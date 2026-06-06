@@ -1,0 +1,12 @@
+version: "1.0"
+library:
+    path: .ddx/plugins/ddx
+    repository:
+        url: https://github.com/DocumentDrivenDX/ddx-library
+        branch: main
+bead: {}
+update_check:
+    enabled: true
+    frequency: 24h
+executions:
+    retain_days: 90

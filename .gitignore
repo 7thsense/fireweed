@@ -1,0 +1,26 @@
+# DDx runtime scratch
+.ddx/agent-logs/
+.ddx/attachments/
+.ddx/workers/
+.ddx/exec-runs.d/
+.ddx/.execute-bead-wt-*/
+.ddx/executions/*/embedded/
+.ddx/executions/**/scratch/
+.ddx/*.lock
+.ddx/*.tmp
+.ddx/server.env
+.ddx/server/
+.ddx/run-state.json
+.ddx/run-state/
+!.ddx/executions/
+!.ddx/executions/*/
+!.ddx/executions/*/prompt.md
+!.ddx/executions/*/manifest.json
+!.ddx/executions/*/result.json
+!.ddx/executions/*/checks.json
+!.ddx/executions/*/usage.json
+.claude/skills/*/
+.agents/skills/*/
+.codex/
+.agent/logs/
+.agent/sessions/
