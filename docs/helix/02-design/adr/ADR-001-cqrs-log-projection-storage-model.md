@@ -44,6 +44,8 @@ log backend to achieve lower commit latency for small batches.
 - Keep local SQLite useful for priority scans and claim performance without
   making local disk the source of truth.
 - Bound replay cost through snapshots and log retention.
+- Require object-storage log backends to batch commands into durable segments so
+  they preserve a reasonable cost profile.
 - Support multiple durable log implementations, including Postgres, Kafka,
   S3-compatible object storage, DynamoDB, Aurora, and Redpanda-like systems.
 
@@ -76,9 +78,9 @@ segment, and projects the commands into SQLite. SQLite snapshots are also stored
 in object storage so old log segments can expire after a safe recovery window.
 
 This gives the strongest cost story when clients can send large batches and
-accept commit latency. It is not the right default for small, latency-sensitive
-commits unless a spike proves that the batching window and object-store commit
-path meet the target.
+accept commit latency. Single-command object writes are not a viable production
+S3 profile; the required tradeoff is lower cost in exchange for batched commit
+latency. Small, latency-sensitive commits should use a faster log backend.
 
 ### Option 4: Local SQLite WAL as Authority
 
@@ -120,8 +122,8 @@ profile says the command is committed. The chosen backend defines the latency
 and cost tradeoff:
 
 - A fast log backend can commit small batches at lower latency and higher cost.
-- An object-log backend can commit large batches at lower cost and higher
-  latency.
+- An object-log backend must commit command segments, not individual commands,
+  and trades lower cost for higher acknowledgement latency.
 - A transactional backend can combine log, claim, and lease authority, but must
   still be deployable without centralizing the whole data plane.
 
@@ -154,7 +156,10 @@ For S3-compatible object storage, the intended model is group commit:
    those positions.
 
 This design makes S3 viable for cost-optimized workloads that can send large
-client batches and tolerate batched acknowledgement latency.
+client batches and tolerate batched acknowledgement latency. S3 adapters should
+reject or strongly discourage production configurations that write one object
+per command; that shape has poor request cost, poor object-count behavior, and
+does not use S3's economics correctly.
 
 ### Napkin Cost Comparison
 
@@ -197,7 +202,7 @@ Directional monthly cost for the baseline:
 
 | Backend | Approximate Monthly Cost | What Dominates | Read |
 |---------|--------------------------|----------------|------|
-| S3 object log, 1-command objects | ~$5,000 in PUTs + storage | Request count | Bad S3 shape: slower ack, many objects, and more expensive than DynamoDB writes at this baseline. |
+| S3 object log, 1-command objects | ~$5,000 in PUTs + storage | Request count | Non-starter for production; useful only as a contrast case or development fallback. |
 | S3 object log, 1 MiB segments | ~$10 in PUT/manifest requests + $1-$25 storage window | Commit latency, not dollars | Best cost profile if clients and server use large batches. |
 | S3 object log, 16 MiB segments | <$2 in PUT/manifest requests + storage window | Commit latency, not dollars | Very cheap, but requires larger batches and tolerates slower ack. |
 | DynamoDB on-demand | ~$625 non-transactional writes; ~$1,250 transactional writes; + up to ~$250/TiB storage retained | Per-command write units | Good low-latency authority, but steady high write volume is meaningfully more expensive than batched S3. |
@@ -209,8 +214,8 @@ Directional monthly cost for the baseline:
 
 Interpretation:
 
-- S3 is the cost floor when batches are large and acknowledgement latency can
-  include group-commit time.
+- S3 is the cost floor only when commands are batched into segments and
+  acknowledgement latency can include group-commit time.
 - DynamoDB and Aurora are simpler correctness authorities for low-latency
   writes, but their per-command or I/O economics matter at billions of
   transitions.
