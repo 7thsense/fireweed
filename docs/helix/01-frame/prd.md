@@ -137,7 +137,8 @@ priority, retry, claim, and state logic with different table shapes.
 ### Should Have (P1)
 
 1. SQS-shaped API adapter for familiar send, receive, delete, visibility, delay,
-   and batch semantics.
+   and batch semantics. The adapter cannot represent mutable priority or
+   schedule updates and must remain secondary to the native pqueue API.
 2. Queue-level rate limits, quotas, and tenant capacity controls.
 3. Dead-letter, redrive, and retention policies configurable per queue.
 4. Operational repair actions for pause, unpause, reschedule, retry, fail,
@@ -291,6 +292,12 @@ priority, retry, claim, and state logic with different table shapes.
 | FR-33, FR-34 | Batch finalize | Batch includes valid lease, stale lease, and already terminal item | Response reports per-item success or reason |
 | FR-43 | Queue isolation | One queue receives sustained 10M-item backlog while another has small eligible backlog | Small queue continues to meet claim latency and progress bounds |
 | FR-44, FR-46 | Seventh Sense validation | Delivery item created before optimized send time, then scheduled later | Item is accepted, updated, and claimed according to timestamp priority |
+| API-001 | Request ID conflict | Same `request_id` is reused with a different batch body | Request fails with `request-id-conflict` |
+| API-001 | Optimistic update conflict | Batch update includes stale `expected_item_version` | Item result reports `conflict` without mutating item |
+| API-001 | Leased update conflict | Client attempts `BatchUpdate` on a leased item | Item result reports `conflict`; worker must renew or finalize |
+| API-001 | Claim retry idempotency | Client retries `BatchClaim` with same `request_id` while leases are active | Response returns the same claimed set and lease tokens |
+| API-001 | Tenant spoofing rejection | HTTP principal authorized for tenant A calls route for tenant B | Request fails as forbidden or not found |
+| API-001 | SQS adapter limitation | Client attempts to update priority through SQS-shaped adapter | Adapter rejects or documents unsupported operation; native `BatchUpdate` is required |
 
 ## Technical Context
 
@@ -344,7 +351,8 @@ Reference systems and interfaces to study:
   distributions, priority skew, and downstream API batch constraints.
 - A later technical design for storage, shard ownership, indexes, and lease
   recovery.
-- A later API design for native pqueue operations and any SQS-shaped adapter.
+- API-001 for native pqueue operations. SQS-shaped compatibility remains a
+  later adapter, not the native contract.
 
 ## Risks
 
@@ -357,19 +365,23 @@ Reference systems and interfaces to study:
 | Generic model becomes too Seventh Sense-specific | Medium | High | Keep Seventh Sense states in metadata and validation, not core lifecycle |
 | Performance tests use unrealistic uniform workloads | High | Medium | Include skewed priority, future-scheduled, leased, retry, and group-heavy test profiles |
 
+## Resolved API Decisions
+
+- v1 progress-bound metrics use eligible age: `oldest_eligible_age_ms` and
+  `progress_bound_risk_count` count or estimate eligible items near
+  `progress_bound_ms`. Bypass count and rank-error metrics remain optional
+  later ordering-quality metrics.
+- Retry is represented as `pending` with retry metadata and `not_before`, while
+  remaining observable as retry.
+- Native batch operations are best-effort with per-item results. `CreateQueue`
+  and each returned claim lease are atomic; no v1 all-or-nothing batch mode is
+  required.
+- The first client surface is the native pqueue API defined in API-001. An
+  SQS-shaped adapter is P1 compatibility work and cannot represent mutable
+  priority or schedule updates.
+
 ## Open Questions
 
-- [ ] What exact progress-bound metric should v1 expose: maximum eligible age,
-  maximum bypass count, maximum delay, or a combination? - blocks ordering-mode
-  feature spec, ask product and technical design reviewers.
-- [ ] Should retry be represented internally as a distinct lifecycle state or as
-  pending with retry metadata while remaining observable as retry? - blocks data
-  model design, ask technical design reviewers.
-- [ ] Are batch operations best-effort with per-item results, or are any
-  operations required to be all-or-nothing? - blocks API design, ask product and
-  implementation reviewers.
-- [ ] What is the first SQS-compatible surface, if any? - blocks compatibility
-  adapter planning, ask product.
 - [ ] What Seventh Sense scheduling SLA should timestamp queues use for progress
   bound validation? - blocks validation plan, ask Seventh Sense operators.
 
