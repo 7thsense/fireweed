@@ -1,0 +1,264 @@
+---
+ddx:
+  id: adr-cqrs-log-projection-storage-model
+  depends_on:
+    - product-vision
+    - prd
+    - concerns
+---
+
+# ADR-001: CQRS Log Projection Storage Model
+
+## Context
+
+pqueue must provide durable priority queue semantics without making application
+nodes durable authorities, requiring node-to-node discovery, or embedding a
+cluster consensus algorithm. It must support batch push, priority update, batch
+claim, lease renewal, finalize, retry, failure, progress bounds, and recovery at
+10M-item queue scale and millions of writes per hour.
+
+The preferred deployment shape separates a low-rate control plane from a
+horizontally scalable data plane:
+
+- The control plane may be centralized and transactional. It owns tenant,
+  queue, shard, placement, epoch, and backend configuration metadata.
+- The data plane owns hot queue operations. It must scale by tenant, queue, and
+  shard, and must not require a centralized coordinator in the hot path.
+- Application nodes are stateless or rebuildable. They may hold local hot state,
+  but acknowledged queue state must survive node loss.
+
+The core storage question is where durable acknowledgement happens. Users have
+different latency and cost requirements. A delivery system such as Seventh Sense
+can often accept batched commit latency if the system preserves durability,
+progress, batching, and concurrency correctness. Other users may pay for a fast
+log backend to achieve lower commit latency for small batches.
+
+## Decision Drivers
+
+- Avoid node discovery, leader election, Raft/Paxos, ZooKeeper, and etcd inside
+  pqueue.
+- Keep the queue data plane horizontally scalable by tenant, queue, and shard.
+- Let users choose a latency/cost profile for durable commits.
+- Preserve a simple correctness model: no acknowledged command is lost after
+  node failure.
+- Keep local SQLite useful for priority scans and claim performance without
+  making local disk the source of truth.
+- Bound replay cost through snapshots and log retention.
+- Support multiple durable log implementations, including Postgres, Kafka,
+  S3-compatible object storage, DynamoDB, Aurora, and Redpanda-like systems.
+
+## Considered Options
+
+### Option 1: Transactional Database as Queue Authority
+
+Postgres, Aurora, or DynamoDB own durable writes, claim concurrency, leases,
+finalization, and fencing directly.
+
+This is simple to reason about and gives low commit latency for small writes,
+but it risks turning a database into the central data plane unless queue/shard
+placement maps to independent database partitions, tables, schemas, or clusters.
+
+### Option 2: Kafka/Redpanda-Style Durable Log
+
+A partitioned streaming log owns durable append and replay. pqueue projects log
+commands into a local execution index and uses the log partition model as the
+data-plane serialization boundary.
+
+This fits high-throughput append workloads and avoids pqueue-owned consensus,
+but claim/finalize semantics still need a carefully designed projection,
+checkpoint, and compaction model.
+
+### Option 3: S3-Compatible Object Log with Batched Commits
+
+pqueue buffers command batches, writes sealed immutable log segments to object
+storage, commits a manifest entry, acknowledges commands in the committed
+segment, and projects the commands into SQLite. SQLite snapshots are also stored
+in object storage so old log segments can expire after a safe recovery window.
+
+This gives the strongest cost story when clients can send large batches and
+accept commit latency. It is not the right default for small, latency-sensitive
+commits unless a spike proves that the batching window and object-store commit
+path meet the target.
+
+### Option 4: Local SQLite WAL as Authority
+
+Each data-plane node stores commands and projection state in local SQLite, then
+ships WAL or snapshots elsewhere asynchronously.
+
+This is fast, but it fails the durability requirement unless acknowledgement is
+delayed until the durable external log boundary is reached. Local SQLite can be
+the projection, not the only authority.
+
+## Decision
+
+pqueue will use a CQRS-style log projection storage model.
+
+The durable command log is the source of truth. Local SQLite is the first
+candidate projection store for priority ordering, eligibility scans, leases,
+batch claim, and replay catch-up. SQLite snapshots may be written to object
+storage and used to bound replay time, but snapshots do not replace the command
+log until the snapshot is committed and the corresponding log-retention window
+is safe to expire.
+
+Every queue state transition is represented as a command in the durable log,
+including:
+
+- enqueue
+- batch enqueue
+- priority update
+- metadata or eligibility update
+- claim
+- lease renewal
+- complete
+- retry
+- fail
+- release
+- repair or administrative state transition
+
+pqueue acknowledges a command only after the configured `LogStore` durability
+profile says the command is committed. The chosen backend defines the latency
+and cost tradeoff:
+
+- A fast log backend can commit small batches at lower latency and higher cost.
+- An object-log backend can commit large batches at lower cost and higher
+  latency.
+- A transactional backend can combine log, claim, and lease authority, but must
+  still be deployable without centralizing the whole data plane.
+
+The storage API must be capability-based rather than one flat generic store:
+
+| Capability | Responsibility |
+|------------|----------------|
+| `LogStore` | Append and read durable command records by tenant/queue/shard. |
+| `ProjectionStore` | Maintain local query state optimized for priority claim and lease operations. |
+| `SnapshotStore` | Persist projection snapshots at durable log positions and support bounded replay. |
+| `ControlPlaneStore` | Store queue metadata, shard assignment, backend configuration, epochs, and placement. |
+
+The core implementation must not assume that all backends provide the same
+latency, concurrency, retention, or transaction semantics. Backend adapters must
+advertise their durability boundary, batching behavior, replay contract,
+retention behavior, and supported concurrency model.
+
+### S3/Object-Log Commit Model
+
+For S3-compatible object storage, the intended model is group commit:
+
+1. Buffer commands per tenant/queue/shard until a size or time threshold.
+2. Seal a segment with checksums and monotonic command positions.
+3. Write the segment to object storage.
+4. Commit a manifest entry or equivalent durable segment pointer.
+5. Acknowledge all commands in the committed segment.
+6. Apply committed commands to the local SQLite projection.
+7. Periodically snapshot SQLite to object storage at a committed log position.
+8. Expire log segments only after a valid snapshot and recovery window cover
+   those positions.
+
+This design makes S3 viable for cost-optimized workloads that can send large
+client batches and tolerate batched acknowledgement latency.
+
+### Napkin Cost Comparison
+
+These numbers are directional. They use public us-east-1 pricing observed while
+drafting this ADR and intentionally exclude data transfer, support plans,
+PrivateLink, backups beyond stated retention, compression differences, and
+operator labor.
+
+Baseline workload:
+
+- 1 billion durable queue commands per month.
+- 1 KiB encoded command record.
+- Roughly 1 TiB logical log ingest per month.
+- One durable append per command before batching.
+- 30-day month.
+- Object-log snapshots allow old command segments to expire, so object-log
+  storage cost depends on recovery window rather than total historical ingest.
+
+Pricing inputs:
+
+Source URLs:
+
+- AWS S3 pricing: https://aws.amazon.com/s3/pricing/
+- AWS MSK pricing: https://aws.amazon.com/msk/pricing/
+- AWS DynamoDB pricing: https://aws.eu/dynamodb/pricing/on-demand/
+- AWS Aurora pricing: https://aws.amazon.com/rds/aurora/pricing/
+- AWS public offer files:
+  https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/
+
+| Service | Public input used |
+|---------|-------------------|
+| S3 Standard | $0.023/GB-month, $0.005/1K PUT/COPY/POST/LIST, $0.0004/1K GET. Source: AWS S3 pricing page and AWS AmazonS3 offer file, publication `2026-05-28T22:27:23Z`. |
+| MSK Provisioned | `kafka.m7g.large` at $0.204/hour, three brokers about $441/month; storage $0.10/GB-month. Source: AWS MSK pricing page and AWS AmazonMSK offer file, publication `2026-04-22T04:05:53Z`. |
+| MSK Express | `express.m7g.large` at $0.408/hour, three brokers about $881/month; $0.01/GB ingest; storage $0.10/GB-month. Source: AWS MSK pricing page and AWS AmazonMSK offer file, publication `2026-04-22T04:05:53Z`. |
+| DynamoDB on-demand | $0.625/million 1 KiB write request units, transactional writes 2x, storage $0.25/GB-month beyond free tier. Source: AWS DynamoDB pricing page and AWS AmazonDynamoDB offer file, publication `2025-08-28T15:38:19Z`. |
+| Aurora PostgreSQL | `db.r7g.large` at $0.276/hour standard or $0.359/hour I/O-Optimized; standard storage $0.10/GB-month; standard I/O $0.20/million; I/O-Optimized storage $0.225/GB-month. Source: AWS Aurora pricing page and AWS AmazonRDS offer file, publication `2026-06-05T18:53:43Z`. |
+| Redpanda self-managed proxy | Three EC2 `i4i.large` nodes at $0.172/hour each, about $372/month before Redpanda licensing/support/ops; larger nodes scale linearly. Source: AWS AmazonEC2 offer file, publication `2026-06-04T22:00:57Z`. |
+
+Directional monthly cost for the baseline:
+
+| Backend | Approximate Monthly Cost | What Dominates | Read |
+|---------|--------------------------|----------------|------|
+| S3 object log, 1-command objects | ~$5,000 in PUTs + storage | Request count | Bad S3 shape: slower ack, many objects, and more expensive than DynamoDB writes at this baseline. |
+| S3 object log, 1 MiB segments | ~$10 in PUT/manifest requests + $1-$25 storage window | Commit latency, not dollars | Best cost profile if clients and server use large batches. |
+| S3 object log, 16 MiB segments | <$2 in PUT/manifest requests + storage window | Commit latency, not dollars | Very cheap, but requires larger batches and tolerates slower ack. |
+| DynamoDB on-demand | ~$625 non-transactional writes; ~$1,250 transactional writes; + up to ~$250/TiB storage retained | Per-command write units | Good low-latency authority, but steady high write volume is meaningfully more expensive than batched S3. |
+| MSK provisioned | ~$441 broker floor + storage | Fixed cluster floor | Good fast log option once traffic justifies the cluster; inefficient for small deployments. |
+| MSK Express | ~$881 broker floor + ~$10/TiB ingest + storage | Fixed cluster floor | Higher floor; may buy operational/performance characteristics rather than raw cost efficiency. |
+| Redpanda self-managed proxy | ~$372 for 3 `i4i.large` nodes before license/support/ops | Compute and operations | Potentially cheaper fixed floor than MSK, but pqueue users inherit more operational responsibility unless managed Redpanda is used. |
+| Aurora PostgreSQL standard | ~$397 for two `db.r7g.large` instances + ~$100/TiB storage + ~$200 per billion I/Os per I/O touched | Compute plus I/O | Strong transactional semantics; must shard carefully to avoid central data-plane bottleneck. |
+| Aurora PostgreSQL I/O-Optimized | ~$517 for two `db.r7g.large` instances + ~$225/TiB storage | Compute plus storage | More predictable for I/O-heavy logs, but fixed cost and centralized write limits still matter. |
+
+Interpretation:
+
+- S3 is the cost floor when batches are large and acknowledgement latency can
+  include group-commit time.
+- DynamoDB and Aurora are simpler correctness authorities for low-latency
+  writes, but their per-command or I/O economics matter at billions of
+  transitions.
+- MSK and Redpanda are attractive when pqueue needs a fast append log with high
+  throughput and replay, and the fixed cluster cost is acceptable.
+- Seventh Sense-like workloads may be a strong fit for S3 object-log durability
+  if producers send large batches and business latency tolerates batched
+  acknowledgement.
+
+## Consequences
+
+Positive:
+
+- pqueue avoids implementing cluster consensus and avoids node-to-node ownership
+  negotiation in the data plane.
+- The durability model is explicit: acknowledged state is in the durable log.
+- Users can choose latency/cost tradeoffs by selecting a backend and batch
+  profile.
+- SQLite remains useful for fast local claims without becoming an unrecoverable
+  authority.
+- Snapshots let object-log deployments expire old command segments and keep
+  storage cost tied to the recovery window.
+
+Negative:
+
+- The storage API is more complex than a single database adapter.
+- Every backend needs conformance tests for durability, replay, idempotency,
+  ordering, batch commit, and crash recovery.
+- S3/object-log deployments require careful client and server batching to avoid
+  high acknowledgement latency.
+- Transactional backends can accidentally become centralized data planes unless
+  shard placement is part of the design.
+- Projection bugs can cause temporary execution errors even if the command log
+  remains correct.
+
+Follow-up design work:
+
+- Define the `LogStore`, `ProjectionStore`, `SnapshotStore`, and
+  `ControlPlaneStore` traits.
+- Define command record schema, idempotency keys, checksums, command positions,
+  and shard epoch fields.
+- Define object-log manifest semantics and safe log expiry after snapshots.
+- Spike S3 group commit latency across segment sizes and batch windows.
+- Spike SQLite projection rebuild time at 10M-item shard scale.
+- Compare Postgres/Aurora, Kafka/MSK, DynamoDB, Redpanda, and S3 adapters with
+  the same conformance test suite.
+
+## Status
+
+Accepted as the initial storage architecture direction. Backend selection and
+implementation details remain subject to technical spikes.
