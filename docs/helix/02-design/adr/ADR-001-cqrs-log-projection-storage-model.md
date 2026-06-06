@@ -22,6 +22,8 @@ horizontally scalable data plane:
 
 - The control plane may be centralized and transactional. It owns tenant,
   queue, shard, placement, epoch, and backend configuration metadata.
+- Postgres is the preferred control-plane storage backend across operating
+  modes.
 - The data plane owns hot queue operations. It must scale by tenant, queue, and
   shard, and must not require a centralized coordinator in the hot path.
 - Application nodes are stateless or rebuildable. They may hold local hot state,
@@ -38,11 +40,15 @@ log backend to achieve lower commit latency for small batches.
 - Avoid node discovery, leader election, Raft/Paxos, ZooKeeper, and etcd inside
   pqueue.
 - Keep the queue data plane horizontally scalable by tenant, queue, and shard.
+- Prefer Postgres for control-plane metadata, assignment, epoch, and backend
+  configuration across all data-plane storage profiles.
 - Let users choose a latency/cost profile for durable commits.
 - Preserve a simple correctness model: no acknowledged command is lost after
   node failure.
 - Keep local SQLite useful for priority scans and claim performance without
   making local disk the source of truth.
+- Make Postgres-native operation a first-class mode for small deployments and
+  teams with a strong managed Postgres provider.
 - Bound replay cost through snapshots and log retention.
 - Require object-storage log backends to batch commands into durable segments so
   they preserve a reasonable cost profile.
@@ -51,14 +57,19 @@ log backend to achieve lower commit latency for small batches.
 
 ## Considered Options
 
-### Option 1: Transactional Database as Queue Authority
+### Option 1: Postgres/Transactional Database as Queue Authority
 
 Postgres, Aurora, or DynamoDB own durable writes, claim concurrency, leases,
-finalization, and fencing directly.
+finalization, and fencing directly. In the Postgres-native mode, pqueue uses
+Postgres both as the durable command log and as the operational queue store
+accessed through ordinary Postgres connections.
 
-This is simple to reason about and gives low commit latency for small writes,
-but it risks turning a database into the central data plane unless queue/shard
-placement maps to independent database partitions, tables, schemas, or clusters.
+This is expected to be the optimal usage pattern at small scale when the user
+has a good Postgres provider: it minimizes moving parts, gives familiar
+transactional semantics, supports low-latency small commits, and avoids
+operating a separate log system. At larger scale, it risks turning a database
+into the central data plane unless queue/shard placement maps to independent
+database partitions, tables, schemas, or clusters.
 
 ### Option 2: Kafka/Redpanda-Style Durable Log
 
@@ -121,6 +132,9 @@ pqueue acknowledges a command only after the configured `LogStore` durability
 profile says the command is committed. The chosen backend defines the latency
 and cost tradeoff:
 
+- A Postgres-native backend can combine the command log, operational queue
+  indexes, leases, idempotency state, and control-plane metadata in one managed
+  Postgres deployment for small-scale or provider-backed usage.
 - A fast log backend can commit small batches at lower latency and higher cost.
 - An object-log backend must commit command segments, not individual commands,
   and trades lower cost for higher acknowledgement latency.
@@ -136,10 +150,38 @@ The storage API must be capability-based rather than one flat generic store:
 | `SnapshotStore` | Persist projection snapshots at durable log positions and support bounded replay. |
 | `ControlPlaneStore` | Store queue metadata, shard assignment, backend configuration, epochs, and placement. |
 
+Postgres is the preferred implementation for `ControlPlaneStore` across all
+operating modes. A backend-specific control plane may be supported later, but it
+must justify why Postgres is not sufficient for low-rate metadata, assignment,
+epoch, and configuration state.
+
 The core implementation must not assume that all backends provide the same
 latency, concurrency, retention, or transaction semantics. Backend adapters must
 advertise their durability boundary, batching behavior, replay contract,
 retention behavior, and supported concurrency model.
+
+### Postgres-Native Operation Mode
+
+Postgres-native mode is a first-class operating profile, not just a generic
+adapter. It is intended for small deployments, early adoption, self-hosters, and
+teams whose infrastructure already includes a strong managed Postgres provider.
+
+In this mode:
+
+- `LogStore` is an append-only Postgres command table or partitioned table set.
+- `ProjectionStore` is a Postgres operational schema for priority indexes,
+  eligibility, leases, idempotency, and finalization state.
+- `ControlPlaneStore` uses Postgres and may share the same Postgres deployment
+  at small scale.
+- SQLite projection is optional rather than required.
+- Queue/shard partitioning still exists in the schema so the deployment can
+  migrate later to sharded Postgres, object-log, Kafka/Redpanda, or local
+  SQLite projection modes.
+
+This mode trades maximum horizontal scale for simplicity, low operational
+overhead, low-latency small commits, and provider-managed durability. It remains
+valid only while the selected Postgres deployment can meet the queue's
+throughput, contention, retention, and noisy-neighbor targets.
 
 ### S3/Object-Log Commit Model
 
@@ -205,6 +247,7 @@ Directional monthly cost for the baseline:
 | S3 object log, 1-command objects | ~$5,000 in PUTs + storage | Request count | Non-starter for production; useful only as a contrast case or development fallback. |
 | S3 object log, 1 MiB segments | ~$10 in PUT/manifest requests + $1-$25 storage window | Commit latency, not dollars | Best cost profile if clients and server use large batches. |
 | S3 object log, 16 MiB segments | <$2 in PUT/manifest requests + storage window | Commit latency, not dollars | Very cheap, but requires larger batches and tolerates slower ack. |
+| Postgres-native managed provider | Provider-dependent; often one database bill and no separate log cluster | Managed database compute/I/O | Expected best default at small scale because it minimizes operational surface and handles small commits well. |
 | DynamoDB on-demand | ~$625 non-transactional writes; ~$1,250 transactional writes; + up to ~$250/TiB storage retained | Per-command write units | Good low-latency authority, but steady high write volume is meaningfully more expensive than batched S3. |
 | MSK provisioned | ~$441 broker floor + storage | Fixed cluster floor | Good fast log option once traffic justifies the cluster; inefficient for small deployments. |
 | MSK Express | ~$881 broker floor + ~$10/TiB ingest + storage | Fixed cluster floor | Higher floor; may buy operational/performance characteristics rather than raw cost efficiency. |
@@ -216,6 +259,9 @@ Interpretation:
 
 - S3 is the cost floor only when commands are batched into segments and
   acknowledgement latency can include group-commit time.
+- Postgres-native mode is likely the best small-scale default when a good
+  Postgres provider is available: one familiar system, real transactions, and
+  no separate broker or object-log machinery.
 - DynamoDB and Aurora are simpler correctness authorities for low-latency
   writes, but their per-command or I/O economics matter at billions of
   transitions.
@@ -234,6 +280,10 @@ Positive:
 - The durability model is explicit: acknowledged state is in the durable log.
 - Users can choose latency/cost tradeoffs by selecting a backend and batch
   profile.
+- Postgres-native mode gives a simple, credible small-scale deployment path.
+- A Postgres control plane gives every data-plane mode one consistent place for
+  queue metadata, shard assignment, backend configuration, and epoch/fencing
+  state.
 - SQLite remains useful for fast local claims without becoming an unrecoverable
   authority.
 - Snapshots let object-log deployments expire old command segments and keep
@@ -242,6 +292,8 @@ Positive:
 Negative:
 
 - The storage API is more complex than a single database adapter.
+- Postgres-native mode can hide scaling limits until a workload outgrows one
+  provider deployment or one database partitioning strategy.
 - Every backend needs conformance tests for durability, replay, idempotency,
   ordering, batch commit, and crash recovery.
 - S3/object-log deployments require careful client and server batching to avoid
@@ -255,6 +307,10 @@ Follow-up design work:
 
 - Define the `LogStore`, `ProjectionStore`, `SnapshotStore`, and
   `ControlPlaneStore` traits.
+- Define the Postgres-native adapter as an explicit reference backend for the
+  first technical design pass.
+- Define the Postgres `ControlPlaneStore` schema as the preferred cross-backend
+  control-plane implementation.
 - Define command record schema, idempotency keys, checksums, command positions,
   and shard epoch fields.
 - Define object-log manifest semantics and safe log expiry after snapshots.
