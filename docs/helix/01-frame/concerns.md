@@ -45,10 +45,10 @@ These concerns are intentionally not active yet:
 
 | Concern | Practice | Override | Authority |
 |---------|----------|----------|-----------|
-| `auth` | Real signup/login/session surface | pqueue may first ship as a library or machine-facing service, so human signup/login is not assumed. Any service/control-plane design must still define principal resolution and provider strategy. | Needs ADR |
-| `multi-tenancy` | Tenant identity derived from authenticated principal | Queue namespace and tenant/account identity may be distinct. Technical design must define how principals, tenants/accounts, and queue namespaces map before storage design is accepted. | Needs ADR |
-| `deployment-topology` | Modular service or app deployment chosen during implementation | The preferred topology is a Rust service of stateless containers behind a load balancer, with tenant/queue shards allocated to workers and persistence externalized or backed by primitives such as object storage. pqueue should not require ZooKeeper, etcd, or an internally maintained consensus protocol unless a technical spike and ADR show no simpler design can satisfy durability, failover, and scale requirements. | Needs ADR |
-| `rust-cargo` | Latest stable Rust, Cargo workspace, and strict lint/tooling policy | Rust is selected now, but exact MSRV, crate boundaries, async runtime, storage crates, and unsafe policy exceptions must be recorded in ADR/technical design before implementation. | Needs ADR |
+| `auth` | Real signup/login/session surface | pqueue may first ship as a library or machine-facing service, so human signup/login is not assumed. Service mode uses provider-neutral principal resolution and operation-scoped authorization. | ADR-002 |
+| `multi-tenancy` | Tenant identity derived from authenticated principal | Queue namespace and tenant/account identity may be distinct. The v1 model maps principal -> tenant -> queue -> shard, with tenant keys carried into storage. | ADR-002 |
+| `deployment-topology` | Modular service or app deployment chosen during implementation | The preferred topology is a Rust service of stateless containers behind a load balancer, with tenant/queue shards allocated through a Postgres control plane and fenced by assignment epoch. pqueue does not require ZooKeeper, etcd, or an internally maintained consensus protocol for the first backend. | ADR-001, TD-001, TD-002 |
+| `rust-cargo` | Latest stable Rust, Cargo workspace, and strict lint/tooling policy | Rust is selected with a pinned stable toolchain, Cargo workspace boundaries, Tokio service/backend runtime, strict linting, dependency checks, and unsafe denied by default. | ADR-003 |
 | `verification` | Whole-stack evidence for buildable products | For docs-only and pre-implementation artifacts, evidence is document review plus `git diff --check`/placeholder checks. Implementation work must use running-system evidence or a recorded exception. | HELIX verification exception |
 
 ## Area Labels
@@ -83,30 +83,20 @@ This project uses the following area labels for concern scoping:
 | `deployment-topology` vs. `multi-tenancy` | Shard placement and load balancing must preserve tenant/queue isolation and noisy-neighbor controls; generic load balancing cannot bypass shard ownership. |
 | `rust-cargo` vs. performance shortcuts | Bounded memory and reliability take precedence over unsafe shortcuts. Any unsafe code or lock-free structure requires explicit design rationale, safety invariants, and concurrency tests. |
 
-## Required Spikes
+## Required Design Coverage
 
-The following storage questions must be answered before technical design is
-accepted:
+The following concern questions must be answered before implementation work is
+broken into beads. Current coverage:
 
-- How queue namespace, tenant/account identity, and physical storage partition
-  map to each other.
-- Whether isolation is best achieved through shared storage with tenant
-  predicates, shared storage plus stronger database-enforced isolation,
-  queue/tenant partitioning, dedicated storage per tenant class, or a hybrid.
-- How noisy-neighbor controls work at the storage layer for hot tenants,
-  10M-item queues, and group-heavy claim workloads.
-- Whether a Niflheim-like topology can satisfy pqueue's requirements without a
-  mandatory external coordinator or an embedded consensus implementation.
-- How shard ownership, fencing, lease epochs, reassignment, and graceful drain
-  work for tenant/queue shards behind a load balancer.
-- Whether deterministic shard assignment, storage-backed leases, or another
-  simple ownership mechanism is enough for failover and horizontal scale.
-- Whether SQLite with WAL persisted to S3/object storage can meet durability,
-  ack, replay, compaction, garbage-collection, and write-amplification
-  requirements without making container-local disk unrecoverable state.
-- How stateless containers rebuild local hot state after restart, failure, or
-  shard movement.
-- How the storage model supports batch push, batch update, batch claim,
-  group-aware claim, lease expiry, progress-bound enforcement, and retention.
-- How migration from Seventh Sense's existing queue-like tables can preserve
-  tenant/account boundaries and operational visibility.
+| Question | Status | Governing Artifact |
+|----------|--------|--------------------|
+| How queue namespace, tenant/account identity, and physical storage partition map to each other. | Covered for v1 service and Postgres-native backend. | ADR-002, TD-002 |
+| Whether isolation uses shared predicates, database-enforced isolation, tenant partitions, dedicated storage, or a hybrid. | Covered as a layered isolation model; shared predicates are the v1 default with stronger placement allowed by deployment class. | ADR-002 |
+| How noisy-neighbor controls work at the storage layer for hot tenants, 10M-item queues, and group-heavy claims. | Covered as storage/test requirements; exact quotas and rate-limit policy remain P1. | ADR-002, TD-002, TP-001 |
+| Whether a Niflheim-like topology can satisfy pqueue without a mandatory coordinator or embedded consensus. | Covered through Postgres control-plane assignments and backend epoch fencing. | ADR-001, TD-001, TD-002 |
+| How shard ownership, fencing, lease epochs, reassignment, and graceful drain work behind a load balancer. | Covered for append fencing and stale writer rejection; graceful drain details remain implementation-plan work. | TD-001, TD-002 |
+| Whether deterministic assignment, storage-backed leases, or another simple ownership mechanism is enough. | Covered for the first backend through control-plane assignment epochs and Postgres stale-epoch rejection. | TD-001, TD-002 |
+| Whether SQLite with WAL persisted to object storage can meet durability, replay, compaction, and write-amplification requirements. | Deferred to an object-log/SQLite spike; not required for Postgres-native v1 implementation. | ADR-001 |
+| How stateless containers rebuild local hot state after restart, failure, or shard movement. | Covered for Postgres-native mode because Postgres owns the projection; object-log/local projection rebuild remains deferred. | TD-002 |
+| How the storage model supports batch push, batch update, batch claim, group-aware claim, lease expiry, progress-bound enforcement, and retention. | Covered for the native contract and Postgres-native backend. | API-001, TD-001, TD-002 |
+| How migration from Seventh Sense's existing queue-like tables preserves tenant/account boundaries and operational visibility. | Deferred until pqueue core and Postgres-native backend exist; requires a later migration design. | PRD, TD-001 |

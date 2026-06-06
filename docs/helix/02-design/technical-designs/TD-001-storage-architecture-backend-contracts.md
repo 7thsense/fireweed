@@ -4,6 +4,7 @@ ddx:
   depends_on:
     - api-native-client-interface
     - adr-cqrs-log-projection-storage-model
+    - adr-auth-tenancy-and-storage-isolation
     - concerns
     - prd
 ---
@@ -435,20 +436,20 @@ Projection stores must represent:
 
 ## Testing
 
-- [ ] **Unit**: command validation, request fingerprinting, item-key
+- **Unit**: command validation, request fingerprinting, item-key
   convergence, `item_version` transitions, retry exhaustion, metadata blockers.
-- [ ] **Integration**: `LogStore` append/read replay, projection rebuild from
+- **Integration**: `LogStore` append/read replay, projection rebuild from
   log, snapshot restore, Postgres control-plane create/read assignments.
-- [ ] **API**: API-001 acceptance sketches, including request-id conflict,
+- **API**: API-001 acceptance sketches, including request-id conflict,
   optimistic update conflict, leased update conflict, claim retry idempotency,
   tenant spoofing rejection, and SQS adapter limitation.
-- [ ] **Security**: tenant isolation negative tests for control plane, log,
+- **Security**: tenant isolation negative tests for control plane, log,
   projection, and snapshot backends.
-- [ ] **Concurrency**: duplicate claim prevention, stale lease finalization,
+- **Concurrency**: duplicate claim prevention, stale lease finalization,
   lease expiry redelivery, group-aware claim progress under skew.
-- [ ] **Performance**: 10M-item projection benchmark, batch push/update/claim/
+- **Performance**: 10M-item projection benchmark, batch push/update/claim/
   finalize throughput, telemetry-on latency, object-log group commit latency.
-- [ ] **Conformance**: shared backend test suite that every `LogStore`,
+- **Conformance**: shared backend test suite that every `LogStore`,
   `ProjectionStore`, `SnapshotStore`, and `ControlPlaneStore` implementation
   must pass before use.
 
@@ -492,13 +493,14 @@ Projection stores must represent:
 3. Implement Postgres `ControlPlaneStore`.
    Files: `crates/pqueue-postgres/src/control_plane/**`.
    Tests: tenant-scoped queue create/read, shard assignment, backend profile.
-4. Draft TD-002 for Postgres-native log/projection DDL and query paths before
-   implementing `LogStore`/`ProjectionStore`.
+4. Implement Postgres-native `LogStore` and `ProjectionStore` according to
+   TD-002.
 5. Implement `pqueue-service` HTTP binding after core structs and first backend
    compile.
 
-**Prerequisites**: API-001 complete; ADR-001 accepted; Rust workspace design or
-initial Cargo workspace setup bead.
+**Prerequisites**: API-001 complete; ADR-001, ADR-002, and ADR-003 accepted;
+TD-002 complete; TP-001 available for test traceability; Rust workspace setup
+bead filed from ADR-003.
 
 ## Risks
 

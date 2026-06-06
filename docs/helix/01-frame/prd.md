@@ -248,10 +248,11 @@ priority, retry, claim, and state logic with different table shapes.
   timing.
 - **FR-37** - Queue policy defines when retryable items become terminal failed
   items.
-- **FR-38** - Terminal failed items are inspectable and optionally redrivable by
-  authorized operators or clients.
-- **FR-39** - Terminal complete and failed items can be retained, archived, or
-  purged according to queue policy.
+- **FR-38** - Terminal complete and failed outcomes are durably recorded with
+  lifecycle state, finalization metadata, failure code when present, and final
+  command position.
+- **FR-39** - Queue policy defines bounded retention for terminal item records
+  and idempotency records so storage growth is controlled.
 
 ### Subsystem: Observability and Operations
 
@@ -353,6 +354,8 @@ Reference systems and interfaces to study:
   recovery.
 - API-001 for native pqueue operations. SQS-shaped compatibility remains a
   later adapter, not the native contract.
+- A later operator/retention contract for P1 redrive, purge, archive, and
+  administrative repair APIs.
 
 ## Risks
 
@@ -380,10 +383,13 @@ Reference systems and interfaces to study:
   SQS-shaped adapter is P1 compatibility work and cannot represent mutable
   priority or schedule updates.
 
-## Open Questions
+## External Validation Inputs
 
-- [ ] What Seventh Sense scheduling SLA should timestamp queues use for progress
-  bound validation? - blocks validation plan, ask Seventh Sense operators.
+- Seventh Sense operators still need to provide the production scheduling SLA
+  used to choose concrete `progress_bound_ms` defaults for Seventh Sense
+  migration validation. This does not block generic pqueue implementation
+  because `progress_bound_ms` is queue configuration, but it does block a final
+  Seventh Sense migration validation plan.
 
 ## Success Criteria
 
