@@ -7,61 +7,62 @@ ddx:
 
 ## Mission Statement
 
-pqueue is the timestamp-prioritized durable queue backbone for the Seventh
-Sense delivery engine, ensuring personalized delivery work runs at the scheduled
-time with explicit lifecycle state: pending, in process, retry, complete, or
-failed.
+pqueue is a durable priority queue engine for applications that need ordered,
+recoverable work execution at scale. Seventh Sense is the first validation use
+case: timestamp-ordered delivery work with idempotent writes, durable claims,
+batch execution, and no lost work.
 
 ## Positioning
 
-For Seventh Sense delivery engineers who need optimized sends to happen at each
-recipient's right time, pqueue is a durable priority queue ordered by timestamp,
-not arrival order. Unlike FIFO queues with scheduler logic layered around them,
-pqueue makes time the queue's primary ordering rule and keeps every item in an
-explicit lifecycle state.
+For engineers building high-volume scheduling and execution systems, pqueue is a
+durable queue that orders eligible work by a queue-defined priority model. Unlike
+FIFO queues with scheduler logic layered around them, pqueue makes priority,
+eligibility, claim leases, retries, and final state part of the queue contract.
 
 ## Vision
 
-When pqueue succeeds, Seventh Sense has one dependable place to record delivery
-work; the rule for what runs next is always the eligible item with the earliest
-scheduled timestamp.
+When pqueue succeeds, applications have one dependable primitive for accepting,
+ordering, claiming, retrying, and completing work.
 
-**North Star**: Every runnable delivery item is durably executed according to
-timestamp priority, with no lost work, no concurrent execution, and an explicit
-final state.
+**North Star**: Every accepted item is durably executed according to its queue's
+priority and progress guarantees, with no lost work, no concurrent execution of
+the same claim, and an explicit final state.
 
 ## User Experience
 
-Engineers use pqueue as one primitive: write timestamped delivery work, claim
-the earliest eligible item, and record the outcome.
+Engineers create a queue with a priority model, push or update work
+idempotently, claim compatible batches of eligible items, and record outcomes.
 
 ## Target Market
 
 | Attribute | Description |
 |-----------|-------------|
-| Who | Seventh Sense delivery engineers and operators |
-| Pain | FIFO queues do not model recipient-specific schedules directly |
-| Current Solution | FIFO queues plus scheduler-specific polling and retry logic |
-| Why They Switch | Personalized delivery needs schedule-aware ordering and durable lifecycle state in the queue itself |
+| Who | Engineers building durable, high-volume async work systems |
+| Pain | FIFO queues and ad hoc scheduler tables do not model priority, eligibility, leases, batching, and retries as one contract |
+| Current Solution | Message brokers, sorted sets, database tables, and worker-specific retry logic |
+| Why They Switch | Priority-aware execution, durable lifecycle state, group-aware batching, and horizontal scale belong in the queue primitive |
 
 ## Key Value Propositions
 
 | Value Proposition | Customer Benefit |
 |-------------------|------------------|
-| Timestamp-prioritized ordering | Delivery follows recipient-specific send time instead of enqueue order |
-| Durable execution lifecycle | Delivery work remains recoverable across worker failures |
-| Single queue backbone | Scheduling, execution, retry, and terminal state share one source of truth |
+| Configurable priority ordering | Queues can model timestamp, numeric, score, or other ordered work without changing worker code |
+| Bounded progress guarantees | Relaxed priority ordering can scale without starving eligible work |
+| Durable execution lifecycle | Work remains recoverable across worker and process failures |
+| Batch and group-aware claims | Workers can efficiently satisfy downstream API batch constraints |
 
 ## Success Definition
 
 | Criterion | Definition |
-|--------|--------|
-| Timestamp ordering correctness | The queue always selects the earliest eligible timestamp before later eligible work |
-| Durable execution safety | No accepted item is lost or concurrently executed after worker failure |
-| Lifecycle completeness | Every accepted item is observable in pending, in process, retry, complete, or failed |
+|-----------|------------|
+| Priority correctness | Claims follow the queue's configured priority and progress contract |
+| Durable execution safety | No accepted item is lost or concurrently held by multiple active claims |
+| Scale readiness | Hot queues with millions of items remain writable, claimable, and observable under production load |
+| Seventh Sense validation | Timestamp-ascending delivery queues meet Seventh Sense scheduling, idempotency, batch, and latency requirements |
 
 ## Why Now
 
-The delivery engine is being defined around individualized send timing; making
-time the queue's native ordering model now prevents FIFO assumptions from
-hardening into the engine contract.
+Seventh Sense needs a shared queue backbone for several scheduled and
+queue-like systems, but the underlying problem is general. Defining pqueue as a
+general durable priority queue now prevents Seventh Sense-specific table and
+worker assumptions from becoming the core product contract.

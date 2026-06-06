@@ -1,263 +1,384 @@
 ---
 ddx:
   id: prd
-kind: product  # `product` (default) frames general product requirements; `data` frames a data product (pipeline, warehouse, data platform, or service). See ADR-008.
+kind: product
 ---
 
 # Product Requirements Document
 
-> **Variant guidance.** This template carries both the default `product`
-> framing and a `data` framing. Sections marked **(kind: data)** apply when
-> `kind: data` and replace the corresponding `product` framing above them.
-> When `kind: product`, ignore the **(kind: data)** blocks. The shape of the
-> document is the same; the framing is parameterized.
-
 ## Summary
 
-[This section should work as a standalone 1-pager. Include: what we're
-building, who uses it, what problem it solves, the solution approach, and the
-top 2-3 success metrics. Write this last — it should be a distillation of the
-full PRD, not an introduction. Someone who reads only this section should
-understand the product well enough to decide whether to read the rest.
+pqueue is a durable priority queue engine for applications that need high-volume,
+ordered, recoverable work execution. A queue defines its priority model,
+ordering mode, progress bound, eligibility rules, and batching constraints.
+Clients push and update items idempotently, workers claim eligible items under a
+lease, and claimed items are finalized as complete, failed, retryable, or
+released.
 
-**(kind: data)** Frame this as a standalone 1-pager for the **data product**:
-what data we are building, who consumes it, the business problem it solves,
-the data solution approach (sources, medallion layer strategy, consumption
-shape), and the top 2-3 success metrics (freshness, quality, cost).]
+The product is general-purpose and may become open source. Seventh Sense is the
+first validation workload: several delivery, action, job, and connector queues
+need timestamp-ordered execution, mutable schedules, batch processing,
+idempotent writes, group-aware claims, and horizontal scale at 10M-item queue
+sizes.
+
+The top success measures are throughput, latency, and correctness: millions of
+writes per hour per deployment, sub-second p95 and p99 for core batch
+operations under representative load, and no eligible item starved beyond its
+configured progress bound.
 
 ## Problem and Goals
 
 ### Problem
 
-[What is broken or missing? Who is affected? Be specific about the failure
-mode — not "users struggle with X" but "users spend N hours per week doing X
-because Y doesn't exist."
+High-volume async systems commonly split priority ordering, delayed execution,
+idempotent ingest, retry, leases, batching, and observability across message
+brokers, sorted sets, database tables, and worker-specific code. That creates
+duplicated queue implementations and makes it hard to prove work is not lost,
+claimed twice, delayed indefinitely, or processed in batches that downstream
+APIs can accept.
 
-**(kind: data)** Be specific about the data failure mode — not "users
-struggle with reporting" but "sales analysts spend 4 hours per week
-reconciling pipeline outputs with source systems because current freshness
-is 24 hours and source data changes hourly."]
+Seventh Sense has this problem today across `jobs_scheduled_actions`,
+`actions_scheduled`, `actions_queue`, `jobs_queue`, `connectors_queue`,
+connector event chunks, and Marketo enrichment queues. The specific tables
+differ, but they point to the same product need: a general durable priority
+queue with timestamp ordering as a first-class validation case.
 
 ### Goals
 
-1. [Primary goal — what changes for users]
-2. [Secondary goal]
+1. Applications can define durable priority queues without hardcoding domain
+   concepts into the queue engine.
+2. Workers can claim the highest-priority eligible work, or bounded-relaxed work
+   when scale requires it, without starving eligible items.
+3. Producers and schedulers can write and update items idempotently at millions
+   of writes per hour.
+4. Downstream API workers can claim, update, and finalize compatible batches
+   efficiently.
+5. Seventh Sense can replace or consolidate its scheduled delivery/action queues
+   without losing timestamp scheduling, lifecycle safety, or operational
+   visibility.
 
 ### Success Metrics
 
 | Metric | Target | Measurement Method |
 |--------|--------|--------------------|
-| [Metric] | [Numeric target] | [Named tool or process] |
-
-**(kind: data)** When `kind: data`, frame metrics for the data product
-itself (throughput, latency, quality score, cost per GB). Include a baseline
-and cadence column:
-
-| Metric | Target | Baseline | Measurement Method | Cadence |
-|--------|--------|----------|--------------------|---------|
-| [Throughput] | [e.g., 1M rows/day] | [Current: 100K rows/day] | [COUNT(*) from production table] | Daily |
-| [Latency] | [e.g., ≤1 hour end-to-end] | [Current: 4 hours] | [MAX(ingestion_timestamp) - MAX(source_timestamp)] | Hourly |
-| [Quality Score] | [e.g., ≥98%] | [Current: 85%] | [Automated quality checks pass rate] | Daily |
-| [Cost per GB] | [e.g., $0.05/GB/month] | [Current: $0.12/GB/month] | [DBU spend / data volume] | Monthly |
+| Write throughput | Millions of accepted item writes per hour per deployment | Load test with batch push and idempotent duplicate writes |
+| Hot queue scale | At least 10M items in a single active queue | Load test with mixed eligible, future, leased, retry, and terminal items |
+| Core operation latency | Sub-second p95 and p99 for batch push, batch update, batch claim, and batch finalize | Benchmark harness under representative Seventh Sense and synthetic workloads |
+| Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
+| Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
 
 ### Non-Goals
 
-[What we are explicitly not trying to achieve. Each non-goal should exclude
-something a reasonable person might assume is in scope.]
-
-Deferred items tracked in `docs/helix/parking-lot.md`.
+- pqueue v1 will not hardcode Seventh Sense job, action, connector, quota,
+  paused, suppressed, or campaign concepts into the core item model.
+- pqueue v1 will not be a full workflow engine like Temporal.
+- pqueue v1 will not require strict global priority ordering for every queue.
+- pqueue v1 will not implement AMQP, Kafka, or SQS compatibility as the core
+  data model.
+- pqueue v1 will not prescribe a storage engine or shard implementation in the
+  PRD.
 
 ## Users and Scope
 
-### Primary Persona: [Name]
+### Primary Persona: Queue Platform Engineer
 
-**Role**: [Job title/function]
-**Goals**: [What they want to achieve]
-**Pain Points**: [Current frustrations — specific enough to validate]
+**Role**: Engineer operating pqueue for one or more applications
 
-### Secondary Persona: [Name]
+**Goals**: Define queues, scale throughput, preserve durability, observe
+backlogs, and keep noisy workloads isolated.
 
-[Same structure]
+**Pain Points**: Existing queue behavior is split across brokers, tables, and
+worker code; correctness and latency are hard to reason about at 10M-item scale.
 
-### (kind: data) Data Consumers
+### Secondary Persona: Worker/Application Engineer
 
-[When `kind: data`, replace the persona blocks with concrete data consumers.]
+**Role**: Engineer producing and consuming queued work
 
-#### Primary Consumer: [Name/Role]
+**Goals**: Push items idempotently, update priority and metadata, claim
+compatible batches, and finalize outcomes without designing a custom queue.
 
-**Team**: [Data Engineering, Analytics, Product, Finance, etc.]
-**Use Case**: [What they do with the data; what decision it informs]
-**Frequency**: [Real-time, daily, weekly, ad-hoc]
-**Key Tables/Feeds**: [Which outputs matter most]
+**Pain Points**: Downstream APIs require batches by account, connector, job,
+campaign, domain, or other compatibility keys; FIFO queues do not provide that
+shape directly.
 
-#### Data Consumer Requirements Table
+### Validation Persona: Seventh Sense Delivery Engineer
 
-| Consumer | Use Case | Freshness SLA | Latency Tolerance | Key Dimensions | Access Level |
-|----------|----------|---------------|-------------------|----------------|--------------|
-| [Team] | [What they do] | [e.g., hourly] | [max delay] | [customer_id, product_id, ...] | [Row-level, Column-level, or Full] |
+**Role**: Engineer migrating Seventh Sense scheduled delivery and action queues
 
-### (kind: data) Data Sources
+**Goals**: Preserve timestamp-prioritized delivery, mutable scheduling, retry,
+pause/suppression gates, and job/account/connector observability.
 
-[Inventory of upstream systems supplying this data product.]
-
-| Source System | Schema / Table | Owner | Update Frequency | Quality Baseline | Notes |
-|---------------|----------------|-------|------------------|------------------|-------|
-| [e.g., Salesforce] | [e.g., Accounts, Opportunities] | [Team] | [hourly, daily, on-demand] | [% completeness, freshness] | [Data model version, API limits, retry policy] |
+**Pain Points**: Current scheduled and queue-like systems repeat similar
+priority, retry, claim, and state logic with different table shapes.
 
 ## Requirements
 
-Each requirement should trace to the Product Vision and be specific enough to
-drive feature specs, designs, tests, and implementation work without embedding
-the detailed design here.
-
 ### Must Have (P0)
 
-1. [Core capability — what must be true for the product to be usable]
+1. General queue namespaces with isolation, routing, metrics, and independent
+   scale behavior.
+2. Queue-defined priority models, including timestamp ascending as a first-class
+   model and at least one non-timestamp model.
+3. Strict and bounded-relaxed ordering modes with mandatory progress guarantees.
+4. Priority and eligibility as separate concepts.
+5. Idempotent batch push and batch update, including priority updates before an
+   item is terminal.
+6. Batch claim and group-aware batch claim.
+7. Durable claim leases with at-least-once execution and single active lease per
+   item.
+8. Batch finalize for complete, failed, retry, and release outcomes with
+   per-item results.
+9. Opaque payload and metadata with metadata-driven eligibility gates.
+10. Observability for queue depth, lifecycle counts, leases, retries, oldest
+    eligible age, and progress-bound risk.
+11. Performance at 10M-item hot queue scale with millions of writes per hour and
+    sub-second p95/p99 core operation latency under representative load.
 
 ### Should Have (P1)
 
-1. [Important feature — valuable but not blocking launch]
+1. SQS-shaped API adapter for familiar send, receive, delete, visibility, delay,
+   and batch semantics.
+2. Queue-level rate limits, quotas, and tenant capacity controls.
+3. Dead-letter, redrive, and retention policies configurable per queue.
+4. Operational repair actions for pause, unpause, reschedule, retry, fail,
+   complete, and purge by queue scope.
+5. Active-queue discovery for workers that need to find queues with eligible
+   work.
 
 ### Nice to Have (P2)
 
-1. [Enhancement — improves experience but can be deferred]
+1. Additional compatibility adapters, such as BullMQ-style or Faktory-style
+   client APIs.
+2. A hosted dashboard for queue inspection, repair, and trend analysis.
+3. Optional bounded-relaxed ordering-quality metrics such as rank error.
 
 ## Functional Requirements
 
-[Detailed behavioral requirements grouped under canonical `### Subsystem: <name>`
-headings. Each requirement is testable, and each `FR-n` belongs to exactly one
-subsystem. A subsystem is a cohesive product capability — the unit that maps to
-~one feature spec (`FEAT-NNN`). The PRD owns breadth (all subsystems + `FR-n` +
-priority); feature specs own each subsystem's depth.
+### Subsystem: Queue Definition
 
-Each functional requirement carries a **stable `FR-n` ID** (e.g. `FR-1`). The ID
-survives edits so downstream artifacts trace to a specific requirement by name:
-every `FR-n` must map to ≥1 user story `US-n`, and reconcile-alignment checks that
-mapping (and that each subsystem maps to a feature) as a coverage floor. Number
-them sequentially; do not renumber on edit.]
+- **FR-1** - A queue is an isolated namespace with a stable identifier used for
+  routing, scaling, metrics, and operational control.
+- **FR-2** - A queue declares its priority model at creation, including priority
+  value type, ordering direction, and deterministic tie-breaker.
+- **FR-3** - Timestamp ascending is a first-class priority model.
+- **FR-4** - At least one non-timestamp priority model is supported to validate
+  that pqueue is not timestamp-only.
+- **FR-5** - A queue declares its ordering mode at creation: strict or
+  bounded-relaxed.
+- **FR-6** - Queue priority model and ordering mode are immutable after creation
+  unless a later migration design explicitly supports changing them.
 
-### Subsystem: [Name — a cohesive capability that becomes ~one FEAT]
+### Subsystem: Priority and Progress
 
-- **FR-1** — [behavioral requirement, testable]
-- **FR-2** — [behavioral requirement, testable]
+- **FR-7** - Strict queues claim eligible items according to priority key plus
+  deterministic tie-breaker.
+- **FR-8** - Bounded-relaxed queues may claim eligible items out of strict
+  priority order to improve throughput.
+- **FR-9** - Every queue declares a mandatory progress bound measured from the
+  moment an item becomes eligible.
+- **FR-10** - Ineligible items, including future-scheduled, gated, leased, or
+  retry-backoff items, do not accrue progress-bound age while ineligible.
+- **FR-11** - Lease expiry returns an item to eligibility without resetting its
+  progress-bound clock.
+- **FR-12** - The queue must claim eligible items before their progress bound is
+  exceeded, regardless of priority relaxation or group-aware batching.
+- **FR-13** - Ordering-quality bounds such as maximum rank error may be exposed,
+  but they do not replace the mandatory progress bound.
 
-### Subsystem: [Name]
+### Subsystem: Eligibility and Metadata
 
-- **FR-3** — [behavioral requirement, testable]
+- **FR-14** - Claims return the highest-priority eligible items under the
+  queue's ordering and progress contract.
+- **FR-15** - Eligibility is determined by lifecycle state, lease state,
+  not-before timing, retry timing, and queue-defined metadata gates.
+- **FR-16** - Items carry opaque caller-defined payload and metadata.
+- **FR-17** - Metadata gates can prevent an otherwise high-priority item from
+  being claimed, such as a paused or disabled domain state in the caller's
+  application.
 
-### (kind: data) Data Quality Requirements
+### Subsystem: Idempotent Ingest and Mutation
 
-[When `kind: data`, add this subsection. Quality dimensions with numeric
-thresholds and enforcement strategy. Reference `data-quality-expectations`
-for executable `EXPECT` clauses per medallion layer.]
+- **FR-18** - Clients can push one or more items idempotently using a
+  caller-supplied logical item key.
+- **FR-19** - Duplicate pushes for the same logical item key converge on one
+  logical item according to documented conflict rules.
+- **FR-20** - Clients can batch update priority, not-before timing, payload
+  references, and metadata for non-terminal items.
+- **FR-21** - Batch push and update return per-item results for accepted,
+  duplicate, conflicted, rejected, and failed items.
+- **FR-22** - The queue defines an idempotency retention window so deduplication
+  state is bounded.
 
-| Dimension | P0 Threshold | P1 Threshold | Measurement Method | Enforcement |
-|-----------|--------------|--------------|--------------------|-------------|
-| Completeness | [e.g., ≥99%] | [e.g., ≥95%] | [Count NULLs / total rows] | [Alert if below P0] |
-| Timeliness | [e.g., ≤1 hour lag] | [e.g., ≤4 hour lag] | [MAX(ingestion_time) - MAX(source_time)] | [Reject data if exceeds P0] |
-| Accuracy | [e.g., ≥98% match to source] | [e.g., ≥95% match] | [Row-count reconciliation + sample audit] | [Manual review + auto-reject if P0 fails] |
-| Uniqueness | [e.g., PK has no duplicates] | [as P0] | [COUNT(*) = COUNT(DISTINCT PK)] | [Fail ingestion] |
+### Subsystem: Claim Leases and Lifecycle
+
+- **FR-23** - Every accepted item is observable in exactly one lifecycle state:
+  pending, in process, retry, complete, or failed, or an equivalent model that
+  preserves those observable states.
+- **FR-24** - A claim creates a lease that makes the item unavailable to other
+  workers until finalized, released, or expired.
+- **FR-25** - No item may have more than one active lease at a time.
+- **FR-26** - If a worker does not finalize before lease expiry, the item becomes
+  eligible for redelivery according to queue policy.
+- **FR-27** - Accepted items, priority, metadata, lease state, and lifecycle
+  state survive process and node restart.
+- **FR-28** - The delivery guarantee is at-least-once execution with a single
+  active lease; consumers remain responsible for idempotent side effects.
+
+### Subsystem: Batch and Group Operations
+
+- **FR-29** - Workers can claim up to a bounded number of eligible items in one
+  batch.
+- **FR-30** - Batch claim returns items in the queue's ordering mode and
+  deterministic result order.
+- **FR-31** - Group-aware batch claim can restrict results to items sharing a
+  caller-defined compatibility key or metadata predicate.
+- **FR-32** - Group-aware batch claim must not permanently favor one group or
+  violate the queue's progress bound for other eligible groups.
+- **FR-33** - Workers can batch finalize leased items as complete, failed,
+  retryable with optional delay, or released.
+- **FR-34** - Batch finalize returns per-item results, including stale lease,
+  already terminal, validation failure, and success outcomes.
+- **FR-35** - Queue or deployment configuration exposes maximum batch sizes and
+  claim limits.
+
+### Subsystem: Retry, Failure, and Retention
+
+- **FR-36** - Retry outcome supports retry count, retry metadata, and not-before
+  timing.
+- **FR-37** - Queue policy defines when retryable items become terminal failed
+  items.
+- **FR-38** - Terminal failed items are inspectable and optionally redrivable by
+  authorized operators or clients.
+- **FR-39** - Terminal complete and failed items can be retained, archived, or
+  purged according to queue policy.
+
+### Subsystem: Observability and Operations
+
+- **FR-40** - The queue exposes counts by lifecycle state per queue.
+- **FR-41** - The queue exposes oldest eligible age, current worst progress-bound
+  risk, active leases, retry backlog, and terminal failure counts.
+- **FR-42** - The queue exposes throughput and latency metrics for push, update,
+  claim, finalize, retry, and lease expiry.
+- **FR-43** - Queue isolation includes noisy-neighbor protection: one queue's
+  load or backlog cannot prevent another queue from making progress within its
+  configured limits.
+
+### Subsystem: Seventh Sense Validation
+
+- **FR-44** - pqueue can represent Seventh Sense scheduled delivery/action work
+  using timestamp-ascending priority without embedding Seventh Sense-specific
+  states in the core lifecycle.
+- **FR-45** - Seventh Sense-specific pause, suppression, quota, account,
+  connector, job, and campaign controls are represented as metadata and
+  eligibility gates.
+- **FR-46** - pqueue can support the existing Seventh Sense need to ingest work
+  quickly and update scheduled time later.
+- **FR-47** - pqueue can claim batches compatible with downstream Seventh Sense
+  API constraints such as account, connector, job, campaign, or external batch
+  key.
 
 ## Acceptance Test Sketches
 
-[For each P0 requirement, describe a concrete scenario with inputs and
-expected outputs. These aren't full test cases — they're the minimum needed
-for an implementer (human or agent) to verify the requirement is met.]
-
 | Requirement | Scenario | Input | Expected Output |
 |-------------|----------|-------|-----------------|
-| [P0 requirement] | [What the user does] | [Specific input or state] | [Observable result] |
+| FR-2, FR-3 | Create timestamp queue | Queue definition with timestamp ascending priority | Queue accepts timestamp priorities and orders eligible claims by timestamp plus tie-breaker |
+| FR-7 | Strict ordering | Three eligible items with priorities 3, 1, 2 | Claim returns priority 1 before 2 before 3 |
+| FR-9, FR-12 | Progress bound | Relaxed queue with one eligible item repeatedly bypassed by newer higher-priority work | Item is claimed before configured progress bound is exceeded |
+| FR-18, FR-19 | Idempotent push | Same logical item key pushed twice in a batch retry | One logical item exists; response reports duplicate/converged result |
+| FR-20 | Mutable priority | Item ingested without final schedule, then updated with timestamp priority | Item becomes claimable according to updated priority and eligibility |
+| FR-24, FR-26 | Lease recovery | Worker claims item and crashes before finalize | Item is invisible during lease and eligible again after lease expiry |
+| FR-29, FR-31 | Group-aware batch claim | Eligible items across groups A and B, worker requests group-compatible batch | Claim returns compatible items from one allowed group without breaking progress bound |
+| FR-33, FR-34 | Batch finalize | Batch includes valid lease, stale lease, and already terminal item | Response reports per-item success or reason |
+| FR-43 | Queue isolation | One queue receives sustained 10M-item backlog while another has small eligible backlog | Small queue continues to meet claim latency and progress bounds |
+| FR-44, FR-46 | Seventh Sense validation | Delivery item created before optimized send time, then scheduled later | Item is accepted, updated, and claimed according to timestamp priority |
 
 ## Technical Context
 
-[Stack, key dependencies with versions, API schemas, and platform targets.
-Be specific enough that an implementer knows what to install and what
-interfaces to code against. This section records current stack decisions — it
-does not make them. Stack selection rationale belongs in ADRs. If a choice
-here isn't backed by an ADR yet, note it in Open Questions.]
+This PRD records product requirements only. Storage engine, shard strategy,
+indexing, protocol, and deployment topology belong in later technical design.
 
-- **Language/Runtime**: [e.g., TypeScript 5.x, Node 20+]
-- **Key Libraries**: [e.g., React 18, Tailwind CSS 4]
-- **Data/Storage**: [e.g., PostgreSQL 16, Redis 7]
-- **APIs**: [e.g., OpenAPI spec at docs/api/v2.yaml]
-- **Platform Targets**: [e.g., Linux, macOS; browser: Chrome/Firefox/Safari latest]
+Reference systems and interfaces to study:
 
-### (kind: data) Data Platform Context
-
-[When `kind: data`, replace the stack list above with platform context.]
-
-- **Target Catalog**: [e.g., `prod`, `analytics`, or domain-specific catalog]
-- **Target Schema**: [e.g., `customer_360`, `payment_events`]
-- **Medallion Layers**: Bronze (raw), Silver (validated), Gold (business)
-- **Access Control Model**: [UC policies, row-level security, column masking]
-
-| Feature | Decision | Rationale |
-|---------|----------|-----------|
-| Ingestion Pattern | [Auto Loader, Streaming Tables, batch] | [Why this choice?] |
-| Processing Model | [Streaming, Batch, Incremental] | [Freshness SLA and cost tradeoff] |
-| Compute Tier | [All-purpose, Jobs, Serverless] | [Workload characteristics, cost model] |
-| Storage Format | [Delta, Parquet, CSV] | [Durability, query performance needs] |
-| DBU Budget (Monthly) | [Estimated spend] | [Based on row volume, freshness, complexity] |
-
-- **Data Classification**: [Public, Internal, Sensitive, PII]
-- **Retention Policy**: [e.g., Bronze: 7 days, Silver: 90 days, Gold: 2 years]
-- **Audit Trail**: [Who accessed what, when, why]
-- **Lineage Tracking**: [Table-to-table dependencies for impact analysis]
+- Meta FOQS for distributed priority queues with priority, delay, leases,
+  ack/nack, metadata, TTL, and massive backlog scale:
+  <https://engineering.fb.com/2021/02/22/production-engineering/foqs-scaling-a-distributed-priority-queue/>
+- Amazon SQS for visibility timeout, at-least-once delivery, batch receive, and
+  FIFO group semantics:
+  <https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html>
+- PGMQ for an open-source SQS-like Postgres queue interface:
+  <https://github.com/pgmq/pgmq>
+- BullMQ, Faktory, and Asynq for developer-facing job queue APIs, retries,
+  delayed work, and observability:
+  <https://bullmq.io/>,
+  <https://github.com/contribsys/faktory>,
+  <https://github.com/hibiken/asynq>
+- Research on relaxed concurrent priority queues, especially MultiQueue and
+  k-LSM, for ordering-quality and throughput tradeoffs:
+  <https://arxiv.org/abs/2107.01350>,
+  <https://arxiv.org/abs/1503.05698>
 
 ## Constraints, Assumptions, Dependencies
 
 ### Constraints
 
-- **Technical**: [Platform or technology limits]
-- **Business**: [Budget, timeline, resource limits]
-- **Legal/Compliance**: [Regulatory requirements]
+- **Business**: The first validation workload is Seventh Sense scheduled
+  delivery/action execution.
+- **Technical**: pqueue must support durable claims and batch operations without
+  requiring exact global ordering for every queue.
+- **Product**: Seventh Sense-specific concepts must remain outside the core
+  model unless they are necessary for generic durable priority queue semantics.
 
 ### Assumptions
 
-- [Key assumptions — what must be true for this plan to work]
+- Queue priority type, ordering direction, ordering mode, and progress bound can
+  be fixed at queue creation for v1.
+- At-least-once execution with single active lease is the correct durability
+  contract; exactly-once side effects are caller-owned.
+- Batch and group-aware operations are required for the first useful release.
+- Timestamp priority uses producer-supplied scheduled time; producers are
+  responsible for the business meaning of that timestamp.
 
 ### Dependencies
 
-- [External systems, teams, or artifacts this work depends on]
+- Seventh Sense production workload data for realistic load profiles, group
+  distributions, priority skew, and downstream API batch constraints.
+- A later technical design for storage, shard ownership, indexes, and lease
+  recovery.
+- A later API design for native pqueue operations and any SQS-shaped adapter.
 
 ## Risks
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| [Risk] | High/Med/Low | High/Med/Low | [Concrete strategy, not "monitor"] |
+| Strict priority creates a scalability bottleneck | High | High | Support bounded-relaxed ordering with mandatory progress bounds |
+| Relaxed ordering misses business scheduling expectations | Medium | High | Require per-queue progress bounds and validate timestamp queues against Seventh Sense scheduling SLA |
+| Group-aware claims starve other groups | Medium | High | Make progress bounds override group preference |
+| Idempotency state grows without bound | Medium | Medium | Require a documented idempotency retention window |
+| Generic model becomes too Seventh Sense-specific | Medium | High | Keep Seventh Sense states in metadata and validation, not core lifecycle |
+| Performance tests use unrealistic uniform workloads | High | Medium | Include skewed priority, future-scheduled, leased, retry, and group-heavy test profiles |
 
 ## Open Questions
 
-[Unresolved items that need answers before or during implementation. Each
-should name who can answer it and what's blocked by it. Prefer explicit
-questions here over `[TBD]` markers scattered through the document.]
-
-- [ ] [Question] — blocks [what], ask [who]
+- [ ] What exact progress-bound metric should v1 expose: maximum eligible age,
+  maximum bypass count, maximum delay, or a combination? - blocks ordering-mode
+  feature spec, ask product and technical design reviewers.
+- [ ] Should retry be represented internally as a distinct lifecycle state or as
+  pending with retry metadata while remaining observable as retry? - blocks data
+  model design, ask technical design reviewers.
+- [ ] Are batch operations best-effort with per-item results, or are any
+  operations required to be all-or-nothing? - blocks API design, ask product and
+  implementation reviewers.
+- [ ] What is the first SQS-compatible surface, if any? - blocks compatibility
+  adapter planning, ask product.
+- [ ] What Seventh Sense scheduling SLA should timestamp queues use for progress
+  bound validation? - blocks validation plan, ask Seventh Sense operators.
 
 ## Success Criteria
 
-[What must be true to call the initiative successful. These should be
-observable outcomes, not activities.]
-
-## Review Checklist
-
-Use this checklist when reviewing a PRD artifact:
-
-- [ ] Summary works as a standalone 1-pager — someone can decide whether to read the rest
-- [ ] Problem statement describes a specific failure mode with concrete cost
-- [ ] Goals are outcomes, not activities ("users can X" not "we build Y")
-- [ ] Success metrics have numeric targets and named measurement methods
-- [ ] Non-goals exclude things a reasonable person might assume are in scope
-- [ ] Personas have specific pain points, not generic descriptions
-- [ ] P0 requirements are necessary for launch — removing any one makes the product unusable
-- [ ] P1/P2 requirements are correctly prioritized relative to each other
-- [ ] Every P0 requirement has an acceptance test sketch
-- [ ] Requirements can trace upward to the Product Vision and downward to downstream artifacts
-- [ ] Functional requirements are testable — each can be verified with specific inputs and expected outputs
-- [ ] Each functional requirement carries a stable `FR-n` ID so user stories can trace to it by name
-- [ ] Functional requirements are grouped under canonical `### Subsystem: <name>` headings, each `FR-n` under exactly one subsystem; each subsystem is a capability that maps to ~one feature spec
-- [ ] Technical context names specific versions and interfaces, not vague technology areas
-- [ ] Risks have concrete mitigations ("we do X"), not vague strategies ("we monitor")
-- [ ] Open questions name who can answer and what is blocked
-- [ ] No contradictions between requirements sections
-- [ ] PRD is consistent with the governing product vision
+pqueue is successful when a general-purpose queue can be created with a
+configured priority model, accepts and updates work idempotently at production
+scale, claims eligible work in strict or bounded-relaxed order without
+starvation, survives worker failure through leases, and supports group-aware
+batch execution. For Seventh Sense, success means scheduled delivery/action work
+can move to pqueue without losing timestamp scheduling correctness, operational
+visibility, or throughput.
