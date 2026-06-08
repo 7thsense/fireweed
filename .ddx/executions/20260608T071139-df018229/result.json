@@ -2,11 +2,15 @@
   "bead_id": "pqueue-2bca1ef6",
   "attempt_id": "20260608T071139-df018229",
   "base_rev": "3613cbf188f94558f84008203d59e508c967f5e8",
-  "result_rev": "e5f58ef54977e053d46bf791229e2033454505f6",
+  "result_rev": "8cdfc380634730d850d929c2fd4787d32b1d0b35",
   "implementation_rev": "e5f58ef54977e053d46bf791229e2033454505f6",
-  "outcome": "task_succeeded",
+  "landed_rev": "8cdfc380634730d850d929c2fd4787d32b1d0b35",
+  "landed_branch": "helix/design-test-operator-specs",
+  "evidence_rev": "8cdfc380634730d850d929c2fd4787d32b1d0b35",
+  "outcome": "merged",
   "status": "success",
   "detail": "success",
+  "orchestrator_status": "success",
   "candidate_ref": "refs/ddx/iterations/20260608T071139-df018229/0",
   "cycle_trace": [
     {
