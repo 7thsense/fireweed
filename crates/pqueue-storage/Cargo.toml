@@ -1,0 +1,12 @@
+[package]
+name = "pqueue-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+
+[lib]
+path = "src/lib.rs"
+

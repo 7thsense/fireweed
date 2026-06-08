@@ -1,0 +1,15 @@
+[package]
+name = "pqueue-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pqueue-client = { path = "../pqueue-client" }
+pqueue-core = { path = "../pqueue-core" }
+pqueue-postgres = { path = "../pqueue-postgres" }
+pqueue-storage = { path = "../pqueue-storage" }
+
+[lib]
+path = "src/lib.rs"
+

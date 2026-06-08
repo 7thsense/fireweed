@@ -1,0 +1,54 @@
+{
+  "attempt_id": "20260608T062435-02d6b2b9",
+  "bead_id": "pqueue-6b4945a0",
+  "base_rev": "4ca2bb1fe6d0b537c69833f1944cb2f253a012be",
+  "created_at": "2026-06-08T06:24:35.983276099Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-6b4945a0",
+    "title": "B-001 workspace and CI foundation crates",
+    "description": "BUILD-001 B-001. Create Rust toolchain, initial crates pqueue-core/pqueue-storage/pqueue-postgres/pqueue-service/pqueue-client, ADR-003 dependency boundaries, unsafe denial, and CI scaffolding. This is the single ready entry bead.",
+    "acceptance": "cargo fmt --all --check passes; cargo clippy --workspace --all-targets -- -D warnings passes; cargo test --workspace passes; pqueue-core has no pqueue crate dependencies; #![forbid(unsafe_code)] enforced; previous intake warning is resolved by this explicit BUILD-001 scope.",
+    "parent": "pqueue-1a2aec65",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:workspace"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: lifecycle dispatch: project root mutation rejected for bead pqueue-6b4945a0\",\"fingerprint\":\"0d9c47212003c07269e8eb73a49e85c94f077db5f8e935b019379e6b8d88bc1d\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"0d9c47212003c07269e8eb73a49e85c94f077db5f8e935b019379e6b8d88bc1d\"}",
+          "created_at": "2026-06-08T04:51:04.773526749Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "adr-rust-workspace-and-toolchain-policy"
+    }
+  },
+  "governing": [
+    {
+      "id": "adr-rust-workspace-and-toolchain-policy",
+      "path": "docs/helix/02-design/adr/ADR-003-rust-workspace-and-toolchain-policy.md",
+      "title": "ADR-003: Rust Workspace and Toolchain Policy"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260608T062435-02d6b2b9",
+    "prompt": ".ddx/executions/20260608T062435-02d6b2b9/prompt.md",
+    "manifest": ".ddx/executions/20260608T062435-02d6b2b9/manifest.json",
+    "result": ".ddx/executions/20260608T062435-02d6b2b9/result.json",
+    "checks": ".ddx/executions/20260608T062435-02d6b2b9/checks.json",
+    "usage": ".ddx/executions/20260608T062435-02d6b2b9/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-6b4945a0-20260608T062435-02d6b2b9"
+  },
+  "prompt_sha": "52074ece95558488b2a0e1200effdd93da3ddfa880a9b2f40123e807818d57c1"
+}
