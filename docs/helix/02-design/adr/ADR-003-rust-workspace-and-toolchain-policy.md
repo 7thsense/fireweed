@@ -91,6 +91,15 @@ service or backend crates.
 - Batch sizes, request body sizes, lease durations, and metadata/payload sizes
   must be configurable and bounded.
 - Use cancellation-safe async patterns in storage calls and background workers.
+- Per-queue and per-`(queue,shard)` background work (lease-expiry sweeps,
+  cross-shard progress aggregation, summary recompute, recurring rearm,
+  idempotency/retention GC) MUST be multiplexed onto bounded, shared per-node
+  resources (worker pools, connection pools, batched sweepers), never one task,
+  loop, or connection per queue or per shard. This is a hard requirement for the
+  PRD queue-density target (>=1000 concurrently active queues per node): adding
+  the 1000th active queue must cost only bounded incremental resource. Per-shard
+  projection state (e.g. SQLite databases) must be opened lazily and bounded by
+  an LRU or equivalent cap rather than held open per shard indefinitely.
 
 ## Testing Policy
 

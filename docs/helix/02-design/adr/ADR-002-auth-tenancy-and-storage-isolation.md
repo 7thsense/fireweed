@@ -5,7 +5,6 @@ ddx:
     - prd
     - concerns
     - api-native-client-interface
-    - td-storage-architecture-backend-contracts
 ---
 
 # ADR-002: Auth, Tenancy, and Storage Isolation
@@ -46,6 +45,15 @@ pqueue will use a layered auth and tenancy model:
    unique within a tenant.
 4. **Shard**: physical routing and capacity unit named by
    `tenant_id/queue_id/shard_id`.
+5. **Group**: `group_key` is a client-visible logical ordering/compatibility
+   partition within a queue (ADR-004). Claim result order is exact per-group
+   order only on a `group_co_residency=true` queue, where
+   `shard_id = hash(group_key) mod shard_count` co-locates a group's items on
+   one shard; on a `group_co_residency=false` queue `group_key` restricts the
+   claim domain but does not promise per-group total order across shards.
+   `shard_id` MUST co-locate a `group_key`'s items when co-residency is enabled,
+   but `shard_id` is never a client-visible ordering or progress scope, and
+   `group_key` carries no progress-bound meaning (progress is queue-global).
 
 The core queue engine requires an already-resolved `PrincipalContext` for
 service-mode operations. It does not implement login, signup, session storage,
@@ -63,14 +71,22 @@ The first service implementation uses operation-scoped permissions:
 | Permission | Applies To |
 |------------|------------|
 | `queue:create` | `CreateQueue` |
-| `queue:read` | queue definition and metrics reads |
+| `queue:read` | queue definition and metrics reads; `DiscoverActiveScopes` |
 | `item:push` | `BatchPush` |
 | `item:update` | `BatchUpdate` |
 | `item:claim` | `BatchClaim` |
 | `lease:renew` | `BatchRenewLeases` |
 | `item:finalize` | `BatchFinalize` |
-| `operator:repair` | future repair/redrive/purge APIs |
-| `admin:shard` | future shard placement and migration APIs |
+| `item:update` (native purge) | native per-key `PurgeItems` (API-001, recurring teardown) |
+| `operator:inspect` | API-002 operator reads (`GetItem`, `ListItems`, `GetQueueAdminState`, `GetOperation`, `ListOperations`) |
+| `operator:repair` | API-002 repair/redrive/archive/retention/pause/resume |
+| `operator:purge` | API-002 bulk operator `PurgeQueueItems` (most destructive; may require a distinct grant) |
+| `admin:shard` | shard placement, resharding, and backend migration (migration design) |
+
+The operator surface (`operator:inspect`/`operator:repair`/`operator:purge`) is
+defined by API-002. Operator mutations may act on leased and terminal items and
+therefore require these stronger, deny-by-default grants distinct from the
+API-001 data-plane permissions.
 
 The policy engine may be RBAC, ABAC, or host-provided callback. The pqueue
 service surface sees only a policy decision:
@@ -124,19 +140,42 @@ requires:
 - queue and tenant identifiers in metrics;
 - configurable max batch size and lease duration per queue;
 - backend profile and shard count per queue;
-- rate-limit outcomes in API-001 error semantics;
+- pqueue deployment/tenant rate-limit and capacity outcomes in API-001 error
+  semantics (the envelope rate-limit error and the per-item `rate_limited`
+  partial-batch status protect the pqueue deployment, not a caller's downstream
+  API);
 - progress-bound metrics per queue;
 - load tests where one hot queue does not prevent another queue from claiming
-  eligible work within its configured limits.
+  eligible work within its configured limits;
+- queue density: a single node MUST support at least 1000 concurrently active
+  queues without cross-queue degradation. This makes noisy-neighbor isolation a
+  density concern as well as a capacity one: per-queue and per-`(queue,shard)`
+  background work (lease-expiry sweeps, cross-shard progress aggregation, summary
+  recompute, recurring rearm, idempotency/retention GC) MUST be multiplexed onto
+  bounded shared per-node resources (worker pools, connection pools, sweeper
+  batches), never one task, loop, or connection per queue or per shard, so that
+  the 1000th active queue costs no more than bounded incremental resource and
+  every active queue still meets its progress bound.
 
-Queue-level rate limits, quotas, and tenant capacity controls are P1 product
-features, but v1 storage and metrics must not make them impossible.
+pqueue deployment-level rate limits, quotas, and tenant capacity controls are P1
+product features, but v1 storage and metrics must not make them impossible.
+Enforcing a caller's downstream API rate limits or quotas is a permanent
+non-goal of the pqueue engine; callers pace their own claim output (claim batch
+size, claim cadence, `not_before`, and group selection) and pqueue performs no
+downstream-rate admission.
 
 ## Security Rules
 
 - Resolve the principal before route handling reaches pqueue core.
 - Authorize before loading queue data or returning whether an unauthorized queue
   exists.
+- Tenant-wide reads (discovery) MUST authorize `queue:read` per candidate queue
+  and MUST exclude unauthorized queues from results without leaking their
+  existence; a request naming an unauthorized queue MUST return
+  forbidden/not-found. Enumeration and per-queue auth fanout MUST be bounded by
+  pagination or a documented per-tenant queue ceiling. The
+  `Authorizer::authorize(..., queue_id: Option<&QueueId>, ...)` signature already
+  supports both tenant-wide (`None`) and per-queue cases.
 - Never trust `worker_id` as an authenticated principal.
 - Store lease tokens only as hashes.
 - Treat payload and metadata as caller data; validate queue-owned fields and
