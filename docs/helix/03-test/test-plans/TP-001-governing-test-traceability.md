@@ -104,6 +104,7 @@ complementary and non-overlapping.
 
 Implementation beads should create or extend these suites:
 
+- `core_domain_tests`
 - `core_priority_model_tests`
 - `core_lifecycle_transition_tests`
 - `core_idempotency_tests`
@@ -127,10 +128,16 @@ Implementation beads should create or extend these suites:
 - `sharding_rebalance_drain_tests`
 - `cross_shard_progress_tests`
 - `object_log_commit_recovery_tests`
+- `sqlite_projection_tests`
 - `service_auth_tenant_tests`
 - `service_api_error_semantics_tests`
+- `service_gate_tests`
+- `service_group_batching_tests`
+- `service_cohort_tests`
+- `service_recurrence_purge_tests`
 - `service_discovery_tests`
 - `service_metrics_ground_truth_tests`
+- `invariant_stress_matrix_tests`
 - `operator_repair_tests`
 - `operator_redrive_tests`
 - `operator_purge_tests`

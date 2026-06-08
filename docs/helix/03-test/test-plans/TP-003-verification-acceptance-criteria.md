@@ -290,9 +290,10 @@ but not sufficient.
 | Loom (each custom concurrent structure) | exhaustive to the bounded preemption depth; 0 failing interleavings | release |
 | Property + fuzz (nightly tier) | ≥ `props`/`fuzz` nightly values; 0 falsifications/crashes | release |
 | Flaky rate | < 0.1% over 100 CI repeats of the suite | release |
-| Safety invariants INV-1..INV-11 | 0 violations under the §2 stress matrix | release |
+| P0/core safety invariants INV-1..INV-10 | 0 violations under the §2 stress matrix | release |
+| Operator safety invariant INV-11 | 0 violations under the §2 stress matrix with operator repair/purge actions enabled | operator-enabled release |
 | TP-002 E0 (per-queue floor ≥10M items/hr), E1, E2 (multi-shard + ≥1000-queue density), E3 (object-log cost/ack/recovery) | pass at TP-002 bars | release |
-| `AC-SEN` P0/core product workflow aggregate | AC-E2E-1..6 and AC-E2E-8..9 green with ledger evidence; INV-1..INV-11 = 0 where applicable | release |
+| `AC-SEN` P0/core product workflow aggregate | AC-E2E-1..6 and AC-E2E-8..9 green with ledger evidence; INV-1..INV-10 = 0 where applicable | release |
 | Operator product workflow aggregate | AC-E2E-7 green with ledger evidence; INV-8 and INV-11 = 0 | operator-enabled release |
 
 ## 6. Verification Ledger
@@ -314,7 +315,7 @@ criteria touch storage, concurrency, claim, lease, operator, or scale behavior
 
 pqueue P0/core v1 is "verified" when:
 
-1. INV-1..INV-11 hold with 0 violations across the §2 stress matrix on both
+1. INV-1..INV-10 hold with 0 violations across the §2 stress matrix on both
    committed backend profiles.
 2. Every `AC-*` in §3 passes at its stated bar, recorded in the ledger.
 3. The §4 backend conformance gate is 100% for both committed profiles.
@@ -330,8 +331,9 @@ pqueue P0/core v1 is "verified" when:
    end-to-end with the applicable invariants holding.
 7. The P1/operator-enabled product surface is "verified" only when
    `operator_validation_tests` runs AC-E2E-7 and the API-002 operator suites at
-   their release bars. This is required before claiming operator support, but it
-   does not block the P0/core v1 gate above.
+   their release bars, including INV-11 under the §2 stress matrix with
+   operator repair/purge actions enabled. This is required before claiming
+   operator support, but it does not block the P0/core v1 gate above.
 
 Any gap MUST be recorded as an explicit, dated deferred item with an owner, not
 silently dropped.
