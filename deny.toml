@@ -1,0 +1,19 @@
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0"]
+confidence-threshold = 0.8
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
