@@ -98,6 +98,7 @@ it turns green. Suites are named in TP-001.
 | AC-CLAIM-3 eligibility gates | future `not_before`, retry backoff, metadata blockers, dynamic gates | ineligible items never claimed; eligible age not accrued while ineligible | 0 violations (INV-4 inputs) |
 | AC-CLAIM-4 strict ordering | `C=64`, skewed priority | INV-6 strict | 0 inversions |
 | AC-CLAIM-5 bounded-relaxed bound | `C=64`, relaxed queue | rank error ≤ declared bound; oldest eligible still claimed ≤ `progress_bound_ms` | within bound; INV-4 holds |
+| AC-CLAIM-6 lease renewal | active leases at durations {short, max}, expired leases, fenced leases after operator repair/purge | renew extends only the active matching lease; stale/expired/fenced tokens fail without extending visibility; renewal preserves single-active-lease safety | 0 stale renewals accepted; 0 duplicate active leases; renewed lease expiry equals requested duration capped by queue policy |
 
 ### 3.3 Group-batching, cohort, gates (gap features)
 
@@ -196,6 +197,10 @@ that can terminate worker/service processes at deterministic cut points, inject
 duplicate request replay, force partial shard append/commit outcomes, and record
 the seed and failure schedule. Build sequencing must create that harness before
 AC-CLAIM-2, AC-SHARD-3, AC-E2E-2, AC-E2E-3, AC-E2E-5, and AC-E2E-7 are claimed.
+AC-E2E-6 release evidence separately depends on the TD-003/TD-004 multi-shard
+backend and the `queue_density_single_node_tests` harness from TP-002 E2; its
+smoke run may start earlier, but its release bar cannot be claimed until that
+scale/density infrastructure exists.
 
 Approximate count/metric assertions use `L_metrics` from §1 and the exact/lagged
 metric contract in API-001 (`GetQueueMetrics`, `DiscoverActiveScopes`) plus the

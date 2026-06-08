@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "ddx": {
+      "source": "DocumentDrivenDX/helix",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/ddx/SKILL.md",
+      "computedHash": "5b86afd58c653d32d59d4a852dc60e83c9ac3078fca79d8c351701687a5ef342"
+    },
+    "helix": {
+      "source": "DocumentDrivenDX/helix",
+      "sourceType": "github",
+      "skillPath": "skills/helix/SKILL.md",
+      "computedHash": "4a47ef1646adf34a54df9a37bd3d6a17cefe30f19ddead0d09ac1d9a876ba4b6"
+    }
+  }
+}

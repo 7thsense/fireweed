@@ -20,164 +20,160 @@ ddx:
 
 # Build Plan: BUILD-001 Implementation Sequence
 
-## Purpose
+## Scope
 
-This plan decomposes the accepted pqueue design into an ordered, dependency-aware
-set of **beads** (portable work items) that a `ddx work` worker drains. Each bead
-cites its governing artifact(s) and the `AC-*` / `INV-*` acceptance criteria from
-TP-003 that mechanically gate its completion (`ddx bead ac-check`). A bead is not
-"done" until its cited acceptance criteria are green and recorded in the
-verification ledger (TP-003 §6).
+This is the canonical build sequencing artifact for pqueue's first
+implementation. It translates the PRD, API contracts, ADRs, TDs, and test plans
+into bounded implementation slices and DDx beads. It does not add product or
+design decisions; when a slice needs a decision not present in the governing
+artifacts, the bead must stop and request a doc update instead of inventing
+scope.
 
-Crate boundaries and toolchain are fixed by ADR-003; storage flows by TD-001/002;
-sharding by TD-003; the object-log backend by TD-004; client/operator contracts by
-API-001/API-002. This plan adds no new design decisions — it sequences them.
+**Governing Artifacts**:
 
-## Definition of Done (every bead)
+- `docs/helix/01-frame/prd.md`
+- `docs/helix/02-design/contracts/API-001-native-client-interface.md`
+- `docs/helix/02-design/contracts/API-002-operator-repair-contract.md`
+- `docs/helix/02-design/adr/ADR-001-cqrs-log-projection-storage-model.md`
+- `docs/helix/02-design/adr/ADR-002-auth-tenancy-and-storage-isolation.md`
+- `docs/helix/02-design/adr/ADR-003-rust-workspace-and-toolchain-policy.md`
+- `docs/helix/02-design/adr/ADR-004-granularity-mapping-and-claim-domain.md`
+- `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
+- `docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md`
+- `docs/helix/02-design/technical-designs/TD-003-sharding-and-shard-ownership.md`
+- `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md`
+- `docs/helix/03-test/test-plans/TP-001-governing-test-traceability.md`
+- `docs/helix/03-test/test-plans/TP-002-scale-substantiation.md`
+- `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md`
 
-1. Code + tests land behind the ADR-003 crate boundaries (inward-flowing deps).
-2. The bead's cited `AC-*` pass at their TP-003 bars; cited `INV-*` show 0
-   violations at the applicable cadence (per-PR vs release, TP-003 §5).
-3. Per-PR CI gates green (`fmt`, `clippy -D warnings`, `test`, `deny`, `machete`,
-   `forbid(unsafe_code)`, coverage thresholds).
-4. The verification ledger entry records command, exit status, environment, seed,
-   measured numbers vs bar, and the named TP-001 suite(s).
-5. Review passes (`ddx work` runs review on by default).
+**Out of Scope for BUILD-001**:
 
-## Epic / Bead DAG
+- SQS-shaped compatibility adapter.
+- Hosted dashboard.
+- Kafka/Redpanda and DynamoDB backend implementations.
+- Seventh Sense migration design from existing tables into pqueue commands.
+- Production `progress_bound_ms` value selection; tests use configured fixture
+  bounds until the external SLA lands.
 
-Beads are grouped into epics. `→` denotes a hard dependency. Foundational epics
-unblock the rest; gap-feature epics depend on the core claim engine.
+## Shared Constraints
 
-### E0 — Workspace & CI foundation  *(no deps)*
+- Rust workspace and crate dependency flow follow ADR-003. `pqueue-core` remains
+  runtime-free and has no pqueue crate dependencies.
+- `#![forbid(unsafe_code)]` is enforced in all initial crates; any exception
+  needs a later ADR/TD.
+- The native API is API-001. API-002 is a designed P1 operator surface: it is
+  required before claiming operator support, but it does not block P0/core v1
+  verification.
+- Every storage backend must pass the same TD-001 conformance suite before it is
+  selectable by backend profile.
+- P0/core v1 verification is TP-003 §7 items 1-6: core invariants, conformance,
+  CI gates, TP-002 E0-E3, and `product_validation_tests` over AC-E2E-1..6 and
+  AC-E2E-8..9.
+- Operator-enabled verification is TP-003 §7 item 7: API-002 suites plus
+  AC-E2E-7.
+- Product E2E smoke (`PQUEUE_E2E_SCALE=smoke`) is a per-PR gate once a suite
+  exists. Release E2E uses the row-specific release shapes in TP-003 §3.10.
 
-- B-001 Cargo workspace + `rust-toolchain.toml` + five crates (`pqueue-core`,
-  `-storage`, `-postgres`, `-service`, `-client`) per ADR-003; inward dep graph
-  enforced. AC: builds; dep-graph lint. INV: n/a.
-- B-002 CI quality-gate pipeline = TP-003 §5 per-PR set (`fmt`, `clippy -D
-  warnings`, `test`, `deny`, `machete`, `forbid(unsafe_code)`, coverage harness,
-  property/fuzz scaffolding, flaky-rate harness). AC: the gate set runs green on
-  empty crates.
+## Implementation Slices
 
-### E1 — `pqueue-core` domain  *(→ E0)*
+| Slice | Area | Governing Artifacts | Depends On | Validation Gate | Notes |
+|-------|------|---------------------|------------|-----------------|-------|
+| B-001 | Workspace and CI foundation | ADR-003, TP-003 §5 | None | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace` | Creates the Rust toolchain, crates, CI scaffolding, dependency policy, unsafe denial, and coverage/property/fuzz placeholders. |
+| B-010 | Core API/domain types | API-001, API-002, ADR-004 | B-001 | `cargo test -p pqueue-core core_domain` | IDs, queue definitions, priority values, metadata, group/cohort/recurrence config, API result/error types. |
+| B-011 | Core priority and ordering | PRD FR-2..FR-8, API-001, TP-003 AC-CORE-1 | B-010 | `cargo test -p pqueue-core core_priority_model_tests` | Includes timestamp and non-timestamp priority models so pqueue is not timestamp-only. |
+| B-012 | Core lifecycle, idempotency, retry, eligibility | API-001, TP-003 AC-CORE-2..4, AC-CLAIM-3 | B-010 | `cargo test -p pqueue-core core_lifecycle_transition_tests core_idempotency_tests core_eligibility_precedence_tests core_recurrence_rearm_tests` | Establishes the pure state machine before storage. |
+| B-020 | Storage traits and conformance harness | TD-001, TP-003 §4 | B-010..B-012 | `cargo test -p pqueue-storage storage_conformance --no-default-features` | Defines `LogStore`, `ProjectionStore`, `SnapshotStore`, `ControlPlaneStore`, command envelopes, positions, fixtures. |
+| B-021 | Fault-injection harness | TP-003 §2, §3.10 | B-020 | `cargo test -p pqueue-storage fault_injection_harness_tests` | Shared process-kill, replay, partial-append, and deterministic failure scheduler used by AC-CLAIM-2, AC-SHARD-3, AC-E2E-2/3/5/7. |
+| B-030 | Postgres control plane | TD-002, ADR-002 | B-020 | `cargo test -p pqueue-postgres postgres_schema_migration_tests postgres_transaction_flow_tests` | Queue definitions, tenant scope, backend profile, shard assignments, assignment epochs. |
+| B-040 | Postgres-native append/projection/write path | TD-001, TD-002, API-001 | B-030 | `cargo test -p pqueue-postgres postgres_transaction_flow_tests` | `BatchPush`, `BatchUpdate`, command/idempotency records, terminal retention basics. |
+| B-041 | Postgres-native claim/renew/finalize path | TD-002, TP-003 AC-CLAIM-1..6 | B-040, B-021 | `cargo test -p pqueue-postgres postgres_concurrency_claim_tests`; `cargo test -p pqueue-storage storage_conformance_claim_tests` | Single active lease, lease renewal, expiry redelivery, strict/bounded-relaxed claim, finalize outcomes. |
+| B-042 | Postgres-native durability/idempotency/replay | TD-001, TD-002, TP-003 INV-5, INV-10 | B-041 | `cargo test -p pqueue-storage storage_conformance_durability_tests` | Kill-after-ack, replay response, request conflict, retention windows. |
+| B-050 | Dynamic gates and eligibility projections | API-001, TD-002, TP-003 AC-GATE-1..2 | B-041 | `cargo test -p pqueue-postgres storage_conformance_gate_tests` | `SetGates`, gate anti-join, no item-row rewrite, exact oldest-eligible behavior. |
+| B-051 | Group batching and per-group summary | ADR-004, API-001, TD-002, TP-003 AC-GRP-1..2 | B-050 | `cargo test -p pqueue-postgres storage_conformance_group_batching_tests postgres_group_coresidency_tests` | `group_co_residency`, whole-group atomic claim, `same_group_key` as item filter. |
+| B-052 | Cohort claims | API-001, ADR-004, TD-002, TP-003 AC-COH-1..2 | B-051 | `cargo test -p pqueue-postgres storage_conformance_cohort_tests` | Complete cohort atomic lease, incomplete expiry, no member leakage. |
+| B-053 | Recurring queues and native purge | API-001, TD-002, TP-003 AC-REC-1..3 | B-041 | `cargo test -p pqueue-postgres core_recurrence_rearm_tests storage_conformance_durability_tests` | `rearm`, per-cycle retry reset, idle metrics, `PurgeItems`, tombstone/replay safety. |
+| B-054 | Active-scope discovery and metrics | API-001, TD-002, TD-003, TP-003 AC-DISC-1..2, AC-OBS-1 | B-050..B-053 | `cargo test -p pqueue-service service_discovery_tests service_metrics_ground_truth_tests` | Top-N ranking, non-co-resident cross-shard aggregation, exact oldest age, bounded count lag. |
+| B-060 | API-001 service and client | API-001, ADR-002, TP-003 AC-SEC-1..2 | B-041 | `cargo test -p pqueue-service service_api_error_semantics_tests service_auth_tenant_tests`; `cargo test -p pqueue-client` | HTTP/JSON routes, auth context, tenant isolation, lease-token hashing, client facade. |
+| B-061 | Product E2E smoke harness | TP-001, TP-003 §3.10 | B-060, B-054 | `PQUEUE_BACKEND_PROFILE=postgres_native PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows -- --ignored` | Implements shared `product_workflows` binary, env knobs, ledger output, seeds, smoke fixture scale. |
+| B-070 | Sharding and shard ownership | TD-003, TD-001, TP-003 AC-SHARD-1..3 | B-054, B-021 | `cargo test -p pqueue-storage sharding_assignment_fencing_tests sharding_rebalance_drain_tests cross_shard_progress_tests` | Assignment, epoch fences, fan-out claim, k-way merge, cross-shard queue-global progress. |
+| B-071 | Queue density resource model | ADR-003, TD-003, TP-002 E2 | B-070 | `cargo test -p pqueue-storage queue_density_single_node_tests -- --ignored` | Bounded shared pools/sweepers and LRU handles; no one task/loop/connection per queue/shard. |
+| B-080 | Object-log durable log and SQLite projection | TD-004, TD-001, TP-003 §4 | B-070 | `cargo test -p pqueue-storage object_log_commit_recovery_tests storage_conformance_durability_tests` | Group commit, manifest CAS/current epoch fence, apply-before-return, replay response, SQLite projection. |
+| B-081 | Object-log conformance parity and recovery | TD-004, TP-002 E3 | B-080 | `cargo test -p pqueue-storage storage_conformance_multi_shard_tests object_log_commit_recovery_tests`; release: E3 benchmark | Snapshot + log-tail recovery, bounded apply lag, object-log cost/ack/recovery evidence. |
+| B-090 | P0 product workflow release gates | PRD, TP-003 AC-E2E-1..6, AC-E2E-8..9 | B-061, B-070, B-081 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows -- --ignored` plus TP-002 E0-E3 | Scheduled action, group batching, cohort, recurring, crash recovery, noisy neighbor, generic priority, downstream pacing. |
+| B-100 | API-002 operator surface | API-002, ADR-002, TP-003 AC-OP-1..9 | B-060, B-050..B-053, B-021 | `cargo test -p pqueue-service operator_repair_tests operator_redrive_tests operator_purge_tests operator_async_operation_tests operator_auth_denied_path_tests` | P1 operator support: pause/resume, repair, redrive, bulk purge/archive, async ops, inspection/auth. |
+| B-101 | Operator product workflow gate | API-002, TP-003 AC-E2E-7 | B-100, B-061 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows operator_repair_redrive_e2e -- --ignored` | Required before claiming operator-enabled product surface verified. |
 
-- B-010 API-001 operation structs + domain types (ids, `priority`, `not_before`,
-  `metadata`, `group_key`, lifecycle enum). AC-CORE-2.
-- B-011 Priority encoding `priority_sort` for all four models + tie-breaker.
-  **AC-CORE-1** (`props ≥ 1,000,000`).
-- B-012 Lifecycle state machine + transition validation. **AC-CORE-2**; INV-3.
-- B-013 Idempotency (request fingerprint, `client_item_key` convergence,
-  `item_version` rules). **AC-CORE-3**; INV-5 (unit tier).
-- B-014 Retry policy + exhaustion → terminal. **AC-CORE-4**.
-- B-015 Eligibility Precedence evaluator (conditions 0–5, single home). AC-CLAIM-3
-  inputs.
+## Issue Decomposition
 
-### E2 — `pqueue-storage` traits & conformance harness  *(→ E1)*
+Work is tracked with `ddx bead`, not custom issue files. Create one epic bead per
+implementation slice group only when it helps dependency management; otherwise
+create task beads directly from the table above.
 
-- B-020 Capability traits (`LogStore`, `ProjectionStore`, `SnapshotStore`,
-  `ControlPlaneStore`), command envelopes, command positions, durability
-  profiles. AC: trait surface compiles; harness skeleton.
-- B-021 Shared backend conformance harness (the TD-001 scenario set as
-  backend-agnostic fixtures). AC: §4 conformance scenarios enumerated and runnable
-  against a mock.
+**Required labels per build bead**:
 
-### E3 — Postgres control plane  *(→ E2)*
+- `helix`
+- `activity:build`
+- `kind:build`
+- `area:<crate-or-subsystem>`
+- `suite:<canonical TP-001 suite>` when a named suite is created or extended
 
-- B-030 Postgres `ControlPlaneStore`: queue defs, shard assignments, backend
-  profile, epochs (TD-002 schema). AC: tenant-scoped create/read; **INV-8** (unit).
+**Required references per build bead**:
 
-### E4 — Postgres-native claim engine (TD-002)  *(→ E3)*  **[reference correctness backend]**
+- This build plan: `build-implementation-plan`
+- Nearest governing artifact via `--set spec-id=<ddx-id>`
+- TP-003 `AC-*` / `INV-*` IDs in the bead description and acceptance criteria
+- Exact command(s) to run, including `PQUEUE_BACKEND_PROFILE`,
+  `PQUEUE_E2E_SCALE`, and seed when relevant
 
-- B-040 `pqueue_items` projection + required indexes; `BatchPush`/`BatchUpdate`
-  transaction flows. AC-CORE-3 (integration); INV-10.
-- B-041 `BatchClaim` with `FOR UPDATE SKIP LOCKED`, lease creation, single active
-  lease. **AC-CLAIM-1, AC-CLAIM-4, AC-CLAIM-5**; **INV-1, INV-6**.
-- B-042 `BatchRenewLeases` + `BatchFinalize` (complete/fail/retry/release) +
-  lease expiry redelivery. **AC-CLAIM-2**; INV-2.
-- B-043 Idempotency + retention/compaction (request-id, item-key, terminal).
-  AC-CORE-3; **INV-5**.
-- B-044 Durable ack + replay/crash recovery. **INV-10**; durable-append conformance.
-- B-045 Backend conformance: postgres_native passes 100% of §4 scenarios.
+**Dependency rules**:
 
-### E5 — Gap features on postgres-native  *(→ E4)*
+- Beads that implement storage behavior depend on the relevant conformance
+  harness bead.
+- Failure/replay/kill beads depend on B-021.
+- Product workflow beads depend on B-061 and the underlying feature slice.
+- AC-E2E-6 release beads depend on B-070, B-071, B-080, and B-081.
+- Operator beads are P1 and depend on the P0 service/storage foundations, but
+  they are not dependencies of the P0/core v1 release gate.
 
-- B-050 Dynamic gates `gate_keys`/`SetGates` + `pqueue_gate_state` (O(1) flip).
-  **AC-GATE-1, AC-GATE-2**.
-- B-051 Whole-group `group_batching` + `pqueue_group_summary` (shard-scoped).
-  **AC-GRP-1, AC-GRP-2**; INV-7.
-- B-052 Complete-cohort `cohort_policy`/`whole_cohort` + `pqueue_cohorts`.
-  **AC-COH-1, AC-COH-2**; INV-7.
-- B-053 Recurring `rearm`/`recurrence`/native `PurgeItems`. **AC-REC-1..3**.
-- B-054 `DiscoverActiveScopes` over the single summary projection.
-  **AC-DISC-1**.
+## Validation Plan
 
-### E6 — Multi-shard & ownership (TD-003)  *(→ E4, E5)*
+- Per-PR gates: ADR-003 formatting/lints/tests/dependency checks, claimed
+  unit/integration ACs, product E2E smoke once a product suite exists.
+- Release gates: TP-003 §5 release column, backend conformance 100% for
+  `postgres_native` and `object_log_sqlite_projection`, TP-002 E0-E3, and
+  `product_validation_tests` at release shape.
+- Operator-enabled release: all P0/core release gates plus API-002 operator
+  suites and `operator_validation_tests`.
+- Every bead must add or extend tests before claiming behavior complete. A bead
+  touching storage, concurrency, claim, lease, operator, or scale behavior cannot
+  close on `cargo test --workspace` alone.
+- Verification ledger evidence must include command, exit status, profile,
+  scale, seed, environment, measured numbers, and named TP-001 suite.
 
-- B-060 Deterministic shard assignment + storage-backed leases + epoch fencing.
-  **AC-SHARD-3**; INV-1 across rebalance.
-- B-061 Multi-shard fan-out claim + deterministic k-way merge + cross-shard
-  queue-global progress aggregation. **AC-SHARD-1, AC-SHARD-2**; **INV-4, INV-9**.
-- B-062 Graceful drain / rebalance / recovery; stalled-shard visibility. AC-SHARD-3.
-- B-063 Queue density: bounded shared per-node resources (one pool, batched
-  sweeper, LRU handles). Feeds **TP-002 E2** `queue_density_single_node_tests`.
+## Risks and Rollbacks
 
-### E7 — Service surface (API-001)  *(→ E4)*
-
-- B-070 `pqueue-service` HTTP/JSON routes + `PrincipalContext`/`Authorizer` wiring
-  + error-shape (RFC 9457). AC: route + error-semantics suites.
-- B-071 Tenant isolation + lease-token hashing + audit. **AC-SEC-1, AC-SEC-2**;
-  **INV-8**.
-- B-072 `pqueue-client` facade (embedded + HTTP).
-
-### E8 — Operator surface (API-002)  *(→ E5, E7)*
-
-- B-080 Pause/resume (Eligibility Precedence condition 0) + admin state. **AC-OP-6**.
-- B-081 `RepairItems` (force_*/clear_lease, lease fence). **AC-OP-1**; **INV-11**.
-- B-082 `RedriveItems` (DLQ, `eligible_since=max(commit,not_before)`). **AC-OP-2**.
-- B-083 Bulk `PurgeQueueItems` + `ArchiveItems` + `RunRetention` + selector
-  guards. **AC-OP-3, AC-OP-7**.
-- B-084 Async operation model (`operation_id`, resumable convergence, cancel).
-  **AC-OP-4**.
-- B-085 Operator inspection + cohort-wholeness targeting + operator authz.
-  **AC-OP-5, AC-OP-8, AC-OP-9**.
-
-### E9 — Object-log second backend (TD-004)  *(→ E4, E6)*
-
-- B-090 Group-commit pipeline, manifest CAS fencing, in-flight reservations,
-  replay-response idempotency. Conformance parity with postgres_native.
-- B-091 SQLite projection (shard-scoped summary, gates, cohorts), snapshot +
-  bounded replay, LRU handles. **INV-10** on object-log.
-- B-092 Object-log backend passes 100% of §4 conformance.
-
-### E10 — Scale, density & end-to-end validation  *(→ E6, E8, E9)*
-
-- B-100 Benchmark harness; **TP-002 E0/E1** (per-queue floor, single-deployment).
-- B-101 **TP-002 E2** (multi-shard scale-out + ≥1000-queue density).
-- B-102 **TP-002 E3** (object-log cost/ack/recovery); **AC-LAT-1..4**.
-- B-103 **AC-SEN** Seventh Sense end-to-end (timestamp schedule + mutable update +
-  gates + group/cohort batches + redrive); INV-1..4.
-
-## Sequencing & parallelism
-
-Critical path: E0 → E1 → E2 → E3 → E4 → {E5, E7} → {E6, E8} → E9 → E10. Within an
-epic, beads with no mutual dependency may be worked in parallel by the queue
-drain. E5 (gap features) and E7 (service) can proceed in parallel once E4 lands;
-E6 (multi-shard) and E8 (operator) once E5/E7 land. E10 is the release gate.
-
-## Worker workflow
-
-1. Beads are filed in the project bead tracker (`ddx bead` / `bd`), labeled with
-   their epic, cited `AC-*`/`INV-*`, governing artifact, and dependencies.
-2. `ddx bead ready` shows execution-ready beads (deps satisfied).
-3. `ddx work` drains the ready queue: it runs `ddx try` per bead with review on,
-   commits on success, and respects retry/no-progress stop conditions.
-4. `ddx bead ac-check` mechanically verifies the bead's acceptance criteria
-   against the working tree before close.
-5. Release gates (soak, scale E0–E3, loom-exhaustive, conformance 100%) run per
-   TP-003 §5 release cadence before v1 is declared "verified" (TP-003 §7).
+| Risk | Impact | Response | Rollback |
+|------|--------|----------|----------|
+| E2E release bars arrive before scale infrastructure exists | H | File smoke E2E beads early but wire release-shape beads behind B-070/B-071/B-080/B-081 dependencies | Keep smoke jobs in CI; do not claim release ledger evidence |
+| Object-log backend hides correctness differences behind eventual projection lag | H | Enforce apply-before-return for own operations, `L_apply` for unrelated readers, and shared conformance parity | Disable `object_log_sqlite_projection` for new queues |
+| Postgres-native is mistaken for horizontal-scale evidence | H | Treat Postgres multi-shard as comparator-only; TP-002 E2 headline requires object-log multi-shard | Mark comparator results as non-gating |
+| Fault-injection harness is under-scoped inside a feature bead | H | File B-021 before failure-heavy features; make E2E failure beads depend on it | Disable failure-heavy E2E release jobs until harness exists |
+| P1 operator work blocks P0/core verification | M | Keep AC-E2E-7 in `operator_validation_tests`, not `product_validation_tests` | Defer B-100/B-101 without changing P0/core release gate |
+| Metrics counters drift from exact state | M | AC-OBS-1 compares exact fields and bounded approximate fields against ground truth | Fail release gate; do not rely on approximate counts for correctness |
+| Beads become too broad | M | Split by crate/suite/AC; each bead names in-scope and out-of-scope files | Reopen/split bead before retrying |
 
 ## Exit Criteria
 
-BUILD-001 is complete when every epic's beads are closed with their `AC-*` green,
-the §4 conformance gate is 100% on both committed backends, the TP-003 §5 release
-gates are green, and TP-002 E0–E3 + AC-SEN pass (TP-003 §7 = v1 "verified").
+BUILD-001 is complete when:
+
+- all P0/core implementation beads B-001 through B-090 are closed with ledger
+  evidence;
+- `postgres_native` and `object_log_sqlite_projection` pass 100% of TD-001
+  conformance;
+- TP-002 E0-E3 pass;
+- TP-003 §5 P0/core release gates and `product_validation_tests` are green;
+- P1/operator beads B-100 and B-101 are either closed with
+  `operator_validation_tests` green or explicitly left open as non-blocking P1
+  work; and
+- no bead depends on chat history or scratch files for executable context.
+
