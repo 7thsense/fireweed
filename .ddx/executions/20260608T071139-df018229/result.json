@@ -1,0 +1,39 @@
+{
+  "bead_id": "pqueue-2bca1ef6",
+  "attempt_id": "20260608T071139-df018229",
+  "base_rev": "3613cbf188f94558f84008203d59e508c967f5e8",
+  "result_rev": "e5f58ef54977e053d46bf791229e2033454505f6",
+  "implementation_rev": "e5f58ef54977e053d46bf791229e2033454505f6",
+  "outcome": "task_succeeded",
+  "status": "success",
+  "detail": "success",
+  "candidate_ref": "refs/ddx/iterations/20260608T071139-df018229/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260608T071139-df018229",
+      "result_rev": "e5f58ef54977e053d46bf791229e2033454505f6",
+      "implementer_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "review_result": {},
+      "final_decision": "success"
+    }
+  ],
+  "harness": "codex",
+  "model": "gpt-5.4-mini",
+  "session_id": "eb-71b49784",
+  "duration_ms": 388623,
+  "tokens": 3105270,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260608T071139-df018229",
+  "prompt_file": ".ddx/executions/20260608T071139-df018229/prompt.md",
+  "manifest_file": ".ddx/executions/20260608T071139-df018229/manifest.json",
+  "result_file": ".ddx/executions/20260608T071139-df018229/result.json",
+  "usage_file": ".ddx/executions/20260608T071139-df018229/usage.json",
+  "rate_limit_budget": 300000000000,
+  "started_at": "2026-06-08T07:11:40.204585937Z",
+  "finished_at": "2026-06-08T07:18:08.828099206Z"
+}

@@ -1,0 +1,88 @@
+{
+  "attempt_id": "20260608T071139-df018229",
+  "bead_id": "pqueue-2bca1ef6",
+  "base_rev": "3613cbf188f94558f84008203d59e508c967f5e8",
+  "created_at": "2026-06-08T07:11:40.196361861Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 7
+  },
+  "bead": {
+    "id": "pqueue-2bca1ef6",
+    "title": "B-010 core API and domain types",
+    "description": "BUILD-001 B-010 core IDs, queue definitions, priority values, metadata, group/cohort/recurrence config, API result/error types, and CreateQueue shape validation.",
+    "acceptance": "cargo test -p pqueue-core core_domain_tests passes; validates mutually exclusive recurrence/cohort fields, completion_bound_ms \u003c= progress_bound_ms, group_co_residency preconditions, shard-count policy fields; ledger cites API-001/API-002/ADR-004.",
+    "parent": "pqueue-f72ef63e",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:pqueue-core",
+      "suite:core_domain_tests"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-06-08T06:43:25.847476662Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260608T063511-f856ecc3\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":2646085,\"output_tokens\":33903,\"total_tokens\":2679988,\"cost_usd\":0,\"duration_ms\":493566,\"exit_code\":0}",
+          "created_at": "2026-06-08T06:43:25.859303946Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=2679988 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "",
+          "body": "{\"candidate_ref\":\"refs/ddx/iterations/20260608T063511-f856ecc3/0\",\"cycle_index\":0,\"attempt_id\":\"20260608T063511-f856ecc3\",\"base_rev\":\"5caec860024acd66f916d8a595bc79190ecb76a4\",\"result_rev\":\"3910d8a9d70b53fe32b2400dc39bbf68e9290e1f\"}",
+          "created_at": "2026-06-08T06:43:25.878301892Z",
+          "kind": "candidate_cycle_pinned",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"sindri\",\"resolved_model\":\"dflash\",\"route_reason\":\"policy=cheap; score=35.0\",\"fallback_chain\":[],\"requested_min_power\":5}",
+          "created_at": "2026-06-08T07:11:39.708026593Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=sindri model=dflash reason=policy=cheap; score=35.0"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260608T064326-2f3f063c\",\"harness\":\"fiz\",\"provider\":\"sindri\",\"model\":\"dflash\",\"route_reason\":\"policy=cheap; score=35.0\",\"input_tokens\":117145,\"output_tokens\":549,\"total_tokens\":117694,\"cost_usd\":0,\"duration_ms\":1692973,\"exit_code\":1}",
+          "created_at": "2026-06-08T07:11:39.726747992Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=117694 model=dflash"
+        }
+      ],
+      "spec-id": "api-native-client-interface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-native-client-interface",
+      "path": "docs/helix/02-design/contracts/API-001-native-client-interface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260608T071139-df018229",
+    "prompt": ".ddx/executions/20260608T071139-df018229/prompt.md",
+    "manifest": ".ddx/executions/20260608T071139-df018229/manifest.json",
+    "result": ".ddx/executions/20260608T071139-df018229/result.json",
+    "checks": ".ddx/executions/20260608T071139-df018229/checks.json",
+    "usage": ".ddx/executions/20260608T071139-df018229/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-2bca1ef6-20260608T071139-df018229"
+  },
+  "prompt_sha": "5f6d6e3540732066df51bcbd56d7bc83485bc8a7cfe84977e2d603f763651a19"
+}
