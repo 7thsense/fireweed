@@ -13,7 +13,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust 1.92.0
-        run: rustup toolchain install 1.92.0 --profile minimal --component clippy rustfmt
+        run: rustup toolchain install 1.92.0 --profile minimal --component clippy rustfmt llvm-tools-preview
+
+      - name: Install cargo tooling
+        run: |
+          cargo install --locked cargo-deny --version 0.19.0
+          cargo install --locked cargo-machete --version 0.9.1
+          cargo install --locked cargo-llvm-cov --version 0.8.2
 
       - name: cargo fmt
         run: cargo +1.92.0 fmt --all --check
@@ -23,3 +29,14 @@ jobs:
 
       - name: cargo test
         run: cargo +1.92.0 test --workspace
+
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: cargo machete
+        run: cargo machete
+
+      - name: coverage scaffold
+        run: |
+          mkdir -p target/llvm-cov
+          cargo llvm-cov --workspace --lcov --summary-only --output-path target/llvm-cov/lcov.info --fail-under-lines 0

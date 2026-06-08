@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260608T063244-d75a4f36",
+  "bead_id": "pqueue-41179ab2",
+  "base_rev": "d84faab143c821cb883004a0d100e25b302698a5",
+  "created_at": "2026-06-08T06:32:45.152477767Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-41179ab2",
+    "title": "B-001 CI quality gates and coverage scaffolding",
+    "description": "BUILD-001 B-001 CI scaffolding for TP-003 §5 per-PR gates.",
+    "acceptance": "cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace, cargo deny check/cargo machete, unsafe denial, coverage scaffolding, property/fuzz placeholders, and flaky harness scaffolding are runnable in CI.",
+    "parent": "pqueue-1a2aec65",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:ci"
+    ],
+    "metadata": {
+      "spec-id": "tp-verification-acceptance-criteria"
+    }
+  },
+  "governing": [
+    {
+      "id": "tp-verification-acceptance-criteria",
+      "path": "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md",
+      "title": "Test Plan: TP-003 Verification and Acceptance Criteria"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260608T063244-d75a4f36",
+    "prompt": ".ddx/executions/20260608T063244-d75a4f36/prompt.md",
+    "manifest": ".ddx/executions/20260608T063244-d75a4f36/manifest.json",
+    "result": ".ddx/executions/20260608T063244-d75a4f36/result.json",
+    "checks": ".ddx/executions/20260608T063244-d75a4f36/checks.json",
+    "usage": ".ddx/executions/20260608T063244-d75a4f36/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-41179ab2-20260608T063244-d75a4f36"
+  },
+  "prompt_sha": "7ae47bdb7055a7f135bb4c8414959e22b145f4f18119314f33f4b2484f69e46b"
+}
