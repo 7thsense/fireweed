@@ -117,6 +117,7 @@ Implementation beads should create or extend these suites:
 - `storage_conformance_gate_tests`
 - `storage_conformance_discovery_tests`
 - `storage_conformance_multi_shard_tests`
+- `fault_injection_harness_tests`
 - `postgres_schema_migration_tests`
 - `postgres_transaction_flow_tests`
 - `postgres_concurrency_claim_tests`
@@ -129,6 +130,7 @@ Implementation beads should create or extend these suites:
 - `service_auth_tenant_tests`
 - `service_api_error_semantics_tests`
 - `service_discovery_tests`
+- `service_metrics_ground_truth_tests`
 - `operator_repair_tests`
 - `operator_redrive_tests`
 - `operator_purge_tests`
@@ -144,11 +146,14 @@ Implementation beads should create or extend these suites:
 - `product_workflow_noisy_neighbor_scale_e2e`
 - `product_workflow_operator_repair_redrive_e2e`
 - `product_workflow_generic_priority_bounded_relaxed_e2e`
+- `product_workflow_downstream_pacing_non_goal_e2e`
 - `seventh_sense_validation_tests` (Seventh-Sense-shaped subset:
   scheduled-action, Marketo group-batching, callback cohort, and recurring
   jobs/connectors workflows)
-- `product_validation_tests` (aggregate release suite over every product
-  workflow suite above)
+- `product_validation_tests` (P0/core release suite over AC-E2E-1..6 and
+  AC-E2E-8..9)
+- `operator_validation_tests` (P1/operator release suite over AC-E2E-7 and
+  operator suites)
 
 Scale, density, and object-log performance suites (`performance_single_deployment_baseline_tests`,
 `performance_multi_shard_scale_out_tests`, `queue_density_single_node_tests`,
@@ -176,10 +181,12 @@ covered before claiming product validation:
 - Seventh Sense production scheduling SLA for concrete `progress_bound_ms`
   validation.
 - The operator repair/redrive/purge/archive surface is now **designed** (API-002)
-  and its coverage rows + suites are listed above; it is a P1 *build* priority,
-  not a deferred design. A compatibility-adapter (SQS-shaped) surface and a P2
-  operator dashboard remain deferred. (Native `DiscoverActiveScopes` and native
-  in-band `PurgeItems` are P0/native-service and covered above.)
+  and its coverage rows + suites are listed above. It is a P1 *build* priority:
+  it is required before claiming the operator-enabled product surface verified,
+  but it does not block the P0/core v1 verification gate. A compatibility-adapter
+  (SQS-shaped) surface and a P2 operator dashboard remain deferred. (Native
+  `DiscoverActiveScopes` and native in-band `PurgeItems` are P0/native-service
+  and covered above.)
 - The later Seventh Sense migration design (mapping existing queue-like tables to
   `BatchPush`/`BatchUpdate`), once it exists. The absence of that migration design
   does **not** defer the generic product workflow suites above; they use PRD-owned

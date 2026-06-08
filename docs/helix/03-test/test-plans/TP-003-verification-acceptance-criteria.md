@@ -123,6 +123,7 @@ it turns green. Suites are named in TP-001.
 | AC | Setup | Assertion | Pass bar |
 |----|-------|-----------|----------|
 | AC-DISC-1 ranking | multi-queue, multi-shard, gated | top-N by oldest-eligible age across shards via single summary; gate-current advance | matches ground truth; 0 mis-ranks at terminal read |
+| AC-DISC-2 non-co-resident group aggregation | `group_co_residency=false`, one `group_key` spanning ≥2 shards with oldest eligible item on one shard and newer eligible items on another | discovery reports the group once, with `oldest_eligible_age_ms` equal to the cross-shard oldest eligible age, not a per-shard top-N union | single row; age matches ground truth; 0 duplicate group descriptors |
 | AC-SHARD-1 fan-out order | `shard_count∈{2,4,8}`, strict | deterministic k-way merge within global `max_items`; INV-6 | 0 inversions |
 | AC-SHARD-2 cross-shard progress | hot shard + cold shard holding queue-global oldest | cold oldest claimed ≤ `progress_bound_ms` | INV-4; 0 violations |
 | AC-SHARD-3 fence + rebalance | reassign under load; `N_kill` mid-drain | single writer (INV-1); stale-epoch appends rejected; no double-lease across drain | 0 stale-epoch commits; 0 double leases |
@@ -160,7 +161,13 @@ scale/density/horizontal magnitude is TP-002 E0–E3; these are the per-op gates
 | AC-LAT-3 | `DiscoverActiveScopes` top-N | p99 < 250 ms over `S=10M`, no full scan (query plan asserted) |
 | AC-LAT-4 | telemetry overhead | core-op p99 with telemetry on ≤ 1.15× telemetry off |
 
-### 3.9 Product end-to-end workflow validation
+### 3.9 Observability correctness
+
+| AC | Setup | Assertion | Pass bar |
+|----|-------|-----------|----------|
+| AC-OBS-1 metrics ground truth | `S∈{10K,1M}`, mixed pending/future/leased/retry/complete/failed/recurring states, both backend profiles, telemetry enabled | `GetQueueMetrics` lifecycle counts, active leases, retry backlog, recurring counters, throughput/latency buckets, and progress-bound risk are compared to a ground-truth scan/checkpoint for the test fixture; `oldest_eligible_age_ms` is exact-on-read as of the reported frontier | exact fields have 0 mismatches; approximate count fields converge within `L_metrics`; throughput/latency values match the harness-recorded operation log within documented aggregation tolerance |
+
+### 3.10 Product end-to-end workflow validation
 
 These are the product-facing "does pqueue work?" gates. Lower-level ACs prove
 individual primitives; these workflows prove those primitives compose through the
@@ -180,9 +187,15 @@ variables, not hidden test defaults:
 
 `PQUEUE_E2E_SCALE=smoke` is the PR-tier shape: small item sets, short runtime,
 and deterministic failures while preserving the same workflow assertions.
-`PQUEUE_E2E_SCALE=release` MUST use the stated `S`, `C`, `K_q`, `T_soak`, and
-kill-count bars. The verification ledger records the profile, scale, seed,
-command, and measured values.
+`PQUEUE_E2E_SCALE=release` MUST use the row's release shape below. `N/A` means
+that parameter is not part of that workflow's release evidence. The verification
+ledger records the profile, scale, seed, command, topology, and measured values.
+
+Failure-heavy ACs depend on a shared `fault_injection_harness_tests` capability
+that can terminate worker/service processes at deterministic cut points, inject
+duplicate request replay, force partial shard append/commit outcomes, and record
+the seed and failure schedule. Build sequencing must create that harness before
+AC-CLAIM-2, AC-SHARD-3, AC-E2E-2, AC-E2E-3, AC-E2E-5, and AC-E2E-7 are claimed.
 
 Approximate count/metric assertions use `L_metrics` from §1 and the exact/lagged
 metric contract in API-001 (`GetQueueMetrics`, `DiscoverActiveScopes`) plus the
@@ -191,21 +204,38 @@ oldest age are never approximate; count lag is bounded by `L_metrics`. For
 `object_log_sqlite_projection`, unrelated-reader visibility additionally uses
 `L_apply` from TD-004's cross-operation apply-lag contract.
 
+Release shapes and shard topology:
+
+| AC | Release shape | Required topology |
+|----|---------------|-------------------|
+| AC-E2E-1 | `S=1M`, `C=64`, `T_soak`, `N_kill>=1000` | Both committed profiles, single-shard and multi-shard where the profile supports it. |
+| AC-E2E-2 | ≥1000 groups, task counts per group in {1,3,10}, `max_groups=300`, `C=64`, `T_soak`, `N_kill>=100` during whole-group claim/finalize | Both committed profiles; `group_co_residency=true`; object-log release run uses ≥4 shards; `postgres_native` may run single-shard unless the optional multi-shard comparator is configured. |
+| AC-E2E-3 | cohort sizes {2,10,1000}, ≥10K cohorts, `C=64`, `T_soak`, `N_kill>=100` during whole-cohort claim/finalize | Both committed profiles; `group_co_residency=true`; object-log release run uses ≥4 shards for cohort placement and replay parity. |
+| AC-E2E-4 | `S=1M` recurring singleton keys, `C=64`, `T_soak`, `N_kill>=1000` | Both committed profiles; object-log release run uses ≥4 shards; `postgres_native` single-shard run is sufficient for the Tier-1 profile. |
+| AC-E2E-5 | `S=1M`, `C=64`, `T_soak`, `N_kill>=1000`, duplicate replay and partial-commit injection enabled | Object-log multi-shard is required for partial-shard append/fan-out failure assertions. `postgres_native` runs the single-shard crash/replay subset; multi-shard Postgres is an optional comparator and does not satisfy TP-002 E2 by itself. |
+| AC-E2E-6 | hot queue `S=10M`, one small eligible queue, `K_q=1000`, `C=64`, `T_soak`, `N_kill=N/A` | Object-log multi-shard is required for cross-shard active-scope routing and density evidence. `postgres_native` runs the single-deployment noisy-neighbor subset; optional multi-shard Postgres is comparator-only. |
+| AC-E2E-7 | ≥1M selected leased/terminal items across repair/redrive/purge/archive cases, `C=64`, async operation replay x100, `T_soak`, `N_kill>=100` | Both committed profiles; object-log release run uses ≥4 shards for partial async operation convergence. |
+| AC-E2E-8 | `S=1M`, `C=64`, `T_soak`, skewed priority distributions, strict `int64` descending queue plus bounded-relaxed non-timestamp queue | Both committed profiles; single-shard is sufficient for generic non-timestamp product proof, with optional multi-shard comparator. |
+| AC-E2E-9 | `S=1M`, one hot `group_key`, `max_items∈{1,25,100}`, paced claim cadence, `C=8`, `T_soak`, `N_kill=N/A` | Both committed profiles; single-shard is sufficient because the contract is admission behavior, not scale-out. |
+
 | AC | Automated suite / command | Product workflow | PRD coverage | Pass bar |
 |----|---------------------------|------------------|--------------|----------|
-| AC-E2E-1 scheduled action delivery | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows scheduled_action_delivery_e2e -- --ignored` | Model `scheduled_actions`: create a timestamp-ascending queue, push items early before optimized send time, later `BatchUpdate` `priority`/`not_before`, close and reopen account/connector/campaign gates with `SetGates`, claim by `group_key`, renew/finalize, and assert queue metrics. Release scale: `S=1M`, `C=64`, `T_soak`, `N_kill>=1000`. | FR-1..FR-3, FR-7, FR-10..FR-12, FR-18..FR-28, FR-33..FR-34, FR-40..FR-46, FR-47a | INV-1..INV-4 = 0; accepted items are either correctly terminal, leased, or eligible/redeliverable after the run; schedule order matches timestamp priority; no gated item is claimed while its gate is blocked; metrics match terminal state within `L_metrics`. |
+| AC-E2E-1 scheduled action delivery | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows scheduled_action_delivery_e2e -- --ignored` | Model `scheduled_actions`: create a timestamp-ascending queue, push items early before optimized send time, later `BatchUpdate` `priority`/`not_before`, close and reopen account/connector/campaign gates with `SetGates`, claim by `group_key`, renew/finalize, and assert queue metrics. Release scale: `S=1M`, `C=64`, `T_soak`, `N_kill>=1000`. | FR-1..FR-3, FR-7, FR-10..FR-12, FR-18..FR-28, FR-33..FR-34, FR-40..FR-46, FR-47a | INV-1..INV-4 = 0; accepted items are either correctly terminal, leased, or eligible/redeliverable after the run; schedule order matches timestamp priority; no gated item is claimed while its gate is blocked; same `queue_id` in a second tenant remains isolated and cross-tenant data-plane access is denied; metrics match terminal state within `L_metrics`. |
 | AC-E2E-2 Marketo group-cardinality batching | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows marketo_group_batching_e2e -- --ignored` | Model a downstream API call that accepts up to 300 distinct lead groups: create `group_co_residency=true`, set `group_batching.max_groups=300`, load >=1000 lead groups with skewed priorities and multiple tasks per lead, discover active groups, then claim/finalize whole eligible groups under contention. | FR-29..FR-32, FR-31a, FR-35, FR-47, FR-47b, FR-48 | INV-7 = 0 partial groups; each claim contains <=300 groups and <=`max_items`; group representatives are ordered by claim order; `batch-too-large` fires when the next whole group cannot fit; concurrent claimers do not duplicate groups. |
 | AC-E2E-3 callback cohort execution | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows callback_cohort_e2e -- --ignored` | Model `actions_scheduled` callback batches: create a cohort-enabled queue with `group_co_residency=true`, push incomplete and complete callback cohorts, verify incomplete cohorts are hidden from claim/discovery, then claim/finalize complete cohorts atomically; run an expiry case for incomplete cohorts. | FR-32a..FR-32c, FR-47a, FR-47c, FR-48 | INV-7 = 0 cohort leaks; incomplete cohorts are never claimed or discovered; complete cohorts lease atomically under one shared lease; `completion_bound_ms <= progress_bound_ms` is enforced; expired incomplete cohorts become terminal `failed` with the required reason. |
 | AC-E2E-4 jobs/connectors recurring singleton | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows jobs_connectors_recurring_e2e -- --ignored` | Model `jobs_queue` and `connectors_queue` poll-cursor rows: one logical item per job/connector key, repeated claim -> work -> `rearm` cycles with new `not_before`, idle periods, per-cycle retry exhaustion, `recurrence.until`, and `PurgeItems` teardown. | FR-36..FR-39, FR-49..FR-55 | No duplicate singleton rows; `item_version` increases monotonically across re-arms; `rearm` never consumes retry budget; idle recurring items do not inflate exact `oldest_eligible_age_ms`, and approximate recurring/retry counters converge within `L_metrics`; purge is idempotent and late finalize returns `not_found`. |
 | AC-E2E-5 worker crash recovery | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows worker_crash_recovery_e2e -- --ignored` | Drive the native API with real service/backend processes while injecting worker exits after claim, service process exits after acknowledged append, duplicate request replay, partial shard append failure, and restart/recovery. | FR-23..FR-28, FR-33..FR-39, API-001 idempotency, TD-001 durability, TD-003 fencing | INV-1, INV-2, INV-3, INV-5, INV-10 = 0 violations; acknowledged commands survive restart; replayed `request_id`s converge; expired leases redeliver without resetting eligible age; no accepted item is lost. |
-| AC-E2E-6 noisy-neighbor and active-scope routing | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows noisy_neighbor_scale_e2e -- --ignored` | Run one hot queue with a 10M resident backlog, one small eligible queue, and `K_q=1000` active queues; workers use `DiscoverActiveScopes` to route group claims while the hot queue is under load. | FR-1, FR-12, FR-40..FR-43, FR-48, TP-002 E1/E2 | Small queue p95/p99 claim latency and progress stay within bars; discovery ranks authorized active scopes by true oldest eligible age; unauthorized queues are excluded; no per-queue/per-shard unbounded worker, loop, or connection growth is observed. |
+| AC-E2E-6 noisy-neighbor and active-scope routing | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows noisy_neighbor_scale_e2e -- --ignored` | Run one hot queue with a 10M resident backlog, one small eligible queue, and `K_q=1000` active queues; workers use `DiscoverActiveScopes` to route group claims while the hot queue is under load. | FR-1, FR-12, FR-40..FR-43, FR-48, TP-002 E1/E2 | Small queue batch-claim latency meets AC-LAT-1 (p95 < 250 ms, p99 < 1000 ms); progress satisfies INV-4 against its configured `progress_bound_ms`; discovery ranks authorized active scopes by true oldest eligible age; unauthorized queues are excluded; no per-queue/per-shard unbounded worker, loop, or connection growth is observed. |
 | AC-E2E-7 operator repair/redrive workflow | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows operator_repair_redrive_e2e -- --ignored` | Model an operator repairing production damage: pause queue, inspect leased and terminal items without exposing lease tokens, force-release or reschedule leased items, redrive failed items, dry-run and execute bulk purge/archive, resume queue, and observe async operation convergence. | API-002, FR-38..FR-43, FR-52, ADR-002 | INV-8 and INV-11 = 0; data-plane principals cannot perform operator actions; stale leases become unusable after repair; dry-run has no side effects; async operation replay returns the same `operation_id`; audit records omit payload and lease tokens. |
 | AC-E2E-8 generic priority and bounded-relaxed service workflow | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows generic_priority_bounded_relaxed_e2e -- --ignored` | Prove pqueue is not timestamp-only or Seventh-Sense-only: create an `int64` descending strict queue and a non-timestamp bounded-relaxed queue, push generic work with skewed priorities and opaque payloads, claim/finalize through the native service API, and verify progress under contention without any Seventh Sense metadata shape. | FR-1, FR-2, FR-4, FR-5..FR-9, FR-12..FR-16, FR-18..FR-21, Non-Goals | Strict non-timestamp claim order has 0 inversions; bounded-relaxed rank error stays within the declared bound and INV-4 holds; opaque payload/metadata round-trip; no Seventh Sense field is required by core validation. |
+| AC-E2E-9 downstream pacing non-goal | `PQUEUE_BACKEND_PROFILE=<profile> PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows downstream_pacing_non_goal_e2e -- --ignored` | Prove pqueue does not enforce downstream API rate/quota admission: load many eligible items for one compatibility group, claim with caller-selected `max_items` values and deliberate pauses between calls, and compare results to eligibility/`max_items` only. | FR-45, Non-Goals, PRD acceptance sketch "No downstream rate enforcement" | Each `BatchClaim` returns up to `max_items` subject only to normal eligibility, active leases, filters, and batch limits; a short or empty batch is valid per API-001; pqueue never withholds otherwise-eligible work for a downstream-rate reason and never emits a downstream-rate lifecycle/admission state. |
 
 `AC-SEN` is the aggregate product release gate for these suites: the
-`product_validation_tests` release job runs AC-E2E-1 through AC-E2E-8 at their
-release bars and fails if any product workflow lacks ledger evidence. The
-`seventh_sense_validation_tests` job is the Seventh-Sense-shaped subset
+`product_validation_tests` release job runs the P0/core workflows AC-E2E-1
+through AC-E2E-6 plus AC-E2E-8 and AC-E2E-9 at their release bars and fails if
+any required product workflow lacks ledger evidence. The
+`operator_validation_tests` release job owns the P1/operator workflow AC-E2E-7.
+The `seventh_sense_validation_tests` job is the Seventh-Sense-shaped subset
 (AC-E2E-1 through AC-E2E-4); it does not replace the generic product workflow
 gate.
 
@@ -246,9 +276,10 @@ but not sufficient.
 | Coverage — `pqueue-service` | ≥ 80% line | per-PR |
 | Property tests | ≥ `props` (PR tier); 0 falsifications | per-PR |
 | Fuzz targets (command decode, selector, priority decode) | ≥ `fuzz` (PR tier); 0 new crashes | per-PR |
-| **Every `AC-*` in §3 executes and passes at its stated bar** | 100% of claimed `AC-*` green | per-PR for unit/integration ACs; release for soak and product E2E ACs |
+| Product E2E smoke (`PQUEUE_E2E_SCALE=smoke`) | P0/core AC-E2E-1..6 and AC-E2E-8..9 pass at smoke shape for each implemented suite and required backend profile; include AC-E2E-7 once the P1/operator surface is implemented | per-PR once the suite exists |
+| **Every `AC-*` in §3 executes and passes at its stated bar** | 100% of claimed `AC-*` green | per-PR for unit/integration ACs and product smoke; release for soak, scale, and release-shape product E2E ACs |
 | Latency micro-bars `AC-LAT-1..4` | meet stated p95/p99 | release |
-| Operator suites (`operator_repair/redrive/purge/async/auth` + `AC-OP-1..9`) | 100% pass | release |
+| Operator suites (`operator_repair/redrive/purge/async/auth` + `AC-OP-1..9`) | 100% pass | operator-enabled release |
 | Backend conformance (§4) — both committed profiles | 100% of scenarios | release |
 | Coverage — `pqueue-storage` conformance scenarios | 100% executed | release |
 | Loom (each custom concurrent structure) | exhaustive to the bounded preemption depth; 0 failing interleavings | release |
@@ -256,7 +287,8 @@ but not sufficient.
 | Flaky rate | < 0.1% over 100 CI repeats of the suite | release |
 | Safety invariants INV-1..INV-11 | 0 violations under the §2 stress matrix | release |
 | TP-002 E0 (per-queue floor ≥10M items/hr), E1, E2 (multi-shard + ≥1000-queue density), E3 (object-log cost/ack/recovery) | pass at TP-002 bars | release |
-| `AC-SEN` product workflow aggregate | AC-E2E-1..AC-E2E-8 green with ledger evidence; INV-1..INV-11 = 0 where applicable | release |
+| `AC-SEN` P0/core product workflow aggregate | AC-E2E-1..6 and AC-E2E-8..9 green with ledger evidence; INV-1..INV-11 = 0 where applicable | release |
+| Operator product workflow aggregate | AC-E2E-7 green with ledger evidence; INV-8 and INV-11 = 0 | operator-enabled release |
 
 ## 6. Verification Ledger
 
@@ -275,7 +307,7 @@ criteria touch storage, concurrency, claim, lease, operator, or scale behavior
 
 ## 7. Exit Criteria (v1 verified)
 
-pqueue v1 is "verified" when:
+pqueue P0/core v1 is "verified" when:
 
 1. INV-1..INV-11 hold with 0 violations across the §2 stress matrix on both
    committed backend profiles.
@@ -284,12 +316,17 @@ pqueue v1 is "verified" when:
 4. The §5 CI quality gates are green.
 5. TP-002 E0 (per-queue floor ≥10M items/hr), E1, E2 (multi-shard + ≥1000-queue
    density), and E3 (object-log cost/ack/recovery) pass.
-6. AC-SEN — the product validation suite (`product_validation_tests`) runs
-   AC-E2E-1 through AC-E2E-8 at their release bars, proving the scheduled
+6. AC-SEN — the product validation suite (`product_validation_tests`) runs the
+   P0/core product workflows AC-E2E-1 through AC-E2E-6 plus AC-E2E-8 and
+   AC-E2E-9 at their release bars, proving the scheduled
    delivery/action, Marketo group batching, callback cohort, recurring
-   jobs/connectors, crash recovery, noisy-neighbor routing, operator
-   repair/redrive, and generic non-timestamp bounded-relaxed workflows
+   jobs/connectors, crash recovery, noisy-neighbor routing, generic
+   non-timestamp bounded-relaxed, and downstream pacing non-goal workflows
    end-to-end with the applicable invariants holding.
+7. The P1/operator-enabled product surface is "verified" only when
+   `operator_validation_tests` runs AC-E2E-7 and the API-002 operator suites at
+   their release bars. This is required before claiming operator support, but it
+   does not block the P0/core v1 gate above.
 
 Any gap MUST be recorded as an explicit, dated deferred item with an owner, not
 silently dropped.
