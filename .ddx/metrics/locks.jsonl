@@ -47,3 +47,12 @@
 {"event":"release","lock_name":"index.lock","operation":"index.add","holder_pid":2726170,"acquired_at":"2026-06-08T07:11:39.898604629Z","released_at":"2026-06-08T07:11:39.905737748Z","duration_ms":7}
 {"event":"acquire","lock_name":"index.lock","operation":"index.commit","holder_pid":2726170,"acquired_at":"2026-06-08T07:11:39.910089786Z"}
 {"event":"release","lock_name":"index.lock","operation":"index.commit","holder_pid":2726170,"acquired_at":"2026-06-08T07:11:39.910089786Z","released_at":"2026-06-08T07:11:39.932307557Z","duration_ms":22}
+{"event":"release","lock_name":"tracker.lock","operation":"pre_dispatch_commits","holder_pid":2726170,"acquired_at":"2026-06-08T07:11:39.891402969Z","released_at":"2026-06-08T07:11:40.011014986Z","duration_ms":119}
+{"event":"acquire","lock_name":"tracker.lock","operation":"land_ref_update","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.288905041Z"}
+{"event":"release","lock_name":"tracker.lock","operation":"land_ref_update","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.288905041Z","released_at":"2026-06-08T07:18:09.351264068Z","duration_ms":62}
+{"event":"acquire","lock_name":"tracker.lock","operation":"land_post_land_finalize","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.396277569Z"}
+{"event":"release","lock_name":"tracker.lock","operation":"land_post_land_finalize","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.396277569Z","released_at":"2026-06-08T07:18:09.486234488Z","duration_ms":89}
+{"event":"acquire","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.958267229Z"}
+{"event":"acquire","lock_name":"index.lock","operation":"index.add","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.966563472Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.add","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.966563472Z","released_at":"2026-06-08T07:18:09.977242629Z","duration_ms":10}
+{"event":"release","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":2726170,"acquired_at":"2026-06-08T07:18:09.958267229Z","released_at":"2026-06-08T07:18:09.977319212Z","duration_ms":19}
