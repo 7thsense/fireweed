@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod verification_ledger;
+
 pub mod scaffold {
     pub fn client_name() -> &'static str {
         pqueue_client::scaffold::core_name()
