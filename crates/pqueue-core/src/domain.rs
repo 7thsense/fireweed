@@ -705,4 +705,243 @@ impl QueueDefinition {
     }
 }
 
+// ---------------------------------------------------------------------------
+// B-011: priority_sort encoding
+// ---------------------------------------------------------------------------
+
+/// Encode a PriorityValue as sortable bytes for the given model.
+///
+/// Ascending: smaller values → smaller byte sequences.
+/// Descending: all bits flipped relative to ascending.
+pub fn priority_sort(value: &PriorityValue, model: &PriorityModel) -> Vec<u8> {
+    let mut bytes = encode_priority_ascending(value);
+    if model.direction == PriorityDirection::Descending {
+        for b in bytes.iter_mut() {
+            *b ^= 0xff;
+        }
+    }
+    bytes
+}
+
+fn encode_priority_ascending(value: &PriorityValue) -> Vec<u8> {
+    match value {
+        PriorityValue::Timestamp(ts) => {
+            let mut b = Vec::with_capacity(12);
+            // Flip sign bit so i64 byte order matches ascending order.
+            let s = (ts.seconds as u64) ^ (1u64 << 63);
+            b.extend_from_slice(&s.to_be_bytes());
+            b.extend_from_slice(&ts.nanoseconds.to_be_bytes());
+            b
+        }
+        PriorityValue::Int64(v) => {
+            // Flip sign bit to map i64 order onto u64 byte order.
+            let u = (*v as u64) ^ (1u64 << 63);
+            u.to_be_bytes().to_vec()
+        }
+        PriorityValue::Decimal(d) => encode_decimal_ascending(d.mantissa, d.scale),
+        PriorityValue::Text(s) => {
+            // Append a null terminator so empty strings get a byte to invert
+            // (0x00 → 0xff) and sort last in descending mode.
+            let mut b = s.as_bytes().to_vec();
+            b.push(0x00);
+            b
+        }
+    }
+}
+
+// Precomputed powers of ten up to 10^38 (fits in u128).
+const POW10: [u128; 39] = [
+    1,
+    10,
+    100,
+    1_000,
+    10_000,
+    100_000,
+    1_000_000,
+    10_000_000,
+    100_000_000,
+    1_000_000_000,
+    10_000_000_000,
+    100_000_000_000,
+    1_000_000_000_000,
+    10_000_000_000_000,
+    100_000_000_000_000,
+    1_000_000_000_000_000,
+    10_000_000_000_000_000,
+    100_000_000_000_000_000,
+    1_000_000_000_000_000_000,
+    10_000_000_000_000_000_000,
+    100_000_000_000_000_000_000,
+    1_000_000_000_000_000_000_000,
+    10_000_000_000_000_000_000_000,
+    100_000_000_000_000_000_000_000,
+    1_000_000_000_000_000_000_000_000,
+    10_000_000_000_000_000_000_000_000,
+    100_000_000_000_000_000_000_000_000,
+    1_000_000_000_000_000_000_000_000_000,
+    10_000_000_000_000_000_000_000_000_000,
+    100_000_000_000_000_000_000_000_000_000,
+    1_000_000_000_000_000_000_000_000_000_000,
+    10_000_000_000_000_000_000_000_000_000_000,
+    100_000_000_000_000_000_000_000_000_000_000,
+    1_000_000_000_000_000_000_000_000_000_000_000,
+    10_000_000_000_000_000_000_000_000_000_000_000,
+    100_000_000_000_000_000_000_000_000_000_000_000,
+    1_000_000_000_000_000_000_000_000_000_000_000_000,
+    10_000_000_000_000_000_000_000_000_000_000_000_000,
+    100_000_000_000_000_000_000_000_000_000_000_000_000,
+];
+
+fn decimal_digit_count(n: u128) -> u32 {
+    if n == 0 {
+        return 1;
+    }
+    let mut n = n;
+    let mut count = 0u32;
+    while n > 0 {
+        n /= 10;
+        count += 1;
+    }
+    count
+}
+
+/// Encode a decimal value as 21 sortable bytes (ascending order).
+///
+/// Layout: 1 sign byte | 4 biased-exponent bytes | 16 normalized-mantissa bytes.
+///
+/// Zero encodes with sign byte 0x80 and all-zero remainder.
+/// Positive values use sign byte 0xc0; the exponent and mantissa are left as-is.
+/// Negative values use sign byte 0x40; exponent and mantissa are bitwise-inverted
+/// so that larger absolute values sort as smaller.
+fn encode_decimal_ascending(mantissa: i128, scale: u32) -> Vec<u8> {
+    const NORMALIZED_DIGITS: u32 = 38;
+    let mut out = vec![0u8; 21];
+
+    if mantissa == 0 {
+        out[0] = 0x80;
+        return out;
+    }
+
+    let positive = mantissa > 0;
+    let abs_m = mantissa.unsigned_abs();
+
+    let digits = decimal_digit_count(abs_m);
+    let effective_exp: i32 = digits as i32 - 1 - scale as i32;
+    let biased_exp = ((effective_exp as i64).wrapping_add(1i64 << 31)) as u32;
+
+    // Normalize to NORMALIZED_DIGITS significant digits.
+    let fractional: u128 = if digits >= NORMALIZED_DIGITS {
+        abs_m / POW10[(digits - NORMALIZED_DIGITS) as usize]
+    } else {
+        abs_m * POW10[(NORMALIZED_DIGITS - digits) as usize]
+    };
+
+    if positive {
+        out[0] = 0xc0;
+        out[1..5].copy_from_slice(&biased_exp.to_be_bytes());
+        out[5..21].copy_from_slice(&fractional.to_be_bytes());
+    } else {
+        out[0] = 0x40;
+        out[1..5].copy_from_slice(&(!biased_exp).to_be_bytes());
+        out[5..21].copy_from_slice(&(!fractional).to_be_bytes());
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// B-012: item lifecycle state machine
+// ---------------------------------------------------------------------------
+
+/// Lifecycle state of a pqueue item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemState {
+    Pending,
+    Leased,
+    /// Terminal: successfully completed.
+    Complete,
+    /// Terminal: failed (retry budget exhausted or explicit terminal fail).
+    Failed,
+}
+
+impl ItemState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, ItemState::Complete | ItemState::Failed)
+    }
+}
+
+/// Events that drive the item lifecycle state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemEvent {
+    /// A worker successfully claimed the item.
+    Claim,
+    /// Worker finalized with a successful complete outcome.
+    FinalizeComplete,
+    /// Worker finalized with a terminal fail outcome (retry budget exhausted).
+    FinalizeFail,
+    /// Worker finalized with a retryable failure; item returns to pending.
+    FinalizeRetry,
+    /// Worker released the item without consuming a retry attempt.
+    FinalizeRelease,
+    /// Worker rearmed a recurring item; resets attempt count, returns to pending.
+    FinalizeRearm,
+    /// The active lease expired; item returns to pending.
+    LeaseExpired,
+}
+
+/// Error returned when an illegal state transition is attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionError {
+    pub state: ItemState,
+    pub event: ItemEvent,
+    pub message: &'static str,
+}
+
+impl fmt::Display for TransitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "illegal transition: {:?} + {:?} — {}",
+            self.state, self.event, self.message
+        )
+    }
+}
+
+impl Error for TransitionError {}
+
+/// Apply an event to the current item state, returning the next state.
+///
+/// Returns `Err(TransitionError)` for any illegal (state, event) pair.
+pub fn apply_transition(state: ItemState, event: ItemEvent) -> Result<ItemState, TransitionError> {
+    match (state, event) {
+        (ItemState::Pending, ItemEvent::Claim) => Ok(ItemState::Leased),
+
+        (ItemState::Leased, ItemEvent::FinalizeComplete) => Ok(ItemState::Complete),
+        (ItemState::Leased, ItemEvent::FinalizeFail) => Ok(ItemState::Failed),
+        (ItemState::Leased, ItemEvent::FinalizeRetry) => Ok(ItemState::Pending),
+        (ItemState::Leased, ItemEvent::FinalizeRelease) => Ok(ItemState::Pending),
+        (ItemState::Leased, ItemEvent::FinalizeRearm) => Ok(ItemState::Pending),
+        (ItemState::Leased, ItemEvent::LeaseExpired) => Ok(ItemState::Pending),
+
+        (ItemState::Complete, _) | (ItemState::Failed, _) => Err(TransitionError {
+            state,
+            event,
+            message: "item is terminal; no further transitions are accepted",
+        }),
+
+        (ItemState::Pending, _) => Err(TransitionError {
+            state,
+            event,
+            message: "event requires a leased item",
+        }),
+
+        (ItemState::Leased, ItemEvent::Claim) => Err(TransitionError {
+            state,
+            event,
+            message: "item is already leased",
+        }),
+    }
+}
+
+#[allow(dead_code)]
 pub type DomainResult<T> = Result<T, CreateQueueError>;
