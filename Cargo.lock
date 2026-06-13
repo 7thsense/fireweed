@@ -24,6 +24,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -232,6 +243,17 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "heimq-wire"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "id-arena"
@@ -483,7 +505,9 @@ dependencies = [
 name = "pqueue-kafka"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
+ "heimq-wire",
  "kafka-protocol",
  "pqueue-core",
  "pqueue-storage",

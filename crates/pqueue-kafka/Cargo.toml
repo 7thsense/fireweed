@@ -8,9 +8,11 @@ license.workspace = true
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 pqueue-storage = { path = "../pqueue-storage" }
+heimq-wire = { path = "../../../heimq/crates/heimq-wire" }
 
 # Kafka wire protocol
 kafka-protocol = "0.15"
+async-trait = "0.1"
 bytes = "1.10"
 tokio = { version = "1.44", features = ["net", "io-util", "rt-multi-thread", "sync", "macros"] }
 thiserror = "2.0"

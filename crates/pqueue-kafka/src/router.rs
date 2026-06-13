@@ -254,12 +254,14 @@ fn encode_msg<T: Encodable>(api_version: i16, msg: &T) -> Result<Bytes, RouterEr
     Ok(buf.freeze())
 }
 
+/// Build response payload (no 4-byte length prefix).
+///
+/// Layout: correlation_id(4) [+ tagged_fields(1 byte, flexible only)] + body.
+/// The caller (heimq-wire WireServer) prepends the length prefix before writing.
 fn frame_response(correlation_id: i32, body: Bytes, flexible: bool) -> Bytes {
-    // payload = correlation_id(4) [+ tagged_fields(1)] + body
     let header_extra = if flexible { 1 } else { 0 };
     let payload_len = 4 + header_extra + body.len();
-    let mut out = BytesMut::with_capacity(4 + payload_len);
-    out.put_i32(payload_len as i32);
+    let mut out = BytesMut::with_capacity(payload_len);
     out.put_i32(correlation_id);
     if flexible {
         out.put_u8(0x00); // empty tagged_fields
