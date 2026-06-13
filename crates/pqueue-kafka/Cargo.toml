@@ -1,0 +1,29 @@
+[package]
+name = "pqueue-kafka"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-storage = { path = "../pqueue-storage" }
+
+# Kafka wire protocol
+kafka-protocol = "0.15"
+bytes = "1.10"
+tokio = { version = "1.44", features = ["net", "io-util", "rt-multi-thread", "sync", "macros"] }
+thiserror = "2.0"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.44", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[test]]
+name = "wire_produce_conformance"
+path = "tests/wire_produce_conformance.rs"
+
+[[test]]
+name = "wire_unit_tests"
+path = "tests/wire_unit_tests.rs"

@@ -5,6 +5,7 @@ members = [
     "crates/pqueue-postgres",
     "crates/pqueue-service",
     "crates/pqueue-client",
+    "crates/pqueue-kafka",
 ]
 resolver = "3"
 

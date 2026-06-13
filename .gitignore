@@ -1,3 +1,6 @@
+# Rust build artifacts
+target/
+
 # DDx runtime scratch
 .ddx/agent-logs/
 .ddx/attachments/
