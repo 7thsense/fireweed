@@ -174,14 +174,22 @@ async fn produce_v9_record_persisted_to_log() {
 
     assert!(!page.commands.is_empty(), "log should contain at least one command after produce");
 
-    // Verify the command is a BatchPush.
+    // Verify the command is a BatchPush with the decoded record payload.
     use pqueue_storage::QueueCommand;
     let (_, envelope) = &page.commands[0];
-    assert!(
-        matches!(&envelope.command, QueueCommand::BatchPush(_)),
-        "expected BatchPush, got {:?}",
-        envelope.command
-    );
+    match &envelope.command {
+        QueueCommand::BatchPush(cmd) => {
+            assert!(!cmd.items.is_empty(), "BatchPush should have at least one item");
+            let item = &cmd.items[0];
+            assert_eq!(
+                item.payload.as_deref(),
+                Some(b"v".as_ref()),
+                "expected value payload b\"v\", got {:?}",
+                item.payload
+            );
+        }
+        other => panic!("expected BatchPush, got {:?}", other),
+    }
 }
 
 /// Produce v3 (legacy, null records) — no push batch, so log must remain empty.

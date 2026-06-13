@@ -49,6 +49,7 @@ fn push_env(q: &str, ids: &[&str], cmd_id: &str) -> CommandEnvelope {
             priority: None,
             not_before: None,
             max_attempts: 3,
+            payload: None,
         })
         .collect();
     CommandEnvelope {

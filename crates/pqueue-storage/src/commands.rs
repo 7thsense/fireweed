@@ -47,6 +47,8 @@ pub struct PushItem {
     pub priority: Option<PriorityValue>,
     pub not_before: Option<UtcTimestamp>,
     pub max_attempts: u32,
+    /// Opaque payload bytes (e.g. Kafka record value). None when not supplied.
+    pub payload: Option<bytes::Bytes>,
 }
 
 #[derive(Debug, Clone)]

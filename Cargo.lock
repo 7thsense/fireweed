@@ -515,6 +515,7 @@ dependencies = [
 name = "pqueue-storage"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "parking_lot",
  "pqueue-core",
  "tokio",

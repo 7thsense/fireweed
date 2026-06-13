@@ -390,6 +390,7 @@ fn make_push_item(id: &str, key: &str, max_attempts: u32) -> PushItem {
         priority: None,
         not_before: None,
         max_attempts,
+        payload: None,
     }
 }
 
@@ -561,6 +562,7 @@ async fn storage_conformance_claim_respects_not_before() {
         priority: None,
         not_before: Some(ts(9999)),
         max_attempts: 3,
+        payload: None,
     };
     let ready_item = make_push_item("i2", "k2", 3);
     store.apply_committed(pos, &[push_cmd(t.clone(), q.clone(), 0, vec![future_item, ready_item], "cmd-1")]).await.unwrap();

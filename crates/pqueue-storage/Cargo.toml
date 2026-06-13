@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 parking_lot = "0.12"
+bytes = "1"
 
 [dev-dependencies]
 tokio = { version = "1.44", features = ["rt", "macros"] }
