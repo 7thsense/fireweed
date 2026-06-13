@@ -131,10 +131,12 @@ async fn run_writer<W: AsyncWrite + Unpin>(
         match route_result {
             Ok((response, batches)) => {
                 // Persist produce batches before acking (ack-after-store).
+                // Storage failure closes the connection so the client retries.
                 if !batches.is_empty() {
                     if let Some(s) = &store {
                         if let Err(e) = s.persist(batches).await {
-                            warn!(error = %e, "produce storage error");
+                            warn!(error = %e, "produce storage error; closing connection");
+                            return Err(ServerError::Router(RouterError::Storage(e.to_string())));
                         }
                     }
                 }
