@@ -9,7 +9,7 @@ use crate::handler::metadata::BrokerMeta;
 use crate::handler::produce::ProducePushBatch;
 use bytes::{BufMut, Bytes, BytesMut};
 use kafka_protocol::protocol::Encodable;
-use pqueue_core::{QueueId, TenantId, UtcTimestamp};
+use pqueue_core::{ItemId, QueueId, TenantId, UtcTimestamp};
 use pqueue_storage::memory::{MemoryLogStore, MemoryProjectionStore};
 use pqueue_storage::traits::{LogStore, ProjectionStore};
 use pqueue_storage::types::{CommandChecksum, ShardId, ShardKey};
@@ -57,7 +57,7 @@ impl KafkaStore {
         let tenant = TenantId::new("default").map_err(|e| RouterError::Storage(e.to_string()))?;
         let ts = UtcTimestamp::new(0, 0).map_err(|e| RouterError::Storage(e.to_string()))?;
 
-        for batch in batches {
+        for mut batch in batches {
             let queue = QueueId::new(&batch.queue_id)
                 .map_err(|e| RouterError::Storage(e.to_string()))?;
             let shard_key = ShardKey {
@@ -66,6 +66,12 @@ impl KafkaStore {
                 shard_id: ShardId::new(0),
             };
             let cmd_id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
+            // Assign globally-unique item_ids using the cmd_id counter so that
+            // items from different produce calls never collide in the projection.
+            for (i, item) in batch.push.items.iter_mut().enumerate() {
+                item.item_id = ItemId::new(format!("kafka-{cmd_id}-{i}"))
+                    .map_err(|e| RouterError::Storage(e.to_string()))?;
+            }
             let item_ids = batch.push.items.iter().map(|i| i.item_id.clone()).collect();
             let envelope = CommandEnvelope {
                 command_id: CommandId::new(format!("kafka-{cmd_id}")),
