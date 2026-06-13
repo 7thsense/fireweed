@@ -217,7 +217,7 @@ async fn produce_v3_null_records_no_log_entry() {
     }
 }
 
-/// Multiple sequential produces accumulate in the log.
+/// Multiple sequential produces accumulate in the log, each with a unique item_id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiple_produces_accumulate_in_log() {
     let server = TestProducerServer::start_with_store(vec!["q".to_string()]).await;
@@ -235,4 +235,17 @@ async fn multiple_produces_accumulate_in_log() {
     let shard_key = make_shard_key("q");
     let page = store.log.read_from(&shard_key, None, 10).await.unwrap();
     assert_eq!(page.commands.len(), 3, "expected 3 log entries, got {}", page.commands.len());
+
+    // Verify all item_ids are unique — each produce must not overwrite prior items.
+    use pqueue_storage::QueueCommand;
+    let mut ids = std::collections::HashSet::new();
+    for (_, envelope) in &page.commands {
+        if let QueueCommand::BatchPush(cmd) = &envelope.command {
+            for item in &cmd.items {
+                assert!(ids.insert(item.item_id.as_str().to_owned()),
+                    "duplicate item_id across batches: {}", item.item_id);
+            }
+        }
+    }
+    assert_eq!(ids.len(), 3, "expected 3 unique item_ids, got {}", ids.len());
 }
