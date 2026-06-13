@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod commands;
+pub mod fault_injection;
 pub mod memory;
 pub mod traits;
 pub mod types;
