@@ -5,15 +5,18 @@
 //! implementation for backend contract validation.
 
 use parking_lot::Mutex;
-use pqueue_core::{QueueDefinition, QueueId, TenantId};
+use pqueue_core::{
+    apply_transition, evaluate_eligibility, EligibilitySnapshot, ItemEvent, ItemId, ItemState,
+    Metadata, QueueDefinition, QueueEligibilityRules, QueueId, TenantId, UtcTimestamp,
+};
 use std::collections::HashMap;
 
-use crate::commands::CommandEnvelope;
+use crate::commands::{CommandEnvelope, FinalizeKind, QueueCommand};
 use crate::traits::{
-    AppendBatchResult, CommandPage, ControlPlaneError, ControlPlaneStore, CreateQueueResult,
-    DurabilityProfile, LogStore, LogStoreError, ProjectionError, ProjectionStore,
-    QueueMetricsSnapshot, ShardAssignment, SnapshotError, SnapshotRef, SnapshotStore,
-    ProjectionSnapshot,
+    AppendBatchResult, ClaimRequest, ClaimResult, CommandPage, ControlPlaneError, ControlPlaneStore,
+    CreateQueueResult, DurabilityProfile, LogStore, LogStoreError, ProjectionError, ProjectionStore,
+    ProjectionSnapshot, QueueMetricsSnapshot, ShardAssignment, SnapshotError, SnapshotRef,
+    SnapshotStore,
 };
 use crate::types::{CommandPosition, QueueKey, ShardId, ShardKey};
 
@@ -112,18 +115,47 @@ impl LogStore for MemoryLogStore {
 // MemoryProjectionStore
 // ---------------------------------------------------------------------------
 
+struct ItemRecord {
+    item_id: ItemId,
+    state: ItemState,
+    not_before: Option<UtcTimestamp>,
+    retry_backoff_until: Option<UtcTimestamp>,
+    #[allow(dead_code)]
+    max_attempts: u32,
+    attempts: u32,
+    lease_token: Option<String>,
+    lease_expires_at: Option<UtcTimestamp>,
+    insertion_order: usize,
+}
+
 #[derive(Default)]
-struct QueueProjection {
-    metrics: QueueMetricsSnapshot,
+struct ShardProjection {
+    items: HashMap<ItemId, ItemRecord>,
+    next_insertion: usize,
+}
+
+impl ShardProjection {
+    fn metrics(&self) -> QueueMetricsSnapshot {
+        let mut m = QueueMetricsSnapshot::default();
+        for rec in self.items.values() {
+            match rec.state {
+                ItemState::Pending => m.pending_count += 1,
+                ItemState::Leased => m.leased_count += 1,
+                ItemState::Complete => m.completed_count += 1,
+                ItemState::Failed => m.failed_count += 1,
+            }
+        }
+        m
+    }
 }
 
 pub struct MemoryProjectionStore {
-    queues: Mutex<HashMap<QueueKey, QueueProjection>>,
+    shards: Mutex<HashMap<ShardKey, ShardProjection>>,
 }
 
 impl MemoryProjectionStore {
     pub fn new() -> Self {
-        Self { queues: Mutex::new(HashMap::new()) }
+        Self { shards: Mutex::new(HashMap::new()) }
     }
 }
 
@@ -133,19 +165,153 @@ impl Default for MemoryProjectionStore {
     }
 }
 
+fn finalize_kind_to_event(kind: FinalizeKind) -> ItemEvent {
+    match kind {
+        FinalizeKind::Complete => ItemEvent::FinalizeComplete,
+        FinalizeKind::Fail => ItemEvent::FinalizeFail,
+        FinalizeKind::Retry => ItemEvent::FinalizeRetry,
+        FinalizeKind::Release => ItemEvent::FinalizeRelease,
+        FinalizeKind::Rearm => ItemEvent::FinalizeRearm,
+    }
+}
+
 impl ProjectionStore for MemoryProjectionStore {
     async fn apply_committed(
         &self,
-        _position: CommandPosition,
-        _commands: &[CommandEnvelope],
+        position: CommandPosition,
+        commands: &[CommandEnvelope],
     ) -> Result<(), ProjectionError> {
+        let mut shards = self.shards.lock();
+        let proj = shards.entry(position.shard_key).or_default();
+
+        for envelope in commands {
+            match &envelope.command {
+                QueueCommand::BatchPush(cmd) => {
+                    for item in &cmd.items {
+                        let order = proj.next_insertion;
+                        proj.next_insertion += 1;
+                        proj.items.insert(
+                            item.item_id.clone(),
+                            ItemRecord {
+                                item_id: item.item_id.clone(),
+                                state: ItemState::Pending,
+                                not_before: item.not_before.clone(),
+                                retry_backoff_until: None,
+                                max_attempts: item.max_attempts,
+                                attempts: 0,
+                                lease_token: None,
+                                lease_expires_at: None,
+                                insertion_order: order,
+                            },
+                        );
+                    }
+                }
+                QueueCommand::BatchClaim(cmd) => {
+                    for id in &cmd.item_ids {
+                        if let Some(rec) = proj.items.get_mut(id) {
+                            if let Ok(next) = apply_transition(rec.state, ItemEvent::Claim) {
+                                rec.state = next;
+                                rec.attempts += 1;
+                                rec.lease_token = Some(cmd.lease_token.clone());
+                                rec.lease_expires_at = Some(cmd.lease_expires_at.clone());
+                            }
+                        }
+                    }
+                }
+                QueueCommand::BatchFinalize(cmd) => {
+                    for outcome in &cmd.outcomes {
+                        if let Some(rec) = proj.items.get_mut(&outcome.item_id) {
+                            let event = finalize_kind_to_event(outcome.kind);
+                            if let Ok(next) = apply_transition(rec.state, event) {
+                                rec.state = next;
+                                rec.lease_token = None;
+                                rec.lease_expires_at = None;
+                            }
+                        }
+                    }
+                }
+                QueueCommand::BatchRenewLeases(cmd) => {
+                    for id in &cmd.item_ids {
+                        if let Some(rec) = proj.items.get_mut(id) {
+                            rec.lease_expires_at = Some(cmd.lease_expires_at.clone());
+                        }
+                    }
+                }
+                QueueCommand::LeaseExpired(cmd) => {
+                    for id in &cmd.item_ids {
+                        if let Some(rec) = proj.items.get_mut(id) {
+                            if let Ok(next) = apply_transition(rec.state, ItemEvent::LeaseExpired) {
+                                rec.state = next;
+                                rec.lease_token = None;
+                                rec.lease_expires_at = None;
+                            }
+                        }
+                    }
+                }
+                // CreateQueue, BatchUpdate, CohortExpired, PurgeItems handled at control-plane layer.
+                _ => {}
+            }
+        }
         Ok(())
     }
 
+    async fn batch_claim(&self, request: ClaimRequest) -> Result<ClaimResult, ProjectionError> {
+        let mut shards = self.shards.lock();
+        let proj = shards.get_mut(&request.shard_key).ok_or(ProjectionError::QueueNotFound)?;
+
+        let rules = QueueEligibilityRules {
+            metadata_blockers: Default::default(),
+            blocked_gate_keys: Default::default(),
+        };
+
+        // Collect eligible item IDs sorted by insertion order for stable FIFO claim.
+        let mut eligible: Vec<(usize, ItemId)> = proj
+            .items
+            .values()
+            .filter_map(|rec| {
+                let snapshot = EligibilitySnapshot {
+                    state: rec.state,
+                    not_before: rec.not_before.clone(),
+                    retry_backoff_until: rec.retry_backoff_until.clone(),
+                    metadata: Metadata::default(),
+                    gate_keys: vec![],
+                };
+                evaluate_eligibility(&snapshot, &rules, &request.now).ok()?;
+                Some((rec.insertion_order, rec.item_id.clone()))
+            })
+            .collect();
+        eligible.sort_by_key(|(order, _)| *order);
+        eligible.truncate(request.max_items);
+
+        let claimed_item_ids: Vec<ItemId> = eligible.into_iter().map(|(_, id)| id).collect();
+
+        for id in &claimed_item_ids {
+            if let Some(rec) = proj.items.get_mut(id) {
+                rec.state = ItemState::Leased;
+                rec.attempts += 1;
+                rec.lease_token = Some(request.lease_token.clone());
+                rec.lease_expires_at = Some(request.lease_expires_at.clone());
+            }
+        }
+
+        Ok(ClaimResult { claimed_item_ids, lease_token: request.lease_token })
+    }
+
     async fn metrics(&self, queue: &QueueKey) -> Result<QueueMetricsSnapshot, ProjectionError> {
-        let queues = self.queues.lock();
-        let proj = queues.get(queue).ok_or(ProjectionError::QueueNotFound)?;
-        Ok(proj.metrics.clone())
+        let shards = self.shards.lock();
+        let mut found = false;
+        let mut total = QueueMetricsSnapshot::default();
+        for (sk, proj) in shards.iter() {
+            if sk.tenant_id == queue.tenant_id && sk.queue_id == queue.queue_id {
+                found = true;
+                let m = proj.metrics();
+                total.pending_count += m.pending_count;
+                total.leased_count += m.leased_count;
+                total.completed_count += m.completed_count;
+                total.failed_count += m.failed_count;
+            }
+        }
+        if found { Ok(total) } else { Err(ProjectionError::QueueNotFound) }
     }
 }
 

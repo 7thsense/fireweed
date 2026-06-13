@@ -7,9 +7,9 @@ pub mod types;
 
 pub use commands::{CommandEnvelope, CommandId, QueueCommand};
 pub use traits::{
-    AppendBatchResult, CommandPage, ControlPlaneError, ControlPlaneStore, DurabilityProfile,
-    LogStore, LogStoreError, ProjectionError, ProjectionStore, ShardAssignment, SnapshotError,
-    SnapshotStore,
+    AppendBatchResult, ClaimRequest, ClaimResult, CommandPage, ControlPlaneError, ControlPlaneStore,
+    DurabilityProfile, LogStore, LogStoreError, ProjectionError, ProjectionStore, ShardAssignment,
+    SnapshotError, SnapshotStore,
 };
 pub use types::{CommandChecksum, CommandPosition, QueueKey, ShardId, ShardKey};
 

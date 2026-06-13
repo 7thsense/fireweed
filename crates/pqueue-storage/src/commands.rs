@@ -1,5 +1,6 @@
 use pqueue_core::{
-    ClientItemKey, ItemId, QueueDefinition, RequestId, TenantId, QueueId, UtcTimestamp,
+    ClientItemKey, ItemId, PriorityValue, QueueDefinition, RequestId, TenantId, QueueId,
+    UtcTimestamp,
 };
 
 use crate::types::{CommandChecksum, ShardId};
@@ -43,6 +44,9 @@ pub struct BatchPushCommand {
 pub struct PushItem {
     pub client_item_key: ClientItemKey,
     pub item_id: ItemId,
+    pub priority: Option<PriorityValue>,
+    pub not_before: Option<UtcTimestamp>,
+    pub max_attempts: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +57,7 @@ pub struct BatchUpdateCommand {
 #[derive(Debug, Clone)]
 pub struct BatchClaimCommand {
     pub item_ids: Vec<ItemId>,
+    pub lease_token: String,
     pub lease_expires_at: UtcTimestamp,
 }
 

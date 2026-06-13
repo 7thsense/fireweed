@@ -1,4 +1,4 @@
-use pqueue_core::{QueueDefinition, QueueId, TenantId};
+use pqueue_core::{ItemId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use std::fmt;
 
 use crate::commands::CommandEnvelope;
@@ -142,6 +142,23 @@ pub struct QueueMetricsSnapshot {
     pub failed_count: u64,
 }
 
+/// A simple claim request for the in-memory backend (items + lease parameters).
+#[derive(Debug, Clone)]
+pub struct ClaimRequest {
+    pub shard_key: ShardKey,
+    pub max_items: usize,
+    pub now: UtcTimestamp,
+    pub lease_token: String,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+/// Result of a projection claim.
+#[derive(Debug, Clone)]
+pub struct ClaimResult {
+    pub claimed_item_ids: Vec<ItemId>,
+    pub lease_token: String,
+}
+
 // ---------------------------------------------------------------------------
 // Storage traits (async fn in traits, available in Rust 1.75+)
 // ---------------------------------------------------------------------------
@@ -179,6 +196,11 @@ pub trait ProjectionStore: Send + Sync {
         position: CommandPosition,
         commands: &[CommandEnvelope],
     ) -> impl Future<Output = Result<(), ProjectionError>> + Send;
+
+    fn batch_claim(
+        &self,
+        request: ClaimRequest,
+    ) -> impl Future<Output = Result<ClaimResult, ProjectionError>> + Send;
 
     fn metrics(
         &self,
