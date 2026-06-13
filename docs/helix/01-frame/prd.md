@@ -107,7 +107,9 @@ evidence record is not publishable.
 - pqueue v1 will not be a full workflow engine like Temporal.
 - pqueue v1 will not require strict global priority ordering for every queue.
 - pqueue v1 will not implement AMQP, Kafka, or SQS compatibility as the core
-  data model.
+  data model. A Kafka producer wire adapter (ApiVersions/Metadata/Produce only,
+  mapped to pqueue enqueue semantics) is in scope as P2 (ADR-005); consumer-side
+  Kafka APIs are permanently out of scope.
 - pqueue v1 will not prescribe a storage engine or shard implementation in the
   PRD.
 - pqueue v1 does not enforce downstream API rate limits or quotas. Pacing work
@@ -220,6 +222,9 @@ priority, retry, claim, and state logic with different table shapes.
    client APIs.
 2. A hosted dashboard for queue inspection, repair, and trend analysis.
 3. Optional bounded-relaxed ordering-quality metrics such as rank error.
+4. Kafka producer wire adapter: ApiVersions/Metadata/Produce over heimq-wire,
+   mapping Produce records to pqueue enqueue semantics. Consumer-side Kafka APIs
+   are permanently out of scope (ADR-005).
 
 ## Functional Requirements
 
