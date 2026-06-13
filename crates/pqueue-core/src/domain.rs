@@ -945,3 +945,158 @@ pub fn apply_transition(state: ItemState, event: ItemEvent) -> Result<ItemState,
 
 #[allow(dead_code)]
 pub type DomainResult<T> = Result<T, CreateQueueError>;
+
+// ---------------------------------------------------------------------------
+// B-012 cont.: retry exhaustion (AC-CORE-4)
+// ---------------------------------------------------------------------------
+
+/// Whether a failure at the given attempt count should terminate the item.
+///
+/// Returns `true` when `attempts_so_far >= max_attempts`, meaning the next
+/// failure event must be `FinalizeFail` (→ `Failed`) rather than
+/// `FinalizeRetry` (→ `Pending`).
+pub fn is_retry_exhausted(attempts_so_far: u32, max_attempts: u32) -> bool {
+    attempts_so_far >= max_attempts
+}
+
+/// The event to apply for a failure, given the current attempt count.
+///
+/// Callers use this to choose between `FinalizeRetry` and `FinalizeFail`.
+pub fn failure_event(attempts_so_far: u32, max_attempts: u32) -> ItemEvent {
+    if is_retry_exhausted(attempts_so_far, max_attempts) {
+        ItemEvent::FinalizeFail
+    } else {
+        ItemEvent::FinalizeRetry
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B-012 cont.: idempotency rules (AC-CORE-3)
+// ---------------------------------------------------------------------------
+
+/// Canonical body hash used for request-id conflict detection.
+///
+/// Two push bodies are considered identical when their hash matches.
+/// A hash collision is treated as a match (safe: the worst case is a
+/// duplicate being misidentified as a replay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BodyHash(pub u64);
+
+/// The outcome of an idempotency check against existing request records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdempotencyOutcome {
+    /// No prior record; proceed with the operation.
+    Proceed,
+    /// Prior `request_id` record with identical body; replay the prior outcome.
+    Replay,
+    /// Prior `request_id` record with a different body; reject with conflict.
+    RequestIdConflict,
+    /// Item with the same `client_item_key` already exists (non-terminal).
+    ClientItemKeyDuplicate,
+}
+
+/// Idempotency check given a prior request record (if any) and a prior item
+/// record (if any), both looked up by their respective keys.
+pub fn check_idempotency(
+    request_id: &RequestId,
+    body_hash: BodyHash,
+    prior_request: Option<(RequestId, BodyHash)>,
+    prior_item_key: Option<&ClientItemKey>,
+    client_item_key: &ClientItemKey,
+) -> IdempotencyOutcome {
+    // request_id check takes priority.
+    if let Some((_prior_rid, prior_hash)) = prior_request.filter(|(rid, _)| rid == request_id) {
+        return if prior_hash == body_hash {
+            IdempotencyOutcome::Replay
+        } else {
+            IdempotencyOutcome::RequestIdConflict
+        };
+    }
+    // client_item_key duplicate check.
+    if prior_item_key.is_some_and(|k| k == client_item_key) {
+        return IdempotencyOutcome::ClientItemKeyDuplicate;
+    }
+    IdempotencyOutcome::Proceed
+}
+
+// ---------------------------------------------------------------------------
+// B-012 cont.: eligibility precedence evaluator (AC-CLAIM-3 pure layer)
+// ---------------------------------------------------------------------------
+
+/// Snapshot of an item's scheduling state for pure eligibility evaluation.
+#[derive(Debug, Clone)]
+pub struct EligibilitySnapshot {
+    /// Item must be in Pending state to be eligible.
+    pub state: ItemState,
+    /// Earliest wall-clock time the item is eligible for claim; None = immediately.
+    pub not_before: Option<UtcTimestamp>,
+    /// Retry backoff: item is ineligible until this time (None = no backoff).
+    pub retry_backoff_until: Option<UtcTimestamp>,
+    /// Item-level metadata (checked against queue-level blockers).
+    pub metadata: Metadata,
+    /// Active gate keys on this item (blocked keys make item ineligible).
+    pub gate_keys: Vec<String>,
+}
+
+/// Queue-level eligibility rules.
+#[derive(Debug, Clone)]
+pub struct QueueEligibilityRules {
+    /// Keys in `metadata_blockers` map to sets of values that block eligibility.
+    pub metadata_blockers: std::collections::BTreeMap<String, Vec<MetadataValue>>,
+    /// Gate keys that are currently in a `blocked` state for this shard.
+    pub blocked_gate_keys: std::collections::HashSet<String>,
+}
+
+/// Reasons an item may be ineligible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IneligibilityReason {
+    NotPending,
+    NotBeforeInFuture,
+    RetryBackoff,
+    MetadataBlocked { key: String },
+    GateBlocked { gate_key: String },
+}
+
+/// Evaluate whether an item is eligible for claim at `now`.
+///
+/// Returns `Ok(())` if eligible, or the first `IneligibilityReason` found
+/// following the Eligibility Precedence order.
+pub fn evaluate_eligibility(
+    snapshot: &EligibilitySnapshot,
+    rules: &QueueEligibilityRules,
+    now: &UtcTimestamp,
+) -> Result<(), IneligibilityReason> {
+    if snapshot.state != ItemState::Pending {
+        return Err(IneligibilityReason::NotPending);
+    }
+
+    if snapshot.not_before.as_ref().is_some_and(|nb| cmp_timestamp(nb, now) == std::cmp::Ordering::Greater) {
+        return Err(IneligibilityReason::NotBeforeInFuture);
+    }
+
+    if snapshot.retry_backoff_until.as_ref().is_some_and(|b| cmp_timestamp(b, now) == std::cmp::Ordering::Greater) {
+        return Err(IneligibilityReason::RetryBackoff);
+    }
+
+    for (key, blocked_values) in &rules.metadata_blockers {
+        if snapshot.metadata.get(key).is_some_and(|v| blocked_values.contains(v)) {
+            return Err(IneligibilityReason::MetadataBlocked { key: key.clone() });
+        }
+    }
+
+    for gate_key in &snapshot.gate_keys {
+        if rules.blocked_gate_keys.contains(gate_key.as_str()) {
+            return Err(IneligibilityReason::GateBlocked {
+                gate_key: gate_key.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn cmp_timestamp(a: &UtcTimestamp, b: &UtcTimestamp) -> std::cmp::Ordering {
+    a.seconds
+        .cmp(&b.seconds)
+        .then(a.nanoseconds.cmp(&b.nanoseconds))
+}
