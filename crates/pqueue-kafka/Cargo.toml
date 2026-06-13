@@ -27,3 +27,7 @@ path = "tests/wire_produce_conformance.rs"
 [[test]]
 name = "wire_unit_tests"
 path = "tests/wire_unit_tests.rs"
+
+[[test]]
+name = "wire_persistence_tests"
+path = "tests/wire_persistence_tests.rs"

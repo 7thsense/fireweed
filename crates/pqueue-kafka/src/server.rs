@@ -123,15 +123,25 @@ async fn run_writer<W: AsyncWrite + Unpin>(
 ) -> Result<(), ServerError> {
     let mut consecutive_errors = 0usize;
     while let Some(frame) = rx.recv().await {
-        let st = state.read().await;
-        match route(&frame, &st) {
-            Ok(response) => {
-                drop(st);
+        let (route_result, store) = {
+            let st = state.read().await;
+            let store = st.store.clone();
+            (route(&frame, &st), store)
+        };
+        match route_result {
+            Ok((response, batches)) => {
+                // Persist produce batches before acking (ack-after-store).
+                if !batches.is_empty() {
+                    if let Some(s) = &store {
+                        if let Err(e) = s.persist(batches).await {
+                            warn!(error = %e, "produce storage error");
+                        }
+                    }
+                }
                 stream.write_all(&response).await?;
                 consecutive_errors = 0;
             }
             Err(e) => {
-                drop(st);
                 warn!(error = %e, "request routing error");
                 if let Some(corr_id) = peek_correlation_id(&frame) {
                     let error_frame = make_error_frame(corr_id, 10);

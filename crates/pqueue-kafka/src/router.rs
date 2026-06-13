@@ -6,9 +6,16 @@
 
 use crate::handler::{api_versions, metadata, produce};
 use crate::handler::metadata::BrokerMeta;
+use crate::handler::produce::ProducePushBatch;
 use bytes::{BufMut, Bytes, BytesMut};
 use kafka_protocol::protocol::Encodable;
+use pqueue_core::{QueueId, TenantId, UtcTimestamp};
+use pqueue_storage::memory::{MemoryLogStore, MemoryProjectionStore};
+use pqueue_storage::traits::{LogStore, ProjectionStore};
+use pqueue_storage::types::{CommandChecksum, ShardId, ShardKey};
+use pqueue_storage::{CommandEnvelope, CommandId, QueueCommand};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 #[derive(Debug, thiserror::Error)]
@@ -19,12 +26,84 @@ pub enum RouterError {
     RequestTooShort,
     #[error("encoding error: {0}")]
     Encode(String),
+    #[error("storage error: {0}")]
+    Storage(String),
+}
+
+/// In-process pqueue storage backing the Kafka produce path.
+///
+/// Produce records are enqueued as pqueue items via `LogStore` + `ProjectionStore`.
+/// Workers can then claim them through the native pqueue API.
+pub struct KafkaStore {
+    pub log: MemoryLogStore,
+    pub projection: MemoryProjectionStore,
+    next_cmd_id: AtomicU64,
+}
+
+impl KafkaStore {
+    pub fn new() -> Self {
+        Self {
+            log: MemoryLogStore::new(),
+            projection: MemoryProjectionStore::new(),
+            next_cmd_id: AtomicU64::new(0),
+        }
+    }
+
+    /// Persist a produce batch to the log and update the projection.
+    ///
+    /// Called from `run_writer` after the produce response is built but before
+    /// the response bytes are flushed to the client — ensuring ack-after-store.
+    pub async fn persist(&self, batches: Vec<ProducePushBatch>) -> Result<(), RouterError> {
+        let tenant = TenantId::new("default").map_err(|e| RouterError::Storage(e.to_string()))?;
+        let ts = UtcTimestamp::new(0, 0).map_err(|e| RouterError::Storage(e.to_string()))?;
+
+        for batch in batches {
+            let queue = QueueId::new(&batch.queue_id)
+                .map_err(|e| RouterError::Storage(e.to_string()))?;
+            let shard_key = ShardKey {
+                tenant_id: tenant.clone(),
+                queue_id: queue.clone(),
+                shard_id: ShardId::new(0),
+            };
+            let cmd_id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
+            let item_ids = batch.push.items.iter().map(|i| i.item_id.clone()).collect();
+            let envelope = CommandEnvelope {
+                command_id: CommandId::new(format!("kafka-{cmd_id}")),
+                request_id: None,
+                tenant_id: tenant.clone(),
+                queue_id: queue,
+                shard_id: ShardId::new(0),
+                item_ids,
+                command: QueueCommand::BatchPush(batch.push),
+                checksum: CommandChecksum(0),
+                created_at: ts,
+            };
+            let result = self.log
+                .append_batch(&shard_key, None, vec![envelope.clone()])
+                .await
+                .map_err(|e| RouterError::Storage(e.to_string()))?;
+            self.projection
+                .apply_committed(result.last_position, &[envelope])
+                .await
+                .map_err(|e| RouterError::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for KafkaStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Shared state accessible from each connection handler.
 pub struct RouterState {
     pub queues: Vec<String>,
     pub broker: BrokerMeta,
+    /// Optional pqueue storage backing. When present, produce records are
+    /// durably enqueued before the Produce response is sent.
+    pub store: Option<Arc<KafkaStore>>,
 }
 
 pub type SharedRouterState = Arc<RwLock<RouterState>>;
@@ -120,8 +199,13 @@ fn body_slice<'a>(
 
 /// Route one raw Kafka frame (without the 4-byte length prefix).
 ///
-/// Returns a fully framed response (4-byte length + correlation_id + [tagged_fields] + body).
-pub fn route(frame: &[u8], state: &RouterState) -> Result<Bytes, RouterError> {
+/// Returns `(framed_response, push_batches)`.  `push_batches` is non-empty only
+/// for Produce requests; the caller must persist them to the `KafkaStore` before
+/// flushing the response to the client (ack-after-store).
+pub fn route(
+    frame: &[u8],
+    state: &RouterState,
+) -> Result<(Bytes, Vec<ProducePushBatch>), RouterError> {
     if frame.len() < 8 {
         return Err(RouterError::RequestTooShort);
     }
@@ -132,7 +216,7 @@ pub fn route(frame: &[u8], state: &RouterState) -> Result<Bytes, RouterError> {
     let flexible = is_flexible_request(api_key, api_version);
     let body = body_slice(frame, 8, flexible)?;
 
-
+    let mut push_batches: Vec<ProducePushBatch> = vec![];
     let response_bytes = match api_key {
         18 => encode_msg(api_version, &api_versions::handle(api_version))?,
         3 => encode_msg(
@@ -140,16 +224,20 @@ pub fn route(frame: &[u8], state: &RouterState) -> Result<Bytes, RouterError> {
             &metadata::handle(api_version, body, &state.queues, &state.broker),
         )?,
         0 => {
-            let (resp, _) = produce::handle(api_version, body);
+            let (resp, batches) = produce::handle(api_version, body);
+            push_batches = batches;
             encode_msg(api_version, &resp)?
         }
         key => return Err(RouterError::UnsupportedApi(key)),
     };
 
-    Ok(frame_response(
-        correlation_id,
-        response_bytes,
-        is_flexible_response(api_key, api_version),
+    Ok((
+        frame_response(
+            correlation_id,
+            response_bytes,
+            is_flexible_response(api_key, api_version),
+        ),
+        push_batches,
     ))
 }
 
