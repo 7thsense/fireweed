@@ -1,0 +1,41 @@
+{
+  "attempt_id": "20260613T032938-e25d57f7",
+  "bead_id": "pqueue-6381a300",
+  "base_rev": "747a5df6bdb576b3fe5cd0ba3180e70c3ae6d1a3",
+  "created_at": "2026-06-13T03:29:39.085184111Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-6381a300",
+    "title": "Stage TP-003 PR gate runner without hard coverage flip",
+    "description": "Purpose: make TP-003 PR gate mechanics available without red-lining the current queue before coverage bars are proven in the release lane.\n\nThis bead stages coverage in report-only mode. The release orchestrator bead is the required successor that flips per-PR coverage enforcement after the bars are proven.\n\nIn-scope files:\n- .github/workflows/ci.yml\n- scripts/ci/pr-gate.sh\n- scripts/ci/coverage-report.sh\n- scripts/ci/property-fuzz-smoke.sh\n- docs/helix/06-iterate/BUILD-001-implementation-plan.md only for an optional note about staged coverage enforcement\n\nOut of scope: hard coverage fail-under enforcement; release/nightly orchestration.",
+    "acceptance": "1. `bash scripts/ci/pr-gate.sh --mode bootstrap` runs fmt, clippy, test, cargo-deny, cargo-machete, coverage report without fail-under, and property/fuzz smoke.\n2. `.github/workflows/ci.yml` calls `scripts/ci/pr-gate.sh --mode bootstrap` for pull requests.\n3. The coverage report prints pqueue-core line/branch coverage and pqueue-service line coverage but does not fail under thresholds in this bead.\n4. The bead implementation or docs note names the release orchestrator bead as the required successor that flips per-PR coverage enforcement.",
+    "labels": [
+      "helix",
+      "activity:build",
+      "kind:verification",
+      "area:release"
+    ],
+    "metadata": {
+      "spec-id": "build-implementation-plan"
+    }
+  },
+  "governing": [
+    {
+      "id": "build-implementation-plan",
+      "path": "docs/helix/04-build/BUILD-001-implementation-plan.md",
+      "title": "Build Plan: BUILD-001 Implementation Sequence"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260613T032938-e25d57f7",
+    "prompt": ".ddx/executions/20260613T032938-e25d57f7/prompt.md",
+    "manifest": ".ddx/executions/20260613T032938-e25d57f7/manifest.json",
+    "result": ".ddx/executions/20260613T032938-e25d57f7/result.json",
+    "checks": ".ddx/executions/20260613T032938-e25d57f7/checks.json",
+    "usage": ".ddx/executions/20260613T032938-e25d57f7/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-6381a300-20260613T032938-e25d57f7"
+  },
+  "prompt_sha": "4a99929822689a464ac21020c151821ec2219a1e95b91588427f88a834ad9545"
+}
