@@ -21,22 +21,5 @@ jobs:
           cargo install --locked cargo-machete --version 0.9.1
           cargo install --locked cargo-llvm-cov --version 0.8.2
 
-      - name: cargo fmt
-        run: cargo +1.92.0 fmt --all --check
-
-      - name: cargo clippy
-        run: cargo +1.92.0 clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo +1.92.0 test --workspace
-
-      - name: cargo deny
-        run: cargo deny check
-
-      - name: cargo machete
-        run: cargo machete
-
-      - name: coverage scaffold
-        run: |
-          mkdir -p target/llvm-cov
-          cargo llvm-cov --workspace --lcov --summary-only --output-path target/llvm-cov/lcov.info --fail-under-lines 0
+      - name: PR gate (bootstrap)
+        run: bash scripts/ci/pr-gate.sh --mode bootstrap
