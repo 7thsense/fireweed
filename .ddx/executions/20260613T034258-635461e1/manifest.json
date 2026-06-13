@@ -1,0 +1,41 @@
+{
+  "attempt_id": "20260613T034258-635461e1",
+  "bead_id": "pqueue-86e5f5a4",
+  "base_rev": "8b53faffc5f39928dee5b4045a8c79c2a031f3cd",
+  "created_at": "2026-06-13T03:42:59.279216551Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-86e5f5a4",
+    "title": "Add flaky-rate repeat harness with release suite-list support",
+    "description": "Purpose: provide repeatability measurement for release and nightly suites.\n\nTP-003 requires a flaky rate below 0.1 percent over 100 repeats. With 100 repeats, that resolution means any single failure is 1 percent and fails the gate; only 0/100 failures pass this strict check.\n\nIn-scope files:\n- scripts/ci/repeat-suite.sh\n- scripts/ci/repeat-suite-report.py\n- scripts/ci/repeat-suite-list-example.toml\n- crates/pqueue-core/tests/flaky_repeat_harness_tests.rs\n- repeat harness fixtures under scripts/ci/fixtures/repeat/\n\nOut of scope: choosing the final release suite list; release/nightly workflows.",
+    "acceptance": "1. `bash scripts/ci/repeat-suite.sh --count 3 -- cargo test -p pqueue-core core_domain_tests` passes.\n2. `bash scripts/ci/repeat-suite.sh --count 3 --suite-list scripts/ci/repeat-suite-list-example.toml` passes.\n3. `bash scripts/ci/repeat-suite.sh --count 100 --max-flaky-rate 0.000999 -- cargo test -p pqueue-core core_domain_tests` passes only with zero failures.\n4. The report includes run count, failures, flaky rate, and failing selector names.",
+    "labels": [
+      "helix",
+      "activity:build",
+      "kind:verification",
+      "area:release"
+    ],
+    "metadata": {
+      "spec-id": "build-implementation-plan"
+    }
+  },
+  "governing": [
+    {
+      "id": "build-implementation-plan",
+      "path": "docs/helix/04-build/BUILD-001-implementation-plan.md",
+      "title": "Build Plan: BUILD-001 Implementation Sequence"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260613T034258-635461e1",
+    "prompt": ".ddx/executions/20260613T034258-635461e1/prompt.md",
+    "manifest": ".ddx/executions/20260613T034258-635461e1/manifest.json",
+    "result": ".ddx/executions/20260613T034258-635461e1/result.json",
+    "checks": ".ddx/executions/20260613T034258-635461e1/checks.json",
+    "usage": ".ddx/executions/20260613T034258-635461e1/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-86e5f5a4-20260613T034258-635461e1"
+  },
+  "prompt_sha": "f22a1465d4f53f7d1e31374c16772597b51da3a5200baab27d0c5b12b370c4d9"
+}
