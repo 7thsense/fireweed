@@ -1,0 +1,9 @@
+# repeat-fixture-suites.toml
+#
+# Suite list used by flaky_repeat_harness_tests to verify the --suite-list
+# path without invoking cargo test.
+# Run from the workspace root.
+
+[[suites]]
+name = "always-pass fixture"
+command = ["bash", "scripts/ci/fixtures/repeat/always-pass.sh"]

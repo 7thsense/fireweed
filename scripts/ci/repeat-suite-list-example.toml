@@ -1,0 +1,16 @@
+# repeat-suite-list-example.toml
+#
+# Example suite list for the repeat-suite harness.
+# Pass to repeat-suite.sh via --suite-list.
+#
+# TP-003 §5 release flaky-rate gate: < 0.1% over 100 repeats.
+# At 100 repeats a single failure yields 1.0%, which exceeds the gate.
+# Enforce with: --max-flaky-rate 0.000999
+#
+# Each [[suites]] entry requires:
+#   name    = "human-readable selector name" (used in the report)
+#   command = ["arg0", "arg1", ...]          (executed verbatim; no shell expansion)
+
+[[suites]]
+name = "core_domain_tests"
+command = ["cargo", "+1.92.0", "test", "-p", "pqueue-core", "core_domain_tests"]
