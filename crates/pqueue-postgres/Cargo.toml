@@ -8,8 +8,9 @@ license.workspace = true
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 pqueue-storage = { path = "../pqueue-storage" }
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-time-0_3"] }
 serde_json = "1.0"
+time = "0.3"
 tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]

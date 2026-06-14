@@ -1306,6 +1306,7 @@ dependencies = [
  "postgres-protocol",
  "serde_core",
  "serde_json",
+ "time",
 ]
 
 [[package]]
@@ -1371,6 +1372,7 @@ dependencies = [
  "serde_json",
  "testcontainers",
  "testcontainers-modules",
+ "time",
  "tokio",
  "tokio-postgres",
 ]

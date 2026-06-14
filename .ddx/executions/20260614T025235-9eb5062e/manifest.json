@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260614T025235-9eb5062e",
+  "bead_id": "pqueue-004f80b9",
+  "base_rev": "d674ac1534d2235dba254cf70acaad9f15c2d37d",
+  "created_at": "2026-06-14T02:52:35.463541308Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-004f80b9",
+    "title": "B-040 Postgres append projection write path",
+    "description": "BUILD-001 B-040 postgres_native BatchPush, BatchUpdate, command/idempotency records, pqueue_items projection, indexes, and terminal retention basics.",
+    "acceptance": "cargo test -p pqueue-postgres postgres_transaction_flow_tests passes; BatchPush/BatchUpdate transaction flows, required partial indexes, command records, and AC-CORE-3 integration evidence are recorded.",
+    "parent": "pqueue-113d0968",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:pqueue-postgres",
+      "suite:postgres_transaction_flow_tests"
+    ],
+    "metadata": {
+      "spec-id": "td-postgres-native-reference-mode"
+    }
+  },
+  "governing": [
+    {
+      "id": "td-postgres-native-reference-mode",
+      "path": "docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md",
+      "title": "Technical Design: TD-002 Postgres-Native Reference Mode"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260614T025235-9eb5062e",
+    "prompt": ".ddx/executions/20260614T025235-9eb5062e/prompt.md",
+    "manifest": ".ddx/executions/20260614T025235-9eb5062e/manifest.json",
+    "result": ".ddx/executions/20260614T025235-9eb5062e/result.json",
+    "checks": ".ddx/executions/20260614T025235-9eb5062e/checks.json",
+    "usage": ".ddx/executions/20260614T025235-9eb5062e/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-004f80b9-20260614T025235-9eb5062e"
+  },
+  "prompt_sha": "5137c064badc865f16e703630351cfef50ac4abacfbc39aafb647ed978057a12"
+}
