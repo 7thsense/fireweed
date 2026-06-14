@@ -86,3 +86,4 @@
 {"event":"acquire","lock_name":"index.lock","operation":"index.add","holder_pid":2185440,"acquired_at":"2026-06-13T03:56:15.584420632Z"}
 {"event":"release","lock_name":"index.lock","operation":"index.add","holder_pid":2185440,"acquired_at":"2026-06-13T03:56:15.584420632Z","released_at":"2026-06-13T03:56:15.590140377Z","duration_ms":5}
 {"event":"release","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":2185440,"acquired_at":"2026-06-13T03:56:15.578710053Z","released_at":"2026-06-13T03:56:15.590228627Z","duration_ms":11}
+{"event":"acquire","lock_name":"tracker.lock","operation":"pre_dispatch_commits","holder_pid":1166192,"acquired_at":"2026-06-14T02:29:32.645732595Z"}
