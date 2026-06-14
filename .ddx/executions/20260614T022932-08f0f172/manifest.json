@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260614T022932-08f0f172",
+  "bead_id": "pqueue-87a72bce",
+  "base_rev": "e74b8c55b483adbf6568ebc03de800204e0d9049",
+  "created_at": "2026-06-14T02:29:32.80539828Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-87a72bce",
+    "title": "B-030 Postgres control plane queues shards epochs",
+    "description": "BUILD-001 B-030 Postgres ControlPlaneStore for queue definitions, tenant scope, backend profile, shard assignments, assignment epochs, and CreateQueue cross-field enforcement.",
+    "acceptance": "cargo test -p pqueue-postgres postgres_schema_migration_tests postgres_transaction_flow_tests passes; tenant-scoped create/read, static single-shard assignment/epoch, and INV-8 unit evidence are recorded.",
+    "parent": "pqueue-62f47c38",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:pqueue-postgres",
+      "suite:postgres_schema_migration_tests"
+    ],
+    "metadata": {
+      "spec-id": "td-postgres-native-reference-mode"
+    }
+  },
+  "governing": [
+    {
+      "id": "td-postgres-native-reference-mode",
+      "path": "docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md",
+      "title": "Technical Design: TD-002 Postgres-Native Reference Mode"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260614T022932-08f0f172",
+    "prompt": ".ddx/executions/20260614T022932-08f0f172/prompt.md",
+    "manifest": ".ddx/executions/20260614T022932-08f0f172/manifest.json",
+    "result": ".ddx/executions/20260614T022932-08f0f172/result.json",
+    "checks": ".ddx/executions/20260614T022932-08f0f172/checks.json",
+    "usage": ".ddx/executions/20260614T022932-08f0f172/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-87a72bce-20260614T022932-08f0f172"
+  },
+  "prompt_sha": "50ecda75d8e8bd89bdbd25f641e4e4c0f3f895fd4c51d25eae4c6552cfce46c4"
+}
