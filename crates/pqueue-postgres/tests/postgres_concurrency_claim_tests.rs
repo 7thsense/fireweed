@@ -104,6 +104,7 @@ fn push_item(id: &str, key: &str, priority: i64, not_before: Option<UtcTimestamp
         priority: Some(PriorityValue::Int64(priority)),
         not_before,
         group_key: None,
+        cohort_size: None,
         gate_keys: vec![],
         payload: None,
     }

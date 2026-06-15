@@ -157,6 +157,42 @@ CREATE INDEX IF NOT EXISTS pqueue_group_summary_discovery_idx
   )
   WHERE oldest_eligible_at IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS pqueue_cohorts (
+  tenant_id               text        NOT NULL,
+  queue_id                text        NOT NULL,
+  group_key               text        NOT NULL,
+  shard_id                integer     NOT NULL,
+  cohort_id               text        NOT NULL,
+  cohort_size             integer     NOT NULL,
+  member_count            integer     NOT NULL,
+  state                   text        NOT NULL,
+  cohort_created_at       timestamptz NOT NULL,
+  first_eligible_at       timestamptz,
+  expire_command_pos      bigint,
+  cohort_lease_token_hash bytea,
+  retention_until         timestamptz,
+  updated_at              timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, queue_id, group_key),
+  FOREIGN KEY (tenant_id, queue_id, shard_id)
+    REFERENCES pqueue_shards (tenant_id, queue_id, shard_id)
+);
+
+CREATE INDEX IF NOT EXISTS pqueue_cohorts_claim_idx
+  ON pqueue_cohorts (
+    tenant_id, queue_id, shard_id,
+    first_eligible_at,
+    cohort_created_at,
+    group_key
+  )
+  WHERE state = 'complete';
+
+CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx
+  ON pqueue_cohorts (
+    tenant_id, queue_id, shard_id,
+    cohort_created_at
+  )
+  WHERE state IN ('forming', 'complete');
+
 CREATE TABLE IF NOT EXISTS pqueue_gate_state (
   tenant_id  text        NOT NULL,
   queue_id   text        NOT NULL,

@@ -335,6 +335,7 @@ fn make_push_request(
                 priority: None,
                 not_before: None,
                 group_key: None,
+                cohort_size: None,
                 gate_keys: vec![],
                 payload: None,
             })
@@ -434,6 +435,7 @@ async fn batch_push_duplicate_client_item_key_is_noop() {
             priority: None,
             not_before: None,
             group_key: None,
+            cohort_size: None,
             gate_keys: vec![],
             payload: None,
         }],
@@ -515,6 +517,7 @@ async fn batch_push_rejects_stale_epoch() {
             priority: None,
             not_before: None,
             group_key: None,
+            cohort_size: None,
             gate_keys: vec![],
             payload: None,
         }],

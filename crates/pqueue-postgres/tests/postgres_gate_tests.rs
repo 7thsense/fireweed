@@ -94,6 +94,7 @@ fn push_item(id: &str, priority: i64, gate_keys: Vec<&str>) -> PgPushItem {
         priority: Some(PriorityValue::Int64(priority)),
         not_before: None,
         group_key: Some("group".to_string()),
+        cohort_size: None,
         gate_keys: gate_keys.into_iter().map(str::to_string).collect(),
         payload: None,
     }

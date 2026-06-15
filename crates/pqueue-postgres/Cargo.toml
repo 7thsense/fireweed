@@ -59,3 +59,7 @@ path = "tests/postgres_gate_tests.rs"
 [[test]]
 name = "postgres_group_batching_tests"
 path = "tests/postgres_group_batching_tests.rs"
+
+[[test]]
+name = "postgres_cohort_tests"
+path = "tests/postgres_cohort_tests.rs"

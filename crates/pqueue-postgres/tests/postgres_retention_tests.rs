@@ -108,6 +108,7 @@ fn push_req(tenant: &str, queue: &str, item_id: &str, key: &str) -> PgBatchPushR
             priority: None,
             not_before: None,
             group_key: None,
+            cohort_size: None,
             gate_keys: vec![],
             payload: None,
         }],

@@ -86,6 +86,7 @@ fn push_item(id: &str, group: Option<&str>, priority: i64) -> PgPushItem {
         priority: Some(PriorityValue::Int64(priority)),
         not_before: None,
         group_key: group.map(str::to_string),
+        cohort_size: None,
         gate_keys: vec![],
         payload: None,
     }

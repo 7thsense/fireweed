@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use pqueue_core::{
-    DecimalValue, PriorityModel, PriorityModelKind, PriorityValue, UtcTimestamp,
+    CohortPolicy, DecimalValue, PriorityModel, PriorityModelKind, PriorityValue, UtcTimestamp,
     priority_sort as compute_priority_sort,
 };
 use serde_json::{Value, json};
@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
-use crate::convert::json_priority_model;
+use crate::convert::{json_cohort_policy, json_priority_model};
 use crate::schema::DDL;
 
 // ---------------------------------------------------------------------------
@@ -78,6 +78,7 @@ pub struct PgPushItem {
     pub priority: Option<PriorityValue>,
     pub not_before: Option<UtcTimestamp>,
     pub group_key: Option<String>,
+    pub cohort_size: Option<u32>,
     pub gate_keys: Vec<String>,
     pub payload: Option<Value>,
 }
@@ -201,6 +202,47 @@ pub struct PgGroupBatchClaimResult {
     pub command_sequence: u64,
     pub claimed_group_keys: Vec<String>,
     pub claimed_item_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct PgCohortClaimRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub max_items: usize,
+    pub now: UtcTimestamp,
+    pub cohort_lease_token: String,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgCohortClaimResult {
+    pub command_sequence: u64,
+    pub cohort_id: Option<String>,
+    pub group_key: Option<String>,
+    pub claimed_item_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct PgCohortExpiredRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub max_cohorts: usize,
+    pub now: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgCohortExpiredResult {
+    pub command_sequence: u64,
+    pub expired_group_keys: Vec<String>,
+    pub expired_item_ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +435,7 @@ fn push_request_fingerprint(req: &PgBatchPushRequest) -> Vec<u8> {
                     json!({"seconds": ts.seconds, "nanoseconds": ts.nanoseconds})
                 }),
                 "group_key": item.group_key,
+                "cohort_size": item.cohort_size,
                 "gate_keys": item.gate_keys,
                 "payload": item.payload,
             })
@@ -620,6 +663,134 @@ async fn refresh_group_summaries(
     Ok(())
 }
 
+async fn upsert_cohort_member(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    queue_id: &str,
+    shard_id: u32,
+    group_key: &str,
+    cohort_size: u32,
+    cohort_policy: &CohortPolicy,
+    now_odt: &OffsetDateTime,
+    member_eligible: bool,
+    command_id: &str,
+) -> Result<(), AppendError> {
+    let max_cohort_size = cohort_policy.max_cohort_size.ok_or_else(|| {
+        AppendError::InvalidRequest("cohort_policy.max_cohort_size is required".to_string())
+    })?;
+    if cohort_size == 0 || u64::from(cohort_size) > max_cohort_size {
+        return Err(AppendError::InvalidRequest(
+            "cohort_size must be between 1 and max_cohort_size".to_string(),
+        ));
+    }
+
+    let existing = tx
+        .query_opt(
+            "SELECT cohort_id, cohort_size, member_count, state, retention_until
+             FROM pqueue_cohorts
+             WHERE tenant_id = $1
+               AND queue_id = $2
+               AND shard_id = $3
+               AND group_key = $4
+             FOR UPDATE",
+            &[&tenant_id, &queue_id, &(shard_id as i32), &group_key],
+        )
+        .await
+        .map_err(to_append_err)?;
+
+    if let Some(row) = existing {
+        let existing_size = row.get::<_, i32>("cohort_size") as u32;
+        let member_count = row.get::<_, i32>("member_count");
+        let state: String = row.get("state");
+        let retention_until: Option<OffsetDateTime> = row.get("retention_until");
+        if retention_until.is_some_and(|until| until > *now_odt) {
+            return Err(AppendError::RequestConflict);
+        }
+        if state != "forming" {
+            return Err(AppendError::RequestConflict);
+        }
+        if existing_size != cohort_size {
+            return Err(AppendError::RequestConflict);
+        }
+        if member_count + 1 > cohort_size as i32 {
+            return Err(AppendError::RequestConflict);
+        }
+
+        let new_count = member_count + 1;
+        let state = if new_count == cohort_size as i32 {
+            "complete"
+        } else {
+            "forming"
+        };
+        let first_eligible_at = if state == "complete" && member_eligible {
+            Some(*now_odt)
+        } else {
+            None
+        };
+        tx.execute(
+            "UPDATE pqueue_cohorts
+             SET member_count = $5,
+                 state = $6,
+                 first_eligible_at = COALESCE(first_eligible_at, $7),
+                 updated_at = $8
+             WHERE tenant_id = $1
+               AND queue_id = $2
+               AND shard_id = $3
+               AND group_key = $4",
+            &[
+                &tenant_id,
+                &queue_id,
+                &(shard_id as i32),
+                &group_key,
+                &new_count,
+                &state,
+                &first_eligible_at,
+                now_odt,
+            ],
+        )
+        .await
+        .map_err(to_append_err)?;
+    } else {
+        let state = if cohort_size == 1 {
+            "complete"
+        } else {
+            "forming"
+        };
+        let first_eligible_at = if state == "complete" && member_eligible {
+            Some(*now_odt)
+        } else {
+            None
+        };
+        let cohort_id = format!("cohort-{command_id}-{group_key}");
+        tx.execute(
+            "INSERT INTO pqueue_cohorts (
+                 tenant_id, queue_id, group_key, shard_id,
+                 cohort_id, cohort_size, member_count, state,
+                 cohort_created_at, first_eligible_at, updated_at
+             ) VALUES (
+                 $1, $2, $3, $4,
+                 $5, $6, 1, $7,
+                 $8, $9, $8
+             )",
+            &[
+                &tenant_id,
+                &queue_id,
+                &group_key,
+                &(shard_id as i32),
+                &cohort_id,
+                &(cohort_size as i32),
+                &state,
+                now_odt,
+                &first_eligible_at,
+            ],
+        )
+        .await
+        .map_err(to_append_err)?;
+    }
+
+    Ok(())
+}
+
 async fn lock_shard_sequence(
     tx: &tokio_postgres::Transaction<'_>,
     tenant_id: &str,
@@ -697,7 +868,7 @@ impl PostgresAppendStore {
         let q_row = tx
             .query_opt(
                 "SELECT priority_model, client_item_key_retention_ms, request_id_retention_ms,
-                        group_co_residency, max_eligible_group_size
+                        group_co_residency, max_eligible_group_size, cohort_policy
                  FROM pqueue_queues
                  WHERE tenant_id = $1 AND queue_id = $2",
                 &[&req.tenant_id, &req.queue_id],
@@ -711,7 +882,10 @@ impl PostgresAppendStore {
         let request_retention_ms: i64 = q_row.get("request_id_retention_ms");
         let group_co_residency: bool = q_row.get("group_co_residency");
         let max_eligible_group_size: Option<i64> = q_row.get("max_eligible_group_size");
+        let cohort_policy_json: Value = q_row.get("cohort_policy");
         let pm = json_priority_model(&pm_json).map_err(|e| AppendError::StorageFailure(e.0))?;
+        let cohort_policy = json_cohort_policy(&cohort_policy_json)
+            .map_err(|e| AppendError::StorageFailure(e.0))?;
 
         let request_fingerprint = req
             .request_id
@@ -785,6 +959,27 @@ impl PostgresAppendStore {
                     "group_co_residency queues require group_key".to_string(),
                 ));
             }
+            if let Some(policy) = cohort_policy.as_ref() {
+                let cohort_size = item.cohort_size.ok_or_else(|| {
+                    AppendError::InvalidRequest(
+                        "cohort-enabled queues require cohort_size".to_string(),
+                    )
+                })?;
+                let max_cohort_size = policy.max_cohort_size.ok_or_else(|| {
+                    AppendError::InvalidRequest(
+                        "cohort_policy.max_cohort_size is required".to_string(),
+                    )
+                })?;
+                if cohort_size == 0 || u64::from(cohort_size) > max_cohort_size {
+                    return Err(AppendError::InvalidRequest(
+                        "cohort_size must be between 1 and max_cohort_size".to_string(),
+                    ));
+                }
+            } else if item.cohort_size.is_some() {
+                return Err(AppendError::InvalidRequest(
+                    "cohort_size requires cohort_policy.enabled=true".to_string(),
+                ));
+            }
             if let (Some(group_key), Some(max_group_size)) =
                 (item.group_key.as_ref(), max_eligible_group_size)
             {
@@ -825,15 +1020,15 @@ impl PostgresAppendStore {
                     "INSERT INTO pqueue_items (
                          tenant_id, queue_id, shard_id, item_id, client_item_key,
                          lifecycle_state, priority, priority_sort, not_before,
-                         eligible_since, group_key, gate_keys, payload, metadata,
+                         eligible_since, group_key, cohort_size, gate_keys, payload, metadata,
                          retry_count, item_version, last_command_sequence,
                          created_at, updated_at
                      ) VALUES (
                          $1, $2, $3, $4, $5,
                          'pending', $6, $7, $8,
-                         $9, $10, $11, $12, '{}'::jsonb,
-                         0, 1, $13,
-                         $14, $14
+                         $9, $10, $11, $12, $13, '{}'::jsonb,
+                         0, 1, $14,
+                         $15, $15
                      ) ON CONFLICT (tenant_id, queue_id, client_item_key) DO NOTHING",
                     &[
                         &req.tenant_id,
@@ -846,6 +1041,7 @@ impl PostgresAppendStore {
                         &not_before_odt,
                         &elig_odt,
                         &item.group_key,
+                        &item.cohort_size.map(|size| size as i32),
                         &item.gate_keys,
                         &item.payload,
                         &(sequence as i64),
@@ -858,6 +1054,26 @@ impl PostgresAppendStore {
             if inserted == 1 {
                 new_item_ids.push(item.item_id.clone());
                 affected_group_keys.push(item.group_key.clone());
+
+                if let (Some(policy), Some(group_key), Some(cohort_size)) = (
+                    cohort_policy.as_ref(),
+                    item.group_key.as_ref(),
+                    item.cohort_size,
+                ) {
+                    upsert_cohort_member(
+                        &tx,
+                        &req.tenant_id,
+                        &req.queue_id,
+                        req.shard_id,
+                        group_key,
+                        cohort_size,
+                        policy,
+                        &now_odt,
+                        elig_odt.is_some(),
+                        &req.command_id,
+                    )
+                    .await?;
+                }
 
                 tx.execute(
                     "INSERT INTO pqueue_item_key_retention
@@ -1325,6 +1541,15 @@ impl PostgresAppendStore {
                           AND gs.gate_key = g.gate_key
                           AND gs.state = 'blocked'
                        )
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM pqueue_cohorts c
+                         WHERE c.tenant_id = pqueue_items.tenant_id
+                           AND c.queue_id = pqueue_items.queue_id
+                           AND c.shard_id = pqueue_items.shard_id
+                           AND c.group_key = pqueue_items.group_key
+                           AND c.state IN ('forming', 'complete', 'leased')
+                       )
                      ORDER BY priority_sort ASC, created_at ASC, item_id ASC
                      LIMIT $5
                      FOR UPDATE SKIP LOCKED
@@ -1704,6 +1929,15 @@ impl PostgresAppendStore {
                           AND gs.gate_key = g.gate_key
                           AND gs.state = 'blocked'
                        )
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM pqueue_cohorts c
+                         WHERE c.tenant_id = pqueue_items.tenant_id
+                           AND c.queue_id = pqueue_items.queue_id
+                           AND c.shard_id = pqueue_items.shard_id
+                           AND c.group_key = pqueue_items.group_key
+                           AND c.state IN ('forming', 'complete', 'leased')
+                       )
                      ORDER BY priority_sort ASC, created_at ASC, item_id ASC
                      FOR UPDATE",
                     &[
@@ -1825,6 +2059,453 @@ impl PostgresAppendStore {
             command_sequence: sequence,
             claimed_group_keys,
             claimed_item_ids,
+        })
+    }
+
+    pub async fn cohort_claim(
+        &self,
+        req: PgCohortClaimRequest,
+    ) -> Result<PgCohortClaimResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        let q_row = tx
+            .query_opt(
+                "SELECT cohort_policy
+                 FROM pqueue_queues
+                 WHERE tenant_id = $1 AND queue_id = $2",
+                &[&req.tenant_id, &req.queue_id],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::QueueNotFound)?;
+        let cohort_policy_json: Value = q_row.get("cohort_policy");
+        if json_cohort_policy(&cohort_policy_json)
+            .map_err(|e| AppendError::StorageFailure(e.0))?
+            .is_none()
+        {
+            return Err(AppendError::InvalidRequest(
+                "whole cohort claim requires cohort_policy.enabled=true".to_string(),
+            ));
+        }
+
+        let (current_epoch, sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let lease_expires_odt = utc_to_odt(&req.lease_expires_at);
+        let candidates = tx
+            .query(
+                "SELECT cohort_id, group_key, cohort_size
+                 FROM pqueue_cohorts
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND state = 'complete'
+                 ORDER BY first_eligible_at ASC NULLS LAST,
+                          cohort_created_at ASC,
+                          group_key ASC
+                 LIMIT 8
+                 FOR UPDATE SKIP LOCKED",
+                &[&req.tenant_id, &req.queue_id, &(req.shard_id as i32)],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+        for row in candidates {
+            let cohort_id: String = row.get("cohort_id");
+            let group_key: String = row.get("group_key");
+            let cohort_size = row.get::<_, i32>("cohort_size") as usize;
+            if cohort_size > req.max_items {
+                return Err(AppendError::BatchTooLarge);
+            }
+
+            let item_rows = tx
+                .query(
+                    "SELECT item_id
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND shard_id = $3
+                       AND group_key = $4
+                       AND lifecycle_state = 'pending'
+                       AND eligible_since IS NOT NULL
+                       AND (not_before IS NULL OR not_before <= $5)
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM unnest(gate_keys) AS g(gate_key)
+                         JOIN pqueue_gate_state gs
+                           ON gs.tenant_id = pqueue_items.tenant_id
+                          AND gs.queue_id = pqueue_items.queue_id
+                          AND gs.shard_id = pqueue_items.shard_id
+                          AND gs.gate_key = g.gate_key
+                          AND gs.state = 'blocked'
+                       )
+                     ORDER BY priority_sort ASC, created_at ASC, item_id ASC
+                     FOR UPDATE",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &(req.shard_id as i32),
+                        &group_key,
+                        &now_odt,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?;
+            if item_rows.len() != cohort_size {
+                continue;
+            }
+
+            let claimed_item_ids: Vec<String> =
+                item_rows.iter().map(|row| row.get("item_id")).collect();
+            tx.execute(
+                "UPDATE pqueue_items
+                 SET lifecycle_state = 'leased',
+                     lease_token_hash = $5,
+                     lease_expires_at = $6,
+                     item_version = item_version + 1,
+                     last_command_sequence = $7,
+                     updated_at = $8
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND item_id = ANY($4::text[])",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &claimed_item_ids,
+                    &lease_token_hash(&req.cohort_lease_token),
+                    &lease_expires_odt,
+                    &(sequence as i64),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_cohorts
+                 SET state = 'leased',
+                     cohort_lease_token_hash = $5,
+                     updated_at = $6
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND group_key = $4
+                   AND state = 'complete'",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &group_key,
+                    &lease_token_hash(&req.cohort_lease_token),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            refresh_group_summary(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                Some(&group_key),
+                &now_odt,
+            )
+            .await?;
+
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "whole_cohort_claim",
+                "cohort_id": cohort_id,
+                "group_key": group_key,
+                "claimed_item_count": claimed_item_ids.len(),
+                "lease_expires_at": req.lease_expires_at.seconds,
+            });
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'whole_cohort_claim', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &claimed_item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.commit().await.map_err(to_append_err)?;
+            return Ok(PgCohortClaimResult {
+                command_sequence: sequence,
+                cohort_id: Some(cohort_id),
+                group_key: Some(group_key),
+                claimed_item_ids,
+            });
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgCohortClaimResult {
+            command_sequence: sequence,
+            cohort_id: None,
+            group_key: None,
+            claimed_item_ids: vec![],
+        })
+    }
+
+    pub async fn materialize_expired_cohorts(
+        &self,
+        req: PgCohortExpiredRequest,
+    ) -> Result<PgCohortExpiredResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        let q_row = tx
+            .query_opt(
+                "SELECT cohort_policy, client_item_key_retention_ms
+                 FROM pqueue_queues
+                 WHERE tenant_id = $1 AND queue_id = $2",
+                &[&req.tenant_id, &req.queue_id],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::QueueNotFound)?;
+        let cohort_policy_json: Value = q_row.get("cohort_policy");
+        let cohort_policy = json_cohort_policy(&cohort_policy_json)
+            .map_err(|e| AppendError::StorageFailure(e.0))?
+            .ok_or_else(|| {
+                AppendError::InvalidRequest(
+                    "cohort expiry requires cohort_policy.enabled=true".to_string(),
+                )
+            })?;
+        let completion_bound_ms = cohort_policy.completion_bound_ms.ok_or_else(|| {
+            AppendError::InvalidRequest("cohort completion_bound_ms is required".to_string())
+        })?;
+        let retention_ms: i64 = q_row.get("client_item_key_retention_ms");
+
+        let (current_epoch, mut sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let limit = req.max_cohorts as i64;
+        let cohort_rows = tx
+            .query(
+                "SELECT group_key, cohort_id
+                 FROM pqueue_cohorts
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND state IN ('forming', 'complete')
+                   AND cohort_created_at + ($5::bigint * interval '1 millisecond') <= $4
+                 ORDER BY cohort_created_at ASC, group_key ASC
+                 LIMIT $6
+                 FOR UPDATE SKIP LOCKED",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                    &(completion_bound_ms as i64),
+                    &limit,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+        let mut expired_group_keys = Vec::new();
+        let mut expired_item_ids = Vec::new();
+        for cohort_row in cohort_rows {
+            let group_key: String = cohort_row.get("group_key");
+            let cohort_id: String = cohort_row.get("cohort_id");
+            let item_rows = tx
+                .query(
+                    "SELECT item_id
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND shard_id = $3
+                       AND group_key = $4
+                       AND lifecycle_state = 'pending'
+                     ORDER BY priority_sort ASC, created_at ASC, item_id ASC
+                     FOR UPDATE",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &(req.shard_id as i32),
+                        &group_key,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?;
+            let item_ids: Vec<String> = item_rows.iter().map(|row| row.get("item_id")).collect();
+            if item_ids.is_empty() {
+                continue;
+            }
+
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "cohort_expired",
+                "cohort_id": cohort_id,
+                "group_key": group_key,
+                "expired_item_count": item_ids.len(),
+            });
+            let expire_command_id = format!("{}-{}", req.command_id, expired_group_keys.len());
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'cohort_expired', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &expire_command_id,
+                    &req.request_id,
+                    &item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_items
+                 SET lifecycle_state = 'failed',
+                     failure_code = 'cohort-incomplete',
+                     terminal_at = $5,
+                     item_version = item_version + 1,
+                     last_command_sequence = $6,
+                     lease_token_hash = NULL,
+                     lease_expires_at = NULL,
+                     updated_at = $5
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND item_id = ANY($4::text[])",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &item_ids,
+                    &now_odt,
+                    &(sequence as i64),
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_cohorts
+                 SET state = 'terminal',
+                     expire_command_pos = $5,
+                     retention_until = $6,
+                     updated_at = $7
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND group_key = $4",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &group_key,
+                    &(sequence as i64),
+                    &(now_odt + time::Duration::milliseconds(retention_ms)),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            refresh_group_summary(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                Some(&group_key),
+                &now_odt,
+            )
+            .await?;
+
+            expired_group_keys.push(group_key);
+            expired_item_ids.extend(item_ids);
+            sequence += 1;
+        }
+
+        if !expired_group_keys.is_empty() {
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = $4, updated_at = $5
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgCohortExpiredResult {
+            command_sequence: sequence,
+            expired_group_keys,
+            expired_item_ids,
         })
     }
 
