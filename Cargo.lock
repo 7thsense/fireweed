@@ -1370,6 +1370,7 @@ dependencies = [
  "pqueue-core",
  "pqueue-storage",
  "serde_json",
+ "sha2",
  "testcontainers",
  "testcontainers-modules",
  "time",

@@ -4,7 +4,8 @@ use pqueue_core::{
     DecimalValue, PriorityModel, PriorityModelKind, PriorityValue, UtcTimestamp,
     priority_sort as compute_priority_sort,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
@@ -43,9 +44,10 @@ fn effective_priority(
         None => match model.kind {
             PriorityModelKind::Timestamp => PriorityValue::Timestamp(*now),
             PriorityModelKind::Int64 => PriorityValue::Int64(0),
-            PriorityModelKind::Decimal => {
-                PriorityValue::Decimal(DecimalValue { mantissa: 0, scale: 0 })
-            }
+            PriorityModelKind::Decimal => PriorityValue::Decimal(DecimalValue {
+                mantissa: 0,
+                scale: 0,
+            }),
             PriorityModelKind::Text => PriorityValue::Text(String::new()),
         },
     }
@@ -155,6 +157,30 @@ pub struct PgBatchUpdateResult {
 }
 
 // ---------------------------------------------------------------------------
+// BatchClaim request / response types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct PgBatchClaimRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub max_items: usize,
+    pub now: UtcTimestamp,
+    pub lease_token: String,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgBatchClaimResult {
+    pub command_sequence: u64,
+    pub claimed_item_ids: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -168,6 +194,10 @@ pub enum AppendError {
 
 fn to_append_err(e: tokio_postgres::Error) -> AppendError {
     AppendError::StorageFailure(e.to_string())
+}
+
+fn lease_token_hash(token: &str) -> Vec<u8> {
+    Sha256::digest(token.as_bytes()).to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -224,8 +254,7 @@ impl PostgresAppendStore {
 
         let pm_json: Value = q_row.get("priority_model");
         let retention_ms: i64 = q_row.get("client_item_key_retention_ms");
-        let pm = json_priority_model(&pm_json)
-            .map_err(|e| AppendError::StorageFailure(e.0))?;
+        let pm = json_priority_model(&pm_json).map_err(|e| AppendError::StorageFailure(e.0))?;
 
         // Step 2: lock shard, validate epoch, read sequence
         let s_row = tx
@@ -260,8 +289,7 @@ impl PostgresAppendStore {
             let pv = effective_priority(item.priority.as_ref(), &pm, &req.now);
             let pv_json = priority_value_to_json(&pv);
             let ps: Vec<u8> = compute_priority_sort(&pv, &pm);
-            let not_before_odt: Option<OffsetDateTime> =
-                item.not_before.as_ref().map(utc_to_odt);
+            let not_before_odt: Option<OffsetDateTime> = item.not_before.as_ref().map(utc_to_odt);
             let elig_odt = eligible_since_odt(item.not_before.as_ref(), &req.now);
 
             let inserted = tx
@@ -336,7 +364,9 @@ impl PostgresAppendStore {
                 item_results.push(PgPushItemResult {
                     client_item_key: item.client_item_key.clone(),
                     item_id: item.item_id.clone(),
-                    outcome: PgPushOutcome::Duplicate { existing_item_id: existing_id },
+                    outcome: PgPushOutcome::Duplicate {
+                        existing_item_id: existing_id,
+                    },
                 });
             }
         }
@@ -380,13 +410,21 @@ impl PostgresAppendStore {
             "UPDATE pqueue_shards
              SET next_command_sequence = next_command_sequence + 1, updated_at = $4
              WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
-            &[&req.tenant_id, &req.queue_id, &(req.shard_id as i32), &now_odt],
+            &[
+                &req.tenant_id,
+                &req.queue_id,
+                &(req.shard_id as i32),
+                &now_odt,
+            ],
         )
         .await
         .map_err(to_append_err)?;
 
         tx.commit().await.map_err(to_append_err)?;
-        Ok(PgBatchPushResult { command_sequence: sequence, items: item_results })
+        Ok(PgBatchPushResult {
+            command_sequence: sequence,
+            items: item_results,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -425,8 +463,7 @@ impl PostgresAppendStore {
             .ok_or(AppendError::QueueNotFound)?;
 
         let pm_json: Value = q_row.get("priority_model");
-        let pm = json_priority_model(&pm_json)
-            .map_err(|e| AppendError::StorageFailure(e.0))?;
+        let pm = json_priority_model(&pm_json).map_err(|e| AppendError::StorageFailure(e.0))?;
 
         // Step 2: lock shard, validate epoch
         let s_row = tx
@@ -513,8 +550,7 @@ impl PostgresAppendStore {
             let pv = effective_priority(item.priority.as_ref(), &pm, &req.now);
             let pv_json = priority_value_to_json(&pv);
             let ps: Vec<u8> = compute_priority_sort(&pv, &pm);
-            let not_before_odt: Option<OffsetDateTime> =
-                item.not_before.as_ref().map(utc_to_odt);
+            let not_before_odt: Option<OffsetDateTime> = item.not_before.as_ref().map(utc_to_odt);
             let elig_odt = eligible_since_odt(item.not_before.as_ref(), &req.now);
 
             let updated = tx
@@ -550,7 +586,9 @@ impl PostgresAppendStore {
                 updated_item_ids.push(item.item_id.clone());
                 item_results.push(PgUpdateItemResult {
                     item_id: item.item_id.clone(),
-                    outcome: PgUpdateOutcome::Updated { item_version: new_version },
+                    outcome: PgUpdateOutcome::Updated {
+                        item_version: new_version,
+                    },
                 });
             } else {
                 item_results.push(PgUpdateItemResult {
@@ -602,13 +640,182 @@ impl PostgresAppendStore {
                 "UPDATE pqueue_shards
                  SET next_command_sequence = next_command_sequence + 1, updated_at = $4
                  WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
-                &[&req.tenant_id, &req.queue_id, &(req.shard_id as i32), &now_odt],
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
             )
             .await
             .map_err(to_append_err)?;
         }
 
         tx.commit().await.map_err(to_append_err)?;
-        Ok(PgBatchUpdateResult { command_sequence: sequence, items: item_results })
+        Ok(PgBatchUpdateResult {
+            command_sequence: sequence,
+            items: item_results,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // BatchClaim transaction flow (TD-002 §BatchClaim)
+    // -----------------------------------------------------------------------
+    //
+    // This single-shard reference path leases eligible pending items under one
+    // transaction using FOR UPDATE SKIP LOCKED. Strict queues use the canonical
+    // priority order. Bounded-relaxed queues currently use the same exact order,
+    // which is a valid zero-rank-error implementation for the reference mode.
+
+    pub async fn batch_claim(
+        &self,
+        req: PgBatchClaimRequest,
+    ) -> Result<PgBatchClaimResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        let q_exists = tx
+            .query_opt(
+                "SELECT ordering_mode
+                 FROM pqueue_queues
+                 WHERE tenant_id = $1 AND queue_id = $2",
+                &[&req.tenant_id, &req.queue_id],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::QueueNotFound)?;
+        let _ordering_mode: String = q_exists.get("ordering_mode");
+
+        let s_row = tx
+            .query_opt(
+                "SELECT assignment_epoch, next_command_sequence
+                 FROM pqueue_shards
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3
+                 FOR UPDATE",
+                &[&req.tenant_id, &req.queue_id, &(req.shard_id as i32)],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::ShardNotFound)?;
+
+        let current_epoch = s_row.get::<_, i64>("assignment_epoch") as u64;
+        if current_epoch != req.expected_epoch {
+            return Err(AppendError::EpochMismatch {
+                expected: req.expected_epoch,
+                current: current_epoch,
+            });
+        }
+        let sequence = s_row.get::<_, i64>("next_command_sequence") as u64;
+
+        let now_odt = utc_to_odt(&req.now);
+        let lease_expires_odt = utc_to_odt(&req.lease_expires_at);
+        let max_items = req.max_items as i64;
+
+        let rows = tx
+            .query(
+                "WITH candidates AS (
+                     SELECT item_id
+                          , priority_sort
+                          , created_at
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND shard_id = $3
+                       AND lifecycle_state = 'pending'
+                       AND eligible_since IS NOT NULL
+                       AND (not_before IS NULL OR not_before <= $4)
+                     ORDER BY priority_sort ASC, created_at ASC, item_id ASC
+                     LIMIT $5
+                     FOR UPDATE SKIP LOCKED
+                 ),
+                 updated AS (
+                     UPDATE pqueue_items i
+                     SET lifecycle_state = 'leased',
+                         lease_token_hash = $6,
+                         lease_expires_at = $7,
+                         item_version = item_version + 1,
+                         last_command_sequence = $8,
+                         updated_at = $4
+                     FROM candidates c
+                     WHERE i.tenant_id = $1
+                       AND i.queue_id = $2
+                       AND i.shard_id = $3
+                       AND i.item_id = c.item_id
+                     RETURNING i.item_id
+                 )
+                 SELECT u.item_id
+                 FROM updated u
+                 JOIN candidates c ON c.item_id = u.item_id
+                 ORDER BY c.priority_sort ASC, c.created_at ASC, c.item_id ASC",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                    &max_items,
+                    &lease_token_hash(&req.lease_token),
+                    &lease_expires_odt,
+                    &(sequence as i64),
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+        let claimed_item_ids: Vec<String> = rows.iter().map(|row| row.get("item_id")).collect();
+
+        if !claimed_item_ids.is_empty() {
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "batch_claim",
+                "claimed_count": claimed_item_ids.len(),
+                "lease_expires_at": req.lease_expires_at.seconds,
+            });
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'batch_claim', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &claimed_item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgBatchClaimResult {
+            command_sequence: sequence,
+            claimed_item_ids,
+        })
     }
 }

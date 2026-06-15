@@ -10,6 +10,7 @@ pqueue-core = { path = "../pqueue-core" }
 pqueue-storage = { path = "../pqueue-storage" }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-time-0_3"] }
 serde_json = "1.0"
+sha2 = "0.11"
 time = "0.3"
 tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "sync"] }
 
@@ -34,3 +35,7 @@ path = "tests/postgres_transaction_flow_tests.rs"
 [[test]]
 name = "postgres_retention_tests"
 path = "tests/postgres_retention_tests.rs"
+
+[[test]]
+name = "postgres_concurrency_claim_tests"
+path = "tests/postgres_concurrency_claim_tests.rs"
