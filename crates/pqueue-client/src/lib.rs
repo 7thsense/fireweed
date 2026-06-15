@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub const PROBLEM_TYPE_BASE: &str = "https://pqueue.dev/problems";
@@ -91,6 +93,81 @@ pub struct SetGatesResponse {
     pub gate_epoch: u64,
     pub gates: Vec<SetGate>,
     pub shards: Vec<GateShardStatus>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupCompleteness {
+    WholeEligible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupBatching {
+    pub max_groups: u32,
+    pub group_completeness: GroupCompleteness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClaimCompatibility {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_group_key: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata_equals: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_batching: Option<GroupBatching>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whole_cohort: Option<bool>,
+}
+
+impl ClaimCompatibility {
+    pub fn has_same_group_key_filter(&self) -> bool {
+        self.same_group_key.unwrap_or(false)
+    }
+
+    pub fn is_whole_cohort(&self) -> bool {
+        self.whole_cohort.unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchClaimRequest {
+    pub request_id: String,
+    pub worker_id: String,
+    pub max_items: u32,
+    pub lease_duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<ClaimCompatibility>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimUnit {
+    Item,
+    SameGroupKey,
+    WholeGroup,
+    WholeCohort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimedItem {
+    pub item_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchClaimResponse {
+    pub request_id: String,
+    pub claim_unit: ClaimUnit,
+    pub items: Vec<ClaimedItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claimed_group_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_basis: Option<String>,
 }
 
 impl ProblemDetails {
@@ -244,5 +321,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn claim_compatibility_distinguishes_filter_from_whole_group_unit() {
+        let same_group_filter = ClaimCompatibility {
+            same_group_key: Some(true),
+            ..ClaimCompatibility::default()
+        };
+        assert!(same_group_filter.has_same_group_key_filter());
+        assert!(same_group_filter.group_batching.is_none());
+
+        let whole_group = ClaimCompatibility {
+            group_batching: Some(GroupBatching {
+                max_groups: 3,
+                group_completeness: GroupCompleteness::WholeEligible,
+            }),
+            ..ClaimCompatibility::default()
+        };
+        assert!(!whole_group.has_same_group_key_filter());
+        assert_eq!(whole_group.group_batching.unwrap().max_groups, 3);
     }
 }

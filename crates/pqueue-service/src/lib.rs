@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json, Router,
@@ -11,7 +11,8 @@ use axum::{
     routing::{get, post},
 };
 use pqueue_client::{
-    ApiErrorCode, GateShardStatus, NativeRoute, ProblemDetails, SetGatesRequest, SetGatesResponse,
+    ApiErrorCode, BatchClaimRequest, BatchClaimResponse, ClaimCompatibility, ClaimUnit,
+    GateShardStatus, NativeRoute, ProblemDetails, SetGatesRequest, SetGatesResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -90,11 +91,57 @@ impl AuthContext {
 #[derive(Debug, Clone)]
 pub struct AppState {
     auth: AuthContext,
+    queue_catalog: QueueCatalog,
 }
 
 impl AppState {
     pub fn new(auth: AuthContext) -> Self {
-        Self { auth }
+        Self {
+            auth,
+            queue_catalog: QueueCatalog::default(),
+        }
+    }
+
+    pub fn with_queue_catalog(auth: AuthContext, queue_catalog: QueueCatalog) -> Self {
+        Self {
+            auth,
+            queue_catalog,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QueueCapabilities {
+    pub group_co_residency: bool,
+    pub max_eligible_group_size: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct QueueCatalog {
+    queues: BTreeMap<(String, String), QueueCapabilities>,
+}
+
+impl QueueCatalog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_queue(
+        mut self,
+        tenant_id: impl Into<String>,
+        queue_id: impl Into<String>,
+        capabilities: QueueCapabilities,
+    ) -> Self {
+        self.queues
+            .insert((tenant_id.into(), queue_id.into()), capabilities);
+        self
+    }
+
+    pub fn capabilities(&self, tenant_id: &str, queue_id: &str) -> QueueCapabilities {
+        self.queues
+            .get(&(tenant_id.to_string(), queue_id.to_string()))
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -137,7 +184,14 @@ pub struct RouteStubResponse {
 }
 
 pub fn app(auth: AuthContext) -> Router {
-    let state = AppState::new(auth);
+    app_with_state(AppState::new(auth))
+}
+
+pub fn app_with_queue_catalog(auth: AuthContext, queue_catalog: QueueCatalog) -> Router {
+    app_with_state(AppState::with_queue_catalog(auth, queue_catalog))
+}
+
+pub fn app_with_state(state: AppState) -> Router {
     Router::new()
         .route("/v1/tenants/{tenant_id}/queues", post(create_queue))
         .route(
@@ -246,16 +300,20 @@ async fn batch_claim(
     State(state): State<AppState>,
     Path((tenant_id, queue_id)): Path<(String, String)>,
     req: Request<Body>,
-) -> Result<Json<RouteStubResponse>, ApiProblem> {
-    route_stub(
-        state,
-        NativeRoute::BatchClaim,
-        tenant_id,
-        Some(queue_id),
-        req,
-        true,
-    )
-    .await
+) -> Result<Json<BatchClaimResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: BatchClaimRequest = parse_json(req).await?;
+    let capabilities = state.queue_catalog.capabilities(&tenant_id, &queue_id);
+    let claim_unit = validate_batch_claim_request(&body, capabilities)?;
+
+    Ok(Json(BatchClaimResponse {
+        request_id: body.request_id,
+        claim_unit,
+        items: vec![],
+        claimed_group_keys: vec![],
+        summary_basis: (claim_unit == ClaimUnit::WholeGroup)
+            .then(|| "pqueue_group_summary".to_string()),
+    }))
 }
 
 async fn purge_items(
@@ -389,6 +447,117 @@ fn validate_set_gates_request(req: &SetGatesRequest) -> Result<(), ApiProblem> {
         }
     }
     Ok(())
+}
+
+fn validate_batch_claim_request(
+    req: &BatchClaimRequest,
+    capabilities: QueueCapabilities,
+) -> Result<ClaimUnit, ApiProblem> {
+    if req.request_id.trim().is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "request_id is required",
+        ));
+    }
+    if req.worker_id.trim().is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "worker_id is required",
+        ));
+    }
+    if req.max_items == 0 {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "max_items must be greater than zero",
+        ));
+    }
+    if req.lease_duration_ms == 0 {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "lease_duration_ms must be greater than zero",
+        ));
+    }
+
+    let Some(compatibility) = req.compatibility.as_ref() else {
+        return Ok(ClaimUnit::Item);
+    };
+
+    validate_claim_compatibility(compatibility, req.max_items, capabilities)
+}
+
+fn validate_claim_compatibility(
+    compatibility: &ClaimCompatibility,
+    max_items: u32,
+    capabilities: QueueCapabilities,
+) -> Result<ClaimUnit, ApiProblem> {
+    if compatibility.group_key.as_deref().is_some_and(|key| {
+        key.is_empty()
+            || key.len() > 256
+            || !key.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            })
+    }) {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "group_key must match ^[A-Za-z0-9._:-]{1,256}$",
+        ));
+    }
+
+    if compatibility.group_batching.is_some() {
+        if compatibility.has_same_group_key_filter()
+            || compatibility.group_key.is_some()
+            || compatibility.is_whole_cohort()
+        {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "group_batching cannot be combined with same_group_key, group_key, or whole_cohort",
+            ));
+        }
+        let group_batching = compatibility.group_batching.as_ref().unwrap();
+        if group_batching.max_groups == 0 {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "group_batching.max_groups must be greater than zero",
+            ));
+        }
+        let Some(max_group_size) = capabilities.max_eligible_group_size else {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "group_batching requires group_co_residency and max_eligible_group_size",
+            ));
+        };
+        if !capabilities.group_co_residency {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "group_batching requires group_co_residency and max_eligible_group_size",
+            ));
+        }
+        if max_group_size > max_items {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::BatchTooLarge,
+                "max_items must be at least max_eligible_group_size for group_batching",
+            ));
+        }
+        return Ok(ClaimUnit::WholeGroup);
+    }
+
+    if compatibility.is_whole_cohort() {
+        return Ok(ClaimUnit::WholeCohort);
+    }
+    if compatibility.has_same_group_key_filter() {
+        return Ok(ClaimUnit::SameGroupKey);
+    }
+    Ok(ClaimUnit::Item)
 }
 
 async fn parse_json<T>(req: Request<Body>) -> Result<T, ApiProblem>

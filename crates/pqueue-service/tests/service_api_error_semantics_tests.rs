@@ -4,7 +4,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use pqueue_client::{ApiErrorCode, NativeRoute, ProblemDetails};
+use pqueue_client::{ApiErrorCode, ClaimUnit, NativeRoute, ProblemDetails};
 use pqueue_service::{AuthContext, app};
 use tower::ServiceExt;
 
@@ -66,14 +66,21 @@ async fn service_api_error_semantics_tests_api_001_routes_are_registered() {
         .method(NativeRoute::BatchClaim.method())
         .uri(NativeRoute::BatchClaim.path("tenant-a", Some("queue-a")))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from("{}"))
+        .body(Body::from(
+            serde_json::json!({
+                "request_id": "req-claim-route",
+                "worker_id": "worker-a",
+                "max_items": 10,
+                "lease_duration_ms": 300000
+            })
+            .to_string(),
+        ))
         .unwrap();
 
     let response = test_app().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    let routed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(routed["operation"], "BatchClaim");
-    assert_eq!(routed["tenant_id"], "tenant-a");
-    assert_eq!(routed["queue_id"], "queue-a");
+    let routed: pqueue_client::BatchClaimResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(routed.request_id, "req-claim-route");
+    assert_eq!(routed.claim_unit, ClaimUnit::Item);
 }
