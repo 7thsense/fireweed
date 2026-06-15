@@ -1,0 +1,16 @@
+{
+  "attempt_id": "20260615T213118-00725d26",
+  "bead_id": "pqueue-6f2f48b9",
+  "trigger": "agent: unknown harness: claude-tui",
+  "scanned_at": "2026-06-15T21:31:19.031082604Z",
+  "reaped": [
+    {
+      "pid": 2827544,
+      "provider": "claude",
+      "command": "[claude] \u003cdefunct\u003e",
+      "age_seconds": 222,
+      "action": "terminated",
+      "reason": "defunct_provider_child"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "attempt_id": "20260615T213118-00725d26",
+  "bead_id": "pqueue-6f2f48b9",
+  "worktree": "/Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-6f2f48b9-20260615T213118-00725d26",
+  "trigger": "agent: unknown harness: claude-tui",
+  "started_at": "2026-06-15T21:31:19.017727542Z",
+  "finished_at": "2026-06-15T21:31:19.026428347Z",
+  "scanned": 102
+}
