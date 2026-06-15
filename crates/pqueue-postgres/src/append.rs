@@ -21,6 +21,10 @@ fn utc_to_odt(ts: &UtcTimestamp) -> OffsetDateTime {
         + time::Duration::nanoseconds(ts.nanoseconds as i64)
 }
 
+fn odt_to_utc(ts: OffsetDateTime) -> UtcTimestamp {
+    UtcTimestamp::new(ts.unix_timestamp(), ts.nanosecond()).unwrap()
+}
+
 fn priority_value_to_json(v: &PriorityValue) -> Value {
     match v {
         PriorityValue::Timestamp(ts) => {
@@ -399,6 +403,29 @@ pub struct PgPurgeItemResult {
 pub struct PgPurgeItemsResult {
     pub command_sequence: u64,
     pub items: Vec<PgPurgeItemResult>,
+}
+
+#[derive(Debug)]
+pub struct PgDiscoverActiveScopesRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub max_results: usize,
+    pub now: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgActiveScope {
+    pub queue_id: String,
+    pub group_key: String,
+    pub oldest_eligible_age_ms: u64,
+    pub eligible_count: i64,
+}
+
+#[derive(Debug)]
+pub struct PgDiscoverActiveScopesResult {
+    pub as_of: UtcTimestamp,
+    pub scopes: Vec<PgActiveScope>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3307,6 +3334,116 @@ impl PostgresAppendStore {
 
         tx.commit().await.map_err(to_append_err)?;
         Ok(result)
+    }
+
+    pub async fn discover_active_scopes(
+        &self,
+        req: PgDiscoverActiveScopesRequest,
+    ) -> Result<PgDiscoverActiveScopesResult, AppendError> {
+        if req.max_results == 0 {
+            return Err(AppendError::InvalidRequest(
+                "max_results must be greater than 0".to_string(),
+            ));
+        }
+
+        let client = self.client.lock().await;
+        client
+            .query_opt(
+                "SELECT 1 FROM pqueue_queues WHERE tenant_id = $1 AND queue_id = $2",
+                &[&req.tenant_id, &req.queue_id],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::QueueNotFound)?;
+
+        let limit = req.max_results as i64;
+        let rows = client
+            .query(
+                "SELECT queue_id, group_key, oldest_eligible_at, eligible_count, updated_at
+                 FROM pqueue_group_summary
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND oldest_eligible_at IS NOT NULL
+                 ORDER BY oldest_eligible_at ASC,
+                          rep_progress_guard_sort ASC,
+                          rep_priority_sort ASC,
+                          rep_created_at ASC,
+                          rep_item_id ASC
+                 LIMIT $4",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &limit,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let mut as_of = now_odt;
+        let mut scopes = Vec::new();
+        for row in rows {
+            let updated_at: OffsetDateTime = row.get("updated_at");
+            if updated_at < as_of {
+                as_of = updated_at;
+            }
+            let group_key: String = row.get("group_key");
+            let current = client
+                .query_opt(
+                    "WITH eligible AS (
+                       SELECT eligible_since, priority_sort, created_at, item_id
+                       FROM pqueue_items
+                       WHERE tenant_id = $1
+                         AND queue_id = $2
+                         AND shard_id = $3
+                         AND group_key = $4
+                         AND lifecycle_state = 'pending'
+                         AND eligible_since IS NOT NULL
+                         AND (not_before IS NULL OR not_before <= $5)
+                         AND NOT EXISTS (
+                           SELECT 1
+                           FROM unnest(gate_keys) AS g(gate_key)
+                           JOIN pqueue_gate_state gs
+                             ON gs.tenant_id = pqueue_items.tenant_id
+                            AND gs.queue_id = pqueue_items.queue_id
+                            AND gs.shard_id = pqueue_items.shard_id
+                            AND gs.gate_key = g.gate_key
+                            AND gs.state = 'blocked'
+                         )
+                     )
+                     SELECT eligible_since, COUNT(*) OVER()::bigint AS eligible_count
+                     FROM eligible
+                     ORDER BY eligible_since ASC, priority_sort ASC, created_at ASC, item_id ASC
+                     LIMIT 1",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &(req.shard_id as i32),
+                        &group_key,
+                        &now_odt,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?;
+            let Some(current) = current else {
+                continue;
+            };
+            let oldest_eligible_at: OffsetDateTime = current.get("eligible_since");
+            let age_ms = (now_odt - oldest_eligible_at).whole_milliseconds().max(0) as u64;
+            scopes.push(PgActiveScope {
+                queue_id: row.get("queue_id"),
+                group_key,
+                oldest_eligible_age_ms: age_ms,
+                eligible_count: current.get("eligible_count"),
+            });
+        }
+
+        Ok(PgDiscoverActiveScopesResult {
+            as_of: odt_to_utc(as_of),
+            scopes,
+        })
     }
 
     pub async fn materialize_expired_leases(
