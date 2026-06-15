@@ -1,6 +1,345 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+
+use axum::{
+    Json, Router,
+    body::{Body, to_bytes},
+    extract::{Path, State},
+    http::{Request, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use pqueue_client::{ApiErrorCode, NativeRoute, ProblemDetails};
+use serde::Serialize;
+
 pub mod verification_ledger;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthContext {
+    principal_id: String,
+    tenants: BTreeSet<String>,
+}
+
+impl AuthContext {
+    pub fn new(
+        principal_id: impl Into<String>,
+        tenants: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            principal_id: principal_id.into(),
+            tenants: tenants.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+
+    pub fn authorize_tenant(&self, tenant_id: &str) -> Result<(), ApiProblem> {
+        if self.tenants.contains(tenant_id) {
+            Ok(())
+        } else {
+            Err(ApiProblem::new(
+                StatusCode::FORBIDDEN,
+                ApiErrorCode::QueueForbidden,
+                "principal is not authorized for the requested tenant",
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AppState {
+    auth: AuthContext,
+}
+
+impl AppState {
+    pub fn new(auth: AuthContext) -> Self {
+        Self { auth }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiProblem {
+    status: StatusCode,
+    problem: ProblemDetails,
+}
+
+impl ApiProblem {
+    pub fn new(status: StatusCode, code: ApiErrorCode, detail: impl Into<String>) -> Self {
+        Self {
+            status,
+            problem: ProblemDetails::new(code, status.as_u16(), detail),
+        }
+    }
+
+    pub fn problem(&self) -> &ProblemDetails {
+        &self.problem
+    }
+}
+
+impl IntoResponse for ApiProblem {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            [(header::CONTENT_TYPE, "application/problem+json")],
+            Json(self.problem),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RouteStubResponse {
+    operation: &'static str,
+    tenant_id: String,
+    queue_id: Option<String>,
+    principal_id: String,
+}
+
+pub fn app(auth: AuthContext) -> Router {
+    let state = AppState::new(auth);
+    Router::new()
+        .route("/v1/tenants/{tenant_id}/queues", post(create_queue))
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/items:push",
+            post(batch_push),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/items:update",
+            post(batch_update),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/gates:set",
+            post(set_gates),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/items:claim",
+            post(batch_claim),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/items:purge",
+            post(purge_items),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/leases:renew",
+            post(renew_leases),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/items:finalize",
+            post(batch_finalize),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/metrics",
+            get(get_queue_metrics),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/scopes:discover",
+            post(discover_active_scopes),
+        )
+        .fallback(route_not_found)
+        .with_state(state)
+}
+
+async fn create_queue(
+    State(state): State<AppState>,
+    Path(tenant_id): Path<String>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(state, NativeRoute::CreateQueue, tenant_id, None, req, true).await
+}
+
+async fn batch_push(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::BatchPush,
+        tenant_id,
+        Some(queue_id),
+        req,
+        true,
+    )
+    .await
+}
+
+async fn batch_update(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::BatchUpdate,
+        tenant_id,
+        Some(queue_id),
+        req,
+        true,
+    )
+    .await
+}
+
+async fn set_gates(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::SetGates,
+        tenant_id,
+        Some(queue_id),
+        req,
+        true,
+    )
+    .await
+}
+
+async fn batch_claim(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::BatchClaim,
+        tenant_id,
+        Some(queue_id),
+        req,
+        true,
+    )
+    .await
+}
+
+async fn purge_items(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::PurgeItems,
+        tenant_id,
+        Some(queue_id),
+        req,
+        true,
+    )
+    .await
+}
+
+async fn renew_leases(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::RenewLeases,
+        tenant_id,
+        Some(queue_id),
+        req,
+        true,
+    )
+    .await
+}
+
+async fn batch_finalize(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::BatchFinalize,
+        tenant_id,
+        Some(queue_id),
+        req,
+        true,
+    )
+    .await
+}
+
+async fn get_queue_metrics(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::GetQueueMetrics,
+        tenant_id,
+        Some(queue_id),
+        req,
+        false,
+    )
+    .await
+}
+
+async fn discover_active_scopes(
+    State(state): State<AppState>,
+    Path(tenant_id): Path<String>,
+    req: Request<Body>,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    route_stub(
+        state,
+        NativeRoute::DiscoverActiveScopes,
+        tenant_id,
+        None,
+        req,
+        true,
+    )
+    .await
+}
+
+async fn route_stub(
+    state: AppState,
+    route: NativeRoute,
+    tenant_id: String,
+    queue_id: Option<String>,
+    req: Request<Body>,
+    expects_body: bool,
+) -> Result<Json<RouteStubResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    if expects_body {
+        parse_json_body(req).await?;
+    }
+
+    Ok(Json(RouteStubResponse {
+        operation: route.operation(),
+        tenant_id,
+        queue_id,
+        principal_id: state.auth.principal_id().to_string(),
+    }))
+}
+
+async fn parse_json_body(req: Request<Body>) -> Result<(), ApiProblem> {
+    let body = to_bytes(req.into_body(), 1024 * 1024).await.map_err(|_| {
+        ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "request body could not be read",
+        )
+    })?;
+    serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
+        ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "request body must be valid JSON",
+        )
+    })?;
+    Ok(())
+}
+
+async fn route_not_found() -> ApiProblem {
+    ApiProblem::new(
+        StatusCode::NOT_FOUND,
+        ApiErrorCode::InvalidRequest,
+        "route is not part of API-001",
+    )
+}
 
 pub mod scaffold {
     pub fn client_name() -> &'static str {
