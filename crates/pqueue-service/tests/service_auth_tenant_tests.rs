@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use pqueue_client::{ApiErrorCode, NativeRoute, ProblemDetails};
-use pqueue_service::{AuthContext, app};
+use pqueue_service::{AuthContext, RedactedLeaseToken, app, hash_lease_token};
 use tower::ServiceExt;
 
 async fn problem_body(response: axum::response::Response) -> ProblemDetails {
@@ -56,4 +56,18 @@ async fn service_auth_tenant_tests_cross_tenant_request_is_forbidden_before_body
     let problem = problem_body(response).await;
     assert_eq!(problem.code, ApiErrorCode::QueueForbidden);
     assert_eq!(problem.status, StatusCode::FORBIDDEN.as_u16());
+}
+
+#[test]
+fn service_auth_tenant_tests_lease_tokens_are_hashed_and_redacted() {
+    let plaintext = "plain-worker-lease-token";
+    let hash = hash_lease_token(plaintext);
+    assert_eq!(hash.len(), 32);
+    assert_ne!(hash.as_slice(), plaintext.as_bytes());
+
+    let redacted = RedactedLeaseToken::new(plaintext);
+    assert_eq!(redacted.hash(), hash);
+    assert_eq!(format!("{redacted}"), "[redacted]");
+    assert_eq!(format!("{redacted:?}"), "LeaseToken([redacted])");
+    assert!(!format!("{redacted:?}").contains(plaintext));
 }

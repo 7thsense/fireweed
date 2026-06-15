@@ -12,8 +12,43 @@ use axum::{
 };
 use pqueue_client::{ApiErrorCode, NativeRoute, ProblemDetails};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 pub mod verification_ledger;
+
+#[derive(Clone, Copy)]
+pub struct RedactedLeaseToken<'a> {
+    token: &'a str,
+}
+
+impl<'a> RedactedLeaseToken<'a> {
+    pub fn new(token: &'a str) -> Self {
+        Self { token }
+    }
+
+    pub fn hash(self) -> [u8; 32] {
+        hash_lease_token(self.token)
+    }
+}
+
+impl std::fmt::Debug for RedactedLeaseToken<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LeaseToken([redacted])")
+    }
+}
+
+impl std::fmt::Display for RedactedLeaseToken<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+pub fn hash_lease_token(token: &str) -> [u8; 32] {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&digest);
+    hash
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
