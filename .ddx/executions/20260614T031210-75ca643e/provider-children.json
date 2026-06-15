@@ -1,0 +1,129 @@
+{
+  "attempt_id": "20260614T031210-75ca643e",
+  "bead_id": "pqueue-6f2f48b9",
+  "trigger": "running_phase_non_route_provider_child",
+  "active_route": "claude",
+  "scanned_at": "2026-06-14T03:45:08.807630859Z",
+  "reaped": [
+    {
+      "pid": 1702610,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1702670,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1783948,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1784095,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1822164,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1822261,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1891583,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1891665,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1916870,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1916890,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1978825,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 1978761,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 2004251,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 2037304,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 2042420,
+      "provider": "gemini",
+      "command": "/home/linuxbrew/.linuxbrew/opt/node/bin/node /home/linuxbrew/.linuxbrew/bin/gemini",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    }
+  ]
+}
