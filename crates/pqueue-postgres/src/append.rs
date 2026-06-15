@@ -181,6 +181,119 @@ pub struct PgBatchClaimResult {
 }
 
 // ---------------------------------------------------------------------------
+// Lease renewal / finalize / expiry request and response types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct PgRenewLeaseItem {
+    pub item_id: String,
+    pub lease_token: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PgRenewLeaseOutcome {
+    Renewed { item_version: u64 },
+    StaleLease,
+    NotFound,
+    Terminal,
+}
+
+#[derive(Debug)]
+pub struct PgRenewLeaseItemResult {
+    pub item_id: String,
+    pub outcome: PgRenewLeaseOutcome,
+}
+
+#[derive(Debug)]
+pub struct PgBatchRenewLeasesRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub items: Vec<PgRenewLeaseItem>,
+    pub now: UtcTimestamp,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgBatchRenewLeasesResult {
+    pub command_sequence: u64,
+    pub items: Vec<PgRenewLeaseItemResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgFinalizeKind {
+    Complete,
+    Fail,
+    Retry,
+    Release,
+}
+
+#[derive(Debug)]
+pub struct PgFinalizeItem {
+    pub item_id: String,
+    pub lease_token: String,
+    pub kind: PgFinalizeKind,
+    pub retry_not_before: Option<UtcTimestamp>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PgFinalizeOutcome {
+    Completed { item_version: u64 },
+    Failed { item_version: u64 },
+    Retried { item_version: u64 },
+    Released { item_version: u64 },
+    StaleLease,
+    NotFound,
+    Terminal,
+    Invalid { message: String },
+}
+
+#[derive(Debug)]
+pub struct PgFinalizeItemResult {
+    pub item_id: String,
+    pub outcome: PgFinalizeOutcome,
+}
+
+#[derive(Debug)]
+pub struct PgBatchFinalizeRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub items: Vec<PgFinalizeItem>,
+    pub now: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgBatchFinalizeResult {
+    pub command_sequence: u64,
+    pub items: Vec<PgFinalizeItemResult>,
+}
+
+#[derive(Debug)]
+pub struct PgLeaseExpiredRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub max_items: usize,
+    pub now: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgLeaseExpiredResult {
+    pub command_sequence: u64,
+    pub expired_item_ids: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -316,6 +429,39 @@ async fn refresh_group_summaries(
     }
 
     Ok(())
+}
+
+async fn lock_shard_sequence(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    queue_id: &str,
+    shard_id: u32,
+    expected_epoch: u64,
+) -> Result<(u64, u64), AppendError> {
+    let s_row = tx
+        .query_opt(
+            "SELECT assignment_epoch, next_command_sequence
+             FROM pqueue_shards
+             WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3
+             FOR UPDATE",
+            &[&tenant_id, &queue_id, &(shard_id as i32)],
+        )
+        .await
+        .map_err(to_append_err)?
+        .ok_or(AppendError::ShardNotFound)?;
+
+    let current_epoch = s_row.get::<_, i64>("assignment_epoch") as u64;
+    if current_epoch != expected_epoch {
+        return Err(AppendError::EpochMismatch {
+            expected: expected_epoch,
+            current: current_epoch,
+        });
+    }
+
+    Ok((
+        current_epoch,
+        s_row.get::<_, i64>("next_command_sequence") as u64,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -972,6 +1118,613 @@ impl PostgresAppendStore {
         Ok(PgBatchClaimResult {
             command_sequence: sequence,
             claimed_item_ids,
+        })
+    }
+
+    pub async fn batch_renew_leases(
+        &self,
+        req: PgBatchRenewLeasesRequest,
+    ) -> Result<PgBatchRenewLeasesResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        tx.query_opt(
+            "SELECT 1 FROM pqueue_queues WHERE tenant_id = $1 AND queue_id = $2",
+            &[&req.tenant_id, &req.queue_id],
+        )
+        .await
+        .map_err(to_append_err)?
+        .ok_or(AppendError::QueueNotFound)?;
+
+        let (current_epoch, sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let lease_expires_odt = utc_to_odt(&req.lease_expires_at);
+        let mut item_results = Vec::new();
+        let mut renewed_item_ids = Vec::new();
+
+        for item in &req.items {
+            let row = tx
+                .query_opt(
+                    "SELECT lifecycle_state, lease_expires_at, item_version
+                     FROM pqueue_items
+                     WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3
+                     FOR UPDATE",
+                    &[&req.tenant_id, &req.queue_id, &item.item_id],
+                )
+                .await
+                .map_err(to_append_err)?;
+
+            let Some(row) = row else {
+                item_results.push(PgRenewLeaseItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgRenewLeaseOutcome::NotFound,
+                });
+                continue;
+            };
+
+            let state: String = row.get("lifecycle_state");
+            if state == "complete" || state == "failed" {
+                item_results.push(PgRenewLeaseItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgRenewLeaseOutcome::Terminal,
+                });
+                continue;
+            }
+
+            let updated = tx
+                .execute(
+                    "UPDATE pqueue_items
+                     SET lease_expires_at = $5,
+                         item_version = item_version + 1,
+                         last_command_sequence = $6,
+                         updated_at = $7
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND item_id = $3
+                       AND lifecycle_state = 'leased'
+                       AND lease_token_hash = $4
+                       AND lease_expires_at > $7",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &item.item_id,
+                        &lease_token_hash(&item.lease_token),
+                        &lease_expires_odt,
+                        &(sequence as i64),
+                        &now_odt,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?;
+
+            if updated == 1 {
+                let item_version = row.get::<_, i64>("item_version") as u64 + 1;
+                renewed_item_ids.push(item.item_id.clone());
+                item_results.push(PgRenewLeaseItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgRenewLeaseOutcome::Renewed { item_version },
+                });
+            } else {
+                item_results.push(PgRenewLeaseItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgRenewLeaseOutcome::StaleLease,
+                });
+            }
+        }
+
+        if !renewed_item_ids.is_empty() {
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "batch_renew_leases",
+                "renewed_count": renewed_item_ids.len(),
+                "lease_expires_at": req.lease_expires_at.seconds,
+            });
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'batch_renew_leases', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &renewed_item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgBatchRenewLeasesResult {
+            command_sequence: sequence,
+            items: item_results,
+        })
+    }
+
+    pub async fn batch_finalize(
+        &self,
+        req: PgBatchFinalizeRequest,
+    ) -> Result<PgBatchFinalizeResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        let q_row = tx
+            .query_opt(
+                "SELECT retry_policy
+                 FROM pqueue_queues
+                 WHERE tenant_id = $1 AND queue_id = $2",
+                &[&req.tenant_id, &req.queue_id],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::QueueNotFound)?;
+        let retry_policy: Value = q_row.get("retry_policy");
+        let max_attempts = retry_policy["max_attempts"].as_u64().unwrap_or(1) as i32;
+
+        let (current_epoch, sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let mut item_results = Vec::new();
+        let mut finalized_item_ids = Vec::new();
+        let mut affected_group_keys = Vec::new();
+
+        for item in &req.items {
+            let row = tx
+                .query_opt(
+                    "SELECT lifecycle_state, lease_expires_at, item_version, retry_count, group_key
+                     FROM pqueue_items
+                     WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3
+                     FOR UPDATE",
+                    &[&req.tenant_id, &req.queue_id, &item.item_id],
+                )
+                .await
+                .map_err(to_append_err)?;
+
+            let Some(row) = row else {
+                item_results.push(PgFinalizeItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgFinalizeOutcome::NotFound,
+                });
+                continue;
+            };
+
+            let state: String = row.get("lifecycle_state");
+            if state == "complete" || state == "failed" {
+                item_results.push(PgFinalizeItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgFinalizeOutcome::Terminal,
+                });
+                continue;
+            }
+
+            let lease_valid = tx
+                .query_opt(
+                    "SELECT 1
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND item_id = $3
+                       AND lifecycle_state = 'leased'
+                       AND lease_token_hash = $4
+                       AND lease_expires_at > $5",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &item.item_id,
+                        &lease_token_hash(&item.lease_token),
+                        &now_odt,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?
+                .is_some();
+
+            if !lease_valid {
+                item_results.push(PgFinalizeItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgFinalizeOutcome::StaleLease,
+                });
+                continue;
+            }
+
+            let current_version = row.get::<_, i64>("item_version") as u64;
+            let retry_count = row.get::<_, i32>("retry_count");
+            let group_key: Option<String> = row.get("group_key");
+            let item_version = current_version + 1;
+
+            let outcome = match item.kind {
+                PgFinalizeKind::Complete => {
+                    tx.execute(
+                        "UPDATE pqueue_items
+                         SET lifecycle_state = 'complete',
+                             lease_token_hash = NULL,
+                             lease_expires_at = NULL,
+                             eligible_since = NULL,
+                             item_version = item_version + 1,
+                             last_command_sequence = $4,
+                             terminal_at = $5,
+                             updated_at = $5
+                         WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3",
+                        &[
+                            &req.tenant_id,
+                            &req.queue_id,
+                            &item.item_id,
+                            &(sequence as i64),
+                            &now_odt,
+                        ],
+                    )
+                    .await
+                    .map_err(to_append_err)?;
+                    PgFinalizeOutcome::Completed { item_version }
+                }
+                PgFinalizeKind::Fail => {
+                    tx.execute(
+                        "UPDATE pqueue_items
+                         SET lifecycle_state = 'failed',
+                             lease_token_hash = NULL,
+                             lease_expires_at = NULL,
+                             eligible_since = NULL,
+                             item_version = item_version + 1,
+                             last_command_sequence = $4,
+                             terminal_at = $5,
+                             updated_at = $5
+                         WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3",
+                        &[
+                            &req.tenant_id,
+                            &req.queue_id,
+                            &item.item_id,
+                            &(sequence as i64),
+                            &now_odt,
+                        ],
+                    )
+                    .await
+                    .map_err(to_append_err)?;
+                    PgFinalizeOutcome::Failed { item_version }
+                }
+                PgFinalizeKind::Retry => {
+                    let Some(not_before) = item.retry_not_before.as_ref() else {
+                        item_results.push(PgFinalizeItemResult {
+                            item_id: item.item_id.clone(),
+                            outcome: PgFinalizeOutcome::Invalid {
+                                message: "retry_not_before is required for retry".to_string(),
+                            },
+                        });
+                        continue;
+                    };
+                    let next_retry_count = retry_count + 1;
+                    if next_retry_count >= max_attempts {
+                        tx.execute(
+                            "UPDATE pqueue_items
+                             SET lifecycle_state = 'failed',
+                                 retry_count = $4,
+                                 lease_token_hash = NULL,
+                                 lease_expires_at = NULL,
+                                 eligible_since = NULL,
+                                 item_version = item_version + 1,
+                                 last_command_sequence = $5,
+                                 terminal_at = $6,
+                                 updated_at = $6
+                             WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3",
+                            &[
+                                &req.tenant_id,
+                                &req.queue_id,
+                                &item.item_id,
+                                &next_retry_count,
+                                &(sequence as i64),
+                                &now_odt,
+                            ],
+                        )
+                        .await
+                        .map_err(to_append_err)?;
+                        PgFinalizeOutcome::Failed { item_version }
+                    } else {
+                        let not_before_odt = utc_to_odt(not_before);
+                        tx.execute(
+                            "UPDATE pqueue_items
+                             SET lifecycle_state = 'pending',
+                                 retry_count = $4,
+                                 not_before = $5,
+                                 eligible_since = $6,
+                                 lease_token_hash = NULL,
+                                 lease_expires_at = NULL,
+                                 item_version = item_version + 1,
+                                 last_command_sequence = $7,
+                                 updated_at = $8
+                             WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3",
+                            &[
+                                &req.tenant_id,
+                                &req.queue_id,
+                                &item.item_id,
+                                &next_retry_count,
+                                &not_before_odt,
+                                &not_before_odt,
+                                &(sequence as i64),
+                                &now_odt,
+                            ],
+                        )
+                        .await
+                        .map_err(to_append_err)?;
+                        PgFinalizeOutcome::Retried { item_version }
+                    }
+                }
+                PgFinalizeKind::Release => {
+                    tx.execute(
+                        "UPDATE pqueue_items
+                         SET lifecycle_state = 'pending',
+                             eligible_since = COALESCE(eligible_since, $4),
+                             lease_token_hash = NULL,
+                             lease_expires_at = NULL,
+                             item_version = item_version + 1,
+                             last_command_sequence = $5,
+                             updated_at = $4
+                         WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3",
+                        &[
+                            &req.tenant_id,
+                            &req.queue_id,
+                            &item.item_id,
+                            &now_odt,
+                            &(sequence as i64),
+                        ],
+                    )
+                    .await
+                    .map_err(to_append_err)?;
+                    PgFinalizeOutcome::Released { item_version }
+                }
+            };
+
+            finalized_item_ids.push(item.item_id.clone());
+            affected_group_keys.push(group_key);
+            item_results.push(PgFinalizeItemResult {
+                item_id: item.item_id.clone(),
+                outcome,
+            });
+        }
+
+        if !finalized_item_ids.is_empty() {
+            refresh_group_summaries(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                &affected_group_keys,
+                &now_odt,
+            )
+            .await?;
+
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "batch_finalize",
+                "finalized_count": finalized_item_ids.len(),
+            });
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'batch_finalize', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &finalized_item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgBatchFinalizeResult {
+            command_sequence: sequence,
+            items: item_results,
+        })
+    }
+
+    pub async fn materialize_expired_leases(
+        &self,
+        req: PgLeaseExpiredRequest,
+    ) -> Result<PgLeaseExpiredResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        tx.query_opt(
+            "SELECT 1 FROM pqueue_queues WHERE tenant_id = $1 AND queue_id = $2",
+            &[&req.tenant_id, &req.queue_id],
+        )
+        .await
+        .map_err(to_append_err)?
+        .ok_or(AppendError::QueueNotFound)?;
+
+        let (current_epoch, sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let max_items = req.max_items as i64;
+        let rows = tx
+            .query(
+                "WITH candidates AS (
+                     SELECT item_id, group_key
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND shard_id = $3
+                       AND lifecycle_state = 'leased'
+                       AND lease_expires_at <= $4
+                     ORDER BY lease_expires_at ASC, item_id ASC
+                     LIMIT $5
+                     FOR UPDATE SKIP LOCKED
+                 ),
+                 updated AS (
+                     UPDATE pqueue_items i
+                     SET lifecycle_state = 'pending',
+                         lease_token_hash = NULL,
+                         lease_expires_at = NULL,
+                         eligible_since = COALESCE(eligible_since, $4),
+                         item_version = item_version + 1,
+                         last_command_sequence = $6,
+                         updated_at = $4
+                     FROM candidates c
+                     WHERE i.tenant_id = $1
+                       AND i.queue_id = $2
+                       AND i.shard_id = $3
+                       AND i.item_id = c.item_id
+                     RETURNING i.item_id
+                 )
+                 SELECT u.item_id, c.group_key
+                 FROM updated u
+                 JOIN candidates c ON c.item_id = u.item_id
+                 ORDER BY c.item_id ASC",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                    &max_items,
+                    &(sequence as i64),
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+        let expired_item_ids: Vec<String> = rows.iter().map(|row| row.get("item_id")).collect();
+        let affected_group_keys: Vec<Option<String>> =
+            rows.iter().map(|row| row.get("group_key")).collect();
+
+        if !expired_item_ids.is_empty() {
+            refresh_group_summaries(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                &affected_group_keys,
+                &now_odt,
+            )
+            .await?;
+
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "lease_expired",
+                "expired_count": expired_item_ids.len(),
+            });
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'lease_expired', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &expired_item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgLeaseExpiredResult {
+            command_sequence: sequence,
+            expired_item_ids,
         })
     }
 }
