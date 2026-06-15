@@ -30,3 +30,7 @@ path = "tests/postgres_schema_migration_tests.rs"
 [[test]]
 name = "postgres_transaction_flow_tests"
 path = "tests/postgres_transaction_flow_tests.rs"
+
+[[test]]
+name = "postgres_retention_tests"
+path = "tests/postgres_retention_tests.rs"

@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260615T172537-61a0a599",
+  "bead_id": "pqueue-7b414f50",
+  "base_rev": "dda2e132447315e82cd1f45be29e13058a364392",
+  "created_at": "2026-06-15T17:25:37.494086916Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 8
+  },
+  "bead": {
+    "id": "pqueue-7b414f50",
+    "title": "B-044 Postgres idempotency retention and compaction groundwork",
+    "description": "BUILD-001 B-044 groundwork for idempotency, retention, and compaction. The supplemental B-044 bead owns full GC correctness verification.",
+    "acceptance": "cargo test -p pqueue-postgres postgres_retention_tests passes for request-id/item-key/terminal retention groundwork; no delete before replay/audit windows; ledger cites INV-5.",
+    "parent": "pqueue-113d0968",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:pqueue-postgres",
+      "suite:postgres_retention_tests"
+    ],
+    "metadata": {
+      "spec-id": "td-postgres-native-reference-mode"
+    }
+  },
+  "governing": [
+    {
+      "id": "td-postgres-native-reference-mode",
+      "path": "docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md",
+      "title": "Technical Design: TD-002 Postgres-Native Reference Mode"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260615T172537-61a0a599",
+    "prompt": ".ddx/executions/20260615T172537-61a0a599/prompt.md",
+    "manifest": ".ddx/executions/20260615T172537-61a0a599/manifest.json",
+    "result": ".ddx/executions/20260615T172537-61a0a599/result.json",
+    "checks": ".ddx/executions/20260615T172537-61a0a599/checks.json",
+    "usage": ".ddx/executions/20260615T172537-61a0a599/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-7b414f50-20260615T172537-61a0a599"
+  },
+  "prompt_sha": "12f039996d47e262bec614c952b9bf1a243ea23639884ad53abfbb8cd7289b34"
+}

@@ -2,6 +2,7 @@
 
 pub mod append;
 pub mod control_plane;
+pub mod retention;
 pub mod schema;
 
 mod convert;

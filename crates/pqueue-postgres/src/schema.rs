@@ -134,6 +134,22 @@ CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
   PRIMARY KEY (tenant_id, queue_id, client_item_key)
 );
 
-CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
+CREATE INDEX IF NOT EXISTS pqueue_item_key_retention_expiry_idx
   ON pqueue_item_key_retention (expires_at);
+
+CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
+  tenant_id           text        NOT NULL,
+  queue_id            text        NOT NULL,
+  operation           text        NOT NULL,
+  request_id          text        NOT NULL,
+  request_fingerprint bytea       NOT NULL,
+  response_payload    jsonb,
+  command_positions   jsonb       NOT NULL DEFAULT '{}'::jsonb,
+  expires_at          timestamptz NOT NULL,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, queue_id, operation, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
+  ON pqueue_request_idempotency (expires_at);
 "#;
