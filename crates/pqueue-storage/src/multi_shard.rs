@@ -1,6 +1,7 @@
-use pqueue_core::ItemId;
+use std::collections::BTreeMap;
 
 use crate::types::ShardKey;
+use pqueue_core::{GroupKey, ItemId, QueueId, TenantId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShardFanoutPlan {
@@ -37,6 +38,37 @@ pub struct CrossShardProgress {
     pub progress_bound_risk_count: u64,
     pub as_of_ms: u64,
     pub stalled_shards: Vec<ShardKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardActiveScopeSummary {
+    pub group_key: Option<GroupKey>,
+    pub oldest_eligible_age_ms: Option<u64>,
+    pub eligible_count: Option<u64>,
+    pub progress_bound_risk_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardActiveScopeRead {
+    pub shard_key: ShardKey,
+    pub observed_at_ms: u64,
+    pub active_scopes: Vec<ShardActiveScopeSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveScopeDescriptor {
+    pub tenant_id: TenantId,
+    pub queue_id: QueueId,
+    pub group_key: Option<GroupKey>,
+    pub oldest_eligible_age_ms: u64,
+    pub eligible_count: Option<u64>,
+    pub progress_bound_risk_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossShardActiveScopes {
+    pub as_of_ms: u64,
+    pub active_scopes: Vec<ActiveScopeDescriptor>,
 }
 
 pub fn plan_fanout_claim(shards: &[ShardKey], max_items: usize) -> Vec<ShardFanoutPlan> {
@@ -114,5 +146,76 @@ pub fn aggregate_cross_shard_progress(
         progress_bound_risk_count,
         as_of_ms,
         stalled_shards,
+    }
+}
+
+pub fn aggregate_cross_shard_active_scopes(
+    shard_reads: &[ShardActiveScopeRead],
+    max_results: usize,
+) -> CrossShardActiveScopes {
+    let as_of_ms = shard_reads
+        .iter()
+        .map(|read| read.observed_at_ms)
+        .min()
+        .unwrap_or(0);
+    let mut by_scope: BTreeMap<(TenantId, QueueId, Option<GroupKey>), ActiveScopeDescriptor> =
+        BTreeMap::new();
+
+    for read in shard_reads {
+        for scope in &read.active_scopes {
+            let Some(oldest_eligible_age_ms) = scope.oldest_eligible_age_ms else {
+                continue;
+            };
+            let key = (
+                read.shard_key.tenant_id.clone(),
+                read.shard_key.queue_id.clone(),
+                scope.group_key.clone(),
+            );
+            by_scope
+                .entry(key)
+                .and_modify(|existing| {
+                    existing.oldest_eligible_age_ms =
+                        existing.oldest_eligible_age_ms.max(oldest_eligible_age_ms);
+                    existing.eligible_count =
+                        sum_optional(existing.eligible_count, scope.eligible_count);
+                    existing.progress_bound_risk_count = sum_optional(
+                        existing.progress_bound_risk_count,
+                        scope.progress_bound_risk_count,
+                    );
+                })
+                .or_insert_with(|| ActiveScopeDescriptor {
+                    tenant_id: read.shard_key.tenant_id.clone(),
+                    queue_id: read.shard_key.queue_id.clone(),
+                    group_key: scope.group_key.clone(),
+                    oldest_eligible_age_ms,
+                    eligible_count: scope.eligible_count,
+                    progress_bound_risk_count: scope.progress_bound_risk_count,
+                });
+        }
+    }
+
+    let mut active_scopes = by_scope.into_values().collect::<Vec<_>>();
+    active_scopes.sort_by(|left, right| {
+        right
+            .oldest_eligible_age_ms
+            .cmp(&left.oldest_eligible_age_ms)
+            .then_with(|| left.tenant_id.as_str().cmp(right.tenant_id.as_str()))
+            .then_with(|| left.queue_id.as_str().cmp(right.queue_id.as_str()))
+            .then_with(|| left.group_key.cmp(&right.group_key))
+    });
+    active_scopes.truncate(max_results);
+
+    CrossShardActiveScopes {
+        as_of_ms,
+        active_scopes,
+    }
+}
+
+fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
     }
 }
