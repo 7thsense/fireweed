@@ -181,6 +181,28 @@ pub struct PgBatchClaimResult {
     pub claimed_item_ids: Vec<String>,
 }
 
+#[derive(Debug)]
+pub struct PgGroupBatchClaimRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub max_groups: usize,
+    pub max_items: usize,
+    pub now: UtcTimestamp,
+    pub lease_token: String,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgGroupBatchClaimResult {
+    pub command_sequence: u64,
+    pub claimed_group_keys: Vec<String>,
+    pub claimed_item_ids: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Lease renewal / finalize / expiry request and response types
 // ---------------------------------------------------------------------------
@@ -334,10 +356,19 @@ pub enum AppendError {
     ShardNotFound,
     QueueNotFound,
     RequestConflict,
+    InvalidRequest(String),
+    BatchTooLarge,
     StorageFailure(String),
 }
 
 fn to_append_err(e: tokio_postgres::Error) -> AppendError {
+    if let Some(db_error) = e.as_db_error() {
+        return AppendError::StorageFailure(format!(
+            "{:?}: {}",
+            db_error.code(),
+            db_error.message()
+        ));
+    }
     AppendError::StorageFailure(e.to_string())
 }
 
@@ -665,7 +696,8 @@ impl PostgresAppendStore {
         // Step 1: load queue definition
         let q_row = tx
             .query_opt(
-                "SELECT priority_model, client_item_key_retention_ms, request_id_retention_ms
+                "SELECT priority_model, client_item_key_retention_ms, request_id_retention_ms,
+                        group_co_residency, max_eligible_group_size
                  FROM pqueue_queues
                  WHERE tenant_id = $1 AND queue_id = $2",
                 &[&req.tenant_id, &req.queue_id],
@@ -677,6 +709,8 @@ impl PostgresAppendStore {
         let pm_json: Value = q_row.get("priority_model");
         let retention_ms: i64 = q_row.get("client_item_key_retention_ms");
         let request_retention_ms: i64 = q_row.get("request_id_retention_ms");
+        let group_co_residency: bool = q_row.get("group_co_residency");
+        let max_eligible_group_size: Option<i64> = q_row.get("max_eligible_group_size");
         let pm = json_priority_model(&pm_json).map_err(|e| AppendError::StorageFailure(e.0))?;
 
         let request_fingerprint = req
@@ -746,6 +780,40 @@ impl PostgresAppendStore {
 
         // Steps 3 + 4: per-item insert
         for item in &req.items {
+            if group_co_residency && item.group_key.is_none() {
+                return Err(AppendError::InvalidRequest(
+                    "group_co_residency queues require group_key".to_string(),
+                ));
+            }
+            if let (Some(group_key), Some(max_group_size)) =
+                (item.group_key.as_ref(), max_eligible_group_size)
+            {
+                let existing_group_items = tx
+                    .query_one(
+                        "SELECT COUNT(*)::bigint
+                         FROM pqueue_items
+                         WHERE tenant_id = $1
+                           AND queue_id = $2
+                           AND shard_id = $3
+                           AND group_key = $4
+                           AND lifecycle_state NOT IN ('complete', 'failed')",
+                        &[
+                            &req.tenant_id,
+                            &req.queue_id,
+                            &(req.shard_id as i32),
+                            group_key,
+                        ],
+                    )
+                    .await
+                    .map_err(to_append_err)?
+                    .get::<_, i64>(0);
+                if existing_group_items + 1 > max_group_size {
+                    return Err(AppendError::InvalidRequest(
+                        "max_eligible_group_size exceeded".to_string(),
+                    ));
+                }
+            }
+
             let pv = effective_priority(item.priority.as_ref(), &pm, &req.now);
             let pv_json = priority_value_to_json(&pv);
             let ps: Vec<u8> = compute_priority_sort(&pv, &pm);
@@ -1516,6 +1584,247 @@ impl PostgresAppendStore {
         Ok(PgBatchRenewLeasesResult {
             command_sequence: sequence,
             items: item_results,
+        })
+    }
+
+    pub async fn group_batch_claim(
+        &self,
+        req: PgGroupBatchClaimRequest,
+    ) -> Result<PgGroupBatchClaimResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        let q_row = tx
+            .query_opt(
+                "SELECT group_co_residency, max_eligible_group_size
+                 FROM pqueue_queues
+                 WHERE tenant_id = $1 AND queue_id = $2",
+                &[&req.tenant_id, &req.queue_id],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::QueueNotFound)?;
+        let group_co_residency: bool = q_row.get("group_co_residency");
+        let max_eligible_group_size: Option<i64> = q_row.get("max_eligible_group_size");
+        if !group_co_residency || max_eligible_group_size.is_none() || req.max_groups == 0 {
+            return Err(AppendError::InvalidRequest(
+                "group batching requires group_co_residency, max_eligible_group_size, and max_groups > 0"
+                    .to_string(),
+            ));
+        }
+
+        let (current_epoch, sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let lease_expires_odt = utc_to_odt(&req.lease_expires_at);
+        let overfetch = (req.max_groups.saturating_mul(4).max(req.max_groups)) as i64;
+        let group_rows = tx
+            .query(
+                "SELECT group_key
+                 FROM pqueue_group_summary
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND group_key <> ''
+                   AND oldest_eligible_at IS NOT NULL
+                 ORDER BY rep_progress_guard_sort ASC,
+                          rep_priority_sort ASC,
+                          rep_created_at ASC,
+                          rep_item_id ASC
+                 LIMIT $4
+                 FOR UPDATE SKIP LOCKED",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &overfetch,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+        let mut claimed_group_keys = Vec::new();
+        let mut claimed_item_ids = Vec::new();
+        let mut affected_group_keys = Vec::new();
+
+        for row in group_rows {
+            if claimed_group_keys.len() >= req.max_groups {
+                break;
+            }
+
+            let group_key: String = row.get("group_key");
+            let active_leases = tx
+                .query_one(
+                    "SELECT COUNT(*)::bigint
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND shard_id = $3
+                       AND group_key = $4
+                       AND lifecycle_state = 'leased'",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &(req.shard_id as i32),
+                        &group_key,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?
+                .get::<_, i64>(0);
+            if active_leases > 0 {
+                continue;
+            }
+
+            let item_rows = tx
+                .query(
+                    "SELECT item_id
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND shard_id = $3
+                       AND group_key = $4
+                       AND lifecycle_state = 'pending'
+                       AND eligible_since IS NOT NULL
+                       AND (not_before IS NULL OR not_before <= $5)
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM unnest(gate_keys) AS g(gate_key)
+                         JOIN pqueue_gate_state gs
+                           ON gs.tenant_id = pqueue_items.tenant_id
+                          AND gs.queue_id = pqueue_items.queue_id
+                          AND gs.shard_id = pqueue_items.shard_id
+                          AND gs.gate_key = g.gate_key
+                          AND gs.state = 'blocked'
+                       )
+                     ORDER BY priority_sort ASC, created_at ASC, item_id ASC
+                     FOR UPDATE",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &(req.shard_id as i32),
+                        &group_key,
+                        &now_odt,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?;
+            if item_rows.is_empty() {
+                continue;
+            }
+
+            let group_item_ids: Vec<String> =
+                item_rows.iter().map(|row| row.get("item_id")).collect();
+            if group_item_ids.len() > req.max_items && claimed_item_ids.is_empty() {
+                return Err(AppendError::BatchTooLarge);
+            }
+            if claimed_item_ids.len() + group_item_ids.len() > req.max_items {
+                break;
+            }
+
+            tx.execute(
+                "UPDATE pqueue_items
+                 SET lifecycle_state = 'leased',
+                     lease_token_hash = $5,
+                     lease_expires_at = $6,
+                     item_version = item_version + 1,
+                     last_command_sequence = $7,
+                     updated_at = $8
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND item_id = ANY($4)",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &group_item_ids,
+                    &lease_token_hash(&req.lease_token),
+                    &lease_expires_odt,
+                    &(sequence as i64),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            affected_group_keys.push(Some(group_key.clone()));
+            claimed_group_keys.push(group_key);
+            claimed_item_ids.extend(group_item_ids);
+        }
+
+        if !claimed_item_ids.is_empty() {
+            refresh_group_summaries(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                &affected_group_keys,
+                &now_odt,
+            )
+            .await?;
+
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "group_batch_claim",
+                "claimed_group_count": claimed_group_keys.len(),
+                "claimed_item_count": claimed_item_ids.len(),
+                "lease_expires_at": req.lease_expires_at.seconds,
+            });
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'group_batch_claim', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &claimed_item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgGroupBatchClaimResult {
+            command_sequence: sequence,
+            claimed_group_keys,
+            claimed_item_ids,
         })
     }
 
