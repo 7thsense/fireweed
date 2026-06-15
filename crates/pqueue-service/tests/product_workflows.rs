@@ -48,37 +48,37 @@ struct ProductWorkflow {
 const PRODUCT_WORKFLOWS: &[ProductWorkflow] = &[
     ProductWorkflow {
         suite: "product_workflow_scheduled_action_delivery_e2e",
-        ac_ids: &["AC-E2E-1"],
-        inv_ids: &["INV-1", "INV-2"],
+        ac_ids: &["AC-E2E-1", "AC-CLAIM-3"],
+        inv_ids: &["INV-1", "INV-4"],
     },
     ProductWorkflow {
         suite: "product_workflow_marketo_group_batching_e2e",
-        ac_ids: &["AC-E2E-2"],
-        inv_ids: &["INV-7", "INV-9"],
+        ac_ids: &["AC-E2E-2", "AC-GRP-1", "AC-GRP-2"],
+        inv_ids: &["INV-7"],
     },
     ProductWorkflow {
         suite: "product_workflow_callback_cohort_e2e",
-        ac_ids: &["AC-E2E-3"],
+        ac_ids: &["AC-E2E-3", "AC-COH-1", "AC-COH-2"],
         inv_ids: &["INV-7"],
     },
     ProductWorkflow {
         suite: "product_workflow_jobs_connectors_recurring_e2e",
-        ac_ids: &["AC-E2E-4"],
+        ac_ids: &["AC-E2E-4", "AC-REC-1", "AC-REC-2", "AC-REC-3"],
         inv_ids: &["INV-5", "INV-10"],
     },
     ProductWorkflow {
         suite: "product_workflow_worker_crash_recovery_e2e",
         ac_ids: &["AC-E2E-5"],
-        inv_ids: &["INV-1", "INV-2", "INV-3"],
+        inv_ids: &["INV-2", "INV-3", "INV-5", "INV-10"],
     },
     ProductWorkflow {
         suite: "product_workflow_noisy_neighbor_scale_e2e",
-        ac_ids: &["AC-E2E-6"],
+        ac_ids: &["AC-E2E-6", "AC-DISC-1", "AC-LAT-3"],
         inv_ids: &["INV-4"],
     },
     ProductWorkflow {
         suite: "product_workflow_generic_priority_bounded_relaxed_e2e",
-        ac_ids: &["AC-E2E-8"],
+        ac_ids: &["AC-E2E-8", "AC-CORE-1", "AC-CLAIM-4", "AC-CLAIM-5"],
         inv_ids: &["INV-6"],
     },
     ProductWorkflow {
