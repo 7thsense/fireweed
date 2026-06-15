@@ -174,6 +174,111 @@ pub struct BatchClaimResponse {
     pub summary_basis: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiTimestamp {
+    pub seconds: i64,
+    #[serde(default)]
+    pub nanoseconds: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalizeOutcome {
+    Complete,
+    Fail,
+    Retry,
+    Release,
+    Rearm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RearmOptions {
+    pub not_before: ApiTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizeItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohort_lease_token: Option<String>,
+    pub outcome: FinalizeOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rearm: Option<RearmOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchFinalizeRequest {
+    pub request_id: String,
+    pub finalizations: Vec<FinalizeItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemResultStatus {
+    Completed,
+    Failed,
+    Retried,
+    Released,
+    Rearmed,
+    Purged,
+    NotFound,
+    Invalid,
+    Conflict,
+    StaleLease,
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_item_key: Option<String>,
+    pub status: ItemResultStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_position: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchFinalizeResponse {
+    pub request_id: String,
+    pub results: Vec<ItemResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_item_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeItemsRequest {
+    pub request_id: String,
+    #[serde(default)]
+    pub force: bool,
+    pub items: Vec<PurgeItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeItemsResponse {
+    pub request_id: String,
+    pub results: Vec<ItemResult>,
+    pub tombstone_replay_safe: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstone_retention_ms: Option<u64>,
+}
+
 impl ProblemDetails {
     pub fn new(code: ApiErrorCode, status: u16, detail: impl Into<String>) -> Self {
         Self {
@@ -369,5 +474,35 @@ mod tests {
             response.cohort_lease_token.as_deref(),
             Some("cohort-lease-a")
         );
+    }
+
+    #[test]
+    fn recurrence_and_purge_dtos_keep_api_status_names() {
+        let finalize = BatchFinalizeResponse {
+            request_id: "req-finalize".to_string(),
+            results: vec![ItemResult {
+                item_id: Some("item-a".to_string()),
+                client_item_key: None,
+                status: ItemResultStatus::Rearmed,
+                detail: None,
+                command_position: Some(7),
+            }],
+        };
+        assert_eq!(finalize.results[0].status, ItemResultStatus::Rearmed);
+
+        let purge = PurgeItemsResponse {
+            request_id: "req-purge".to_string(),
+            results: vec![ItemResult {
+                item_id: None,
+                client_item_key: Some("key-a".to_string()),
+                status: ItemResultStatus::Purged,
+                detail: None,
+                command_position: Some(8),
+            }],
+            tombstone_replay_safe: true,
+            tombstone_retention_ms: Some(86_400_000),
+        };
+        assert!(purge.tombstone_replay_safe);
+        assert_eq!(purge.results[0].status, ItemResultStatus::Purged);
     }
 }

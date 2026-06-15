@@ -11,8 +11,10 @@ use axum::{
     routing::{get, post},
 };
 use pqueue_client::{
-    ApiErrorCode, BatchClaimRequest, BatchClaimResponse, ClaimCompatibility, ClaimUnit,
-    GateShardStatus, NativeRoute, ProblemDetails, SetGatesRequest, SetGatesResponse,
+    ApiErrorCode, BatchClaimRequest, BatchClaimResponse, BatchFinalizeRequest,
+    BatchFinalizeResponse, ClaimCompatibility, ClaimUnit, FinalizeItem, FinalizeOutcome,
+    GateShardStatus, ItemResult, ItemResultStatus, NativeRoute, ProblemDetails, PurgeItem,
+    PurgeItemsRequest, PurgeItemsResponse, SetGatesRequest, SetGatesResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -117,6 +119,9 @@ pub struct QueueCapabilities {
     pub cohort_policy_enabled: bool,
     pub cohort_completion_bound_ms: Option<u64>,
     pub progress_bound_ms: Option<u64>,
+    pub recurring: bool,
+    pub recurrence_until_seconds: Option<i64>,
+    pub client_item_key_retention_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -325,16 +330,30 @@ async fn purge_items(
     State(state): State<AppState>,
     Path((tenant_id, queue_id)): Path<(String, String)>,
     req: Request<Body>,
-) -> Result<Json<RouteStubResponse>, ApiProblem> {
-    route_stub(
-        state,
-        NativeRoute::PurgeItems,
-        tenant_id,
-        Some(queue_id),
-        req,
-        true,
-    )
-    .await
+) -> Result<Json<PurgeItemsResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: PurgeItemsRequest = parse_json(req).await?;
+    validate_request_id(&body.request_id)?;
+    if body.items.is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "items must not be empty",
+        ));
+    }
+    let capabilities = state.queue_catalog.capabilities(&tenant_id, &queue_id);
+    let results = body
+        .items
+        .iter()
+        .map(|item| purge_result(item, body.force))
+        .collect();
+
+    Ok(Json(PurgeItemsResponse {
+        request_id: body.request_id,
+        results,
+        tombstone_replay_safe: true,
+        tombstone_retention_ms: capabilities.client_item_key_retention_ms,
+    }))
 }
 
 async fn renew_leases(
@@ -357,16 +376,28 @@ async fn batch_finalize(
     State(state): State<AppState>,
     Path((tenant_id, queue_id)): Path<(String, String)>,
     req: Request<Body>,
-) -> Result<Json<RouteStubResponse>, ApiProblem> {
-    route_stub(
-        state,
-        NativeRoute::BatchFinalize,
-        tenant_id,
-        Some(queue_id),
-        req,
-        true,
-    )
-    .await
+) -> Result<Json<BatchFinalizeResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: BatchFinalizeRequest = parse_json(req).await?;
+    validate_request_id(&body.request_id)?;
+    if body.finalizations.is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "finalizations must not be empty",
+        ));
+    }
+    let capabilities = state.queue_catalog.capabilities(&tenant_id, &queue_id);
+    let results = body
+        .finalizations
+        .iter()
+        .map(|item| finalize_result(item, capabilities))
+        .collect();
+
+    Ok(Json(BatchFinalizeResponse {
+        request_id: body.request_id,
+        results,
+    }))
 }
 
 async fn get_queue_metrics(
@@ -423,13 +454,7 @@ async fn route_stub(
 }
 
 fn validate_set_gates_request(req: &SetGatesRequest) -> Result<(), ApiProblem> {
-    if req.request_id.trim().is_empty() {
-        return Err(ApiProblem::new(
-            StatusCode::BAD_REQUEST,
-            ApiErrorCode::InvalidRequest,
-            "request_id is required",
-        ));
-    }
+    validate_request_id(&req.request_id)?;
     if req.gates.is_empty() {
         return Err(ApiProblem::new(
             StatusCode::BAD_REQUEST,
@@ -458,13 +483,7 @@ fn validate_batch_claim_request(
     req: &BatchClaimRequest,
     capabilities: QueueCapabilities,
 ) -> Result<ClaimUnit, ApiProblem> {
-    if req.request_id.trim().is_empty() {
-        return Err(ApiProblem::new(
-            StatusCode::BAD_REQUEST,
-            ApiErrorCode::InvalidRequest,
-            "request_id is required",
-        ));
-    }
+    validate_request_id(&req.request_id)?;
     if req.worker_id.trim().is_empty() {
         return Err(ApiProblem::new(
             StatusCode::BAD_REQUEST,
@@ -605,6 +624,122 @@ fn validate_claim_compatibility(
         return Ok(ClaimUnit::SameGroupKey);
     }
     Ok(ClaimUnit::Item)
+}
+
+fn validate_request_id(request_id: &str) -> Result<(), ApiProblem> {
+    if request_id.trim().is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "request_id is required",
+        ));
+    }
+    Ok(())
+}
+
+fn finalize_result(item: &FinalizeItem, capabilities: QueueCapabilities) -> ItemResult {
+    let target = item.item_id.clone();
+    if target.as_deref().is_none_or(str::is_empty) && item.cohort_id.is_none() {
+        return item_result(
+            target,
+            None,
+            ItemResultStatus::Invalid,
+            Some("item_id or cohort_id is required".to_string()),
+        );
+    }
+    if item.lease_token.as_deref().is_none_or(str::is_empty)
+        && item.cohort_lease_token.as_deref().is_none_or(str::is_empty)
+    {
+        return item_result(
+            target,
+            None,
+            ItemResultStatus::Invalid,
+            Some("lease_token or cohort_lease_token is required".to_string()),
+        );
+    }
+
+    match item.outcome {
+        FinalizeOutcome::Complete => item_result(target, None, ItemResultStatus::Completed, None),
+        FinalizeOutcome::Fail => item_result(target, None, ItemResultStatus::Failed, None),
+        FinalizeOutcome::Retry => item_result(target, None, ItemResultStatus::Retried, None),
+        FinalizeOutcome::Release => item_result(target, None, ItemResultStatus::Released, None),
+        FinalizeOutcome::Rearm => rearm_result(item, capabilities),
+    }
+}
+
+fn rearm_result(item: &FinalizeItem, capabilities: QueueCapabilities) -> ItemResult {
+    let target = item.item_id.clone();
+    if !capabilities.recurring {
+        return item_result(
+            target,
+            None,
+            ItemResultStatus::Invalid,
+            Some("rearm requires recurrence.mode=recurring".to_string()),
+        );
+    }
+    let Some(rearm) = item.rearm.as_ref() else {
+        return item_result(
+            target,
+            None,
+            ItemResultStatus::Invalid,
+            Some("rearm.not_before is required".to_string()),
+        );
+    };
+    if capabilities
+        .recurrence_until_seconds
+        .is_some_and(|until| rearm.not_before.seconds > until)
+    {
+        return item_result(
+            target,
+            None,
+            ItemResultStatus::Terminal,
+            Some("rearm is past recurrence.until".to_string()),
+        );
+    }
+    item_result(target, None, ItemResultStatus::Rearmed, None)
+}
+
+fn purge_result(item: &PurgeItem, force: bool) -> ItemResult {
+    if item.item_id.as_deref().is_none_or(str::is_empty)
+        && item.client_item_key.as_deref().is_none_or(str::is_empty)
+    {
+        return item_result(
+            item.item_id.clone(),
+            item.client_item_key.clone(),
+            ItemResultStatus::Invalid,
+            Some("item_id or client_item_key is required".to_string()),
+        );
+    }
+    if !force {
+        return item_result(
+            item.item_id.clone(),
+            item.client_item_key.clone(),
+            ItemResultStatus::Conflict,
+            Some("leased items require force=true to purge".to_string()),
+        );
+    }
+    item_result(
+        item.item_id.clone(),
+        item.client_item_key.clone(),
+        ItemResultStatus::Purged,
+        None,
+    )
+}
+
+fn item_result(
+    item_id: Option<String>,
+    client_item_key: Option<String>,
+    status: ItemResultStatus,
+    detail: Option<String>,
+) -> ItemResult {
+    ItemResult {
+        item_id,
+        client_item_key,
+        status,
+        detail,
+        command_position: matches!(status, ItemResultStatus::Rearmed | ItemResultStatus::Purged)
+            .then_some(0),
+    }
 }
 
 async fn parse_json<T>(req: Request<Body>) -> Result<T, ApiProblem>
