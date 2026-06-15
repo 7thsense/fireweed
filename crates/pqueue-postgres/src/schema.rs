@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
   recurrence_until      timestamptz,
   payload               jsonb,
   metadata              jsonb       NOT NULL DEFAULT '{}'::jsonb,
+  gate_keys             text[]      NOT NULL DEFAULT '{}',
   retry_count           integer     NOT NULL DEFAULT 0,
   retry_metadata        jsonb       NOT NULL DEFAULT '{}'::jsonb,
   failure_code          text,
@@ -155,6 +156,22 @@ CREATE INDEX IF NOT EXISTS pqueue_group_summary_discovery_idx
     rep_item_id
   )
   WHERE oldest_eligible_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS pqueue_gate_state (
+  tenant_id  text        NOT NULL,
+  queue_id   text        NOT NULL,
+  shard_id   integer     NOT NULL,
+  gate_key   text        NOT NULL,
+  state      text        NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, queue_id, shard_id, gate_key),
+  FOREIGN KEY (tenant_id, queue_id, shard_id)
+    REFERENCES pqueue_shards (tenant_id, queue_id, shard_id)
+);
+
+CREATE INDEX IF NOT EXISTS pqueue_gate_state_blocked_idx
+  ON pqueue_gate_state (tenant_id, queue_id, shard_id, gate_key)
+  WHERE state = 'blocked';
 
 CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
   tenant_id       text        NOT NULL,

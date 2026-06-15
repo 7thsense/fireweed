@@ -88,6 +88,7 @@ fn push_item(id: &str, group: &str, priority: i64, not_before: Option<UtcTimesta
         priority: Some(PriorityValue::Int64(priority)),
         not_before,
         group_key: Some(group.to_string()),
+        gate_keys: vec![],
         payload: None,
     }
 }

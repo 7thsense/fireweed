@@ -51,3 +51,7 @@ path = "tests/postgres_lease_lifecycle_tests.rs"
 [[test]]
 name = "postgres_durability_idempotency_tests"
 path = "tests/postgres_durability_idempotency_tests.rs"
+
+[[test]]
+name = "postgres_gate_tests"
+path = "tests/postgres_gate_tests.rs"

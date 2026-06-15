@@ -78,6 +78,7 @@ pub struct PgPushItem {
     pub priority: Option<PriorityValue>,
     pub not_before: Option<UtcTimestamp>,
     pub group_key: Option<String>,
+    pub gate_keys: Vec<String>,
     pub payload: Option<Value>,
 }
 
@@ -293,6 +294,36 @@ pub struct PgLeaseExpiredResult {
     pub expired_item_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgGateState {
+    Open,
+    Blocked,
+}
+
+#[derive(Debug)]
+pub struct PgSetGate {
+    pub gate_key: String,
+    pub state: PgGateState,
+}
+
+#[derive(Debug)]
+pub struct PgSetGatesRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub gates: Vec<PgSetGate>,
+    pub now: UtcTimestamp,
+}
+
+#[derive(Debug)]
+pub struct PgSetGatesResult {
+    pub command_sequence: u64,
+    pub gates: Vec<PgSetGate>,
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -331,6 +362,7 @@ fn push_request_fingerprint(req: &PgBatchPushRequest) -> Vec<u8> {
                     json!({"seconds": ts.seconds, "nanoseconds": ts.nanoseconds})
                 }),
                 "group_key": item.group_key,
+                "gate_keys": item.gate_keys,
                 "payload": item.payload,
             })
         })
@@ -447,7 +479,8 @@ async fn refresh_group_summary(
 
     tx.execute(
         "WITH group_items AS (
-           SELECT lifecycle_state, eligible_since, not_before, priority_sort, created_at, item_id
+           SELECT lifecycle_state, eligible_since, not_before, priority_sort, created_at, item_id,
+                  gate_keys
            FROM pqueue_items
            WHERE tenant_id = $1
              AND queue_id = $2
@@ -461,6 +494,16 @@ async fn refresh_group_summary(
                WHERE lifecycle_state = 'pending'
                  AND eligible_since IS NOT NULL
                  AND (not_before IS NULL OR not_before <= $5)
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM unnest(group_items.gate_keys) AS g(gate_key)
+                   JOIN pqueue_gate_state gs
+                     ON gs.tenant_id = $1
+                    AND gs.queue_id = $2
+                    AND gs.shard_id = $3
+                    AND gs.gate_key = g.gate_key
+                    AND gs.state = 'blocked'
+                 )
              )::bigint AS eligible_count,
              COUNT(*) FILTER (WHERE lifecycle_state = 'pending')::bigint AS pending_count,
              COUNT(*) FILTER (WHERE lifecycle_state = 'leased')::bigint AS leased_count,
@@ -474,6 +517,16 @@ async fn refresh_group_summary(
            WHERE lifecycle_state = 'pending'
              AND eligible_since IS NOT NULL
              AND (not_before IS NULL OR not_before <= $5)
+             AND NOT EXISTS (
+               SELECT 1
+               FROM unnest(group_items.gate_keys) AS g(gate_key)
+               JOIN pqueue_gate_state gs
+                 ON gs.tenant_id = $1
+                AND gs.queue_id = $2
+                AND gs.shard_id = $3
+                AND gs.gate_key = g.gate_key
+                AND gs.state = 'blocked'
+             )
            ORDER BY eligible_since ASC, priority_sort ASC, created_at ASC, item_id ASC
            LIMIT 1
          )
@@ -704,15 +757,15 @@ impl PostgresAppendStore {
                     "INSERT INTO pqueue_items (
                          tenant_id, queue_id, shard_id, item_id, client_item_key,
                          lifecycle_state, priority, priority_sort, not_before,
-                         eligible_since, group_key, payload, metadata,
+                         eligible_since, group_key, gate_keys, payload, metadata,
                          retry_count, item_version, last_command_sequence,
                          created_at, updated_at
                      ) VALUES (
                          $1, $2, $3, $4, $5,
                          'pending', $6, $7, $8,
-                         $9, $10, $11, '{}'::jsonb,
-                         0, 1, $12,
-                         $13, $13
+                         $9, $10, $11, $12, '{}'::jsonb,
+                         0, 1, $13,
+                         $14, $14
                      ) ON CONFLICT (tenant_id, queue_id, client_item_key) DO NOTHING",
                     &[
                         &req.tenant_id,
@@ -725,6 +778,7 @@ impl PostgresAppendStore {
                         &not_before_odt,
                         &elig_odt,
                         &item.group_key,
+                        &item.gate_keys,
                         &item.payload,
                         &(sequence as i64),
                         &now_odt,
@@ -1193,6 +1247,16 @@ impl PostgresAppendStore {
                        AND lifecycle_state = 'pending'
                        AND eligible_since IS NOT NULL
                        AND (not_before IS NULL OR not_before <= $4)
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM unnest(gate_keys) AS g(gate_key)
+                         JOIN pqueue_gate_state gs
+                           ON gs.tenant_id = pqueue_items.tenant_id
+                          AND gs.queue_id = pqueue_items.queue_id
+                          AND gs.shard_id = pqueue_items.shard_id
+                          AND gs.gate_key = g.gate_key
+                          AND gs.state = 'blocked'
+                       )
                      ORDER BY priority_sort ASC, created_at ASC, item_id ASC
                      LIMIT $5
                      FOR UPDATE SKIP LOCKED
@@ -1904,6 +1968,125 @@ impl PostgresAppendStore {
         Ok(PgLeaseExpiredResult {
             command_sequence: sequence,
             expired_item_ids,
+        })
+    }
+
+    pub async fn set_gates(&self, req: PgSetGatesRequest) -> Result<PgSetGatesResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        tx.query_opt(
+            "SELECT 1 FROM pqueue_queues WHERE tenant_id = $1 AND queue_id = $2",
+            &[&req.tenant_id, &req.queue_id],
+        )
+        .await
+        .map_err(to_append_err)?
+        .ok_or(AppendError::QueueNotFound)?;
+
+        let (current_epoch, sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let now_odt = utc_to_odt(&req.now);
+        let mut canonical_gates = req.gates;
+        canonical_gates.sort_by(|a, b| a.gate_key.cmp(&b.gate_key));
+        canonical_gates.dedup_by(|a, b| a.gate_key == b.gate_key);
+
+        for gate in &canonical_gates {
+            let state = match gate.state {
+                PgGateState::Open => "open",
+                PgGateState::Blocked => "blocked",
+            };
+            tx.execute(
+                "INSERT INTO pqueue_gate_state (
+                     tenant_id, queue_id, shard_id, gate_key, state, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (tenant_id, queue_id, shard_id, gate_key) DO UPDATE SET
+                   state = EXCLUDED.state,
+                   updated_at = EXCLUDED.updated_at",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &gate.gate_key,
+                    &state,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        if !canonical_gates.is_empty() {
+            let gate_payload: Vec<Value> = canonical_gates
+                .iter()
+                .map(|gate| {
+                    json!({
+                        "gate_key": gate.gate_key,
+                        "state": match gate.state {
+                            PgGateState::Open => "open",
+                            PgGateState::Blocked => "blocked",
+                        },
+                    })
+                })
+                .collect();
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "set_gates",
+                "gates": gate_payload,
+            });
+            let item_ids: Vec<String> = Vec::new();
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'set_gates', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(PgSetGatesResult {
+            command_sequence: sequence,
+            gates: canonical_gates,
         })
     }
 }
