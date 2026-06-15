@@ -200,6 +200,124 @@ fn lease_token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
+async fn refresh_group_summary(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    queue_id: &str,
+    shard_id: u32,
+    group_key: Option<&str>,
+    now_odt: &OffsetDateTime,
+) -> Result<(), AppendError> {
+    tx.execute(
+        "DELETE FROM pqueue_group_summary s
+         WHERE s.tenant_id = $1
+           AND s.queue_id = $2
+           AND s.shard_id = $3
+           AND s.group_key = COALESCE($4::text, '')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM pqueue_items i
+             WHERE i.tenant_id = s.tenant_id
+               AND i.queue_id = s.queue_id
+               AND i.shard_id = s.shard_id
+               AND COALESCE(i.group_key, '') = s.group_key
+           )",
+        &[&tenant_id, &queue_id, &(shard_id as i32), &group_key],
+    )
+    .await
+    .map_err(to_append_err)?;
+
+    tx.execute(
+        "WITH group_items AS (
+           SELECT lifecycle_state, eligible_since, not_before, priority_sort, created_at, item_id
+           FROM pqueue_items
+           WHERE tenant_id = $1
+             AND queue_id = $2
+             AND shard_id = $3
+             AND COALESCE(group_key, '') = COALESCE($4::text, '')
+         ),
+         stats AS (
+           SELECT
+             COUNT(*)::bigint AS total_count,
+             COUNT(*) FILTER (
+               WHERE lifecycle_state = 'pending'
+                 AND eligible_since IS NOT NULL
+                 AND (not_before IS NULL OR not_before <= $5)
+             )::bigint AS eligible_count,
+             COUNT(*) FILTER (WHERE lifecycle_state = 'pending')::bigint AS pending_count,
+             COUNT(*) FILTER (WHERE lifecycle_state = 'leased')::bigint AS leased_count,
+             COUNT(*) FILTER (WHERE lifecycle_state IN ('complete', 'failed'))::bigint
+               AS terminal_count
+           FROM group_items
+         ),
+         rep AS (
+           SELECT eligible_since, priority_sort, created_at, item_id
+           FROM group_items
+           WHERE lifecycle_state = 'pending'
+             AND eligible_since IS NOT NULL
+             AND (not_before IS NULL OR not_before <= $5)
+           ORDER BY eligible_since ASC, priority_sort ASC, created_at ASC, item_id ASC
+           LIMIT 1
+         )
+         INSERT INTO pqueue_group_summary (
+           tenant_id, queue_id, shard_id, group_key,
+           oldest_eligible_at, rep_progress_guard_sort, rep_priority_sort,
+           rep_created_at, rep_item_id,
+           eligible_count, pending_count, leased_count, terminal_count, updated_at
+         )
+         SELECT
+           $1, $2, $3, COALESCE($4::text, ''),
+           rep.eligible_since, rep.eligible_since, rep.priority_sort,
+           rep.created_at, rep.item_id,
+           stats.eligible_count, stats.pending_count, stats.leased_count,
+           stats.terminal_count, $5
+         FROM stats
+         LEFT JOIN rep ON true
+         WHERE stats.total_count > 0
+         ON CONFLICT (tenant_id, queue_id, shard_id, group_key) DO UPDATE SET
+           oldest_eligible_at = EXCLUDED.oldest_eligible_at,
+           rep_progress_guard_sort = EXCLUDED.rep_progress_guard_sort,
+           rep_priority_sort = EXCLUDED.rep_priority_sort,
+           rep_created_at = EXCLUDED.rep_created_at,
+           rep_item_id = EXCLUDED.rep_item_id,
+           eligible_count = EXCLUDED.eligible_count,
+           pending_count = EXCLUDED.pending_count,
+           leased_count = EXCLUDED.leased_count,
+           terminal_count = EXCLUDED.terminal_count,
+           updated_at = EXCLUDED.updated_at",
+        &[
+            &tenant_id,
+            &queue_id,
+            &(shard_id as i32),
+            &group_key,
+            now_odt,
+        ],
+    )
+    .await
+    .map_err(to_append_err)?;
+
+    Ok(())
+}
+
+async fn refresh_group_summaries(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    queue_id: &str,
+    shard_id: u32,
+    groups: &[Option<String>],
+    now_odt: &OffsetDateTime,
+) -> Result<(), AppendError> {
+    let mut groups = groups.to_vec();
+    groups.sort();
+    groups.dedup();
+
+    for group in groups {
+        refresh_group_summary(tx, tenant_id, queue_id, shard_id, group.as_deref(), now_odt).await?;
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // PostgresAppendStore
 // ---------------------------------------------------------------------------
@@ -283,6 +401,7 @@ impl PostgresAppendStore {
 
         let mut item_results: Vec<PgPushItemResult> = Vec::new();
         let mut new_item_ids: Vec<String> = Vec::new();
+        let mut affected_group_keys: Vec<Option<String>> = Vec::new();
 
         // Steps 3 + 4: per-item insert
         for item in &req.items {
@@ -328,6 +447,7 @@ impl PostgresAppendStore {
 
             if inserted == 1 {
                 new_item_ids.push(item.item_id.clone());
+                affected_group_keys.push(item.group_key.clone());
 
                 tx.execute(
                     "INSERT INTO pqueue_item_key_retention
@@ -370,6 +490,16 @@ impl PostgresAppendStore {
                 });
             }
         }
+
+        refresh_group_summaries(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            &affected_group_keys,
+            &now_odt,
+        )
+        .await?;
 
         // Step 5: write command record
         let checksum = vec![0u8; 4];
@@ -490,12 +620,13 @@ impl PostgresAppendStore {
         let now_odt = utc_to_odt(&req.now);
         let mut item_results: Vec<PgUpdateItemResult> = Vec::new();
         let mut updated_item_ids: Vec<String> = Vec::new();
+        let mut affected_group_keys: Vec<Option<String>> = Vec::new();
 
         // Step 3: per-item update
         for item in &req.items {
             let existing = tx
                 .query_opt(
-                    "SELECT lifecycle_state, item_version, lease_expires_at
+                    "SELECT lifecycle_state, item_version, lease_expires_at, group_key
                      FROM pqueue_items
                      WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3",
                     &[&req.tenant_id, &req.queue_id, &item.item_id],
@@ -512,6 +643,7 @@ impl PostgresAppendStore {
             };
 
             let state: String = row.get("lifecycle_state");
+            let group_key: Option<String> = row.get("group_key");
             if state == "complete" || state == "failed" {
                 item_results.push(PgUpdateItemResult {
                     item_id: item.item_id.clone(),
@@ -584,6 +716,7 @@ impl PostgresAppendStore {
             if updated == 1 {
                 let new_version = current_version + 1;
                 updated_item_ids.push(item.item_id.clone());
+                affected_group_keys.push(group_key);
                 item_results.push(PgUpdateItemResult {
                     item_id: item.item_id.clone(),
                     outcome: PgUpdateOutcome::Updated {
@@ -602,6 +735,16 @@ impl PostgresAppendStore {
 
         // Step 4: write command record (only if any items were processed)
         if !req.items.is_empty() {
+            refresh_group_summaries(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                &affected_group_keys,
+                &now_odt,
+            )
+            .await?;
+
             let checksum = vec![0u8; 4];
             let cmd_payload = json!({
                 "kind": "batch_update",
@@ -715,6 +858,7 @@ impl PostgresAppendStore {
             .query(
                 "WITH candidates AS (
                      SELECT item_id
+                          , group_key
                           , priority_sort
                           , created_at
                      FROM pqueue_items
@@ -743,7 +887,7 @@ impl PostgresAppendStore {
                        AND i.item_id = c.item_id
                      RETURNING i.item_id
                  )
-                 SELECT u.item_id
+                 SELECT u.item_id, c.group_key
                  FROM updated u
                  JOIN candidates c ON c.item_id = u.item_id
                  ORDER BY c.priority_sort ASC, c.created_at ASC, c.item_id ASC",
@@ -762,8 +906,20 @@ impl PostgresAppendStore {
             .map_err(to_append_err)?;
 
         let claimed_item_ids: Vec<String> = rows.iter().map(|row| row.get("item_id")).collect();
+        let affected_group_keys: Vec<Option<String>> =
+            rows.iter().map(|row| row.get("group_key")).collect();
 
         if !claimed_item_ids.is_empty() {
+            refresh_group_summaries(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                &affected_group_keys,
+                &now_odt,
+            )
+            .await?;
+
             let checksum = vec![0u8; 4];
             let cmd_payload = json!({
                 "kind": "batch_claim",

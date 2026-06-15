@@ -125,6 +125,37 @@ CREATE INDEX IF NOT EXISTS pqueue_items_group_claim_idx
   )
   WHERE lifecycle_state = 'pending';
 
+CREATE TABLE IF NOT EXISTS pqueue_group_summary (
+  tenant_id               text        NOT NULL,
+  queue_id                text        NOT NULL,
+  shard_id                integer     NOT NULL,
+  group_key               text        NOT NULL,
+  oldest_eligible_at      timestamptz,
+  rep_progress_guard_sort timestamptz,
+  rep_priority_sort       bytea,
+  rep_created_at          timestamptz,
+  rep_item_id             text,
+  eligible_count          bigint      NOT NULL DEFAULT 0,
+  pending_count           bigint      NOT NULL DEFAULT 0,
+  leased_count            bigint      NOT NULL DEFAULT 0,
+  terminal_count          bigint      NOT NULL DEFAULT 0,
+  updated_at              timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, queue_id, shard_id, group_key),
+  FOREIGN KEY (tenant_id, queue_id, shard_id)
+    REFERENCES pqueue_shards (tenant_id, queue_id, shard_id)
+);
+
+CREATE INDEX IF NOT EXISTS pqueue_group_summary_discovery_idx
+  ON pqueue_group_summary (
+    tenant_id, queue_id, shard_id,
+    oldest_eligible_at,
+    rep_progress_guard_sort,
+    rep_priority_sort,
+    rep_created_at,
+    rep_item_id
+  )
+  WHERE oldest_eligible_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
   tenant_id       text        NOT NULL,
   queue_id        text        NOT NULL,

@@ -39,3 +39,7 @@ path = "tests/postgres_retention_tests.rs"
 [[test]]
 name = "postgres_concurrency_claim_tests"
 path = "tests/postgres_concurrency_claim_tests.rs"
+
+[[test]]
+name = "postgres_group_summary_tests"
+path = "tests/postgres_group_summary_tests.rs"
