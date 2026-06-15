@@ -1,0 +1,9 @@
+{
+  "attempt_id": "20260615T170350-77ac7720",
+  "bead_id": "pqueue-6f2f48b9",
+  "worktree": "/Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-6f2f48b9-20260615T170350-77ac7720",
+  "trigger": "agent: provider process exited without emitting a final event",
+  "started_at": "2026-06-15T17:21:24.952772617Z",
+  "finished_at": "2026-06-15T17:21:24.959699397Z",
+  "scanned": 84
+}
