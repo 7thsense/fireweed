@@ -302,6 +302,7 @@ pub enum AppendError {
     EpochMismatch { expected: u64, current: u64 },
     ShardNotFound,
     QueueNotFound,
+    RequestConflict,
     StorageFailure(String),
 }
 
@@ -311,6 +312,110 @@ fn to_append_err(e: tokio_postgres::Error) -> AppendError {
 
 fn lease_token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
+}
+
+fn json_fingerprint(value: &Value) -> Vec<u8> {
+    Sha256::digest(value.to_string().as_bytes()).to_vec()
+}
+
+fn push_request_fingerprint(req: &PgBatchPushRequest) -> Vec<u8> {
+    let items: Vec<Value> = req
+        .items
+        .iter()
+        .map(|item| {
+            json!({
+                "item_id": item.item_id,
+                "client_item_key": item.client_item_key,
+                "priority": item.priority.as_ref().map(priority_value_to_json),
+                "not_before": item.not_before.map(|ts| {
+                    json!({"seconds": ts.seconds, "nanoseconds": ts.nanoseconds})
+                }),
+                "group_key": item.group_key,
+                "payload": item.payload,
+            })
+        })
+        .collect();
+    json_fingerprint(&json!({
+        "operation": "batch_push",
+        "tenant_id": req.tenant_id,
+        "queue_id": req.queue_id,
+        "shard_id": req.shard_id,
+        "expected_epoch": req.expected_epoch,
+        "items": items,
+    }))
+}
+
+fn push_result_to_json(result: &PgBatchPushResult) -> Value {
+    let items: Vec<Value> = result
+        .items
+        .iter()
+        .map(|item| {
+            let outcome = match &item.outcome {
+                PgPushOutcome::New { item_version } => {
+                    json!({"kind": "new", "item_version": item_version})
+                }
+                PgPushOutcome::Duplicate { existing_item_id } => {
+                    json!({"kind": "duplicate", "existing_item_id": existing_item_id})
+                }
+            };
+            json!({
+                "client_item_key": item.client_item_key,
+                "item_id": item.item_id,
+                "outcome": outcome,
+            })
+        })
+        .collect();
+    json!({"command_sequence": result.command_sequence, "items": items})
+}
+
+fn json_to_push_result(value: &Value) -> Result<PgBatchPushResult, AppendError> {
+    let command_sequence = value["command_sequence"]
+        .as_u64()
+        .ok_or_else(|| AppendError::StorageFailure("missing command_sequence".to_string()))?;
+    let items = value["items"]
+        .as_array()
+        .ok_or_else(|| AppendError::StorageFailure("missing push response items".to_string()))?
+        .iter()
+        .map(|item| {
+            let outcome = match item["outcome"]["kind"].as_str().unwrap_or("") {
+                "new" => PgPushOutcome::New {
+                    item_version: item["outcome"]["item_version"].as_u64().ok_or_else(|| {
+                        AppendError::StorageFailure("missing item_version".to_string())
+                    })?,
+                },
+                "duplicate" => PgPushOutcome::Duplicate {
+                    existing_item_id: item["outcome"]["existing_item_id"]
+                        .as_str()
+                        .ok_or_else(|| {
+                            AppendError::StorageFailure("missing existing_item_id".to_string())
+                        })?
+                        .to_string(),
+                },
+                other => {
+                    return Err(AppendError::StorageFailure(format!(
+                        "unknown push outcome: {other}"
+                    )));
+                }
+            };
+            Ok(PgPushItemResult {
+                client_item_key: item["client_item_key"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        AppendError::StorageFailure("missing client_item_key".to_string())
+                    })?
+                    .to_string(),
+                item_id: item["item_id"]
+                    .as_str()
+                    .ok_or_else(|| AppendError::StorageFailure("missing item_id".to_string()))?
+                    .to_string(),
+                outcome,
+            })
+        })
+        .collect::<Result<Vec<_>, AppendError>>()?;
+    Ok(PgBatchPushResult {
+        command_sequence,
+        items,
+    })
 }
 
 async fn refresh_group_summary(
@@ -507,7 +612,7 @@ impl PostgresAppendStore {
         // Step 1: load queue definition
         let q_row = tx
             .query_opt(
-                "SELECT priority_model, client_item_key_retention_ms
+                "SELECT priority_model, client_item_key_retention_ms, request_id_retention_ms
                  FROM pqueue_queues
                  WHERE tenant_id = $1 AND queue_id = $2",
                 &[&req.tenant_id, &req.queue_id],
@@ -518,7 +623,44 @@ impl PostgresAppendStore {
 
         let pm_json: Value = q_row.get("priority_model");
         let retention_ms: i64 = q_row.get("client_item_key_retention_ms");
+        let request_retention_ms: i64 = q_row.get("request_id_retention_ms");
         let pm = json_priority_model(&pm_json).map_err(|e| AppendError::StorageFailure(e.0))?;
+
+        let request_fingerprint = req
+            .request_id
+            .as_ref()
+            .map(|_| push_request_fingerprint(&req));
+        if let (Some(request_id), Some(fingerprint)) =
+            (req.request_id.as_ref(), request_fingerprint.as_ref())
+        {
+            if let Some(row) = tx
+                .query_opt(
+                    "SELECT request_fingerprint, response_payload
+                     FROM pqueue_request_idempotency
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND operation = 'batch_push'
+                       AND request_id = $3
+                       AND expires_at > $4
+                     FOR UPDATE",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        request_id,
+                        &utc_to_odt(&req.now),
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?
+            {
+                let stored_fingerprint: Vec<u8> = row.get("request_fingerprint");
+                if stored_fingerprint != *fingerprint {
+                    return Err(AppendError::RequestConflict);
+                }
+                let response_payload: Value = row.get("response_payload");
+                return json_to_push_result(&response_payload);
+            }
+        }
 
         // Step 2: lock shard, validate epoch, read sequence
         let s_row = tx
@@ -696,11 +838,48 @@ impl PostgresAppendStore {
         .await
         .map_err(to_append_err)?;
 
-        tx.commit().await.map_err(to_append_err)?;
-        Ok(PgBatchPushResult {
+        let result = PgBatchPushResult {
             command_sequence: sequence,
             items: item_results,
-        })
+        };
+
+        if let (Some(request_id), Some(fingerprint)) =
+            (req.request_id.as_ref(), request_fingerprint.as_ref())
+        {
+            let response_payload = push_result_to_json(&result);
+            let command_positions = json!({
+                "shard_id": req.shard_id,
+                "sequence": sequence,
+                "assignment_epoch": current_epoch,
+            });
+            let expires_at = now_odt + time::Duration::milliseconds(request_retention_ms);
+            tx.execute(
+                "INSERT INTO pqueue_request_idempotency (
+                     tenant_id, queue_id, operation, request_id,
+                     request_fingerprint, response_payload, command_positions,
+                     expires_at, created_at
+                 ) VALUES (
+                     $1, $2, 'batch_push', $3,
+                     $4, $5, $6,
+                     $7, $8
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    request_id,
+                    fingerprint,
+                    &response_payload,
+                    &command_positions,
+                    &expires_at,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(result)
     }
 
     // -----------------------------------------------------------------------
