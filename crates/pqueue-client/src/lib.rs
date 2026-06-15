@@ -167,6 +167,10 @@ pub struct BatchClaimResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claimed_group_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohort_lease_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_basis: Option<String>,
 }
 
@@ -341,5 +345,29 @@ mod tests {
         };
         assert!(!whole_group.has_same_group_key_filter());
         assert_eq!(whole_group.group_batching.unwrap().max_groups, 3);
+    }
+
+    #[test]
+    fn batch_claim_response_carries_whole_cohort_fields() {
+        let response = BatchClaimResponse {
+            request_id: "req-cohort".to_string(),
+            claim_unit: ClaimUnit::WholeCohort,
+            items: vec![ClaimedItem {
+                item_id: "item-a".to_string(),
+                group_key: Some("callback-42".to_string()),
+                lease_token: None,
+            }],
+            claimed_group_keys: vec![],
+            cohort_id: Some("cohort-a".to_string()),
+            cohort_lease_token: Some("cohort-lease-a".to_string()),
+            summary_basis: None,
+        };
+
+        assert_eq!(response.claim_unit, ClaimUnit::WholeCohort);
+        assert_eq!(response.cohort_id.as_deref(), Some("cohort-a"));
+        assert_eq!(
+            response.cohort_lease_token.as_deref(),
+            Some("cohort-lease-a")
+        );
     }
 }

@@ -114,6 +114,9 @@ impl AppState {
 pub struct QueueCapabilities {
     pub group_co_residency: bool,
     pub max_eligible_group_size: Option<u32>,
+    pub cohort_policy_enabled: bool,
+    pub cohort_completion_bound_ms: Option<u64>,
+    pub progress_bound_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -311,6 +314,8 @@ async fn batch_claim(
         claim_unit,
         items: vec![],
         claimed_group_keys: vec![],
+        cohort_id: None,
+        cohort_lease_token: None,
         summary_basis: (claim_unit == ClaimUnit::WholeGroup)
             .then(|| "pqueue_group_summary".to_string()),
     }))
@@ -552,6 +557,48 @@ fn validate_claim_compatibility(
     }
 
     if compatibility.is_whole_cohort() {
+        if compatibility.has_same_group_key_filter() || compatibility.group_key.is_some() {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "whole_cohort cannot be combined with same_group_key, group_key, or group_batching",
+            ));
+        }
+        if !capabilities.cohort_policy_enabled {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "whole_cohort requires cohort_policy.enabled=true",
+            ));
+        }
+        if !capabilities.group_co_residency {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "whole_cohort requires group_co_residency",
+            ));
+        }
+        let Some(completion_bound_ms) = capabilities.cohort_completion_bound_ms else {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "whole_cohort requires cohort completion_bound_ms",
+            ));
+        };
+        let Some(progress_bound_ms) = capabilities.progress_bound_ms else {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "whole_cohort requires queue progress_bound_ms",
+            ));
+        };
+        if completion_bound_ms > progress_bound_ms {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "cohort completion_bound_ms must be <= progress_bound_ms",
+            ));
+        }
         return Ok(ClaimUnit::WholeCohort);
     }
     if compatibility.has_same_group_key_filter() {
