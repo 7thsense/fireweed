@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use pqueue_core::{
-    CohortPolicy, DecimalValue, PriorityModel, PriorityModelKind, PriorityValue, UtcTimestamp,
-    priority_sort as compute_priority_sort,
+    CohortPolicy, DecimalValue, PriorityModel, PriorityModelKind, PriorityValue, RecurrenceMode,
+    UtcTimestamp, priority_sort as compute_priority_sort,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
-use crate::convert::{json_cohort_policy, json_priority_model};
+use crate::convert::{json_cohort_policy, json_priority_model, json_recurrence};
 use crate::schema::DDL;
 
 // ---------------------------------------------------------------------------
@@ -79,6 +79,7 @@ pub struct PgPushItem {
     pub not_before: Option<UtcTimestamp>,
     pub group_key: Option<String>,
     pub cohort_size: Option<u32>,
+    pub recurrence_until: Option<UtcTimestamp>,
     pub gate_keys: Vec<String>,
     pub payload: Option<Value>,
 }
@@ -294,6 +295,7 @@ pub enum PgFinalizeKind {
     Fail,
     Retry,
     Release,
+    Rearm,
 }
 
 #[derive(Debug)]
@@ -310,6 +312,7 @@ pub enum PgFinalizeOutcome {
     Failed { item_version: u64 },
     Retried { item_version: u64 },
     Released { item_version: u64 },
+    Rearmed { item_version: u64 },
     StaleLease,
     NotFound,
     Terminal,
@@ -356,6 +359,46 @@ pub struct PgLeaseExpiredRequest {
 pub struct PgLeaseExpiredResult {
     pub command_sequence: u64,
     pub expired_item_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct PgPurgeItem {
+    pub item_id: Option<String>,
+    pub client_item_key: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct PgPurgeItemsRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub expected_epoch: u64,
+    pub command_id: String,
+    pub request_id: Option<String>,
+    pub force: bool,
+    pub items: Vec<PgPurgeItem>,
+    pub now: UtcTimestamp,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PgPurgeOutcome {
+    Purged { item_id: String },
+    NotFound,
+    Conflict { message: String },
+    Invalid { message: String },
+}
+
+#[derive(Debug)]
+pub struct PgPurgeItemResult {
+    pub item_id: Option<String>,
+    pub client_item_key: Option<String>,
+    pub outcome: PgPurgeOutcome,
+}
+
+#[derive(Debug)]
+pub struct PgPurgeItemsResult {
+    pub command_sequence: u64,
+    pub items: Vec<PgPurgeItemResult>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,6 +479,9 @@ fn push_request_fingerprint(req: &PgBatchPushRequest) -> Vec<u8> {
                 }),
                 "group_key": item.group_key,
                 "cohort_size": item.cohort_size,
+                "recurrence_until": item.recurrence_until.map(|ts| {
+                    json!({"seconds": ts.seconds, "nanoseconds": ts.nanoseconds})
+                }),
                 "gate_keys": item.gate_keys,
                 "payload": item.payload,
             })
@@ -519,6 +565,105 @@ fn json_to_push_result(value: &Value) -> Result<PgBatchPushResult, AppendError> 
         })
         .collect::<Result<Vec<_>, AppendError>>()?;
     Ok(PgBatchPushResult {
+        command_sequence,
+        items,
+    })
+}
+
+fn purge_request_fingerprint(req: &PgPurgeItemsRequest) -> Vec<u8> {
+    let items: Vec<Value> = req
+        .items
+        .iter()
+        .map(|item| {
+            json!({
+                "item_id": item.item_id,
+                "client_item_key": item.client_item_key,
+            })
+        })
+        .collect();
+    json_fingerprint(&json!({
+        "operation": "purge_items",
+        "tenant_id": req.tenant_id,
+        "queue_id": req.queue_id,
+        "shard_id": req.shard_id,
+        "expected_epoch": req.expected_epoch,
+        "force": req.force,
+        "items": items,
+    }))
+}
+
+fn purge_result_to_json(result: &PgPurgeItemsResult) -> Value {
+    let items: Vec<Value> = result
+        .items
+        .iter()
+        .map(|item| {
+            let outcome = match &item.outcome {
+                PgPurgeOutcome::Purged { item_id } => {
+                    json!({"kind": "purged", "item_id": item_id})
+                }
+                PgPurgeOutcome::NotFound => json!({"kind": "not_found"}),
+                PgPurgeOutcome::Conflict { message } => {
+                    json!({"kind": "conflict", "message": message})
+                }
+                PgPurgeOutcome::Invalid { message } => {
+                    json!({"kind": "invalid", "message": message})
+                }
+            };
+            json!({
+                "item_id": item.item_id,
+                "client_item_key": item.client_item_key,
+                "outcome": outcome,
+            })
+        })
+        .collect();
+    json!({"command_sequence": result.command_sequence, "items": items})
+}
+
+fn json_to_purge_result(value: &Value) -> Result<PgPurgeItemsResult, AppendError> {
+    let command_sequence = value["command_sequence"]
+        .as_u64()
+        .ok_or_else(|| AppendError::StorageFailure("missing command_sequence".to_string()))?;
+    let items = value["items"]
+        .as_array()
+        .ok_or_else(|| AppendError::StorageFailure("missing purge response items".to_string()))?
+        .iter()
+        .map(|item| {
+            let outcome = match item["outcome"]["kind"].as_str().unwrap_or("") {
+                "purged" => PgPurgeOutcome::Purged {
+                    item_id: item["outcome"]["item_id"]
+                        .as_str()
+                        .ok_or_else(|| {
+                            AppendError::StorageFailure("missing purged item_id".to_string())
+                        })?
+                        .to_string(),
+                },
+                "not_found" => PgPurgeOutcome::NotFound,
+                "conflict" => PgPurgeOutcome::Conflict {
+                    message: item["outcome"]["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                },
+                "invalid" => PgPurgeOutcome::Invalid {
+                    message: item["outcome"]["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                },
+                other => {
+                    return Err(AppendError::StorageFailure(format!(
+                        "unknown purge outcome: {other}"
+                    )));
+                }
+            };
+            Ok(PgPurgeItemResult {
+                item_id: item["item_id"].as_str().map(str::to_string),
+                client_item_key: item["client_item_key"].as_str().map(str::to_string),
+                outcome,
+            })
+        })
+        .collect::<Result<Vec<_>, AppendError>>()?;
+    Ok(PgPurgeItemsResult {
         command_sequence,
         items,
     })
@@ -868,7 +1013,8 @@ impl PostgresAppendStore {
         let q_row = tx
             .query_opt(
                 "SELECT priority_model, client_item_key_retention_ms, request_id_retention_ms,
-                        group_co_residency, max_eligible_group_size, cohort_policy
+                        group_co_residency, max_eligible_group_size, cohort_policy,
+                        recurrence_policy
                  FROM pqueue_queues
                  WHERE tenant_id = $1 AND queue_id = $2",
                 &[&req.tenant_id, &req.queue_id],
@@ -883,8 +1029,11 @@ impl PostgresAppendStore {
         let group_co_residency: bool = q_row.get("group_co_residency");
         let max_eligible_group_size: Option<i64> = q_row.get("max_eligible_group_size");
         let cohort_policy_json: Value = q_row.get("cohort_policy");
+        let recurrence_policy_json: Value = q_row.get("recurrence_policy");
         let pm = json_priority_model(&pm_json).map_err(|e| AppendError::StorageFailure(e.0))?;
         let cohort_policy = json_cohort_policy(&cohort_policy_json)
+            .map_err(|e| AppendError::StorageFailure(e.0))?;
+        let recurrence_policy = json_recurrence(&recurrence_policy_json)
             .map_err(|e| AppendError::StorageFailure(e.0))?;
 
         let request_fingerprint = req
@@ -980,6 +1129,12 @@ impl PostgresAppendStore {
                     "cohort_size requires cohort_policy.enabled=true".to_string(),
                 ));
             }
+            if recurrence_policy.mode == RecurrenceMode::Oneshot && item.recurrence_until.is_some()
+            {
+                return Err(AppendError::InvalidRequest(
+                    "recurrence_until requires recurrence.mode=recurring".to_string(),
+                ));
+            }
             if let (Some(group_key), Some(max_group_size)) =
                 (item.group_key.as_ref(), max_eligible_group_size)
             {
@@ -1014,21 +1169,28 @@ impl PostgresAppendStore {
             let ps: Vec<u8> = compute_priority_sort(&pv, &pm);
             let not_before_odt: Option<OffsetDateTime> = item.not_before.as_ref().map(utc_to_odt);
             let elig_odt = eligible_since_odt(item.not_before.as_ref(), &req.now);
+            let recurrence_until = item
+                .recurrence_until
+                .or(recurrence_policy.until)
+                .as_ref()
+                .map(utc_to_odt);
 
             let inserted = tx
                 .execute(
                     "INSERT INTO pqueue_items (
                          tenant_id, queue_id, shard_id, item_id, client_item_key,
                          lifecycle_state, priority, priority_sort, not_before,
-                         eligible_since, group_key, cohort_size, gate_keys, payload, metadata,
+                         eligible_since, group_key, cohort_size, recurrence_until,
+                         gate_keys, payload, metadata,
                          retry_count, item_version, last_command_sequence,
                          created_at, updated_at
                      ) VALUES (
                          $1, $2, $3, $4, $5,
                          'pending', $6, $7, $8,
-                         $9, $10, $11, $12, $13, '{}'::jsonb,
-                         0, 1, $14,
-                         $15, $15
+                         $9, $10, $11, $12,
+                         $13, $14, '{}'::jsonb,
+                         0, 1, $15,
+                         $16, $16
                      ) ON CONFLICT (tenant_id, queue_id, client_item_key) DO NOTHING",
                     &[
                         &req.tenant_id,
@@ -1042,6 +1204,7 @@ impl PostgresAppendStore {
                         &elig_odt,
                         &item.group_key,
                         &item.cohort_size.map(|size| size as i32),
+                        &recurrence_until,
                         &item.gate_keys,
                         &item.payload,
                         &(sequence as i64),
@@ -2518,7 +2681,7 @@ impl PostgresAppendStore {
 
         let q_row = tx
             .query_opt(
-                "SELECT retry_policy
+                "SELECT retry_policy, recurring
                  FROM pqueue_queues
                  WHERE tenant_id = $1 AND queue_id = $2",
                 &[&req.tenant_id, &req.queue_id],
@@ -2528,6 +2691,7 @@ impl PostgresAppendStore {
             .ok_or(AppendError::QueueNotFound)?;
         let retry_policy: Value = q_row.get("retry_policy");
         let max_attempts = retry_policy["max_attempts"].as_u64().unwrap_or(1) as i32;
+        let recurring: bool = q_row.get("recurring");
 
         let (current_epoch, sequence) = lock_shard_sequence(
             &tx,
@@ -2546,7 +2710,8 @@ impl PostgresAppendStore {
         for item in &req.items {
             let row = tx
                 .query_opt(
-                    "SELECT lifecycle_state, lease_expires_at, item_version, retry_count, group_key
+                    "SELECT lifecycle_state, lease_expires_at, item_version, retry_count,
+                            group_key, recurrence_until
                      FROM pqueue_items
                      WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3
                      FOR UPDATE",
@@ -2605,6 +2770,7 @@ impl PostgresAppendStore {
             let current_version = row.get::<_, i64>("item_version") as u64;
             let retry_count = row.get::<_, i32>("retry_count");
             let group_key: Option<String> = row.get("group_key");
+            let recurrence_until: Option<OffsetDateTime> = row.get("recurrence_until");
             let item_version = current_version + 1;
 
             let outcome = match item.kind {
@@ -2745,6 +2911,64 @@ impl PostgresAppendStore {
                     .map_err(to_append_err)?;
                     PgFinalizeOutcome::Released { item_version }
                 }
+                PgFinalizeKind::Rearm => {
+                    if !recurring {
+                        item_results.push(PgFinalizeItemResult {
+                            item_id: item.item_id.clone(),
+                            outcome: PgFinalizeOutcome::Invalid {
+                                message: "rearm requires recurrence.mode=recurring".to_string(),
+                            },
+                        });
+                        continue;
+                    }
+                    let Some(not_before) = item.retry_not_before.as_ref() else {
+                        item_results.push(PgFinalizeItemResult {
+                            item_id: item.item_id.clone(),
+                            outcome: PgFinalizeOutcome::Invalid {
+                                message: "retry_not_before is required for rearm".to_string(),
+                            },
+                        });
+                        continue;
+                    };
+                    let not_before_odt = utc_to_odt(not_before);
+                    if recurrence_until.is_some_and(|until| not_before_odt > until) {
+                        item_results.push(PgFinalizeItemResult {
+                            item_id: item.item_id.clone(),
+                            outcome: PgFinalizeOutcome::Terminal,
+                        });
+                        continue;
+                    }
+                    let eligible_since = if not_before_odt > now_odt {
+                        not_before_odt
+                    } else {
+                        now_odt
+                    };
+                    tx.execute(
+                        "UPDATE pqueue_items
+                         SET lifecycle_state = 'pending',
+                             retry_count = 0,
+                             not_before = $4,
+                             eligible_since = $5,
+                             lease_token_hash = NULL,
+                             lease_expires_at = NULL,
+                             item_version = item_version + 1,
+                             last_command_sequence = $6,
+                             updated_at = $7
+                         WHERE tenant_id = $1 AND queue_id = $2 AND item_id = $3",
+                        &[
+                            &req.tenant_id,
+                            &req.queue_id,
+                            &item.item_id,
+                            &not_before_odt,
+                            &eligible_since,
+                            &(sequence as i64),
+                            &now_odt,
+                        ],
+                    )
+                    .await
+                    .map_err(to_append_err)?;
+                    PgFinalizeOutcome::Rearmed { item_version }
+                }
             };
 
             finalized_item_ids.push(item.item_id.clone());
@@ -2818,6 +3042,271 @@ impl PostgresAppendStore {
             command_sequence: sequence,
             items: item_results,
         })
+    }
+
+    pub async fn purge_items(
+        &self,
+        req: PgPurgeItemsRequest,
+    ) -> Result<PgPurgeItemsResult, AppendError> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(to_append_err)?;
+
+        let q_row = tx
+            .query_opt(
+                "SELECT client_item_key_retention_ms, request_id_retention_ms
+                 FROM pqueue_queues
+                 WHERE tenant_id = $1 AND queue_id = $2",
+                &[&req.tenant_id, &req.queue_id],
+            )
+            .await
+            .map_err(to_append_err)?
+            .ok_or(AppendError::QueueNotFound)?;
+        let key_retention_ms: i64 = q_row.get("client_item_key_retention_ms");
+        let request_retention_ms: i64 = q_row.get("request_id_retention_ms");
+        let now_odt = utc_to_odt(&req.now);
+
+        let request_fingerprint = req
+            .request_id
+            .as_ref()
+            .map(|_| purge_request_fingerprint(&req));
+        if let (Some(request_id), Some(fingerprint)) =
+            (req.request_id.as_ref(), request_fingerprint.as_ref())
+        {
+            if let Some(row) = tx
+                .query_opt(
+                    "SELECT request_fingerprint, response_payload
+                     FROM pqueue_request_idempotency
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND operation = 'purge_items'
+                       AND request_id = $3
+                       AND expires_at > $4
+                     FOR UPDATE",
+                    &[&req.tenant_id, &req.queue_id, request_id, &now_odt],
+                )
+                .await
+                .map_err(to_append_err)?
+            {
+                let stored_fingerprint: Vec<u8> = row.get("request_fingerprint");
+                if stored_fingerprint != *fingerprint {
+                    return Err(AppendError::RequestConflict);
+                }
+                let response_payload: Value = row.get("response_payload");
+                return json_to_purge_result(&response_payload);
+            }
+        }
+
+        let (current_epoch, sequence) = lock_shard_sequence(
+            &tx,
+            &req.tenant_id,
+            &req.queue_id,
+            req.shard_id,
+            req.expected_epoch,
+        )
+        .await?;
+
+        let mut item_results = Vec::new();
+        let mut purged_item_ids = Vec::new();
+        let mut affected_group_keys = Vec::new();
+        for item in &req.items {
+            if item.item_id.is_none() && item.client_item_key.is_none() {
+                item_results.push(PgPurgeItemResult {
+                    item_id: None,
+                    client_item_key: None,
+                    outcome: PgPurgeOutcome::Invalid {
+                        message: "item_id or client_item_key is required".to_string(),
+                    },
+                });
+                continue;
+            }
+
+            let row = tx
+                .query_opt(
+                    "SELECT item_id, client_item_key, lifecycle_state, group_key
+                     FROM pqueue_items
+                     WHERE tenant_id = $1
+                       AND queue_id = $2
+                       AND shard_id = $3
+                       AND ($4::text IS NULL OR item_id = $4)
+                       AND ($5::text IS NULL OR client_item_key = $5)
+                     FOR UPDATE",
+                    &[
+                        &req.tenant_id,
+                        &req.queue_id,
+                        &(req.shard_id as i32),
+                        &item.item_id,
+                        &item.client_item_key,
+                    ],
+                )
+                .await
+                .map_err(to_append_err)?;
+
+            let Some(row) = row else {
+                item_results.push(PgPurgeItemResult {
+                    item_id: item.item_id.clone(),
+                    client_item_key: item.client_item_key.clone(),
+                    outcome: PgPurgeOutcome::NotFound,
+                });
+                continue;
+            };
+
+            let item_id: String = row.get("item_id");
+            let client_item_key: String = row.get("client_item_key");
+            let lifecycle_state: String = row.get("lifecycle_state");
+            let group_key: Option<String> = row.get("group_key");
+            if lifecycle_state == "leased" && !req.force {
+                item_results.push(PgPurgeItemResult {
+                    item_id: Some(item_id),
+                    client_item_key: Some(client_item_key),
+                    outcome: PgPurgeOutcome::Conflict {
+                        message: "leased item requires force=true".to_string(),
+                    },
+                });
+                continue;
+            }
+
+            tx.execute(
+                "DELETE FROM pqueue_items
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND item_id = $4",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &item_id,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "INSERT INTO pqueue_item_key_retention
+                     (tenant_id, queue_id, client_item_key, item_id, expires_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (tenant_id, queue_id, client_item_key)
+                 DO UPDATE SET item_id = EXCLUDED.item_id,
+                               expires_at = EXCLUDED.expires_at",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &client_item_key,
+                    &item_id,
+                    &(now_odt + time::Duration::milliseconds(key_retention_ms)),
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            purged_item_ids.push(item_id.clone());
+            affected_group_keys.push(group_key);
+            item_results.push(PgPurgeItemResult {
+                item_id: Some(item_id.clone()),
+                client_item_key: Some(client_item_key),
+                outcome: PgPurgeOutcome::Purged { item_id },
+            });
+        }
+
+        if !purged_item_ids.is_empty() {
+            refresh_group_summaries(
+                &tx,
+                &req.tenant_id,
+                &req.queue_id,
+                req.shard_id,
+                &affected_group_keys,
+                &now_odt,
+            )
+            .await?;
+
+            let checksum = vec![0u8; 4];
+            let cmd_payload = json!({
+                "kind": "purge_items",
+                "purged_count": purged_item_ids.len(),
+                "force": req.force,
+            });
+            tx.execute(
+                "INSERT INTO pqueue_commands (
+                     tenant_id, queue_id, shard_id, sequence, assignment_epoch,
+                     command_id, request_id, command_type, item_ids,
+                     command_payload, checksum, created_at
+                 ) VALUES (
+                     $1, $2, $3, $4, $5,
+                     $6, $7, 'purge_items', $8,
+                     $9, $10, $11
+                 )",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(sequence as i64),
+                    &(current_epoch as i64),
+                    &req.command_id,
+                    &req.request_id,
+                    &purged_item_ids,
+                    &cmd_payload,
+                    &checksum,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+
+            tx.execute(
+                "UPDATE pqueue_shards
+                 SET next_command_sequence = next_command_sequence + 1, updated_at = $4
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        let result = PgPurgeItemsResult {
+            command_sequence: sequence,
+            items: item_results,
+        };
+        if let (Some(request_id), Some(fingerprint)) =
+            (req.request_id.as_ref(), request_fingerprint.as_ref())
+        {
+            let response_payload = purge_result_to_json(&result);
+            let command_positions = json!({
+                "shard_id": req.shard_id,
+                "sequence": sequence,
+                "assignment_epoch": current_epoch,
+            });
+            tx.execute(
+                "INSERT INTO pqueue_request_idempotency (
+                     tenant_id, queue_id, operation, request_id,
+                     request_fingerprint, response_payload, command_positions,
+                     expires_at, created_at
+                 ) VALUES ($1, $2, 'purge_items', $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (tenant_id, queue_id, operation, request_id)
+                 DO UPDATE SET response_payload = EXCLUDED.response_payload,
+                               command_positions = EXCLUDED.command_positions,
+                               expires_at = EXCLUDED.expires_at",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    request_id,
+                    fingerprint,
+                    &response_payload,
+                    &command_positions,
+                    &(now_odt + time::Duration::milliseconds(request_retention_ms)),
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_append_err)?;
+        }
+
+        tx.commit().await.map_err(to_append_err)?;
+        Ok(result)
     }
 
     pub async fn materialize_expired_leases(

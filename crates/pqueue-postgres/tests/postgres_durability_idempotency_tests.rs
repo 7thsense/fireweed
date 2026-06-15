@@ -90,6 +90,7 @@ fn push_item(id: &str, key: &str) -> PgPushItem {
         not_before: None,
         group_key: None,
         cohort_size: None,
+        recurrence_until: None,
         gate_keys: vec![],
         payload: None,
     }

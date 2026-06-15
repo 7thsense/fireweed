@@ -95,6 +95,7 @@ fn push_item(id: &str, group: &str, priority: i64, cohort_size: Option<u32>) -> 
         not_before: None,
         group_key: Some(group.to_string()),
         cohort_size,
+        recurrence_until: None,
         gate_keys: vec![],
         payload: None,
     }

@@ -89,6 +89,7 @@ fn push_item(id: &str, group: &str, priority: i64, not_before: Option<UtcTimesta
         not_before,
         group_key: Some(group.to_string()),
         cohort_size: None,
+        recurrence_until: None,
         gate_keys: vec![],
         payload: None,
     }

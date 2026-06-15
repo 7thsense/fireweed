@@ -105,6 +105,7 @@ fn push_item(id: &str, key: &str, priority: i64, not_before: Option<UtcTimestamp
         not_before,
         group_key: None,
         cohort_size: None,
+        recurrence_until: None,
         gate_keys: vec![],
         payload: None,
     }

@@ -63,3 +63,7 @@ path = "tests/postgres_group_batching_tests.rs"
 [[test]]
 name = "postgres_cohort_tests"
 path = "tests/postgres_cohort_tests.rs"
+
+[[test]]
+name = "postgres_recurrence_purge_tests"
+path = "tests/postgres_recurrence_purge_tests.rs"
