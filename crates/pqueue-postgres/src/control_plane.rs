@@ -49,11 +49,31 @@ pub struct PgEpochShardLeaseRequest {
     pub now: UtcTimestamp,
 }
 
+#[derive(Debug)]
+pub struct PgBeginDrainRequest {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub shard_id: u32,
+    pub owner_id: String,
+    pub expected_epoch: u64,
+    pub target_owner_id: String,
+    pub now: UtcTimestamp,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgShardLeaseResult {
     pub acquired: bool,
     pub assignment_epoch: u64,
     pub active_owner_id: Option<String>,
+    pub lease_expires_at: Option<UtcTimestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgShardOwnerState {
+    pub assignment_epoch: u64,
+    pub state: String,
+    pub active_owner_id: Option<String>,
+    pub target_owner_id: Option<String>,
     pub lease_expires_at: Option<UtcTimestamp>,
 }
 
@@ -244,6 +264,68 @@ impl PostgresControlPlaneStore {
             assignment_epoch: req.expected_epoch,
             active_owner_id: None,
             lease_expires_at: None,
+        })
+    }
+
+    pub async fn begin_drain(
+        &self,
+        req: PgBeginDrainRequest,
+    ) -> Result<PgShardOwnerState, ControlPlaneError> {
+        let client = self.client.lock().await;
+        let now_odt = utc_to_odt(&req.now);
+        client
+            .execute(
+                "UPDATE pqueue_shards
+                 SET state = 'draining',
+                     target_owner_id = $6,
+                     updated_at = $7
+                 WHERE tenant_id = $1
+                   AND queue_id = $2
+                   AND shard_id = $3
+                   AND assignment_epoch = $4
+                   AND active_owner_id = $5
+                   AND lease_expires_at > $7",
+                &[
+                    &req.tenant_id,
+                    &req.queue_id,
+                    &(req.shard_id as i32),
+                    &(req.expected_epoch as i64),
+                    &req.owner_id,
+                    &req.target_owner_id,
+                    &now_odt,
+                ],
+            )
+            .await
+            .map_err(to_storage_err)?;
+        drop(client);
+        self.resolve_shard_owner(&req.tenant_id, &req.queue_id, req.shard_id)
+            .await
+    }
+
+    pub async fn resolve_shard_owner(
+        &self,
+        tenant_id: &str,
+        queue_id: &str,
+        shard_id: u32,
+    ) -> Result<PgShardOwnerState, ControlPlaneError> {
+        let client = self.client.lock().await;
+        let row = client
+            .query_opt(
+                "SELECT assignment_epoch, state, active_owner_id, target_owner_id, lease_expires_at
+                 FROM pqueue_shards
+                 WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3",
+                &[&tenant_id, &queue_id, &(shard_id as i32)],
+            )
+            .await
+            .map_err(to_storage_err)?
+            .ok_or(ControlPlaneError::QueueNotFound)?;
+        let lease_expires_at: Option<OffsetDateTime> = row.get("lease_expires_at");
+        Ok(PgShardOwnerState {
+            assignment_epoch: row.get::<_, i64>("assignment_epoch") as u64,
+            state: row.get("state"),
+            active_owner_id: row.get("active_owner_id"),
+            target_owner_id: row.get("target_owner_id"),
+            lease_expires_at: lease_expires_at.map(odt_to_utc),
         })
     }
 }

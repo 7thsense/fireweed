@@ -1684,7 +1684,7 @@ impl PostgresAppendStore {
 
         let s_row = tx
             .query_opt(
-                "SELECT assignment_epoch, next_command_sequence
+                "SELECT assignment_epoch, next_command_sequence, state
                  FROM pqueue_shards
                  WHERE tenant_id = $1 AND queue_id = $2 AND shard_id = $3
                  FOR UPDATE",
@@ -1693,6 +1693,13 @@ impl PostgresAppendStore {
             .await
             .map_err(to_append_err)?
             .ok_or(AppendError::ShardNotFound)?;
+
+        let shard_state: String = s_row.get("state");
+        if shard_state == "draining" {
+            return Err(AppendError::InvalidRequest(
+                "shard is draining and not accepting new claims".to_string(),
+            ));
+        }
 
         let current_epoch = s_row.get::<_, i64>("assignment_epoch") as u64;
         if current_epoch != req.expected_epoch {
