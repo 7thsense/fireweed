@@ -236,4 +236,11 @@ CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
 
 CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
   ON pqueue_request_idempotency (expires_at);
+
+CREATE TABLE IF NOT EXISTS pqueue_workers (
+  owner_id         text        PRIMARY KEY,
+  heartbeat_at     timestamptz NOT NULL,
+  heartbeat_ttl_ms bigint      NOT NULL,
+  updated_at       timestamptz NOT NULL DEFAULT now()
+);
 "#;
