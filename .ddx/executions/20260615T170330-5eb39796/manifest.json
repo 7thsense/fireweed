@@ -1,0 +1,57 @@
+{
+  "attempt_id": "20260615T170330-5eb39796",
+  "bead_id": "pqueue-6f2f48b9",
+  "base_rev": "0bee2bbb5e592958fa3cdf0a989a5782e268ce24",
+  "created_at": "2026-06-15T17:03:30.372512735Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-6f2f48b9",
+    "title": "B-041 Postgres claim path strict relaxed and single lease",
+    "description": "BUILD-001 B-041 claim path: single active lease, strict ordering, bounded-relaxed claim, and progress-bound guards. Operator-fenced renewal is P1/B-100.",
+    "acceptance": "cargo test -p pqueue-postgres postgres_concurrency_claim_tests passes; cargo test -p pqueue-storage storage_conformance_claim_tests storage_conformance_progress_tests passes; AC-CLAIM-1/4/5 and INV-1/6 evidence recorded.",
+    "parent": "pqueue-113d0968",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:pqueue-postgres",
+      "suite:postgres_concurrency_claim_tests",
+      "suite:storage_conformance_claim_tests"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-06-15T17:03:30.08872886Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "td-postgres-native-reference-mode"
+    }
+  },
+  "governing": [
+    {
+      "id": "td-postgres-native-reference-mode",
+      "path": "docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md",
+      "title": "Technical Design: TD-002 Postgres-Native Reference Mode"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260615T170330-5eb39796",
+    "prompt": ".ddx/executions/20260615T170330-5eb39796/prompt.md",
+    "manifest": ".ddx/executions/20260615T170330-5eb39796/manifest.json",
+    "result": ".ddx/executions/20260615T170330-5eb39796/result.json",
+    "checks": ".ddx/executions/20260615T170330-5eb39796/checks.json",
+    "usage": ".ddx/executions/20260615T170330-5eb39796/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-6f2f48b9-20260615T170330-5eb39796"
+  },
+  "prompt_sha": "4f20a757adc845e4933d5bea4d0365a024336628aa08ef15d850382d5a94b1e2"
+}

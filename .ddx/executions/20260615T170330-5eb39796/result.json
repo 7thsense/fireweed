@@ -1,0 +1,23 @@
+{
+  "bead_id": "pqueue-6f2f48b9",
+  "attempt_id": "20260615T170330-5eb39796",
+  "base_rev": "0bee2bbb5e592958fa3cdf0a989a5782e268ce24",
+  "result_rev": "0bee2bbb5e592958fa3cdf0a989a5782e268ce24",
+  "outcome": "task_failed",
+  "status": "execution_failed",
+  "detail": "under-specified routing for harness=\"codex\": supply --model, --policy, or --min-power",
+  "harness": "codex",
+  "session_id": "eb-52a3772a",
+  "duration_ms": 607,
+  "exit_code": 1,
+  "error": "under-specified routing for harness=\"codex\": supply --model, --policy, or --min-power",
+  "project_root": "/Users/erik/Projects/pqueue",
+  "failure_mode": "unknown",
+  "execution_dir": ".ddx/executions/20260615T170330-5eb39796",
+  "prompt_file": ".ddx/executions/20260615T170330-5eb39796/prompt.md",
+  "manifest_file": ".ddx/executions/20260615T170330-5eb39796/manifest.json",
+  "result_file": ".ddx/executions/20260615T170330-5eb39796/result.json",
+  "rate_limit_budget": 300000000000,
+  "started_at": "2026-06-15T17:03:30.379871346Z",
+  "finished_at": "2026-06-15T17:03:30.987351875Z"
+}
