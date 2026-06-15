@@ -46,6 +46,53 @@ pub struct ProblemDetails {
     pub code: ApiErrorCode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateState {
+    Blocked,
+    Open,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetGate {
+    pub gate_key: String,
+    pub state: GateState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetGatesRequest {
+    pub request_id: String,
+    pub gates: Vec<SetGate>,
+}
+
+impl SetGatesRequest {
+    pub fn canonical_gates(&self) -> Vec<SetGate> {
+        let mut gates = std::collections::BTreeMap::new();
+        for gate in &self.gates {
+            gates.insert(gate.gate_key.clone(), gate.state);
+        }
+        gates
+            .into_iter()
+            .map(|(gate_key, state)| SetGate { gate_key, state })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateShardStatus {
+    pub shard: String,
+    pub applied_command_position: u64,
+    pub converged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetGatesResponse {
+    pub request_id: String,
+    pub gate_epoch: u64,
+    pub gates: Vec<SetGate>,
+    pub shards: Vec<GateShardStatus>,
+}
+
 impl ProblemDetails {
     pub fn new(code: ApiErrorCode, status: u16, detail: impl Into<String>) -> Self {
         Self {
@@ -161,6 +208,41 @@ mod tests {
         assert_eq!(
             NativeRoute::DiscoverActiveScopes.path("tenant-a", None),
             "/v1/tenants/tenant-a/scopes:discover"
+        );
+    }
+
+    #[test]
+    fn set_gates_requests_canonicalize_last_write_wins() {
+        let request = SetGatesRequest {
+            request_id: "req-gates".to_string(),
+            gates: vec![
+                SetGate {
+                    gate_key: "z".to_string(),
+                    state: GateState::Blocked,
+                },
+                SetGate {
+                    gate_key: "a".to_string(),
+                    state: GateState::Open,
+                },
+                SetGate {
+                    gate_key: "z".to_string(),
+                    state: GateState::Open,
+                },
+            ],
+        };
+
+        assert_eq!(
+            request.canonical_gates(),
+            vec![
+                SetGate {
+                    gate_key: "a".to_string(),
+                    state: GateState::Open,
+                },
+                SetGate {
+                    gate_key: "z".to_string(),
+                    state: GateState::Open,
+                },
+            ]
         );
     }
 }

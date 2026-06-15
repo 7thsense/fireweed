@@ -10,8 +10,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use pqueue_client::{ApiErrorCode, NativeRoute, ProblemDetails};
+use pqueue_client::{
+    ApiErrorCode, GateShardStatus, NativeRoute, ProblemDetails, SetGatesRequest, SetGatesResponse,
+};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 pub mod verification_ledger;
@@ -221,16 +224,22 @@ async fn set_gates(
     State(state): State<AppState>,
     Path((tenant_id, queue_id)): Path<(String, String)>,
     req: Request<Body>,
-) -> Result<Json<RouteStubResponse>, ApiProblem> {
-    route_stub(
-        state,
-        NativeRoute::SetGates,
-        tenant_id,
-        Some(queue_id),
-        req,
-        true,
-    )
-    .await
+) -> Result<Json<SetGatesResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: SetGatesRequest = parse_json(req).await?;
+    validate_set_gates_request(&body)?;
+    let gates = body.canonical_gates();
+
+    Ok(Json(SetGatesResponse {
+        request_id: body.request_id,
+        gate_epoch: 1,
+        gates,
+        shards: vec![GateShardStatus {
+            shard: format!("{tenant_id}/{queue_id}/shard-0"),
+            applied_command_position: 0,
+            converged: true,
+        }],
+    }))
 }
 
 async fn batch_claim(
@@ -339,7 +348,7 @@ async fn route_stub(
 ) -> Result<Json<RouteStubResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
     if expects_body {
-        parse_json_body(req).await?;
+        let _: serde_json::Value = parse_json(req).await?;
     }
 
     Ok(Json(RouteStubResponse {
@@ -350,7 +359,42 @@ async fn route_stub(
     }))
 }
 
-async fn parse_json_body(req: Request<Body>) -> Result<(), ApiProblem> {
+fn validate_set_gates_request(req: &SetGatesRequest) -> Result<(), ApiProblem> {
+    if req.request_id.trim().is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "request_id is required",
+        ));
+    }
+    if req.gates.is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "gates must not be empty",
+        ));
+    }
+    for gate in &req.gates {
+        let valid = !gate.gate_key.is_empty()
+            && gate.gate_key.len() <= 256
+            && gate.gate_key.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            });
+        if !valid {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "gate_key must match ^[A-Za-z0-9._:-]{1,256}$",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn parse_json<T>(req: Request<Body>) -> Result<T, ApiProblem>
+where
+    T: DeserializeOwned,
+{
     let body = to_bytes(req.into_body(), 1024 * 1024).await.map_err(|_| {
         ApiProblem::new(
             StatusCode::BAD_REQUEST,
@@ -358,14 +402,13 @@ async fn parse_json_body(req: Request<Body>) -> Result<(), ApiProblem> {
             "request body could not be read",
         )
     })?;
-    serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
+    serde_json::from_slice::<T>(&body).map_err(|_| {
         ApiProblem::new(
             StatusCode::BAD_REQUEST,
             ApiErrorCode::InvalidRequest,
             "request body must be valid JSON",
         )
-    })?;
-    Ok(())
+    })
 }
 
 async fn route_not_found() -> ApiProblem {
