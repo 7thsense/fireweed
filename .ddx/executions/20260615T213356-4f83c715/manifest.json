@@ -1,0 +1,230 @@
+{
+  "attempt_id": "20260615T213356-4f83c715",
+  "bead_id": "pqueue-6f2f48b9",
+  "base_rev": "abe2afc863bf0f3cc9810a84a7fc6a8c3f4043f0",
+  "created_at": "2026-06-15T21:33:56.297659455Z",
+  "requested": {
+    "harness": "claude",
+    "model": "sonnet",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-6f2f48b9",
+    "title": "B-041 Postgres claim path strict relaxed and single lease",
+    "description": "BUILD-001 B-041 claim path: single active lease, strict ordering, bounded-relaxed claim, and progress-bound guards. Operator-fenced renewal is P1/B-100.",
+    "acceptance": "cargo test -p pqueue-postgres postgres_concurrency_claim_tests passes; cargo test -p pqueue-storage storage_conformance_claim_tests storage_conformance_progress_tests passes; AC-CLAIM-1/4/5 and INV-1/6 evidence recorded.",
+    "parent": "pqueue-113d0968",
+    "labels": [
+      "helix",
+      "helix-04",
+      "activity:build",
+      "kind:build",
+      "build-001",
+      "area:pqueue-postgres",
+      "suite:postgres_concurrency_claim_tests",
+      "suite:storage_conformance_claim_tests"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-06-15T17:03:30.08872886Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"fallback_chain\":[],\"requested_harness\":\"codex\"}",
+          "created_at": "2026-06-15T17:03:31.051164512Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260615T170330-5eb39796\",\"bead_id\":\"pqueue-6f2f48b9\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"\",\"routing_intent_degraded\":true,\"routing_intent_note\":\"actual route facts unavailable\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-06-15T17:03:31.181962431Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli harness=codex note=actual route facts unavailable"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"0bee2bbb5e592958fa3cdf0a989a5782e268ce24\",\"classification\":\"\",\"decode_warnings\":[{\"field\":\"output\",\"warning\":\"empty output\"}],\"detail\":\"under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"malformed\":true,\"rationale\":\"\",\"recommended_action\":\"\",\"result_rev\":\"0bee2bbb5e592958fa3cdf0a989a5782e268ce24\",\"session_id\":\"eb-52a3772a\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-06-15T17:03:31.775941271Z",
+          "kind": "bead-quality.triage-warning",
+          "source": "ddx work",
+          "summary": "empty output"
+        },
+        {
+          "actor": "erik",
+          "body": "under-specified routing for harness=\"codex\": supply --model, --policy, or --min-power\ndecision_audit={\"failure_class\":\"unknown\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=0bee2bbb5e592958fa3cdf0a989a5782e268ce24\nbase_rev=0bee2bbb5e592958fa3cdf0a989a5782e268ce24\nretry_after=2026-06-15T23:03:31Z\noutcome_reason=unknown",
+          "created_at": "2026-06-15T17:03:31.79046316Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"forced_at\":\"2026-06-15T17:03:50Z\",\"reason\":\"retry after under-specified Codex route; adding min-power\",\"retry_after\":\"2026-06-15T23:03:31Z\"}",
+          "created_at": "2026-06-15T17:03:50.032995143Z",
+          "kind": "force-claim",
+          "source": "ddx work",
+          "summary": "retry cooldown overridden for targeted execution"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-06-15T17:03:50.670774233Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"fallback_chain\":[],\"requested_harness\":\"codex\",\"requested_min_power\":8}",
+          "created_at": "2026-06-15T17:21:25.049080465Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260615T170350-77ac7720\",\"bead_id\":\"pqueue-6f2f48b9\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"\",\"routing_intent_degraded\":true,\"routing_intent_note\":\"actual route facts unavailable\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-06-15T17:21:25.737104797Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli harness=codex note=actual route facts unavailable"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"16bec18df39c95b47eeaa93b4b539bd408d3d281\",\"classification\":\"\",\"decode_warnings\":[{\"field\":\"output\",\"warning\":\"empty output\"}],\"detail\":\"agent: provider process exited without emitting a final event\",\"malformed\":true,\"rationale\":\"\",\"recommended_action\":\"\",\"result_rev\":\"2c772196dec9da65285d4676f1781ce74352c3ed\",\"session_id\":\"eb-77048c10\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-06-15T17:21:26.207311583Z",
+          "kind": "bead-quality.triage-warning",
+          "source": "ddx work",
+          "summary": "empty output"
+        },
+        {
+          "actor": "erik",
+          "body": "agent: provider process exited without emitting a final event\ndecision_audit={\"failure_class\":\"unknown\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=2c772196dec9da65285d4676f1781ce74352c3ed\nbase_rev=16bec18df39c95b47eeaa93b4b539bd408d3d281\nretry_after=2026-06-15T23:03:31Z\noutcome_reason=unknown",
+          "created_at": "2026-06-15T17:21:26.229371914Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"forced_at\":\"2026-06-15T21:07:24Z\",\"reason\":\"continue full queue goal after provider finalization failure; retrying B-041 in foreground\",\"retry_after\":\"2026-06-15T23:03:31Z\"}",
+          "created_at": "2026-06-15T21:07:24.409289467Z",
+          "kind": "force-claim",
+          "source": "ddx work",
+          "summary": "retry cooldown overridden for targeted execution"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[],\"requested_min_power\":8}",
+          "created_at": "2026-06-15T21:27:12.058614018Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"forced_at\":\"2026-06-15T21:27:35Z\",\"reason\":\"continue full queue goal; Codex attempts did not land B-041, retrying with claude-tui route that landed B-044\",\"retry_after\":\"2026-06-15T23:03:31Z\"}",
+          "created_at": "2026-06-15T21:27:35.862441152Z",
+          "kind": "force-claim",
+          "source": "ddx work",
+          "summary": "retry cooldown overridden for targeted execution"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: empty output\",\"fingerprint\":\"e34bdae94e7315839ca053aac38fbaa8650d6abc771248c4bad134e1d2da0366\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"e34bdae94e7315839ca053aac38fbaa8650d6abc771248c4bad134e1d2da0366\"}",
+          "created_at": "2026-06-15T21:31:18.614519108Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude-tui\",\"resolved_model\":\"sonnet-4.6\",\"fallback_chain\":[],\"requested_harness\":\"claude-tui\",\"requested_model\":\"sonnet-4.6\"}",
+          "created_at": "2026-06-15T21:31:19.086757312Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude-tui model=sonnet-4.6"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude-tui\",\"resolved_model\":\"sonnet-4.6\",\"fallback_chain\":[],\"requested_harness\":\"claude-tui\",\"requested_model\":\"sonnet-4.6\",\"requested_min_power\":8}",
+          "created_at": "2026-06-15T21:31:19.749779008Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude-tui model=sonnet-4.6"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"detail\":\"agent: unknown harness: claude-tui; hard pin exhausted: typed provider failure provider_harness_unavailable on pinned route (--harness claude-tui --model sonnet-4.6); the pin was not widened. Remediation: fix the pinned provider/model/harness, or rerun without the pin to let DDx fall back to another eligible route.\",\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"reason\":\"provider_harness_unavailable\"}",
+          "created_at": "2026-06-15T21:31:19.9236806Z",
+          "kind": "disruption_detected",
+          "source": "ddx work",
+          "summary": "provider_harness_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude-tui\",\"actual_model\":\"sonnet-4.6\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260615T213119-b6e1f9b2\",\"bead_id\":\"pqueue-6f2f48b9\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-06-15T21:31:19.93223603Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=sonnet-4.6 harness=claude-tui"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"60244b9f3cefe96b80a0688ad0dff415f8538e11\",\"classification\":\"\",\"decode_warnings\":[{\"field\":\"output\",\"warning\":\"empty output\"}],\"detail\":\"agent: unknown harness: claude-tui; hard pin exhausted: typed provider failure provider_harness_unavailable on pinned route (--harness claude-tui --model sonnet-4.6); the pin was not widened. Remediation: fix the pinned provider/model/harness, or rerun without the pin to let DDx fall back to another eligible route.\",\"malformed\":true,\"rationale\":\"\",\"recommended_action\":\"\",\"result_rev\":\"60244b9f3cefe96b80a0688ad0dff415f8538e11\",\"session_id\":\"eb-9d9296c6\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-06-15T21:31:23.820160281Z",
+          "kind": "bead-quality.triage-warning",
+          "source": "ddx work",
+          "summary": "empty output"
+        },
+        {
+          "actor": "erik",
+          "body": "agent: unknown harness: claude-tui; hard pin exhausted: typed provider failure provider_harness_unavailable on pinned route (--harness claude-tui --model sonnet-4.6); the pin was not widened. Remediation: fix the pinned provider/model/harness, or rerun without the pin to let DDx fall back to another eligible route.\ndecision_audit={\"failure_class\":\"provider_harness_unavailable\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=60244b9f3cefe96b80a0688ad0dff415f8538e11\nbase_rev=60244b9f3cefe96b80a0688ad0dff415f8538e11\nretry_after=2026-06-15T23:03:31Z\noutcome_reason=provider_harness_unavailable",
+          "created_at": "2026-06-15T21:31:23.839297101Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"forced_at\":\"2026-06-15T21:31:43Z\",\"reason\":\"continue full queue goal; claude-tui execute harness unavailable, retrying known claude harness\",\"retry_after\":\"2026-06-15T23:03:31Z\"}",
+          "created_at": "2026-06-15T21:31:43.147079409Z",
+          "kind": "force-claim",
+          "source": "ddx work",
+          "summary": "retry cooldown overridden for targeted execution"
+        }
+      ],
+      "spec-id": "td-postgres-native-reference-mode",
+      "work-cooldown-base-rev": "0bee2bbb5e592958fa3cdf0a989a5782e268ce24",
+      "work-last-detail": "under-specified routing for harness=\"codex\": supply --model, --policy, or --min-power",
+      "work-last-status": "execution_failed",
+      "work-retry-after": "2026-06-15T23:03:31Z"
+    }
+  },
+  "governing": [
+    {
+      "id": "td-postgres-native-reference-mode",
+      "path": "docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md",
+      "title": "Technical Design: TD-002 Postgres-Native Reference Mode"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260615T213356-4f83c715",
+    "prompt": ".ddx/executions/20260615T213356-4f83c715/prompt.md",
+    "manifest": ".ddx/executions/20260615T213356-4f83c715/manifest.json",
+    "result": ".ddx/executions/20260615T213356-4f83c715/result.json",
+    "checks": ".ddx/executions/20260615T213356-4f83c715/checks.json",
+    "usage": ".ddx/executions/20260615T213356-4f83c715/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-6f2f48b9-20260615T213356-4f83c715"
+  },
+  "prompt_sha": "e9eef0d0e071f84e13fa69f5b955f6c7e6cc714fc2f692b9998e3bd3b3b61375"
+}
