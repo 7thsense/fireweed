@@ -3,7 +3,9 @@
 use pqueue_core::{ClientItemKey, ItemId, QueueId, TenantId, UtcTimestamp};
 use pqueue_storage::commands::{BatchPushCommand, PushItem};
 use pqueue_storage::multi_shard::{
-    ClaimCandidate, ClaimSortKey, deterministic_k_way_merge, plan_fanout_claim,
+    ClaimCandidate, ClaimIntentRecord, ClaimIntentReplayDecision, ClaimSortKey,
+    MultiShardCommandKind, ShardClaimReplayState, ShardCommandCommit, deterministic_k_way_merge,
+    evaluate_multi_shard_command_convergence, plan_fanout_claim, replay_claim_intent,
 };
 use pqueue_storage::{
     CommandEnvelope, CommandId, QueueCommand,
@@ -218,6 +220,209 @@ async fn storage_conformance_multi_shard_tests_fanout_claims_planned_shards() {
         .unwrap();
     assert_eq!(metrics.pending_count, 0);
     assert_eq!(metrics.leased_count, 4);
+}
+
+#[tokio::test]
+async fn multi_shard_claim_order_replay_tests_claim_intent_reuses_plan_after_partial_failure() {
+    let t = tenant();
+    let q = qid("intent-partial");
+    let shards = vec![
+        shard(t.clone(), q.clone(), 0),
+        shard(t.clone(), q.clone(), 1),
+        shard(t.clone(), q.clone(), 2),
+    ];
+    let intent = ClaimIntentRecord {
+        shard_plans: plan_fanout_claim(&shards, 5),
+    };
+    let decision = replay_claim_intent(
+        &intent,
+        &[
+            ShardClaimReplayState {
+                shard_key: shard(t.clone(), q.clone(), 0),
+                committed_item_ids: vec![iid("item-a"), iid("item-b")],
+                leases_active: true,
+                retryable_failure: false,
+            },
+            ShardClaimReplayState {
+                shard_key: shard(t.clone(), q.clone(), 1),
+                committed_item_ids: Vec::new(),
+                leases_active: false,
+                retryable_failure: true,
+            },
+        ],
+    );
+
+    let ClaimIntentReplayDecision::Replay(replay) = decision else {
+        panic!("active partial lease set should replay, not expire");
+    };
+    assert_eq!(
+        replay
+            .committed_item_ids
+            .iter()
+            .map(ItemId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["item-a", "item-b"]
+    );
+    assert!(replay.partial);
+    assert_eq!(
+        replay
+            .retry_plan
+            .iter()
+            .map(|plan| (plan.shard_key.shard_id.as_u32(), plan.max_items))
+            .collect::<Vec<_>>(),
+        vec![(1, 2), (2, 1)]
+    );
+}
+
+#[tokio::test]
+async fn multi_shard_claim_order_replay_tests_request_expired_is_envelope_scoped() {
+    let t = tenant();
+    let q = qid("intent-expired");
+    let intent = ClaimIntentRecord {
+        shard_plans: plan_fanout_claim(
+            &[
+                shard(t.clone(), q.clone(), 0),
+                shard(t.clone(), q.clone(), 1),
+            ],
+            4,
+        ),
+    };
+    let decision = replay_claim_intent(
+        &intent,
+        &[
+            ShardClaimReplayState {
+                shard_key: shard(t.clone(), q.clone(), 0),
+                committed_item_ids: vec![iid("old-a")],
+                leases_active: false,
+                retryable_failure: false,
+            },
+            ShardClaimReplayState {
+                shard_key: shard(t.clone(), q.clone(), 1),
+                committed_item_ids: vec![iid("old-b")],
+                leases_active: false,
+                retryable_failure: false,
+            },
+        ],
+    );
+
+    assert_eq!(decision, ClaimIntentReplayDecision::RequestExpired);
+}
+
+#[tokio::test]
+async fn storage_conformance_multi_shard_tests_set_gates_converges_only_after_all_shards_commit() {
+    let t = tenant();
+    let q = qid("set-gates-convergence");
+    let shards = vec![
+        shard(t.clone(), q.clone(), 0),
+        shard(t.clone(), q.clone(), 1),
+        shard(t.clone(), q.clone(), 2),
+    ];
+    let partial = evaluate_multi_shard_command_convergence(
+        MultiShardCommandKind::SetGates,
+        &shards,
+        &[
+            ShardCommandCommit {
+                shard_key: shard(t.clone(), q.clone(), 2),
+                committed: true,
+            },
+            ShardCommandCommit {
+                shard_key: shard(t.clone(), q.clone(), 0),
+                committed: true,
+            },
+        ],
+    );
+
+    assert!(!partial.converged);
+    assert!(!partial.ack_allowed);
+    assert!(!partial.visible);
+    assert_eq!(
+        partial
+            .committed_shards
+            .iter()
+            .map(|shard| shard.shard_id.as_u32())
+            .collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+    assert_eq!(
+        partial
+            .retry_shards
+            .iter()
+            .map(|shard| shard.shard_id.as_u32())
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+
+    let converged = evaluate_multi_shard_command_convergence(
+        MultiShardCommandKind::SetGates,
+        &shards,
+        &[
+            ShardCommandCommit {
+                shard_key: shard(t.clone(), q.clone(), 2),
+                committed: true,
+            },
+            ShardCommandCommit {
+                shard_key: shard(t.clone(), q.clone(), 0),
+                committed: true,
+            },
+            ShardCommandCommit {
+                shard_key: shard(t.clone(), q.clone(), 1),
+                committed: true,
+            },
+        ],
+    );
+    assert!(converged.converged);
+    assert!(converged.ack_allowed);
+    assert!(converged.visible);
+    assert!(converged.retry_shards.is_empty());
+}
+
+#[tokio::test]
+async fn storage_conformance_multi_shard_tests_purge_items_converges_by_retrying_uncommitted_shards()
+ {
+    let t = tenant();
+    let q = qid("purge-convergence");
+    let shards = vec![
+        shard(t.clone(), q.clone(), 0),
+        shard(t.clone(), q.clone(), 1),
+    ];
+    let partial = evaluate_multi_shard_command_convergence(
+        MultiShardCommandKind::PurgeItems,
+        &shards,
+        &[ShardCommandCommit {
+            shard_key: shard(t.clone(), q.clone(), 1),
+            committed: true,
+        }],
+    );
+
+    assert_eq!(partial.kind, MultiShardCommandKind::PurgeItems);
+    assert!(!partial.ack_allowed);
+    assert!(!partial.visible);
+    assert_eq!(
+        partial
+            .retry_shards
+            .iter()
+            .map(|shard| shard.shard_id.as_u32())
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
+
+    let converged = evaluate_multi_shard_command_convergence(
+        MultiShardCommandKind::PurgeItems,
+        &shards,
+        &[
+            ShardCommandCommit {
+                shard_key: shard(t.clone(), q.clone(), 1),
+                committed: true,
+            },
+            ShardCommandCommit {
+                shard_key: shard(t.clone(), q.clone(), 0),
+                committed: true,
+            },
+        ],
+    );
+    assert!(converged.converged);
+    assert!(converged.ack_allowed);
+    assert!(converged.visible);
 }
 
 fn claim_candidate(

@@ -71,6 +71,54 @@ pub struct CrossShardActiveScopes {
     pub active_scopes: Vec<ActiveScopeDescriptor>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimIntentRecord {
+    pub shard_plans: Vec<ShardFanoutPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardClaimReplayState {
+    pub shard_key: ShardKey,
+    pub committed_item_ids: Vec<ItemId>,
+    pub leases_active: bool,
+    pub retryable_failure: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimIntentReplay {
+    pub committed_item_ids: Vec<ItemId>,
+    pub retry_plan: Vec<ShardFanoutPlan>,
+    pub partial: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimIntentReplayDecision {
+    Replay(ClaimIntentReplay),
+    RequestExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiShardCommandKind {
+    SetGates,
+    PurgeItems,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardCommandCommit {
+    pub shard_key: ShardKey,
+    pub committed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiShardCommandConvergence {
+    pub kind: MultiShardCommandKind,
+    pub converged: bool,
+    pub ack_allowed: bool,
+    pub visible: bool,
+    pub committed_shards: Vec<ShardKey>,
+    pub retry_shards: Vec<ShardKey>,
+}
+
 pub fn plan_fanout_claim(shards: &[ShardKey], max_items: usize) -> Vec<ShardFanoutPlan> {
     if shards.is_empty() || max_items == 0 {
         return Vec::new();
@@ -208,6 +256,79 @@ pub fn aggregate_cross_shard_active_scopes(
     CrossShardActiveScopes {
         as_of_ms,
         active_scopes,
+    }
+}
+
+pub fn replay_claim_intent(
+    intent: &ClaimIntentRecord,
+    shard_states: &[ShardClaimReplayState],
+) -> ClaimIntentReplayDecision {
+    let mut committed_item_ids = shard_states
+        .iter()
+        .filter(|state| state.leases_active)
+        .flat_map(|state| state.committed_item_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    committed_item_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+
+    let any_recorded_lease = shard_states
+        .iter()
+        .any(|state| !state.committed_item_ids.is_empty());
+    let any_active_lease = !committed_item_ids.is_empty();
+    if any_recorded_lease && !any_active_lease {
+        return ClaimIntentReplayDecision::RequestExpired;
+    }
+
+    let mut retry_plan = intent
+        .shard_plans
+        .iter()
+        .filter(|plan| {
+            shard_states
+                .iter()
+                .find(|state| state.shard_key == plan.shard_key)
+                .is_none_or(|state| state.retryable_failure)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    retry_plan.sort_by(|left, right| left.shard_key.cmp(&right.shard_key));
+
+    ClaimIntentReplayDecision::Replay(ClaimIntentReplay {
+        committed_item_ids,
+        partial: !retry_plan.is_empty(),
+        retry_plan,
+    })
+}
+
+pub fn evaluate_multi_shard_command_convergence(
+    kind: MultiShardCommandKind,
+    target_shards: &[ShardKey],
+    commits: &[ShardCommandCommit],
+) -> MultiShardCommandConvergence {
+    let mut ordered_targets = target_shards.to_vec();
+    ordered_targets.sort();
+    ordered_targets.dedup();
+
+    let mut committed_shards = Vec::new();
+    let mut retry_shards = Vec::new();
+    for shard in ordered_targets {
+        let committed = commits
+            .iter()
+            .find(|commit| commit.shard_key == shard)
+            .is_some_and(|commit| commit.committed);
+        if committed {
+            committed_shards.push(shard);
+        } else {
+            retry_shards.push(shard);
+        }
+    }
+
+    let converged = retry_shards.is_empty();
+    MultiShardCommandConvergence {
+        kind,
+        converged,
+        ack_allowed: converged,
+        visible: converged,
+        committed_shards,
+        retry_shards,
     }
 }
 
