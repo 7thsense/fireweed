@@ -11,10 +11,12 @@ use axum::{
     routing::{get, post},
 };
 use pqueue_client::{
-    ApiErrorCode, BatchClaimRequest, BatchClaimResponse, BatchFinalizeRequest,
-    BatchFinalizeResponse, ClaimCompatibility, ClaimUnit, FinalizeItem, FinalizeOutcome,
-    GateShardStatus, ItemResult, ItemResultStatus, NativeRoute, ProblemDetails, PurgeItem,
-    PurgeItemsRequest, PurgeItemsResponse, SetGatesRequest, SetGatesResponse,
+    ActiveScope, ApiErrorCode, ApiTimestamp, BatchClaimRequest, BatchClaimResponse,
+    BatchFinalizeRequest, BatchFinalizeResponse, ClaimCompatibility, ClaimUnit,
+    DiscoverActiveScopesRequest, DiscoverActiveScopesResponse, DiscoveryGranularity, FinalizeItem,
+    FinalizeOutcome, GateShardStatus, GetQueueMetricsResponse, ItemResult, ItemResultStatus,
+    LifecycleCounts, NativeRoute, ProblemDetails, PurgeItem, PurgeItemsRequest, PurgeItemsResponse,
+    QueueMetrics, SetGatesRequest, SetGatesResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -127,6 +129,8 @@ pub struct QueueCapabilities {
 #[derive(Debug, Clone, Default)]
 pub struct QueueCatalog {
     queues: BTreeMap<(String, String), QueueCapabilities>,
+    metrics: BTreeMap<(String, String), QueueMetricsSnapshot>,
+    active_scopes: Vec<ActiveScopeSnapshot>,
 }
 
 impl QueueCatalog {
@@ -145,11 +149,85 @@ impl QueueCatalog {
         self
     }
 
+    pub fn with_metrics(
+        mut self,
+        tenant_id: impl Into<String>,
+        queue_id: impl Into<String>,
+        metrics: QueueMetricsSnapshot,
+    ) -> Self {
+        self.metrics
+            .insert((tenant_id.into(), queue_id.into()), metrics);
+        self
+    }
+
+    pub fn with_active_scope(mut self, scope: ActiveScopeSnapshot) -> Self {
+        self.active_scopes.push(scope);
+        self
+    }
+
     pub fn capabilities(&self, tenant_id: &str, queue_id: &str) -> QueueCapabilities {
         self.queues
             .get(&(tenant_id.to_string(), queue_id.to_string()))
             .copied()
             .unwrap_or_default()
+    }
+
+    pub fn metrics(&self, tenant_id: &str, queue_id: &str) -> Option<&QueueMetricsSnapshot> {
+        self.metrics
+            .get(&(tenant_id.to_string(), queue_id.to_string()))
+    }
+
+    pub fn active_scopes(&self, tenant_id: &str) -> impl Iterator<Item = &ActiveScopeSnapshot> {
+        self.active_scopes
+            .iter()
+            .filter(move |scope| scope.tenant_id == tenant_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueMetricsSnapshot {
+    pub as_of: ApiTimestamp,
+    pub metrics: QueueMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveScopeSnapshot {
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub group_key: Option<String>,
+    pub oldest_eligible_age_ms: u64,
+    pub eligible_count: Option<u64>,
+    pub progress_bound_risk_count: Option<u64>,
+    pub as_of: ApiTimestamp,
+}
+
+impl ActiveScopeSnapshot {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        queue_id: impl Into<String>,
+        group_key: Option<String>,
+        oldest_eligible_age_ms: u64,
+        as_of: ApiTimestamp,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            queue_id: queue_id.into(),
+            group_key,
+            oldest_eligible_age_ms,
+            eligible_count: None,
+            progress_bound_risk_count: None,
+            as_of,
+        }
+    }
+
+    pub fn with_counts(
+        mut self,
+        eligible_count: Option<u64>,
+        progress_bound_risk_count: Option<u64>,
+    ) -> Self {
+        self.eligible_count = eligible_count;
+        self.progress_bound_risk_count = progress_bound_risk_count;
+        self
     }
 }
 
@@ -403,33 +481,107 @@ async fn batch_finalize(
 async fn get_queue_metrics(
     State(state): State<AppState>,
     Path((tenant_id, queue_id)): Path<(String, String)>,
-    req: Request<Body>,
-) -> Result<Json<RouteStubResponse>, ApiProblem> {
-    route_stub(
-        state,
-        NativeRoute::GetQueueMetrics,
-        tenant_id,
-        Some(queue_id),
-        req,
-        false,
-    )
-    .await
+    _req: Request<Body>,
+) -> Result<Json<GetQueueMetricsResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let snapshot = state
+        .queue_catalog
+        .metrics(&tenant_id, &queue_id)
+        .cloned()
+        .unwrap_or_else(empty_metrics_snapshot);
+    Ok(Json(GetQueueMetricsResponse {
+        queue_id,
+        as_of: snapshot.as_of,
+        metrics: snapshot.metrics,
+        exact_oldest_eligible_age: true,
+    }))
 }
 
 async fn discover_active_scopes(
     State(state): State<AppState>,
     Path(tenant_id): Path<String>,
     req: Request<Body>,
-) -> Result<Json<RouteStubResponse>, ApiProblem> {
-    route_stub(
-        state,
-        NativeRoute::DiscoverActiveScopes,
-        tenant_id,
-        None,
-        req,
-        true,
-    )
-    .await
+) -> Result<Json<DiscoverActiveScopesResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: DiscoverActiveScopesRequest = parse_json(req).await?;
+    let granularity = body.granularity.unwrap_or(match body.queue_id {
+        Some(_) => DiscoveryGranularity::Group,
+        None => DiscoveryGranularity::Queue,
+    });
+    if granularity == DiscoveryGranularity::Group
+        && body.queue_id.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "group discovery requires queue_id",
+        ));
+    }
+    let max_results = body.max_results.unwrap_or(100);
+    if max_results == 0 {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "max_results must be greater than zero",
+        ));
+    }
+
+    let mut scopes = state
+        .queue_catalog
+        .active_scopes(&tenant_id)
+        .filter(|scope| {
+            body.queue_id
+                .as_ref()
+                .is_none_or(|queue| &scope.queue_id == queue)
+        })
+        .filter(|scope| {
+            body.group_key
+                .as_ref()
+                .is_none_or(|group| scope.group_key.as_ref() == Some(group))
+        })
+        .map(|scope| ActiveScope {
+            queue_id: scope.queue_id.clone(),
+            group_key: (granularity == DiscoveryGranularity::Group)
+                .then(|| scope.group_key.clone())
+                .flatten(),
+            oldest_eligible_age_ms: scope.oldest_eligible_age_ms,
+            eligible_count: scope.eligible_count,
+            progress_bound_risk_count: scope.progress_bound_risk_count,
+        })
+        .collect::<Vec<_>>();
+    if granularity == DiscoveryGranularity::Queue {
+        scopes = roll_up_queue_scopes(scopes);
+    }
+    scopes.sort_by(|a, b| {
+        b.oldest_eligible_age_ms
+            .cmp(&a.oldest_eligible_age_ms)
+            .then_with(|| a.queue_id.cmp(&b.queue_id))
+            .then_with(|| a.group_key.cmp(&b.group_key))
+    });
+    scopes.truncate(max_results as usize);
+
+    let as_of = state
+        .queue_catalog
+        .active_scopes(&tenant_id)
+        .filter(|scope| {
+            body.queue_id
+                .as_ref()
+                .is_none_or(|queue| &scope.queue_id == queue)
+        })
+        .map(|scope| scope.as_of)
+        .min_by_key(|as_of| (as_of.seconds, as_of.nanoseconds))
+        .unwrap_or(ApiTimestamp {
+            seconds: 0,
+            nanoseconds: 0,
+        });
+
+    Ok(Json(DiscoverActiveScopesResponse {
+        as_of,
+        active_scopes: scopes,
+        next_page_token: None,
+        read_only: true,
+        summary_basis: "pqueue_group_summary".to_string(),
+    }))
 }
 
 async fn route_stub(
@@ -739,6 +891,65 @@ fn item_result(
         detail,
         command_position: matches!(status, ItemResultStatus::Rearmed | ItemResultStatus::Purged)
             .then_some(0),
+    }
+}
+
+fn empty_metrics_snapshot() -> QueueMetricsSnapshot {
+    QueueMetricsSnapshot {
+        as_of: ApiTimestamp {
+            seconds: 0,
+            nanoseconds: 0,
+        },
+        metrics: QueueMetrics {
+            lifecycle_counts: LifecycleCounts {
+                pending: 0,
+                leased: 0,
+                complete: 0,
+                failed: 0,
+            },
+            retry_backlog: 0,
+            oldest_eligible_age_ms: None,
+            progress_bound_risk_count: 0,
+            active_leases: 0,
+            recurring_pending: 0,
+            recurring_leased: 0,
+        },
+    }
+}
+
+fn roll_up_queue_scopes(scopes: Vec<ActiveScope>) -> Vec<ActiveScope> {
+    let mut by_queue: BTreeMap<String, ActiveScope> = BTreeMap::new();
+    for scope in scopes {
+        by_queue
+            .entry(scope.queue_id.clone())
+            .and_modify(|existing| {
+                existing.oldest_eligible_age_ms = existing
+                    .oldest_eligible_age_ms
+                    .max(scope.oldest_eligible_age_ms);
+                existing.eligible_count =
+                    sum_optional(existing.eligible_count, scope.eligible_count);
+                existing.progress_bound_risk_count = sum_optional(
+                    existing.progress_bound_risk_count,
+                    scope.progress_bound_risk_count,
+                );
+            })
+            .or_insert(ActiveScope {
+                queue_id: scope.queue_id,
+                group_key: None,
+                oldest_eligible_age_ms: scope.oldest_eligible_age_ms,
+                eligible_count: scope.eligible_count,
+                progress_bound_risk_count: scope.progress_bound_risk_count,
+            });
+    }
+    by_queue.into_values().collect()
+}
+
+fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left + right),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
     }
 }
 

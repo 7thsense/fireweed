@@ -279,6 +279,77 @@ pub struct PurgeItemsResponse {
     pub tombstone_retention_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleCounts {
+    pub pending: u64,
+    pub leased: u64,
+    pub complete: u64,
+    pub failed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueMetrics {
+    pub lifecycle_counts: LifecycleCounts,
+    pub retry_backlog: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_eligible_age_ms: Option<u64>,
+    pub progress_bound_risk_count: u64,
+    pub active_leases: u64,
+    pub recurring_pending: u64,
+    pub recurring_leased: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetQueueMetricsResponse {
+    pub queue_id: String,
+    pub as_of: ApiTimestamp,
+    pub metrics: QueueMetrics,
+    pub exact_oldest_eligible_age: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryGranularity {
+    Queue,
+    Group,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverActiveScopesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<DiscoveryGranularity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_results: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveScope {
+    pub queue_id: String,
+    #[serde(default)]
+    pub group_key: Option<String>,
+    pub oldest_eligible_age_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_bound_risk_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverActiveScopesResponse {
+    pub as_of: ApiTimestamp,
+    pub active_scopes: Vec<ActiveScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+    pub read_only: bool,
+    pub summary_basis: String,
+}
+
 impl ProblemDetails {
     pub fn new(code: ApiErrorCode, status: u16, detail: impl Into<String>) -> Self {
         Self {
@@ -504,5 +575,49 @@ mod tests {
         };
         assert!(purge.tombstone_replay_safe);
         assert_eq!(purge.results[0].status, ItemResultStatus::Purged);
+    }
+
+    #[test]
+    fn discovery_and_metrics_dtos_represent_exact_oldest_age() {
+        let metrics = GetQueueMetricsResponse {
+            queue_id: "queue-a".to_string(),
+            as_of: ApiTimestamp {
+                seconds: 1_718_000_100,
+                nanoseconds: 0,
+            },
+            metrics: QueueMetrics {
+                lifecycle_counts: LifecycleCounts {
+                    pending: 2,
+                    leased: 1,
+                    complete: 0,
+                    failed: 0,
+                },
+                retry_backlog: 0,
+                oldest_eligible_age_ms: Some(20_000),
+                progress_bound_risk_count: 1,
+                active_leases: 1,
+                recurring_pending: 0,
+                recurring_leased: 0,
+            },
+            exact_oldest_eligible_age: true,
+        };
+        assert_eq!(metrics.metrics.oldest_eligible_age_ms, Some(20_000));
+        assert!(metrics.exact_oldest_eligible_age);
+
+        let discovery = DiscoverActiveScopesResponse {
+            as_of: metrics.as_of,
+            active_scopes: vec![ActiveScope {
+                queue_id: "queue-a".to_string(),
+                group_key: Some("group-a".to_string()),
+                oldest_eligible_age_ms: 20_000,
+                eligible_count: Some(2),
+                progress_bound_risk_count: Some(1),
+            }],
+            next_page_token: None,
+            read_only: true,
+            summary_basis: "pqueue_group_summary".to_string(),
+        };
+        assert_eq!(discovery.active_scopes[0].oldest_eligible_age_ms, 20_000);
+        assert!(discovery.read_only);
     }
 }
