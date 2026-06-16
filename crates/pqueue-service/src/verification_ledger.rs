@@ -228,11 +228,88 @@ impl LedgerRow {
         if self.suite == "invariant_stress_matrix_tests" {
             validate_invariant_stress_matrix_row(self)?;
         }
+        if self.suite == "product_validation_tests" && self.scale == "release" {
+            validate_product_validation_release_row(self)?;
+        }
         if self.suite == "object_log_commit_recovery_tests" {
             validate_object_log_e3_row(self)?;
         }
         Ok(())
     }
+}
+
+fn validate_product_validation_release_row(row: &LedgerRow) -> Result<(), LedgerError> {
+    let exit_criteria =
+        required_nested_string_array(&row.measurements, "measurements", "build_exit_criteria")?;
+    for required in [
+        "BUILD-001-P0-core-implementation-closed",
+        "TP-002-E0-E3-pass",
+        "TP-003-P0-release-gates-green",
+    ] {
+        if !exit_criteria.iter().any(|id| id == required) {
+            return Err(LedgerError::invalid_field(
+                "measurements.build_exit_criteria",
+                format!("product validation release rows must cite {required}"),
+            ));
+        }
+    }
+
+    let evidence_ids =
+        required_nested_string_array(&row.measurements, "measurements", "tp002_evidence_ids")?;
+    for required in ["E0", "E1", "E2", "E3"] {
+        if !evidence_ids.iter().any(|id| id == required) {
+            return Err(LedgerError::invalid_field(
+                "measurements.tp002_evidence_ids",
+                format!("product validation release rows must cite TP-002 {required}"),
+            ));
+        }
+    }
+
+    let workflow_ids =
+        required_nested_string_array(&row.measurements, "measurements", "workflow_ac_ids")?;
+    for required in [
+        "AC-E2E-1", "AC-E2E-2", "AC-E2E-3", "AC-E2E-4", "AC-E2E-5", "AC-E2E-6", "AC-E2E-8",
+        "AC-E2E-9",
+    ] {
+        if !workflow_ids.iter().any(|id| id == required) {
+            return Err(LedgerError::invalid_field(
+                "measurements.workflow_ac_ids",
+                format!("product validation release rows must cite {required}"),
+            ));
+        }
+    }
+
+    for field in [
+        "postgres_native_conformance_pct",
+        "object_log_sqlite_projection_conformance_pct",
+    ] {
+        let pct = required_nested_u64_field(&row.measurements, "measurements", field)?;
+        if pct != 100 {
+            return Err(LedgerError::invalid_field(
+                format!("measurements.{field}"),
+                "committed backend conformance must be 100%",
+            ));
+        }
+    }
+
+    let invariant_violations = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "invariant_stress_matrix_violations",
+    )?;
+    if invariant_violations != 0 {
+        return Err(LedgerError::invalid_field(
+            "measurements.invariant_stress_matrix_violations",
+            "P0/core product validation requires zero INV-1..10 stress violations",
+        ));
+    }
+    required_nested_u64_field(
+        &row.pass_bar,
+        "pass_bar",
+        "required_backend_conformance_pct",
+    )?;
+    required_nested_u64_field(&row.pass_bar, "pass_bar", "max_invariant_violations")?;
+    Ok(())
 }
 
 fn validate_invariant_stress_matrix_row(row: &LedgerRow) -> Result<(), LedgerError> {

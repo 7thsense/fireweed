@@ -213,6 +213,45 @@ fn verification_ledger_tests_require_zero_invariant_stress_violations() {
 }
 
 #[test]
+fn verification_ledger_tests_require_product_validation_backend_conformance() {
+    let invalid = serde_json::json!({
+        "ac_ids": ["AC-E2E-1", "AC-E2E-2", "AC-E2E-3", "AC-E2E-4", "AC-E2E-5", "AC-E2E-6", "AC-E2E-8", "AC-E2E-9"],
+        "inv_ids": ["INV-1", "INV-2", "INV-3", "INV-4", "INV-5", "INV-6", "INV-7", "INV-8", "INV-9", "INV-10"],
+        "command": "PQUEUE_E2E_SCALE=release cargo test -p pqueue-service product_validation_tests -- --ignored --nocapture",
+        "exit_status": 0,
+        "backend_profile": "aggregate_committed_backends",
+        "scale": "release",
+        "seed": 9001,
+        "environment": {
+            "instance_class": "local-dev"
+        },
+        "suite": "product_validation_tests",
+        "measurements": {
+            "build_exit_criteria": ["BUILD-001-P0-core-implementation-closed", "TP-002-E0-E3-pass", "TP-003-P0-release-gates-green"],
+            "tp002_evidence_ids": ["E0", "E1", "E2", "E3"],
+            "workflow_ac_ids": ["AC-E2E-1", "AC-E2E-2", "AC-E2E-3", "AC-E2E-4", "AC-E2E-5", "AC-E2E-6", "AC-E2E-8", "AC-E2E-9"],
+            "committed_backend_profiles": ["postgres_native", "object_log_sqlite_projection"],
+            "postgres_native_conformance_pct": 100,
+            "object_log_sqlite_projection_conformance_pct": 99,
+            "invariant_stress_matrix_violations": 0
+        },
+        "pass_bar": {
+            "comparison": "within-bar",
+            "threshold": "release",
+            "required_backend_conformance_pct": 100,
+            "max_invariant_violations": 0
+        }
+    });
+
+    let err = validate_ledger_text(&format!("{invalid}\n"))
+        .expect_err("product validation requires 100% conformance for committed backends");
+    assert_eq!(
+        err.field.as_deref(),
+        Some("measurements.object_log_sqlite_projection_conformance_pct")
+    );
+}
+
+#[test]
 fn verification_ledger_tests_require_object_log_e3_fields() {
     let missing = serde_json::json!({
         "ac_ids": ["AC-LAT-1", "AC-LAT-2", "AC-LAT-3", "AC-LAT-4"],
