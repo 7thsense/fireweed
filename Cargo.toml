@@ -7,6 +7,7 @@ members = [
     "crates/pqueue-client",
     "crates/pqueue-kafka",
     "crates/pqueue-objectlog",
+    "crates/pqueue-sqlite",
 ]
 resolver = "3"
 
