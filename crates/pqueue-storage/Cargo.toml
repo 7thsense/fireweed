@@ -10,6 +10,10 @@ pqueue-core = { path = "../pqueue-core" }
 parking_lot = "0.12"
 bytes = "1"
 
+[features]
+default = []
+object-log = []
+
 [dev-dependencies]
 tokio = { version = "1.44", features = ["rt", "macros"] }
 
