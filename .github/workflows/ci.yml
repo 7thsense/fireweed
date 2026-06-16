@@ -9,8 +9,34 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pqueue
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout pqueue
+        uses: actions/checkout@v4
+        with:
+          path: pqueue
+
+      - name: Checkout fjord dependency
+        uses: actions/checkout@v4
+        with:
+          repository: telepathdata/fjord
+          path: fjord
+          token: ${{ secrets.PQUEUE_DEPENDENCIES_TOKEN || github.token }}
+
+      - name: Checkout object-log dependency
+        uses: actions/checkout@v4
+        with:
+          repository: telepathdata/object-log
+          path: object-log
+          token: ${{ secrets.PQUEUE_DEPENDENCIES_TOKEN || github.token }}
+
+      - name: Checkout heimq dependency
+        uses: actions/checkout@v4
+        with:
+          repository: easel/heimq
+          path: heimq
 
       - name: Install Rust 1.92.0
         run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
