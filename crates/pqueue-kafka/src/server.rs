@@ -4,7 +4,7 @@
 //! WireServer. PqueueFrameHandler wraps the router state and implements the
 //! FrameHandler trait: route → persist → return response bytes.
 
-use crate::router::{route, RouterError, SharedRouterState};
+use crate::router::{RouterError, SharedRouterState, route};
 use async_trait::async_trait;
 use bytes::Bytes;
 use heimq_wire::{FrameError, FrameHandler, WireServer};
@@ -30,7 +30,9 @@ impl FrameHandler for PqueueFrameHandler {
         let (response, batches) = route_result.map_err(|e| FrameError::Protocol(e.to_string()))?;
         if !batches.is_empty() {
             if let Some(s) = &store {
-                s.persist(batches).await.map_err(|e: RouterError| FrameError::Storage(e.to_string()))?;
+                s.persist(batches)
+                    .await
+                    .map_err(|e: RouterError| FrameError::Storage(e.to_string()))?;
             }
         }
         Ok(response)
@@ -57,6 +59,8 @@ impl ProducerServer {
         listener: tokio::net::TcpListener,
         max_connections: Option<usize>,
     ) -> Result<(), heimq_wire::WireError> {
-        self.inner.run_with_listener(listener, max_connections).await
+        self.inner
+            .run_with_listener(listener, max_connections)
+            .await
     }
 }

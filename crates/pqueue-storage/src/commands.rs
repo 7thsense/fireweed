@@ -1,5 +1,5 @@
 use pqueue_core::{
-    ClientItemKey, ItemId, PriorityValue, QueueDefinition, RequestId, TenantId, QueueId,
+    ClientItemKey, ItemId, PriorityValue, QueueDefinition, QueueId, RequestId, TenantId,
     UtcTimestamp,
 };
 

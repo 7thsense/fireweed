@@ -21,7 +21,12 @@ fn framed_request(api_key: i16, api_version: i16, correlation_id: i32, body: &[u
     framed.to_vec()
 }
 
-fn framed_flexible_request(api_key: i16, api_version: i16, correlation_id: i32, body: &[u8]) -> Vec<u8> {
+fn framed_flexible_request(
+    api_key: i16,
+    api_version: i16,
+    correlation_id: i32,
+    body: &[u8],
+) -> Vec<u8> {
     // Request header v2 (flexible): api_key(2) api_version(2) corr_id(4)
     //   client_id NULLABLE_STRING (i16 length + bytes — NOT compact varint)
     //   _tagged_fields varint
@@ -76,11 +81,16 @@ async fn wire_unit_api_versions_v3_flexible() {
 
     // ApiVersions v3 uses flexible request header v2 (null client_id + tagged_fields).
     // But per Kafka spec, ApiVersions response always uses response header v0 (no tagged_fields).
-    let req = framed_flexible_request(18, 3, 99, &[
-        0x00, // null client_software_name compact_nullable_string
-        0x00, // null client_software_version compact_nullable_string
-        0x00, // empty tagged_fields
-    ]);
+    let req = framed_flexible_request(
+        18,
+        3,
+        99,
+        &[
+            0x00, // null client_software_name compact_nullable_string
+            0x00, // null client_software_version compact_nullable_string
+            0x00, // empty tagged_fields
+        ],
+    );
     stream.write_all(&req).await.unwrap();
 
     let resp = tokio::time::timeout(Duration::from_secs(5), read_response(&mut stream))
@@ -99,9 +109,14 @@ async fn wire_unit_metadata_v0_lists_queues() {
     let mut stream = TcpStream::connect(server.addr).await.unwrap();
 
     // Metadata v0 (legacy): null topics array = list all.
-    let req = framed_request(3, 0, 1, &[
-        0xFF, 0xFF, // null array (int32 -1 = list all topics)
-    ]);
+    let req = framed_request(
+        3,
+        0,
+        1,
+        &[
+            0xFF, 0xFF, // null array (int32 -1 = list all topics)
+        ],
+    );
     stream.write_all(&req).await.unwrap();
 
     let resp = tokio::time::timeout(Duration::from_secs(5), read_response(&mut stream))
@@ -122,7 +137,7 @@ async fn wire_unit_produce_v3_returns_ok() {
     // v3: transactional_id(NullableString) + acks(i16) + timeout(i32) + topics
     let mut body = BytesMut::new();
     body.put_i16(-1); // null transactional_id
-    body.put_i16(1);  // acks=1
+    body.put_i16(1); // acks=1
     body.put_i32(5000); // timeout_ms
     // topics array: 1 element
     body.put_i32(1);
@@ -160,7 +175,7 @@ async fn wire_unit_produce_v9_flexible_one_record() {
     // acks=1, timeout=5000ms, topic="my-queue", partition=0, records=(one batch)
     let mut body = BytesMut::new();
     body.put_u8(0x00); // transactional_id: null CNS (varint 0 = null)
-    body.put_i16(1);   // acks
+    body.put_i16(1); // acks
     body.put_i32(5000); // timeout_ms
 
     // topic_data: compact_array len=2 (varint: count+1)
@@ -185,7 +200,10 @@ async fn wire_unit_produce_v9_flexible_one_record() {
     // compact_nullable_bytes varint = batch.len() + 1
     let batch_varint_len = batch.len() + 1;
     // encode as varint (assuming < 128)
-    assert!(batch_varint_len < 128, "batch must be < 127 bytes for single-byte varint");
+    assert!(
+        batch_varint_len < 128,
+        "batch must be < 127 bytes for single-byte varint"
+    );
     body.put_u8(batch_varint_len as u8);
     body.extend_from_slice(&batch);
     // PartitionProduceData tagged_fields
@@ -202,7 +220,12 @@ async fn wire_unit_produce_v9_flexible_one_record() {
         .await
         .expect("timeout reading Produce v9 response");
 
-    assert!(resp.len() >= 4, "response too short: {} bytes: {:?}", resp.len(), resp);
+    assert!(
+        resp.len() >= 4,
+        "response too short: {} bytes: {:?}",
+        resp.len(),
+        resp
+    );
     let corr_id = i32::from_be_bytes([resp[0], resp[1], resp[2], resp[3]]);
     assert_eq!(corr_id, 88, "wrong correlation_id");
 
@@ -212,9 +235,17 @@ async fn wire_unit_produce_v9_flexible_one_record() {
     eprintln!("Produce v9 response ({} bytes): {:02x?}", resp.len(), &resp);
 
     // Response header v1: correlation_id(4) + tagged_fields(1)
-    assert!(resp.len() >= 5, "response too short for header v1: {:?}", resp);
+    assert!(
+        resp.len() >= 5,
+        "response too short for header v1: {:?}",
+        resp
+    );
     let tf = resp[4];
-    assert_eq!(tf, 0x00, "expected 0x00 response header tagged_fields, got 0x{:02x}", tf);
+    assert_eq!(
+        tf, 0x00,
+        "expected 0x00 response header tagged_fields, got 0x{:02x}",
+        tf
+    );
 
     // ProduceResponse v9 body starts at resp[5]:
     // In ProduceResponse, the field ORDER is: responses FIRST, then throttle_time_ms at end.
@@ -223,7 +254,11 @@ async fn wire_unit_produce_v9_flexible_one_record() {
     let body_bytes = &resp[5..];
     assert!(!body_bytes.is_empty(), "empty body");
     let responses_varint = body_bytes[0];
-    assert!(responses_varint >= 2, "expected >=1 response topic (varint>=2), got {}", responses_varint);
+    assert!(
+        responses_varint >= 2,
+        "expected >=1 response topic (varint>=2), got {}",
+        responses_varint
+    );
 }
 
 fn build_minimal_record_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -266,16 +301,16 @@ fn build_minimal_record_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
     batch.put_i64(0); // base_offset
     batch.put_i32(batch_length_val); // batch_length
     batch.put_i32(-1); // partition_leader_epoch (ignored)
-    batch.put_u8(2);   // magic = 2
-    batch.put_u32(0);  // crc (we skip real CRC)
-    batch.put_i16(0);  // attributes
-    batch.put_i32(0);  // last_offset_delta
-    batch.put_i64(0);  // base_timestamp
-    batch.put_i64(0);  // max_timestamp
+    batch.put_u8(2); // magic = 2
+    batch.put_u32(0); // crc (we skip real CRC)
+    batch.put_i16(0); // attributes
+    batch.put_i32(0); // last_offset_delta
+    batch.put_i64(0); // base_timestamp
+    batch.put_i64(0); // max_timestamp
     batch.put_i64(-1); // producer_id (non-idempotent)
     batch.put_i16(-1); // producer_epoch
     batch.put_i32(-1); // base_sequence
-    batch.put_i32(1);  // records_count
+    batch.put_i32(1); // records_count
     batch.extend_from_slice(&records_bytes);
     batch.to_vec()
 }

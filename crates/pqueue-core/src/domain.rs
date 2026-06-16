@@ -1070,16 +1070,28 @@ pub fn evaluate_eligibility(
         return Err(IneligibilityReason::NotPending);
     }
 
-    if snapshot.not_before.as_ref().is_some_and(|nb| cmp_timestamp(nb, now) == std::cmp::Ordering::Greater) {
+    if snapshot
+        .not_before
+        .as_ref()
+        .is_some_and(|nb| cmp_timestamp(nb, now) == std::cmp::Ordering::Greater)
+    {
         return Err(IneligibilityReason::NotBeforeInFuture);
     }
 
-    if snapshot.retry_backoff_until.as_ref().is_some_and(|b| cmp_timestamp(b, now) == std::cmp::Ordering::Greater) {
+    if snapshot
+        .retry_backoff_until
+        .as_ref()
+        .is_some_and(|b| cmp_timestamp(b, now) == std::cmp::Ordering::Greater)
+    {
         return Err(IneligibilityReason::RetryBackoff);
     }
 
     for (key, blocked_values) in &rules.metadata_blockers {
-        if snapshot.metadata.get(key).is_some_and(|v| blocked_values.contains(v)) {
+        if snapshot
+            .metadata
+            .get(key)
+            .is_some_and(|v| blocked_values.contains(v))
+        {
             return Err(IneligibilityReason::MetadataBlocked { key: key.clone() });
         }
     }

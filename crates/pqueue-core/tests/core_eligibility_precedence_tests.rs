@@ -7,11 +7,11 @@
 //   4. no metadata blocker matches
 //   5. no blocked gate key present
 
-use std::collections::{BTreeMap, HashSet};
 use pqueue_core::{
     EligibilitySnapshot, IneligibilityReason, ItemState, Metadata, MetadataValue,
     QueueEligibilityRules, UtcTimestamp, evaluate_eligibility,
 };
+use std::collections::{BTreeMap, HashSet};
 
 fn ts(secs: i64) -> UtcTimestamp {
     UtcTimestamp::new(secs, 0).unwrap()
@@ -128,7 +128,8 @@ fn core_eligibility_precedence_tests_backoff_active_is_ineligible() {
 #[test]
 fn core_eligibility_precedence_tests_non_matching_metadata_is_eligible() {
     let mut snap = pending_eligible();
-    snap.metadata.insert("status", MetadataValue::String("active".into()));
+    snap.metadata
+        .insert("status", MetadataValue::String("active".into()));
 
     let mut rules = empty_rules();
     rules.metadata_blockers.insert(
@@ -142,7 +143,8 @@ fn core_eligibility_precedence_tests_non_matching_metadata_is_eligible() {
 #[test]
 fn core_eligibility_precedence_tests_matching_metadata_blocker_is_ineligible() {
     let mut snap = pending_eligible();
-    snap.metadata.insert("status", MetadataValue::String("paused".into()));
+    snap.metadata
+        .insert("status", MetadataValue::String("paused".into()));
 
     let mut rules = empty_rules();
     rules.metadata_blockers.insert(
@@ -153,7 +155,9 @@ fn core_eligibility_precedence_tests_matching_metadata_blocker_is_ineligible() {
     let result = evaluate_eligibility(&snap, &rules, &ts(1000));
     assert_eq!(
         result,
-        Err(IneligibilityReason::MetadataBlocked { key: "status".into() })
+        Err(IneligibilityReason::MetadataBlocked {
+            key: "status".into()
+        })
     );
 }
 
@@ -164,7 +168,10 @@ fn core_eligibility_precedence_tests_matching_metadata_blocker_is_ineligible() {
 #[test]
 fn core_eligibility_precedence_tests_no_gate_keys_is_eligible() {
     let rules = empty_rules();
-    assert_eq!(evaluate_eligibility(&pending_eligible(), &rules, &ts(1000)), Ok(()));
+    assert_eq!(
+        evaluate_eligibility(&pending_eligible(), &rules, &ts(1000)),
+        Ok(())
+    );
 }
 
 #[test]
@@ -187,7 +194,9 @@ fn core_eligibility_precedence_tests_blocked_gate_key_is_ineligible() {
     let result = evaluate_eligibility(&snap, &rules, &ts(1000));
     assert_eq!(
         result,
-        Err(IneligibilityReason::GateBlocked { gate_key: "region:us-east".into() })
+        Err(IneligibilityReason::GateBlocked {
+            gate_key: "region:us-east".into()
+        })
     );
 }
 
@@ -215,7 +224,7 @@ fn core_eligibility_precedence_tests_state_beats_not_before() {
 fn core_eligibility_precedence_tests_not_before_beats_backoff() {
     let snap = EligibilitySnapshot {
         state: ItemState::Pending,
-        not_before: Some(ts(2000)),      // future → ineligible
+        not_before: Some(ts(2000)),          // future → ineligible
         retry_backoff_until: Some(ts(3000)), // also future
         metadata: Metadata::new(),
         gate_keys: vec![],
@@ -281,7 +290,13 @@ fn core_eligibility_precedence_tests_ineligible_item_has_single_eligibility_home
         IneligibilityReason::NotBeforeInFuture,
         IneligibilityReason::RetryBackoff,
         IneligibilityReason::MetadataBlocked { key: "k".into() },
-        IneligibilityReason::GateBlocked { gate_key: "g".into() },
+        IneligibilityReason::GateBlocked {
+            gate_key: "g".into(),
+        },
     ];
-    assert_eq!(reasons.len(), 5, "all 5 ineligibility reasons accounted for");
+    assert_eq!(
+        reasons.len(),
+        5,
+        "all 5 ineligibility reasons accounted for"
+    );
 }

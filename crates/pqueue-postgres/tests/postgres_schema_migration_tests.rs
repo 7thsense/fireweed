@@ -10,7 +10,7 @@ use testcontainers_modules::postgres::Postgres;
 use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
 
-use pqueue_postgres::{schema::DDL, PostgresControlPlaneStore};
+use pqueue_postgres::{PostgresControlPlaneStore, schema::DDL};
 
 /// Start a Postgres container and return a connected client.
 /// Connects via container bridge IP rather than a forwarded host port.
@@ -42,7 +42,9 @@ async fn start_pg() -> (Arc<Mutex<tokio_postgres::Client>>, impl std::fmt::Debug
 async fn schema_creates_pqueue_queues_table() {
     let (client_arc, _pg) = start_pg().await;
 
-    PostgresControlPlaneStore::new(client_arc.clone()).await.unwrap();
+    PostgresControlPlaneStore::new(client_arc.clone())
+        .await
+        .unwrap();
 
     let client = client_arc.lock().await;
     let row = client
@@ -61,7 +63,9 @@ async fn schema_creates_pqueue_queues_table() {
 async fn schema_creates_pqueue_shards_table() {
     let (client_arc, _pg) = start_pg().await;
 
-    PostgresControlPlaneStore::new(client_arc.clone()).await.unwrap();
+    PostgresControlPlaneStore::new(client_arc.clone())
+        .await
+        .unwrap();
 
     let client = client_arc.lock().await;
     let row = client
@@ -81,8 +85,12 @@ async fn schema_migration_is_idempotent() {
     let (client_arc, _pg) = start_pg().await;
 
     // Run migration twice; CREATE TABLE IF NOT EXISTS must not error.
-    PostgresControlPlaneStore::new(client_arc.clone()).await.unwrap();
-    PostgresControlPlaneStore::new(client_arc.clone()).await.unwrap();
+    PostgresControlPlaneStore::new(client_arc.clone())
+        .await
+        .unwrap();
+    PostgresControlPlaneStore::new(client_arc.clone())
+        .await
+        .unwrap();
 
     let client = client_arc.lock().await;
     let row = client
@@ -101,15 +109,23 @@ async fn schema_migration_is_idempotent() {
 #[tokio::test]
 async fn schema_ddl_constant_is_non_empty() {
     assert!(!DDL.trim().is_empty(), "DDL constant must not be empty");
-    assert!(DDL.contains("pqueue_queues"), "DDL must define pqueue_queues");
-    assert!(DDL.contains("pqueue_shards"), "DDL must define pqueue_shards");
+    assert!(
+        DDL.contains("pqueue_queues"),
+        "DDL must define pqueue_queues"
+    );
+    assert!(
+        DDL.contains("pqueue_shards"),
+        "DDL must define pqueue_shards"
+    );
 }
 
 #[tokio::test]
 async fn schema_shards_fk_references_queues() {
     let (client_arc, _pg) = start_pg().await;
 
-    PostgresControlPlaneStore::new(client_arc.clone()).await.unwrap();
+    PostgresControlPlaneStore::new(client_arc.clone())
+        .await
+        .unwrap();
 
     let client = client_arc.lock().await;
     let rows = client

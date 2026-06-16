@@ -3,8 +3,8 @@
 //! Only ApiVersions (18), Metadata (3), and Produce (0) are advertised.
 //! Consumer-side APIs are permanently out of scope (ADR-005).
 
-use kafka_protocol::messages::api_versions_response::ApiVersion;
 use kafka_protocol::messages::ApiVersionsResponse;
+use kafka_protocol::messages::api_versions_response::ApiVersion;
 
 /// Produce: v0-v9, Metadata: v0-v12, ApiVersions: v0-v3
 pub const PRODUCER_APIS: &[(i16, i16, i16)] = &[

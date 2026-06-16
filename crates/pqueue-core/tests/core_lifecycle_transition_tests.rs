@@ -147,14 +147,18 @@ fn core_lifecycle_transition_tests_exhaustive_matrix() {
                 assert!(
                     result.is_ok(),
                     "Expected legal: {:?} + {:?} should succeed, got {:?}",
-                    state, event, result.unwrap_err()
+                    state,
+                    event,
+                    result.unwrap_err()
                 );
                 legal_count += 1;
             } else {
                 assert!(
                     result.is_err(),
                     "Expected illegal: {:?} + {:?} should fail, got Ok({:?})",
-                    state, event, result.unwrap()
+                    state,
+                    event,
+                    result.unwrap()
                 );
                 let err: TransitionError = result.unwrap_err();
                 assert_eq!(err.state, state);

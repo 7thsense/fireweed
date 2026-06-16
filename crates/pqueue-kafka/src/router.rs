@@ -4,9 +4,9 @@
 //! Kafka wire protocol headers. First-flexible-version per API:
 //!   Produce (0) v9+, Metadata (3) v9+, ApiVersions (18) v3+.
 
-use crate::handler::{api_versions, metadata, produce};
 use crate::handler::metadata::BrokerMeta;
 use crate::handler::produce::ProducePushBatch;
+use crate::handler::{api_versions, metadata, produce};
 use bytes::{BufMut, Bytes, BytesMut};
 use kafka_protocol::protocol::Encodable;
 use pqueue_core::{ItemId, QueueId, TenantId, UtcTimestamp};
@@ -58,8 +58,8 @@ impl KafkaStore {
         let ts = UtcTimestamp::new(0, 0).map_err(|e| RouterError::Storage(e.to_string()))?;
 
         for mut batch in batches {
-            let queue = QueueId::new(&batch.queue_id)
-                .map_err(|e| RouterError::Storage(e.to_string()))?;
+            let queue =
+                QueueId::new(&batch.queue_id).map_err(|e| RouterError::Storage(e.to_string()))?;
             let shard_key = ShardKey {
                 tenant_id: tenant.clone(),
                 queue_id: queue.clone(),
@@ -84,7 +84,8 @@ impl KafkaStore {
                 checksum: CommandChecksum(0),
                 created_at: ts,
             };
-            let result = self.log
+            let result = self
+                .log
                 .append_batch(&shard_key, None, vec![envelope.clone()])
                 .await
                 .map_err(|e| RouterError::Storage(e.to_string()))?;
@@ -133,8 +134,8 @@ fn is_flexible_response(api_key: i16, api_version: i16) -> bool {
         return false; // ApiVersions: always response header v0
     }
     match api_key {
-        0 => api_version >= 9,  // Produce
-        3 => api_version >= 9,  // Metadata
+        0 => api_version >= 9, // Produce
+        3 => api_version >= 9, // Metadata
         _ => false,
     }
 }
@@ -178,11 +179,19 @@ fn body_slice<'a>(
         return Ok(&[]);
     }
     let cid_len = i16::from_be_bytes([rest[0], rest[1]]);
-    let cid_body_len = if cid_len < 0 { 0usize } else { cid_len as usize };
+    let cid_body_len = if cid_len < 0 {
+        0usize
+    } else {
+        cid_len as usize
+    };
     let after_cid = 2 + cid_body_len;
 
     if !flexible {
-        return Ok(if after_cid <= rest.len() { &rest[after_cid..] } else { &[] });
+        return Ok(if after_cid <= rest.len() {
+            &rest[after_cid..]
+        } else {
+            &[]
+        });
     }
 
     // Flexible header v2 adds _tagged_fields after client_id.
@@ -190,7 +199,8 @@ fn body_slice<'a>(
     if rest.len() <= after_cid {
         return Ok(&[]);
     }
-    let (tag_count, mut pos) = parse_varint(&rest[after_cid..]).ok_or(RouterError::RequestTooShort)?;
+    let (tag_count, mut pos) =
+        parse_varint(&rest[after_cid..]).ok_or(RouterError::RequestTooShort)?;
     pos += after_cid;
     for _ in 0..tag_count {
         // Skip tag key.

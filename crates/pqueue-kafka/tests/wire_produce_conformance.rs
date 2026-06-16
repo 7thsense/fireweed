@@ -6,11 +6,11 @@
 //
 // Tests are skipped when `go` is not in PATH.
 
-use pqueue_kafka::test_support::TestProducerServer;
 use pqueue_core::{QueueId, TenantId, UtcTimestamp};
+use pqueue_kafka::test_support::TestProducerServer;
+use pqueue_storage::QueueCommand;
 use pqueue_storage::traits::{ClaimRequest, LogStore, ProjectionStore};
 use pqueue_storage::types::{ShardId, ShardKey};
-use pqueue_storage::QueueCommand;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -128,7 +128,12 @@ async fn wire_produce_conformance_franz_go_payload_stored() {
         }
     }
 
-    assert_eq!(all_payloads.len(), 5, "expected 5 items from 5 produced records, got {}", all_payloads.len());
+    assert_eq!(
+        all_payloads.len(),
+        5,
+        "expected 5 items from 5 produced records, got {}",
+        all_payloads.len()
+    );
     for (i, payload) in all_payloads.iter().enumerate() {
         let expected = format!("val-{}", i);
         assert_eq!(
@@ -173,7 +178,10 @@ async fn wire_produce_conformance_produced_records_claimable_as_pqueue_items() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "franz-go oracle failed\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        out.status.success(),
+        "franz-go oracle failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
 
     // Wait for async persist path.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -218,8 +226,13 @@ async fn wire_produce_conformance_produced_records_claimable_as_pqueue_items() {
     }
 
     for claimed_id in &claim_result.claimed_item_ids {
-        let payload = id_to_payload.get(claimed_id.as_str())
+        let payload = id_to_payload
+            .get(claimed_id.as_str())
             .unwrap_or_else(|| panic!("claimed item_id {} not found in log", claimed_id));
-        assert!(payload.is_some(), "claimed item {} has no payload", claimed_id);
+        assert!(
+            payload.is_some(),
+            "claimed item {} has no payload",
+            claimed_id
+        );
     }
 }

@@ -3,7 +3,7 @@ use pqueue_core::{
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition,
     QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug)]
 pub struct ConvertError(pub String);
@@ -62,7 +62,11 @@ pub fn json_priority_model(v: &Value) -> Result<PriorityModel, ConvertError> {
         "item_id" => PriorityTieBreaker::ItemId,
         s => return Err(ConvertError(format!("unknown tie_breaker: {s}"))),
     };
-    Ok(PriorityModel { kind, direction, tie_breaker })
+    Ok(PriorityModel {
+        kind,
+        direction,
+        tie_breaker,
+    })
 }
 
 pub fn eligibility_policy_to_json(ep: &EligibilityPolicy) -> Value {
@@ -137,7 +141,9 @@ pub fn recurrence_to_json(r: &RecurrencePolicy) -> Value {
         RecurrenceMode::Oneshot => "oneshot",
         RecurrenceMode::Recurring => "recurring",
     };
-    let until = r.until.map(|u| json!({ "seconds": u.seconds, "nanoseconds": u.nanoseconds }));
+    let until = r
+        .until
+        .map(|u| json!({ "seconds": u.seconds, "nanoseconds": u.nanoseconds }));
     json!({ "mode": mode, "until": until })
 }
 
@@ -151,8 +157,13 @@ pub fn json_recurrence(v: &Value) -> Result<RecurrencePolicy, ConvertError> {
         None
     } else {
         let u = &v["until"];
-        let secs = u["seconds"].as_i64().ok_or_else(|| ConvertError("missing until.seconds".into()))?;
-        let ns = u["nanoseconds"].as_u64().ok_or_else(|| ConvertError("missing until.nanoseconds".into()))? as u32;
+        let secs = u["seconds"]
+            .as_i64()
+            .ok_or_else(|| ConvertError("missing until.seconds".into()))?;
+        let ns = u["nanoseconds"]
+            .as_u64()
+            .ok_or_else(|| ConvertError("missing until.nanoseconds".into()))?
+            as u32;
         Some(UtcTimestamp::new(secs, ns).map_err(|e| ConvertError(e.to_string()))?)
     };
     Ok(RecurrencePolicy { mode, until })

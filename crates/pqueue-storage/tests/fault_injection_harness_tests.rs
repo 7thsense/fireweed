@@ -10,12 +10,15 @@
 
 use pqueue_core::{ClientItemKey, ItemId, QueueId, TenantId, UtcTimestamp};
 use pqueue_storage::{
-    commands::{BatchClaimCommand, BatchFinalizeCommand, BatchPushCommand, FinalizeKind, FinalizeOutcome, PushItem},
-    fault_injection::{replay, FailureMode, FaultInjectedLogStore, KillSchedule},
+    CommandEnvelope, CommandId, QueueCommand,
+    commands::{
+        BatchClaimCommand, BatchFinalizeCommand, BatchPushCommand, FinalizeKind, FinalizeOutcome,
+        PushItem,
+    },
+    fault_injection::{FailureMode, FaultInjectedLogStore, KillSchedule, replay},
     memory::{MemoryLogStore, MemoryProjectionStore},
     traits::{LogStore, LogStoreError, ProjectionStore},
     types::{QueueKey, ShardId, ShardKey},
-    CommandEnvelope, CommandId, QueueCommand,
 };
 
 fn ts(s: i64) -> UtcTimestamp {
@@ -35,7 +38,11 @@ fn qid(s: &str) -> QueueId {
 }
 
 fn sk(q: &str) -> ShardKey {
-    ShardKey { tenant_id: tid(), queue_id: qid(q), shard_id: ShardId::new(0) }
+    ShardKey {
+        tenant_id: tid(),
+        queue_id: qid(q),
+        shard_id: ShardId::new(0),
+    }
 }
 
 fn push_env(q: &str, ids: &[&str], cmd_id: &str) -> CommandEnvelope {
@@ -97,7 +104,10 @@ fn finalize_env(q: &str, id: &str, kind: FinalizeKind, cmd_id: &str) -> CommandE
         shard_id: ShardId::new(0),
         item_ids: vec![iid(id)],
         command: QueueCommand::BatchFinalize(BatchFinalizeCommand {
-            outcomes: vec![FinalizeOutcome { item_id: iid(id), kind }],
+            outcomes: vec![FinalizeOutcome {
+                item_id: iid(id),
+                kind,
+            }],
         }),
         checksum: pqueue_storage::types::CommandChecksum(0),
         created_at: ts(0),
@@ -130,7 +140,10 @@ async fn fault_injection_harness_tests_fail_at_call_n() {
     let shard = sk("fail-n");
 
     // Call 1: succeeds.
-    store.append_batch(&shard, None, vec![push_env("fail-n", &["i1"], "cmd-1")]).await.unwrap();
+    store
+        .append_batch(&shard, None, vec![push_env("fail-n", &["i1"], "cmd-1")])
+        .await
+        .unwrap();
 
     // Call 2: injected failure.
     let err = store
@@ -141,7 +154,10 @@ async fn fault_injection_harness_tests_fail_at_call_n() {
     assert_eq!(store.call_count(), 2);
 
     // Call 3: succeeds again.
-    store.append_batch(&shard, None, vec![push_env("fail-n", &["i3"], "cmd-3")]).await.unwrap();
+    store
+        .append_batch(&shard, None, vec![push_env("fail-n", &["i3"], "cmd-3")])
+        .await
+        .unwrap();
 
     // Log only has i1 and i3 (i2 was injected failure, never committed).
     let page = store.read_from(&shard, None, 10).await.unwrap();
@@ -180,7 +196,11 @@ async fn fault_injection_harness_tests_partial_append_zero_fails_immediately() {
     let shard = sk("partial-zero");
 
     let err = store
-        .append_batch(&shard, None, vec![push_env("partial-zero", &["i1"], "cmd-1")])
+        .append_batch(
+            &shard,
+            None,
+            vec![push_env("partial-zero", &["i1"], "cmd-1")],
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, LogStoreError::StorageFailure(_)));
@@ -200,16 +220,28 @@ async fn fault_injection_harness_tests_replay_restores_committed_items() {
     let shard = sk("replay");
 
     // Write 3 items to log.
-    log.append_batch(&shard, None, vec![push_env("replay", &["i1", "i2", "i3"], "push")]).await.unwrap();
+    log.append_batch(
+        &shard,
+        None,
+        vec![push_env("replay", &["i1", "i2", "i3"], "push")],
+    )
+    .await
+    .unwrap();
 
     // Simulate crash: create fresh projection, replay from log.
     let proj = MemoryProjectionStore::new();
     let last = replay(&log, &proj, &shard).await.unwrap();
     assert!(last.is_some());
 
-    let qk = QueueKey { tenant_id: tid(), queue_id: qid("replay") };
+    let qk = QueueKey {
+        tenant_id: tid(),
+        queue_id: qid("replay"),
+    };
     let m = proj.metrics(&qk).await.unwrap();
-    assert_eq!(m.pending_count, 3, "all pushed items should be present after replay");
+    assert_eq!(
+        m.pending_count, 3,
+        "all pushed items should be present after replay"
+    );
 }
 
 #[tokio::test]
@@ -218,7 +250,9 @@ async fn fault_injection_harness_tests_replay_empty_log_returns_none() {
     let shard = sk("replay-empty");
 
     // Initialize shard (needed so read_from doesn't return ShardNotFound).
-    log.append_batch(&shard, None, vec![push_env("replay-empty", &[], "empty")]).await.unwrap();
+    log.append_batch(&shard, None, vec![push_env("replay-empty", &[], "empty")])
+        .await
+        .unwrap();
 
     let proj = MemoryProjectionStore::new();
     let last = replay(&log, &proj, &shard).await.unwrap();
@@ -236,18 +270,24 @@ async fn fault_injection_harness_tests_replay_after_partial_append_no_lost_work(
     let shard = sk("replay-partial");
 
     let batch = vec![
-        push_env("replay-partial", &["i1"], "cmd-1"),  // committed
-        push_env("replay-partial", &["i2"], "cmd-2"),  // lost (not committed)
+        push_env("replay-partial", &["i1"], "cmd-1"), // committed
+        push_env("replay-partial", &["i2"], "cmd-2"), // lost (not committed)
     ];
     let _ = store.append_batch(&shard, None, batch).await; // expected Err
 
     let proj = MemoryProjectionStore::new();
     replay(&store, &proj, &shard).await.unwrap();
 
-    let qk = QueueKey { tenant_id: tid(), queue_id: qid("replay-partial") };
+    let qk = QueueKey {
+        tenant_id: tid(),
+        queue_id: qid("replay-partial"),
+    };
     let m = proj.metrics(&qk).await.unwrap();
     // Only i1 was committed; i2 was never acknowledged, so 0 lost items.
-    assert_eq!(m.pending_count, 1, "only committed items appear after replay (INV-10)");
+    assert_eq!(
+        m.pending_count, 1,
+        "only committed items appear after replay (INV-10)"
+    );
 }
 
 #[tokio::test]
@@ -256,14 +296,29 @@ async fn fault_injection_harness_tests_replay_restores_claimed_state() {
     let log = MemoryLogStore::new();
     let shard = sk("replay-claim");
 
-    log.append_batch(&shard, None, vec![push_env("replay-claim", &["i1"], "push")]).await.unwrap();
-    log.append_batch(&shard, None, vec![claim_env("replay-claim", &["i1"], "tok-1", "claim")]).await.unwrap();
+    log.append_batch(
+        &shard,
+        None,
+        vec![push_env("replay-claim", &["i1"], "push")],
+    )
+    .await
+    .unwrap();
+    log.append_batch(
+        &shard,
+        None,
+        vec![claim_env("replay-claim", &["i1"], "tok-1", "claim")],
+    )
+    .await
+    .unwrap();
 
     // Fresh projection via replay.
     let proj = MemoryProjectionStore::new();
     replay(&log, &proj, &shard).await.unwrap();
 
-    let qk = QueueKey { tenant_id: tid(), queue_id: qid("replay-claim") };
+    let qk = QueueKey {
+        tenant_id: tid(),
+        queue_id: qid("replay-claim"),
+    };
     let m = proj.metrics(&qk).await.unwrap();
     assert_eq!(m.leased_count, 1, "claim state survives crash+replay");
     assert_eq!(m.pending_count, 0);
@@ -274,16 +329,45 @@ async fn fault_injection_harness_tests_replay_restores_terminal_state() {
     let log = MemoryLogStore::new();
     let shard = sk("replay-terminal");
 
-    log.append_batch(&shard, None, vec![push_env("replay-terminal", &["i1"], "push")]).await.unwrap();
-    log.append_batch(&shard, None, vec![claim_env("replay-terminal", &["i1"], "tok", "claim")]).await.unwrap();
-    log.append_batch(&shard, None, vec![finalize_env("replay-terminal", "i1", FinalizeKind::Complete, "fin")]).await.unwrap();
+    log.append_batch(
+        &shard,
+        None,
+        vec![push_env("replay-terminal", &["i1"], "push")],
+    )
+    .await
+    .unwrap();
+    log.append_batch(
+        &shard,
+        None,
+        vec![claim_env("replay-terminal", &["i1"], "tok", "claim")],
+    )
+    .await
+    .unwrap();
+    log.append_batch(
+        &shard,
+        None,
+        vec![finalize_env(
+            "replay-terminal",
+            "i1",
+            FinalizeKind::Complete,
+            "fin",
+        )],
+    )
+    .await
+    .unwrap();
 
     let proj = MemoryProjectionStore::new();
     replay(&log, &proj, &shard).await.unwrap();
 
-    let qk = QueueKey { tenant_id: tid(), queue_id: qid("replay-terminal") };
+    let qk = QueueKey {
+        tenant_id: tid(),
+        queue_id: qid("replay-terminal"),
+    };
     let m = proj.metrics(&qk).await.unwrap();
-    assert_eq!(m.completed_count, 1, "terminal state survives crash+replay (INV-3)");
+    assert_eq!(
+        m.completed_count, 1,
+        "terminal state survives crash+replay (INV-3)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +379,8 @@ async fn fault_injection_harness_tests_kill_schedule_fires_at_target() {
     let kill = KillSchedule::kill_after(3);
     assert!(!kill.checkpoint()); // 1
     assert!(!kill.checkpoint()); // 2
-    assert!(kill.checkpoint());  // 3 — kill fires
-    assert!(kill.checkpoint());  // 4 — already past target
+    assert!(kill.checkpoint()); // 3 — kill fires
+    assert!(kill.checkpoint()); // 4 — already past target
     assert_eq!(kill.checkpoint_count(), 4);
 }
 
@@ -318,10 +402,22 @@ async fn fault_injection_harness_tests_worker_kill_mid_claim_items_redeliverable
     let kill = KillSchedule::kill_after(2); // kill after 2nd checkpoint
 
     // Worker turn 1: push + claim (2 checkpoints).
-    log.append_batch(&shard, None, vec![push_env("kill-mid-claim", &["i1", "i2"], "push")]).await.unwrap();
+    log.append_batch(
+        &shard,
+        None,
+        vec![push_env("kill-mid-claim", &["i1", "i2"], "push")],
+    )
+    .await
+    .unwrap();
     assert!(!kill.checkpoint()); // checkpoint 1: after push ack
-    log.append_batch(&shard, None, vec![claim_env("kill-mid-claim", &["i1", "i2"], "tok", "claim")]).await.unwrap();
-    assert!(kill.checkpoint());  // checkpoint 2: after claim ack — kill fires here
+    log.append_batch(
+        &shard,
+        None,
+        vec![claim_env("kill-mid-claim", &["i1", "i2"], "tok", "claim")],
+    )
+    .await
+    .unwrap();
+    assert!(kill.checkpoint()); // checkpoint 2: after claim ack — kill fires here
 
     // Worker "crashed" before finalize. Simulate lease expiry by replaying
     // into a fresh projection (expiry event would be written by a background
@@ -329,12 +425,18 @@ async fn fault_injection_harness_tests_worker_kill_mid_claim_items_redeliverable
     let proj = MemoryProjectionStore::new();
     replay(&log, &proj, &shard).await.unwrap();
 
-    let qk = QueueKey { tenant_id: tid(), queue_id: qid("kill-mid-claim") };
+    let qk = QueueKey {
+        tenant_id: tid(),
+        queue_id: qid("kill-mid-claim"),
+    };
     let m = proj.metrics(&qk).await.unwrap();
     // After replay the items are still in Leased state (lease has not expired yet).
     // A real system would write a LeaseExpired command; the harness verifies
     // that the committed log state is consistent and not lost.
-    assert_eq!(m.leased_count, 2, "committed claim state survives crash (INV-10)");
+    assert_eq!(
+        m.leased_count, 2,
+        "committed claim state survives crash (INV-10)"
+    );
     assert_eq!(m.pending_count, 0);
     assert_eq!(m.completed_count, 0);
 }
@@ -346,21 +448,47 @@ async fn fault_injection_harness_tests_stale_epoch_rejected_after_reassign() {
     let shard = sk("epoch-fence");
 
     // Worker A appends with epoch=0.
-    log.append_batch(&shard, Some(0), vec![push_env("epoch-fence", &["i1"], "cmd-1")]).await.unwrap();
+    log.append_batch(
+        &shard,
+        Some(0),
+        vec![push_env("epoch-fence", &["i1"], "cmd-1")],
+    )
+    .await
+    .unwrap();
 
     // Shard epoch changes (e.g., after a rebalance/failover). Simulate by
     // appending without a fence to advance internal epoch: the memory store
     // does NOT auto-advance epoch on append (epoch stays at init 0). Stale
     // epoch fencing works by having workers supply the expected epoch and the
     // store comparing. A wrong expected epoch is rejected.
-    let err = log.append_batch(&shard, Some(99), vec![push_env("epoch-fence", &["i2"], "cmd-2")]).await.unwrap_err();
-    assert!(matches!(err, LogStoreError::StalEpoch { .. }), "stale epoch must be rejected (AC-SHARD-3)");
+    let err = log
+        .append_batch(
+            &shard,
+            Some(99),
+            vec![push_env("epoch-fence", &["i2"], "cmd-2")],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LogStoreError::StalEpoch { .. }),
+        "stale epoch must be rejected (AC-SHARD-3)"
+    );
 
     // Valid append (current epoch=0) succeeds.
-    log.append_batch(&shard, Some(0), vec![push_env("epoch-fence", &["i3"], "cmd-3")]).await.unwrap();
+    log.append_batch(
+        &shard,
+        Some(0),
+        vec![push_env("epoch-fence", &["i3"], "cmd-3")],
+    )
+    .await
+    .unwrap();
 
     let page = log.read_from(&shard, None, 10).await.unwrap();
-    assert_eq!(page.commands.len(), 2, "only fenced-in appends committed; stale rejected");
+    assert_eq!(
+        page.commands.len(),
+        2,
+        "only fenced-in appends committed; stale rejected"
+    );
 }
 
 /// Replay across multiple pages (pagination).
@@ -372,15 +500,31 @@ async fn fault_injection_harness_tests_replay_paginates_large_log() {
     // Write 10 single-item batches.
     let ids: Vec<String> = (0..10).map(|i| format!("i{}", i)).collect();
     for (i, id) in ids.iter().enumerate() {
-        log.append_batch(&shard, None, vec![push_env("replay-pages", &[id.as_str()], &format!("cmd-{}", i))]).await.unwrap();
+        log.append_batch(
+            &shard,
+            None,
+            vec![push_env(
+                "replay-pages",
+                &[id.as_str()],
+                &format!("cmd-{}", i),
+            )],
+        )
+        .await
+        .unwrap();
     }
 
     let proj = MemoryProjectionStore::new();
     replay(&log, &proj, &shard).await.unwrap();
 
-    let qk = QueueKey { tenant_id: tid(), queue_id: qid("replay-pages") };
+    let qk = QueueKey {
+        tenant_id: tid(),
+        queue_id: qid("replay-pages"),
+    };
     let m = proj.metrics(&qk).await.unwrap();
-    assert_eq!(m.pending_count, 10, "all 10 items present after paginated replay");
+    assert_eq!(
+        m.pending_count, 10,
+        "all 10 items present after paginated replay"
+    );
 }
 
 /// Deterministic failure + replay round-trip: demonstrates the harness
@@ -403,16 +547,25 @@ async fn fault_injection_harness_tests_ac_e2e5_partial_commit_replay_convergence
     let proj = MemoryProjectionStore::new();
     replay(&store, &proj, &shard).await.unwrap();
 
-    let qk = QueueKey { tenant_id: tid(), queue_id: qid("e2e5") };
+    let qk = QueueKey {
+        tenant_id: tid(),
+        queue_id: qid("e2e5"),
+    };
     let m = proj.metrics(&qk).await.unwrap();
     // Exactly the 2 committed commands' items are present; i3 was never acked.
     assert_eq!(m.pending_count, 2);
 
     // Phase 3: continue appending from the clean replay position.
-    store.append_batch(&shard, None, vec![push_env("e2e5", &["i3"], "cmd-3-retry")]).await.unwrap();
+    store
+        .append_batch(&shard, None, vec![push_env("e2e5", &["i3"], "cmd-3-retry")])
+        .await
+        .unwrap();
 
     let proj2 = MemoryProjectionStore::new();
     replay(&store, &proj2, &shard).await.unwrap();
     let m2 = proj2.metrics(&qk).await.unwrap();
-    assert_eq!(m2.pending_count, 3, "convergence: all 3 items present after retry+replay");
+    assert_eq!(
+        m2.pending_count, 3,
+        "convergence: all 3 items present after retry+replay"
+    );
 }

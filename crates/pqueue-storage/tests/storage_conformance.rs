@@ -5,23 +5,22 @@
 // that future backends can run against.
 
 use pqueue_core::{
-    CohortPolicy, ClientItemKey, EligibilityPolicy, ItemId, OrderingMode, PriorityModel,
-    QueueCreationPolicy, QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, CreateQueue,
-};
-use pqueue_storage::{
-    memory::{
-        MemoryControlPlaneStore, MemoryLogStore, MemoryProjectionStore, MemorySnapshotStore,
-    },
-    traits::{
-        ClaimRequest, ControlPlaneError, ControlPlaneStore, DurabilityProfile,
-        LogStore, LogStoreError, ProjectionStore, ProjectionSnapshot, SnapshotStore,
-    },
-    types::{CommandPosition, QueueKey, ShardId, ShardKey},
-    CommandEnvelope, CommandId, QueueCommand,
+    ClientItemKey, CohortPolicy, CreateQueue, EligibilityPolicy, ItemId, OrderingMode,
+    PriorityModel, QueueCreationPolicy, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
+    UtcTimestamp,
 };
 use pqueue_storage::commands::{
     BatchClaimCommand, BatchFinalizeCommand, BatchPushCommand, FinalizeKind, FinalizeOutcome,
     LeaseExpiredCommand, PushItem,
+};
+use pqueue_storage::{
+    CommandEnvelope, CommandId, QueueCommand,
+    memory::{MemoryControlPlaneStore, MemoryLogStore, MemoryProjectionStore, MemorySnapshotStore},
+    traits::{
+        ClaimRequest, ControlPlaneError, ControlPlaneStore, DurabilityProfile, LogStore,
+        LogStoreError, ProjectionSnapshot, ProjectionStore, SnapshotStore,
+    },
+    types::{CommandPosition, QueueKey, ShardId, ShardKey},
 };
 
 fn tenant() -> TenantId {
@@ -56,7 +55,11 @@ fn simple_queue_def(tenant: TenantId, queue: QueueId) -> pqueue_core::QueueDefin
 }
 
 fn shard(tenant: TenantId, queue: QueueId, shard_id: u32) -> ShardKey {
-    ShardKey { tenant_id: tenant, queue_id: queue, shard_id: ShardId::new(shard_id) }
+    ShardKey {
+        tenant_id: tenant,
+        queue_id: queue,
+        shard_id: ShardId::new(shard_id),
+    }
 }
 
 fn ts(seconds: i64) -> UtcTimestamp {
@@ -186,7 +189,10 @@ async fn storage_conformance_control_plane_create_and_read_queue() {
     assert!(result.created);
     assert_eq!(result.definition.queue_id, q);
 
-    let key = QueueKey { tenant_id: t.clone(), queue_id: q.clone() };
+    let key = QueueKey {
+        tenant_id: t.clone(),
+        queue_id: q.clone(),
+    };
     let fetched = store.queue_definition(&key).await.unwrap();
     assert_eq!(fetched.queue_id, q);
 }
@@ -206,7 +212,10 @@ async fn storage_conformance_control_plane_duplicate_create_is_error() {
 #[tokio::test]
 async fn storage_conformance_control_plane_missing_queue_is_error() {
     let store = MemoryControlPlaneStore::new();
-    let key = QueueKey { tenant_id: tenant(), queue_id: qid("ghost") };
+    let key = QueueKey {
+        tenant_id: tenant(),
+        queue_id: qid("ghost"),
+    };
     let err = store.queue_definition(&key).await.unwrap_err();
     assert_eq!(err, ControlPlaneError::QueueNotFound);
 }
@@ -219,9 +228,16 @@ async fn storage_conformance_control_plane_shard_assignments() {
     let def = simple_queue_def(t.clone(), q.clone());
 
     store.create_queue(def).await.unwrap();
-    let key = QueueKey { tenant_id: t, queue_id: q };
+    let key = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let shards = store.shard_assignments(&key).await.unwrap();
-    assert_eq!(shards.len(), 1, "single-shard queue should have one assignment");
+    assert_eq!(
+        shards.len(),
+        1,
+        "single-shard queue should have one assignment"
+    );
     assert_eq!(shards[0].epoch, 1);
 }
 
@@ -231,8 +247,14 @@ async fn storage_conformance_control_plane_list_queues() {
     let t = tenant();
     let q1 = qid("q1");
     let q2 = qid("q2");
-    store.create_queue(simple_queue_def(t.clone(), q1.clone())).await.unwrap();
-    store.create_queue(simple_queue_def(t.clone(), q2.clone())).await.unwrap();
+    store
+        .create_queue(simple_queue_def(t.clone(), q1.clone()))
+        .await
+        .unwrap();
+    store
+        .create_queue(simple_queue_def(t.clone(), q2.clone()))
+        .await
+        .unwrap();
 
     let mut listed = store.list_queues(&t).await.unwrap();
     listed.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -285,7 +307,10 @@ async fn storage_conformance_log_store_read_from_position() {
     let sk = shard(t.clone(), q.clone(), 0);
 
     for _ in 0..4 {
-        store.append_batch(&sk, None, vec![dummy_cmd(t.clone(), q.clone(), 0)]).await.unwrap();
+        store
+            .append_batch(&sk, None, vec![dummy_cmd(t.clone(), q.clone(), 0)])
+            .await
+            .unwrap();
     }
 
     // Read from position 1 (after sequence 0).
@@ -308,7 +333,10 @@ async fn storage_conformance_log_store_stale_epoch_rejected() {
     let sk = shard(t.clone(), q.clone(), 0);
 
     // First append establishes the shard with epoch 0.
-    store.append_batch(&sk, None, vec![dummy_cmd(t.clone(), q.clone(), 0)]).await.unwrap();
+    store
+        .append_batch(&sk, None, vec![dummy_cmd(t.clone(), q.clone(), 0)])
+        .await
+        .unwrap();
 
     // Now attempt with a wrong expected epoch (epoch 99 != actual 0).
     let err = store
@@ -342,9 +370,15 @@ async fn storage_conformance_snapshot_write_and_read() {
     let t = tenant();
     let q = qid("snap-test");
     let sk = shard(t.clone(), q.clone(), 0);
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 5, backend_epoch: 1 };
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 5,
+        backend_epoch: 1,
+    };
 
-    let snap = ProjectionSnapshot { payload: b"state".to_vec() };
+    let snap = ProjectionSnapshot {
+        payload: b"state".to_vec(),
+    };
     let ref_ = store.write_snapshot(&sk, pos.clone(), snap).await.unwrap();
     assert_eq!(ref_.shard_key, sk);
     assert_eq!(ref_.position.sequence, 5);
@@ -374,7 +408,11 @@ async fn storage_conformance_projection_apply_committed_succeeds() {
     let t = tenant();
     let q = qid("proj-test");
     let sk = shard(t.clone(), q.clone(), 0);
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
 
     store.apply_committed(pos, &[]).await.unwrap();
 }
@@ -400,15 +438,22 @@ async fn storage_conformance_durability_push_items_visible_in_metrics() {
     let t = tenant();
     let q = qid("dur-push");
     let sk = shard(t.clone(), q.clone(), 0);
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
 
-    let items = vec![
-        make_push_item("i1", "k1", 3),
-        make_push_item("i2", "k2", 3),
-    ];
-    store.apply_committed(pos, &[push_cmd(t.clone(), q.clone(), 0, items, "cmd-1")]).await.unwrap();
+    let items = vec![make_push_item("i1", "k1", 3), make_push_item("i2", "k2", 3)];
+    store
+        .apply_committed(pos, &[push_cmd(t.clone(), q.clone(), 0, items, "cmd-1")])
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.pending_count, 2);
     assert_eq!(m.leased_count, 0);
@@ -420,11 +465,21 @@ async fn storage_conformance_durability_empty_batch_is_noop() {
     let t = tenant();
     let q = qid("dur-noop");
     let sk = shard(t.clone(), q.clone(), 0);
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
 
-    store.apply_committed(pos, &[push_cmd(t.clone(), q.clone(), 0, vec![], "cmd-1")]).await.unwrap();
+    store
+        .apply_committed(pos, &[push_cmd(t.clone(), q.clone(), 0, vec![], "cmd-1")])
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.pending_count, 0);
 }
@@ -436,19 +491,48 @@ async fn storage_conformance_durability_multi_batch_accumulates() {
     let q = qid("dur-multi");
     let sk = shard(t.clone(), q.clone(), 0);
 
-    let pos0 = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
-    store.apply_committed(
-        pos0,
-        &[push_cmd(t.clone(), q.clone(), 0, vec![make_push_item("i1", "k1", 3)], "cmd-1")],
-    ).await.unwrap();
+    let pos0 = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos0,
+            &[push_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![make_push_item("i1", "k1", 3)],
+                "cmd-1",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let pos1 = CommandPosition { shard_key: sk.clone(), sequence: 1, backend_epoch: 0 };
-    store.apply_committed(
-        pos1,
-        &[push_cmd(t.clone(), q.clone(), 0, vec![make_push_item("i2", "k2", 3)], "cmd-2")],
-    ).await.unwrap();
+    let pos1 = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 1,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos1,
+            &[push_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![make_push_item("i2", "k2", 3)],
+                "cmd-2",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.pending_count, 2);
 }
@@ -456,9 +540,15 @@ async fn storage_conformance_durability_multi_batch_accumulates() {
 #[tokio::test]
 async fn storage_conformance_durability_metrics_missing_queue_is_error() {
     let store = MemoryProjectionStore::new();
-    let qk = QueueKey { tenant_id: tenant(), queue_id: qid("ghost") };
+    let qk = QueueKey {
+        tenant_id: tenant(),
+        queue_id: qid("ghost"),
+    };
     let err = store.metrics(&qk).await.unwrap_err();
-    assert!(matches!(err, pqueue_storage::traits::ProjectionError::QueueNotFound));
+    assert!(matches!(
+        err,
+        pqueue_storage::traits::ProjectionError::QueueNotFound
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -472,8 +562,15 @@ async fn push_and_claim_setup(
     items: Vec<PushItem>,
 ) -> ShardKey {
     let sk = shard(t.clone(), q.clone(), 0);
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
-    store.apply_committed(pos, &[push_cmd(t, q, 0, items, "cmd-push")]).await.unwrap();
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(pos, &[push_cmd(t, q, 0, items, "cmd-push")])
+        .await
+        .unwrap();
     sk
 }
 
@@ -483,17 +580,23 @@ async fn storage_conformance_claim_returns_pending_items() {
     let t = tenant();
     let q = qid("claim-basic");
     let sk = push_and_claim_setup(
-        &store, t.clone(), q.clone(),
+        &store,
+        t.clone(),
+        q.clone(),
         vec![make_push_item("i1", "k1", 3), make_push_item("i2", "k2", 3)],
-    ).await;
+    )
+    .await;
 
-    let result = store.batch_claim(ClaimRequest {
-        shard_key: sk.clone(),
-        max_items: 10,
-        now: ts(1000),
-        lease_token: "tok-1".to_string(),
-        lease_expires_at: ts(2000),
-    }).await.unwrap();
+    let result = store
+        .batch_claim(ClaimRequest {
+            shard_key: sk.clone(),
+            max_items: 10,
+            now: ts(1000),
+            lease_token: "tok-1".to_string(),
+            lease_expires_at: ts(2000),
+        })
+        .await
+        .unwrap();
 
     assert_eq!(result.claimed_item_ids.len(), 2);
     assert_eq!(result.lease_token, "tok-1");
@@ -505,21 +608,27 @@ async fn storage_conformance_claim_respects_max_items() {
     let t = tenant();
     let q = qid("claim-max");
     let sk = push_and_claim_setup(
-        &store, t.clone(), q.clone(),
+        &store,
+        t.clone(),
+        q.clone(),
         vec![
             make_push_item("i1", "k1", 3),
             make_push_item("i2", "k2", 3),
             make_push_item("i3", "k3", 3),
         ],
-    ).await;
+    )
+    .await;
 
-    let result = store.batch_claim(ClaimRequest {
-        shard_key: sk,
-        max_items: 2,
-        now: ts(1000),
-        lease_token: "tok-1".to_string(),
-        lease_expires_at: ts(2000),
-    }).await.unwrap();
+    let result = store
+        .batch_claim(ClaimRequest {
+            shard_key: sk,
+            max_items: 2,
+            now: ts(1000),
+            lease_token: "tok-1".to_string(),
+            lease_expires_at: ts(2000),
+        })
+        .await
+        .unwrap();
 
     assert_eq!(result.claimed_item_ids.len(), 2);
 }
@@ -530,19 +639,28 @@ async fn storage_conformance_claim_moves_items_to_leased() {
     let t = tenant();
     let q = qid("claim-state");
     let sk = push_and_claim_setup(
-        &store, t.clone(), q.clone(),
+        &store,
+        t.clone(),
+        q.clone(),
         vec![make_push_item("i1", "k1", 3)],
-    ).await;
+    )
+    .await;
 
-    store.batch_claim(ClaimRequest {
-        shard_key: sk,
-        max_items: 10,
-        now: ts(1000),
-        lease_token: "tok-1".to_string(),
-        lease_expires_at: ts(2000),
-    }).await.unwrap();
+    store
+        .batch_claim(ClaimRequest {
+            shard_key: sk,
+            max_items: 10,
+            now: ts(1000),
+            lease_token: "tok-1".to_string(),
+            lease_expires_at: ts(2000),
+        })
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.pending_count, 0);
     assert_eq!(m.leased_count, 1);
@@ -554,7 +672,11 @@ async fn storage_conformance_claim_respects_not_before() {
     let t = tenant();
     let q = qid("claim-notbefore");
     let sk = shard(t.clone(), q.clone(), 0);
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
 
     let future_item = PushItem {
         item_id: iid("i1"),
@@ -565,15 +687,30 @@ async fn storage_conformance_claim_respects_not_before() {
         payload: None,
     };
     let ready_item = make_push_item("i2", "k2", 3);
-    store.apply_committed(pos, &[push_cmd(t.clone(), q.clone(), 0, vec![future_item, ready_item], "cmd-1")]).await.unwrap();
+    store
+        .apply_committed(
+            pos,
+            &[push_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![future_item, ready_item],
+                "cmd-1",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let result = store.batch_claim(ClaimRequest {
-        shard_key: sk,
-        max_items: 10,
-        now: ts(1000),
-        lease_token: "tok-1".to_string(),
-        lease_expires_at: ts(2000),
-    }).await.unwrap();
+    let result = store
+        .batch_claim(ClaimRequest {
+            shard_key: sk,
+            max_items: 10,
+            now: ts(1000),
+            lease_token: "tok-1".to_string(),
+            lease_expires_at: ts(2000),
+        })
+        .await
+        .unwrap();
 
     // Only i2 should be claimed (i1 not_before is in future).
     assert_eq!(result.claimed_item_ids.len(), 1);
@@ -584,14 +721,20 @@ async fn storage_conformance_claim_respects_not_before() {
 async fn storage_conformance_claim_empty_shard_returns_not_found() {
     let store = MemoryProjectionStore::new();
     let sk = shard(tenant(), qid("ghost"), 0);
-    let err = store.batch_claim(ClaimRequest {
-        shard_key: sk,
-        max_items: 10,
-        now: ts(1000),
-        lease_token: "tok".to_string(),
-        lease_expires_at: ts(2000),
-    }).await.unwrap_err();
-    assert!(matches!(err, pqueue_storage::traits::ProjectionError::QueueNotFound));
+    let err = store
+        .batch_claim(ClaimRequest {
+            shard_key: sk,
+            max_items: 10,
+            now: ts(1000),
+            lease_token: "tok".to_string(),
+            lease_expires_at: ts(2000),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        pqueue_storage::traits::ProjectionError::QueueNotFound
+    ));
 }
 
 #[tokio::test]
@@ -600,27 +743,52 @@ async fn storage_conformance_claim_already_leased_items_skipped() {
     let t = tenant();
     let q = qid("claim-skip-leased");
     let sk = push_and_claim_setup(
-        &store, t.clone(), q.clone(),
+        &store,
+        t.clone(),
+        q.clone(),
         vec![make_push_item("i1", "k1", 3), make_push_item("i2", "k2", 3)],
-    ).await;
+    )
+    .await;
 
     // Claim i1 via apply_committed (simulates log-driven claim).
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 1, backend_epoch: 0 };
-    store.apply_committed(pos, &[claim_cmd(t.clone(), q.clone(), 0, vec![iid("i1")], "tok-1", ts(2000), "cmd-claim")]).await.unwrap();
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 1,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos,
+            &[claim_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![iid("i1")],
+                "tok-1",
+                ts(2000),
+                "cmd-claim",
+            )],
+        )
+        .await
+        .unwrap();
 
     // batch_claim should only return i2.
-    let result = store.batch_claim(ClaimRequest {
-        shard_key: sk,
-        max_items: 10,
-        now: ts(1000),
-        lease_token: "tok-2".to_string(),
-        lease_expires_at: ts(3000),
-    }).await.unwrap();
+    let result = store
+        .batch_claim(ClaimRequest {
+            shard_key: sk,
+            max_items: 10,
+            now: ts(1000),
+            lease_token: "tok-2".to_string(),
+            lease_expires_at: ts(3000),
+        })
+        .await
+        .unwrap();
 
     assert_eq!(result.claimed_item_ids.len(), 1);
     assert_eq!(result.claimed_item_ids[0], iid("i2"));
 }
 
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Progress conformance (B-020): finalize lifecycle transitions
 // ---------------------------------------------------------------------------
@@ -633,11 +801,45 @@ async fn push_and_auto_claim(
     token: &str,
 ) -> ShardKey {
     let sk = shard(t.clone(), q.clone(), 0);
-    let pos0 = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
-    store.apply_committed(pos0, &[push_cmd(t.clone(), q.clone(), 0, vec![make_push_item(item_id, item_id, 3)], "cmd-push")]).await.unwrap();
+    let pos0 = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos0,
+            &[push_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![make_push_item(item_id, item_id, 3)],
+                "cmd-push",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let pos1 = CommandPosition { shard_key: sk.clone(), sequence: 1, backend_epoch: 0 };
-    store.apply_committed(pos1, &[claim_cmd(t, q, 0, vec![iid(item_id)], token, ts(2000), "cmd-claim")]).await.unwrap();
+    let pos1 = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 1,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos1,
+            &[claim_cmd(
+                t,
+                q,
+                0,
+                vec![iid(item_id)],
+                token,
+                ts(2000),
+                "cmd-claim",
+            )],
+        )
+        .await
+        .unwrap();
     sk
 }
 
@@ -648,14 +850,32 @@ async fn storage_conformance_progress_finalize_complete() {
     let q = qid("prog-complete");
     let sk = push_and_auto_claim(&store, t.clone(), q.clone(), "i1", "tok").await;
 
-    let pos = CommandPosition { shard_key: sk, sequence: 2, backend_epoch: 0 };
-    store.apply_committed(pos, &[finalize_cmd(
-        t.clone(), q.clone(), 0,
-        vec![FinalizeOutcome { item_id: iid("i1"), kind: FinalizeKind::Complete }],
-        "cmd-fin",
-    )]).await.unwrap();
+    let pos = CommandPosition {
+        shard_key: sk,
+        sequence: 2,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos,
+            &[finalize_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![FinalizeOutcome {
+                    item_id: iid("i1"),
+                    kind: FinalizeKind::Complete,
+                }],
+                "cmd-fin",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.completed_count, 1);
     assert_eq!(m.leased_count, 0);
@@ -668,14 +888,32 @@ async fn storage_conformance_progress_finalize_fail() {
     let q = qid("prog-fail");
     let sk = push_and_auto_claim(&store, t.clone(), q.clone(), "i1", "tok").await;
 
-    let pos = CommandPosition { shard_key: sk, sequence: 2, backend_epoch: 0 };
-    store.apply_committed(pos, &[finalize_cmd(
-        t.clone(), q.clone(), 0,
-        vec![FinalizeOutcome { item_id: iid("i1"), kind: FinalizeKind::Fail }],
-        "cmd-fin",
-    )]).await.unwrap();
+    let pos = CommandPosition {
+        shard_key: sk,
+        sequence: 2,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos,
+            &[finalize_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![FinalizeOutcome {
+                    item_id: iid("i1"),
+                    kind: FinalizeKind::Fail,
+                }],
+                "cmd-fin",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.failed_count, 1);
     assert_eq!(m.leased_count, 0);
@@ -688,26 +926,47 @@ async fn storage_conformance_progress_finalize_retry_re_enqueues() {
     let q = qid("prog-retry");
     let sk = push_and_auto_claim(&store, t.clone(), q.clone(), "i1", "tok").await;
 
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 2, backend_epoch: 0 };
-    store.apply_committed(pos, &[finalize_cmd(
-        t.clone(), q.clone(), 0,
-        vec![FinalizeOutcome { item_id: iid("i1"), kind: FinalizeKind::Retry }],
-        "cmd-fin",
-    )]).await.unwrap();
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 2,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos,
+            &[finalize_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![FinalizeOutcome {
+                    item_id: iid("i1"),
+                    kind: FinalizeKind::Retry,
+                }],
+                "cmd-fin",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t.clone(), queue_id: q.clone() };
+    let qk = QueueKey {
+        tenant_id: t.clone(),
+        queue_id: q.clone(),
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.pending_count, 1, "retried item should be Pending again");
     assert_eq!(m.leased_count, 0);
 
     // Should be claimable again.
-    let result = store.batch_claim(ClaimRequest {
-        shard_key: sk,
-        max_items: 10,
-        now: ts(1000),
-        lease_token: "tok-2".to_string(),
-        lease_expires_at: ts(3000),
-    }).await.unwrap();
+    let result = store
+        .batch_claim(ClaimRequest {
+            shard_key: sk,
+            max_items: 10,
+            now: ts(1000),
+            lease_token: "tok-2".to_string(),
+            lease_expires_at: ts(3000),
+        })
+        .await
+        .unwrap();
     assert_eq!(result.claimed_item_ids.len(), 1);
 }
 
@@ -718,14 +977,32 @@ async fn storage_conformance_progress_finalize_release_re_enqueues() {
     let q = qid("prog-release");
     let sk = push_and_auto_claim(&store, t.clone(), q.clone(), "i1", "tok").await;
 
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 2, backend_epoch: 0 };
-    store.apply_committed(pos, &[finalize_cmd(
-        t.clone(), q.clone(), 0,
-        vec![FinalizeOutcome { item_id: iid("i1"), kind: FinalizeKind::Release }],
-        "cmd-fin",
-    )]).await.unwrap();
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 2,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos,
+            &[finalize_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![FinalizeOutcome {
+                    item_id: iid("i1"),
+                    kind: FinalizeKind::Release,
+                }],
+                "cmd-fin",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.pending_count, 1);
 }
@@ -737,12 +1014,34 @@ async fn storage_conformance_progress_lease_expired_re_enqueues() {
     let q = qid("prog-expired");
     let sk = push_and_auto_claim(&store, t.clone(), q.clone(), "i1", "tok").await;
 
-    let pos = CommandPosition { shard_key: sk.clone(), sequence: 2, backend_epoch: 0 };
-    store.apply_committed(pos, &[lease_expired_cmd(t.clone(), q.clone(), 0, vec![iid("i1")], "cmd-exp")]).await.unwrap();
+    let pos = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 2,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos,
+            &[lease_expired_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![iid("i1")],
+                "cmd-exp",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
-    assert_eq!(m.pending_count, 1, "expired lease should return item to Pending");
+    assert_eq!(
+        m.pending_count, 1,
+        "expired lease should return item to Pending"
+    );
     assert_eq!(m.leased_count, 0);
 }
 
@@ -754,24 +1053,80 @@ async fn storage_conformance_progress_full_lifecycle_complete() {
     let sk = shard(t.clone(), q.clone(), 0);
 
     // Push 2 items.
-    let pos0 = CommandPosition { shard_key: sk.clone(), sequence: 0, backend_epoch: 0 };
-    store.apply_committed(pos0, &[push_cmd(t.clone(), q.clone(), 0, vec![
-        make_push_item("i1", "k1", 3),
-        make_push_item("i2", "k2", 3),
-    ], "cmd-push")]).await.unwrap();
+    let pos0 = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 0,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos0,
+            &[push_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![make_push_item("i1", "k1", 3), make_push_item("i2", "k2", 3)],
+                "cmd-push",
+            )],
+        )
+        .await
+        .unwrap();
 
     // Claim both.
-    let pos1 = CommandPosition { shard_key: sk.clone(), sequence: 1, backend_epoch: 0 };
-    store.apply_committed(pos1, &[claim_cmd(t.clone(), q.clone(), 0, vec![iid("i1"), iid("i2")], "tok", ts(5000), "cmd-claim")]).await.unwrap();
+    let pos1 = CommandPosition {
+        shard_key: sk.clone(),
+        sequence: 1,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos1,
+            &[claim_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![iid("i1"), iid("i2")],
+                "tok",
+                ts(5000),
+                "cmd-claim",
+            )],
+        )
+        .await
+        .unwrap();
 
     // Complete i1, fail i2.
-    let pos2 = CommandPosition { shard_key: sk, sequence: 2, backend_epoch: 0 };
-    store.apply_committed(pos2, &[finalize_cmd(t.clone(), q.clone(), 0, vec![
-        FinalizeOutcome { item_id: iid("i1"), kind: FinalizeKind::Complete },
-        FinalizeOutcome { item_id: iid("i2"), kind: FinalizeKind::Fail },
-    ], "cmd-fin")]).await.unwrap();
+    let pos2 = CommandPosition {
+        shard_key: sk,
+        sequence: 2,
+        backend_epoch: 0,
+    };
+    store
+        .apply_committed(
+            pos2,
+            &[finalize_cmd(
+                t.clone(),
+                q.clone(),
+                0,
+                vec![
+                    FinalizeOutcome {
+                        item_id: iid("i1"),
+                        kind: FinalizeKind::Complete,
+                    },
+                    FinalizeOutcome {
+                        item_id: iid("i2"),
+                        kind: FinalizeKind::Fail,
+                    },
+                ],
+                "cmd-fin",
+            )],
+        )
+        .await
+        .unwrap();
 
-    let qk = QueueKey { tenant_id: t, queue_id: q };
+    let qk = QueueKey {
+        tenant_id: t,
+        queue_id: q,
+    };
     let m = store.metrics(&qk).await.unwrap();
     assert_eq!(m.pending_count, 0);
     assert_eq!(m.leased_count, 0);

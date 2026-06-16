@@ -26,7 +26,9 @@ fn read_zigzag(data: &[u8]) -> Option<(i64, usize)> {
             return Some((decoded, i + 1));
         }
         shift += 7;
-        if shift >= 64 { return None; }
+        if shift >= 64 {
+            return None;
+        }
     }
     None
 }
@@ -47,62 +49,90 @@ fn read_zigzag(data: &[u8]) -> Option<(i64, usize)> {
 /// Returns `None` for the whole batch if the format is unrecognised (magic != 2 or compressed).
 fn decode_records(batch: &[u8]) -> Option<Vec<(Option<Bytes>, Option<Bytes>)>> {
     // Minimum RecordBatch header = 61 bytes.
-    if batch.len() < 61 { return None; }
+    if batch.len() < 61 {
+        return None;
+    }
     let magic = batch[16];
-    if magic != 2 { return None; }
+    if magic != 2 {
+        return None;
+    }
     // Attributes bits 0-2 = compression codec.  0 = uncompressed.
     let attributes = i16::from_be_bytes([batch[21], batch[22]]);
-    if attributes & 0x07 != 0 { return None; } // compressed — skip
+    if attributes & 0x07 != 0 {
+        return None;
+    } // compressed — skip
     let count = i32::from_be_bytes([batch[57], batch[58], batch[59], batch[60]]);
-    if count <= 0 { return Some(vec![]); }
+    if count <= 0 {
+        return Some(vec![]);
+    }
 
     let mut pos = 61usize;
     let mut records = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
-        if pos >= batch.len() { break; }
+        if pos >= batch.len() {
+            break;
+        }
         // record length (zigzag) — covers everything after this field
         let (_, len_bytes) = read_zigzag(&batch[pos..])?;
         pos += len_bytes;
-        if pos >= batch.len() { break; }
+        if pos >= batch.len() {
+            break;
+        }
         // attributes (i8)
         pos += 1;
         // timestampDelta (zigzag)
-        let (_, ts_len) = read_zigzag(&batch[pos..])?; pos += ts_len;
+        let (_, ts_len) = read_zigzag(&batch[pos..])?;
+        pos += ts_len;
         // offsetDelta (zigzag)
-        let (_, od_len) = read_zigzag(&batch[pos..])?; pos += od_len;
+        let (_, od_len) = read_zigzag(&batch[pos..])?;
+        pos += od_len;
         // key
-        let (key_len, kl_len) = read_zigzag(&batch[pos..])?; pos += kl_len;
+        let (key_len, kl_len) = read_zigzag(&batch[pos..])?;
+        pos += kl_len;
         let key = if key_len < 0 {
             None
         } else {
             let end = pos + key_len as usize;
-            if end > batch.len() { break; }
+            if end > batch.len() {
+                break;
+            }
             let k = Bytes::copy_from_slice(&batch[pos..end]);
             pos = end;
             Some(k)
         };
         // value
-        let (val_len, vl_len) = read_zigzag(&batch[pos..])?; pos += vl_len;
+        let (val_len, vl_len) = read_zigzag(&batch[pos..])?;
+        pos += vl_len;
         let value = if val_len < 0 {
             None
         } else {
             let end = pos + val_len as usize;
-            if end > batch.len() { break; }
+            if end > batch.len() {
+                break;
+            }
             let v = Bytes::copy_from_slice(&batch[pos..end]);
             pos = end;
             Some(v)
         };
         // Skip headers: headers_count (unsigned varint), then each header
-        if pos >= batch.len() { records.push((key, value)); break; }
-        let (hcount, hc_len) = read_zigzag(&batch[pos..])?; pos += hc_len;
+        if pos >= batch.len() {
+            records.push((key, value));
+            break;
+        }
+        let (hcount, hc_len) = read_zigzag(&batch[pos..])?;
+        pos += hc_len;
         for _ in 0..hcount.max(0) {
             // header key: compact_string (unsigned varint N, then N bytes)
-            let (hk_len, hkl_len) = read_zigzag(&batch[pos..])?; pos += hkl_len;
+            let (hk_len, hkl_len) = read_zigzag(&batch[pos..])?;
+            pos += hkl_len;
             pos += hk_len.max(0) as usize;
             // header value: compact_bytes (signed varint N, then N bytes; -1 = null)
-            let (hv_len, hvl_len) = read_zigzag(&batch[pos..])?; pos += hvl_len;
-            if hv_len > 0 { pos += hv_len as usize; }
+            let (hv_len, hvl_len) = read_zigzag(&batch[pos..])?;
+            pos += hvl_len;
+            if hv_len > 0 {
+                pos += hv_len as usize;
+            }
         }
         records.push((key, value));
     }
@@ -211,13 +241,11 @@ pub fn handle(api_version: i16, body: &[u8]) -> (ProduceResponse, Vec<ProducePus
                                     let item_id =
                                         ItemId::new(format!("{}-{}-{}", topic_name, partition, i))
                                             .unwrap_or_else(|_| ItemId::new("fallback").unwrap());
-                                    let client_key = ClientItemKey::new(format!(
-                                        "{}-key-{}",
-                                        topic_name, i
-                                    ))
-                                    .unwrap_or_else(|_| {
-                                        ClientItemKey::new("fallback-key").unwrap()
-                                    });
+                                    let client_key =
+                                        ClientItemKey::new(format!("{}-key-{}", topic_name, i))
+                                            .unwrap_or_else(|_| {
+                                                ClientItemKey::new("fallback-key").unwrap()
+                                            });
                                     items.push(PushItem {
                                         item_id,
                                         client_item_key: client_key,

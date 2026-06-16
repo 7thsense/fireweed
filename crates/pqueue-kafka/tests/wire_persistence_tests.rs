@@ -3,8 +3,8 @@
 // then checks that BatchPush commands landed after a Produce request.
 
 use bytes::{BufMut, BytesMut};
-use pqueue_kafka::test_support::TestProducerServer;
 use pqueue_core::{QueueId, TenantId};
+use pqueue_kafka::test_support::TestProducerServer;
 use pqueue_storage::traits::LogStore;
 use pqueue_storage::types::{ShardId, ShardKey};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 fn framed_produce_v3(queue: &str, correlation_id: i32) -> Vec<u8> {
     let mut body = BytesMut::new();
     body.put_i16(-1); // null transactional_id
-    body.put_i16(1);  // acks=1
+    body.put_i16(1); // acks=1
     body.put_i32(5000); // timeout_ms
     body.put_i32(1); // topics count
     body.put_i16(queue.len() as i16);
@@ -39,7 +39,7 @@ fn framed_produce_v3(queue: &str, correlation_id: i32) -> Vec<u8> {
 fn framed_produce_v9_with_record(queue: &str, correlation_id: i32) -> Vec<u8> {
     let mut body = BytesMut::new();
     body.put_u8(0x00); // null transactional_id CNS
-    body.put_i16(1);   // acks=1
+    body.put_i16(1); // acks=1
     body.put_i32(5000); // timeout_ms
 
     // topic_data: compact_array 1 element
@@ -54,7 +54,10 @@ fn framed_produce_v9_with_record(queue: &str, correlation_id: i32) -> Vec<u8> {
 
     // Build a minimal RecordBatch with 1 record.
     let batch = build_record_batch(b"k", b"v");
-    assert!(batch.len() + 1 < 128, "batch too large for single-byte varint");
+    assert!(
+        batch.len() + 1 < 128,
+        "batch too large for single-byte varint"
+    );
     body.put_u8((batch.len() + 1) as u8); // compact_nullable_bytes length varint
     body.extend_from_slice(&batch);
     body.put_u8(0x00); // partition tagged_fields
@@ -97,16 +100,16 @@ fn build_record_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
     batch.put_i64(0); // base_offset
     batch.put_i32(batch_length_val);
     batch.put_i32(-1); // partition_leader_epoch
-    batch.put_u8(2);   // magic
-    batch.put_u32(0);  // crc
-    batch.put_i16(0);  // attributes
-    batch.put_i32(0);  // last_offset_delta
-    batch.put_i64(0);  // base_timestamp
-    batch.put_i64(0);  // max_timestamp
+    batch.put_u8(2); // magic
+    batch.put_u32(0); // crc
+    batch.put_i16(0); // attributes
+    batch.put_i32(0); // last_offset_delta
+    batch.put_i64(0); // base_timestamp
+    batch.put_i64(0); // max_timestamp
     batch.put_i64(-1); // producer_id
     batch.put_i16(-1); // producer_epoch
     batch.put_i32(-1); // base_sequence
-    batch.put_i32(1);  // records_count
+    batch.put_i32(1); // records_count
     batch.extend_from_slice(&records_bytes);
     batch.to_vec()
 }
@@ -172,14 +175,20 @@ async fn produce_v9_record_persisted_to_log() {
         .await
         .expect("shard should exist after produce");
 
-    assert!(!page.commands.is_empty(), "log should contain at least one command after produce");
+    assert!(
+        !page.commands.is_empty(),
+        "log should contain at least one command after produce"
+    );
 
     // Verify the command is a BatchPush with the decoded record payload.
     use pqueue_storage::QueueCommand;
     let (_, envelope) = &page.commands[0];
     match &envelope.command {
         QueueCommand::BatchPush(cmd) => {
-            assert!(!cmd.items.is_empty(), "BatchPush should have at least one item");
+            assert!(
+                !cmd.items.is_empty(),
+                "BatchPush should have at least one item"
+            );
             let item = &cmd.items[0];
             assert_eq!(
                 item.payload.as_deref(),
@@ -213,7 +222,10 @@ async fn produce_v3_null_records_no_log_entry() {
     // Either ShardNotFound or an empty page — both are acceptable.
     match result {
         Err(_) => {} // ShardNotFound — correct
-        Ok(page) => assert!(page.commands.is_empty(), "expected no commands for null-records produce"),
+        Ok(page) => assert!(
+            page.commands.is_empty(),
+            "expected no commands for null-records produce"
+        ),
     }
 }
 
@@ -234,7 +246,12 @@ async fn multiple_produces_accumulate_in_log() {
 
     let shard_key = make_shard_key("q");
     let page = store.log.read_from(&shard_key, None, 10).await.unwrap();
-    assert_eq!(page.commands.len(), 3, "expected 3 log entries, got {}", page.commands.len());
+    assert_eq!(
+        page.commands.len(),
+        3,
+        "expected 3 log entries, got {}",
+        page.commands.len()
+    );
 
     // Verify all item_ids are unique — each produce must not overwrite prior items.
     use pqueue_storage::QueueCommand;
@@ -242,10 +259,18 @@ async fn multiple_produces_accumulate_in_log() {
     for (_, envelope) in &page.commands {
         if let QueueCommand::BatchPush(cmd) = &envelope.command {
             for item in &cmd.items {
-                assert!(ids.insert(item.item_id.as_str().to_owned()),
-                    "duplicate item_id across batches: {}", item.item_id);
+                assert!(
+                    ids.insert(item.item_id.as_str().to_owned()),
+                    "duplicate item_id across batches: {}",
+                    item.item_id
+                );
             }
         }
     }
-    assert_eq!(ids.len(), 3, "expected 3 unique item_ids, got {}", ids.len());
+    assert_eq!(
+        ids.len(),
+        3,
+        "expected 3 unique item_ids, got {}",
+        ids.len()
+    );
 }

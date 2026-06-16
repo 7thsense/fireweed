@@ -6,17 +6,17 @@
 
 use parking_lot::Mutex;
 use pqueue_core::{
-    apply_transition, evaluate_eligibility, EligibilitySnapshot, ItemEvent, ItemId, ItemState,
-    Metadata, QueueDefinition, QueueEligibilityRules, QueueId, TenantId, UtcTimestamp,
+    EligibilitySnapshot, ItemEvent, ItemId, ItemState, Metadata, QueueDefinition,
+    QueueEligibilityRules, QueueId, TenantId, UtcTimestamp, apply_transition, evaluate_eligibility,
 };
 use std::collections::HashMap;
 
 use crate::commands::{CommandEnvelope, FinalizeKind, QueueCommand};
 use crate::traits::{
-    AppendBatchResult, ClaimRequest, ClaimResult, CommandPage, ControlPlaneError, ControlPlaneStore,
-    CreateQueueResult, DurabilityProfile, LogStore, LogStoreError, ProjectionError, ProjectionStore,
-    ProjectionSnapshot, QueueMetricsSnapshot, ShardAssignment, SnapshotError, SnapshotRef,
-    SnapshotStore,
+    AppendBatchResult, ClaimRequest, ClaimResult, CommandPage, ControlPlaneError,
+    ControlPlaneStore, CreateQueueResult, DurabilityProfile, LogStore, LogStoreError,
+    ProjectionError, ProjectionSnapshot, ProjectionStore, QueueMetricsSnapshot, ShardAssignment,
+    SnapshotError, SnapshotRef, SnapshotStore,
 };
 use crate::types::{CommandPosition, QueueKey, ShardId, ShardKey};
 
@@ -36,7 +36,9 @@ pub struct MemoryLogStore {
 
 impl MemoryLogStore {
     pub fn new() -> Self {
-        Self { shards: Mutex::new(HashMap::new()) }
+        Self {
+            shards: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -103,7 +105,10 @@ impl LogStore for MemoryLogStore {
             None
         };
 
-        Ok(CommandPage { commands, next_position })
+        Ok(CommandPage {
+            commands,
+            next_position,
+        })
     }
 
     fn durability_profile(&self) -> DurabilityProfile {
@@ -155,7 +160,9 @@ pub struct MemoryProjectionStore {
 
 impl MemoryProjectionStore {
     pub fn new() -> Self {
-        Self { shards: Mutex::new(HashMap::new()) }
+        Self {
+            shards: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -257,7 +264,9 @@ impl ProjectionStore for MemoryProjectionStore {
 
     async fn batch_claim(&self, request: ClaimRequest) -> Result<ClaimResult, ProjectionError> {
         let mut shards = self.shards.lock();
-        let proj = shards.get_mut(&request.shard_key).ok_or(ProjectionError::QueueNotFound)?;
+        let proj = shards
+            .get_mut(&request.shard_key)
+            .ok_or(ProjectionError::QueueNotFound)?;
 
         let rules = QueueEligibilityRules {
             metadata_blockers: Default::default(),
@@ -294,7 +303,10 @@ impl ProjectionStore for MemoryProjectionStore {
             }
         }
 
-        Ok(ClaimResult { claimed_item_ids, lease_token: request.lease_token })
+        Ok(ClaimResult {
+            claimed_item_ids,
+            lease_token: request.lease_token,
+        })
     }
 
     async fn metrics(&self, queue: &QueueKey) -> Result<QueueMetricsSnapshot, ProjectionError> {
@@ -311,7 +323,11 @@ impl ProjectionStore for MemoryProjectionStore {
                 total.failed_count += m.failed_count;
             }
         }
-        if found { Ok(total) } else { Err(ProjectionError::QueueNotFound) }
+        if found {
+            Ok(total)
+        } else {
+            Err(ProjectionError::QueueNotFound)
+        }
     }
 }
 
@@ -325,7 +341,9 @@ pub struct MemorySnapshotStore {
 
 impl MemorySnapshotStore {
     pub fn new() -> Self {
-        Self { snapshots: Mutex::new(HashMap::new()) }
+        Self {
+            snapshots: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -354,7 +372,9 @@ impl SnapshotStore for MemorySnapshotStore {
             position,
             ref_id,
         };
-        self.snapshots.lock().insert(shard.clone(), (snapshot_ref.clone(), snapshot));
+        self.snapshots
+            .lock()
+            .insert(shard.clone(), (snapshot_ref.clone(), snapshot));
         Ok(snapshot_ref)
     }
 
@@ -393,7 +413,9 @@ struct QueueEntry {
 
 impl MemoryControlPlaneStore {
     pub fn new() -> Self {
-        Self { queues: Mutex::new(HashMap::new()) }
+        Self {
+            queues: Mutex::new(HashMap::new()),
+        }
     }
 
     fn make_key(definition: &QueueDefinition) -> QueueKey {
@@ -432,15 +454,15 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
                 worker_id: None,
             })
             .collect();
-        let result = CreateQueueResult { created: true, definition: definition.clone() };
+        let result = CreateQueueResult {
+            created: true,
+            definition: definition.clone(),
+        };
         queues.insert(key, QueueEntry { definition, shards });
         Ok(result)
     }
 
-    async fn queue_definition(
-        &self,
-        key: &QueueKey,
-    ) -> Result<QueueDefinition, ControlPlaneError> {
+    async fn queue_definition(&self, key: &QueueKey) -> Result<QueueDefinition, ControlPlaneError> {
         self.queues
             .lock()
             .get(key)
@@ -459,10 +481,7 @@ impl ControlPlaneStore for MemoryControlPlaneStore {
             .ok_or(ControlPlaneError::QueueNotFound)
     }
 
-    async fn list_queues(
-        &self,
-        tenant_id: &TenantId,
-    ) -> Result<Vec<QueueId>, ControlPlaneError> {
+    async fn list_queues(&self, tenant_id: &TenantId) -> Result<Vec<QueueId>, ControlPlaneError> {
         let queues = self.queues.lock();
         let ids = queues
             .keys()

@@ -4,11 +4,11 @@
 // order matches the declared total order for all four priority models in both
 // directions, over ≥ 1,000,000 generated pairs.
 
-use proptest::prelude::*;
 use pqueue_core::{
     DecimalValue, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
     PriorityValue, UtcTimestamp, priority_sort,
 };
+use proptest::prelude::*;
 use std::cmp::Ordering;
 
 // ---------------------------------------------------------------------------
@@ -16,7 +16,9 @@ use std::cmp::Ordering;
 // ---------------------------------------------------------------------------
 
 fn cmp_timestamp(a: &UtcTimestamp, b: &UtcTimestamp) -> Ordering {
-    a.seconds.cmp(&b.seconds).then(a.nanoseconds.cmp(&b.nanoseconds))
+    a.seconds
+        .cmp(&b.seconds)
+        .then(a.nanoseconds.cmp(&b.nanoseconds))
 }
 
 fn cmp_int64(a: i64, b: i64) -> Ordering {
@@ -68,7 +70,11 @@ fn cmp_decimal(a: &DecimalValue, b: &DecimalValue) -> Ordering {
     };
 
     // For negatives, invert the absolute ordering.
-    if sign_a < 0 { abs_ord.reverse() } else { abs_ord }
+    if sign_a < 0 {
+        abs_ord.reverse()
+    } else {
+        abs_ord
+    }
 }
 
 fn cmp_text(a: &str, b: &str) -> Ordering {
@@ -90,9 +96,8 @@ fn reference_cmp(a: &PriorityValue, b: &PriorityValue) -> Ordering {
 // ---------------------------------------------------------------------------
 
 fn arb_timestamp() -> impl Strategy<Value = PriorityValue> {
-    (i64::MIN..i64::MAX, 0u32..1_000_000_000u32).prop_map(|(s, ns)| {
-        PriorityValue::Timestamp(UtcTimestamp::new(s, ns).unwrap())
-    })
+    (i64::MIN..i64::MAX, 0u32..1_000_000_000u32)
+        .prop_map(|(s, ns)| PriorityValue::Timestamp(UtcTimestamp::new(s, ns).unwrap()))
 }
 
 fn arb_int64() -> impl Strategy<Value = PriorityValue> {
@@ -101,8 +106,12 @@ fn arb_int64() -> impl Strategy<Value = PriorityValue> {
 
 fn arb_decimal() -> impl Strategy<Value = PriorityValue> {
     // Constrain to avoid overflow in the reference cross-multiply: scale ≤ 18, mantissa small.
-    (-10_000_000_000i128..10_000_000_000i128, 0u32..10u32)
-        .prop_map(|(m, s)| PriorityValue::Decimal(DecimalValue { mantissa: m, scale: s }))
+    (-10_000_000_000i128..10_000_000_000i128, 0u32..10u32).prop_map(|(m, s)| {
+        PriorityValue::Decimal(DecimalValue {
+            mantissa: m,
+            scale: s,
+        })
+    })
 }
 
 fn arb_text() -> impl Strategy<Value = PriorityValue> {
@@ -237,9 +246,18 @@ fn core_priority_model_tests_int64_boundaries() {
 fn core_priority_model_tests_decimal_equivalent_representations() {
     let model = model_for(PriorityModelKind::Decimal, PriorityDirection::Ascending);
     // 1.0 expressed three ways must all encode identically.
-    let a = PriorityValue::Decimal(DecimalValue { mantissa: 1, scale: 0 });
-    let b = PriorityValue::Decimal(DecimalValue { mantissa: 10, scale: 1 });
-    let c = PriorityValue::Decimal(DecimalValue { mantissa: 100, scale: 2 });
+    let a = PriorityValue::Decimal(DecimalValue {
+        mantissa: 1,
+        scale: 0,
+    });
+    let b = PriorityValue::Decimal(DecimalValue {
+        mantissa: 10,
+        scale: 1,
+    });
+    let c = PriorityValue::Decimal(DecimalValue {
+        mantissa: 100,
+        scale: 2,
+    });
 
     assert_eq!(priority_sort(&a, &model), priority_sort(&b, &model));
     assert_eq!(priority_sort(&b, &model), priority_sort(&c, &model));

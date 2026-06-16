@@ -5,9 +5,7 @@
 //   - Rearm resets the per-cycle retry counter.
 //   - The pure `is_retry_exhausted` and `failure_event` helpers are correct.
 
-use pqueue_core::{
-    ItemEvent, ItemState, apply_transition, failure_event, is_retry_exhausted,
-};
+use pqueue_core::{ItemEvent, ItemState, apply_transition, failure_event, is_retry_exhausted};
 
 // ---------------------------------------------------------------------------
 // is_retry_exhausted
@@ -66,14 +64,12 @@ fn simulate_retry_cycle(max_attempts: u32) {
 
     loop {
         // Claim the item.
-        state = apply_transition(state, ItemEvent::Claim)
-            .expect("Claim from Pending must succeed");
+        state = apply_transition(state, ItemEvent::Claim).expect("Claim from Pending must succeed");
         assert_eq!(state, ItemState::Leased);
 
         // Choose the failure event based on exhaustion.
         let event = failure_event(attempts, max_attempts);
-        state = apply_transition(state, event)
-            .expect("failure event from Leased must succeed");
+        state = apply_transition(state, event).expect("failure event from Leased must succeed");
 
         attempts += 1;
 
@@ -96,12 +92,16 @@ fn simulate_retry_cycle(max_attempts: u32) {
     }
 
     assert_eq!(
-        attempts, max_attempts + 1,
+        attempts,
+        max_attempts + 1,
         "expected terminal fail on attempt {}, got it on {}",
         max_attempts + 1,
         attempts
     );
-    assert_eq!(terminal_fail_count, 1, "item must reach Failed exactly once");
+    assert_eq!(
+        terminal_fail_count, 1,
+        "item must reach Failed exactly once"
+    );
     // Verify no further transitions are accepted (INV-3).
     assert!(apply_transition(state, ItemEvent::Claim).is_err());
 }

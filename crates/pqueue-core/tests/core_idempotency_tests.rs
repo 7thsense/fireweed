@@ -5,9 +5,7 @@
 //   2. Replayed request_id with conflicting body → RequestIdConflict.
 //   3. Duplicate client_item_key (non-terminal) → ClientItemKeyDuplicate.
 
-use pqueue_core::{
-    BodyHash, ClientItemKey, IdempotencyOutcome, RequestId, check_idempotency,
-};
+use pqueue_core::{BodyHash, ClientItemKey, IdempotencyOutcome, RequestId, check_idempotency};
 
 fn rid(s: &str) -> RequestId {
     RequestId::new(s).unwrap()

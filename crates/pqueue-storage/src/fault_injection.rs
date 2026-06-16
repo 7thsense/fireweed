@@ -4,8 +4,8 @@
 //! and a `replay` helper for replaying a shard log into a `ProjectionStore`.
 //! Used by `fault_injection_harness_tests` to verify INV-2 and INV-10.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::commands::CommandEnvelope;
 use crate::traits::{
@@ -42,7 +42,11 @@ pub struct FaultInjectedLogStore<T: LogStore> {
 
 impl<T: LogStore> FaultInjectedLogStore<T> {
     pub fn new(inner: T, mode: FailureMode) -> Self {
-        Self { inner, mode, call_count: Arc::new(AtomicU32::new(0)) }
+        Self {
+            inner,
+            mode,
+            call_count: Arc::new(AtomicU32::new(0)),
+        }
     }
 
     pub fn call_count(&self) -> u32 {
@@ -60,22 +64,32 @@ impl<T: LogStore + Send + Sync> LogStore for FaultInjectedLogStore<T> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
 
         match &self.mode {
-            FailureMode::None => self.inner.append_batch(shard, expected_epoch, commands).await,
+            FailureMode::None => {
+                self.inner
+                    .append_batch(shard, expected_epoch, commands)
+                    .await
+            }
 
             FailureMode::FailAtCallN(target) => {
                 if n == *target {
-                    return Err(LogStoreError::StorageFailure(
-                        format!("injected failure at call {}", n),
-                    ));
+                    return Err(LogStoreError::StorageFailure(format!(
+                        "injected failure at call {}",
+                        n
+                    )));
                 }
-                self.inner.append_batch(shard, expected_epoch, commands).await
+                self.inner
+                    .append_batch(shard, expected_epoch, commands)
+                    .await
             }
 
             FailureMode::PartialAppend(keep) => {
                 let total = commands.len();
                 if total <= *keep {
                     // All commands fit; no truncation needed, behave normally.
-                    return self.inner.append_batch(shard, expected_epoch, commands).await;
+                    return self
+                        .inner
+                        .append_batch(shard, expected_epoch, commands)
+                        .await;
                 }
                 // Commit only the first `keep` commands, then fail.
                 let truncated: Vec<CommandEnvelope> = commands.into_iter().take(*keep).collect();
@@ -84,7 +98,9 @@ impl<T: LogStore + Send + Sync> LogStore for FaultInjectedLogStore<T> {
                         "partial append: 0 commands committed".to_string(),
                     ));
                 }
-                self.inner.append_batch(shard, expected_epoch, truncated).await?;
+                self.inner
+                    .append_batch(shard, expected_epoch, truncated)
+                    .await?;
                 Err(LogStoreError::StorageFailure(
                     "partial append: truncated batch".to_string(),
                 ))
@@ -185,7 +201,10 @@ pub struct KillSchedule {
 impl KillSchedule {
     /// Create a kill schedule that fires after `kill_after` checkpoints.
     pub fn kill_after(kill_after: u32) -> Self {
-        Self { killed: Arc::new(AtomicU32::new(0)), kill_at: kill_after }
+        Self {
+            killed: Arc::new(AtomicU32::new(0)),
+            kill_at: kill_after,
+        }
     }
 
     /// Always-passive schedule (no kills).
