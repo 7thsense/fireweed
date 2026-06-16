@@ -54,6 +54,7 @@ scope.
 - Seventh Sense migration design from existing tables into pqueue commands.
 - Production `progress_bound_ms` value selection; tests use configured fixture
   bounds until the external SLA lands.
+  <!-- pqueue-deferral: progress_bound_ms; owner=Erik; reason="external production SLA input pending"; recheck=2026-07-15 -->
 
 ## Shared Constraints
 
