@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
 use pqueue_core::{ClientItemKey, ItemId, QueueId, RequestId, TenantId, UtcTimestamp};
-use pqueue_objectlog::{FjordObjectLogStore, MemoryBlobStore, MemoryCoordinator};
+use pqueue_objectlog::{
+    ConfigError, DeploymentProfile, FjordObjectLogStore, ManifestMode, MemoryBlobStore,
+    MemoryCoordinator, PqueueObjectLogConfig,
+};
 use pqueue_storage::commands::{
     BatchClaimCommand, BatchPushCommand, CommandEnvelope, CommandId, PushItem, QueueCommand,
 };
@@ -247,4 +250,88 @@ async fn object_log_commit_recovery_tests_request_id_replay_finds_committed_comm
     assert_eq!(replayed.0.sequence, 0);
     assert_eq!(replayed.1.request_id.as_ref(), Some(&request_id));
     assert!(matches!(replayed.1.command, QueueCommand::BatchClaim(_)));
+}
+
+#[test]
+fn object_log_commit_recovery_tests_rejects_production_one_object_per_command_config() {
+    let config = PqueueObjectLogConfig {
+        deployment_profile: DeploymentProfile::Production,
+        manifest_mode: ManifestMode::ObjectStoreCas,
+        max_commands_per_segment: 1,
+        dev_unsafe_one_command_segments: false,
+    };
+
+    assert_eq!(
+        config.validate(),
+        Err(ConfigError::OneCommandSegmentInProduction)
+    );
+}
+
+#[test]
+fn object_log_commit_recovery_tests_rejects_dev_unsafe_segment_flag_in_production() {
+    let config = PqueueObjectLogConfig {
+        deployment_profile: DeploymentProfile::Production,
+        manifest_mode: ManifestMode::ObjectStoreCas,
+        max_commands_per_segment: 16,
+        dev_unsafe_one_command_segments: true,
+    };
+
+    assert_eq!(
+        config.validate(),
+        Err(ConfigError::DevUnsafeFlagInProduction)
+    );
+}
+
+#[test]
+fn object_log_commit_recovery_tests_rejects_missing_cas_without_fallback() {
+    let config = PqueueObjectLogConfig {
+        deployment_profile: DeploymentProfile::Production,
+        manifest_mode: ManifestMode::NoConditionalWrite,
+        max_commands_per_segment: 16,
+        dev_unsafe_one_command_segments: false,
+    };
+
+    assert_eq!(
+        config.validate(),
+        Err(ConfigError::MissingConditionalWriteWithoutFallback)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_keeps_epoch_fence() {
+    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
+        Arc::new(MemoryCoordinator::new());
+    let blob = Arc::new(MemoryBlobStore::new());
+    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let config = PqueueObjectLogConfig {
+        deployment_profile: DeploymentProfile::Production,
+        manifest_mode: ManifestMode::PostgresManifestPointerFallback,
+        max_commands_per_segment: 16,
+        dev_unsafe_one_command_segments: false,
+    };
+    let store = FjordObjectLogStore::new_with_config(coordinator, blob_dyn, config).unwrap();
+    let t = tenant();
+    let q = qid("object-log-fallback");
+    let shard = shard(t.clone(), q.clone(), 0);
+
+    assert_eq!(
+        store.config().manifest_mode,
+        ManifestMode::PostgresManifestPointerFallback
+    );
+    store.commit_epoch_fence(&shard, 2).unwrap();
+    let stale = store
+        .append_batch(&shard, Some(1), vec![push_envelope(&t, &q, 0, 0)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stale,
+        LogStoreError::StalEpoch {
+            expected: 1,
+            current: 2
+        }
+    );
+    store
+        .append_batch(&shard, Some(2), vec![push_envelope(&t, &q, 0, 1)])
+        .await
+        .unwrap();
 }

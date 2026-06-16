@@ -22,23 +22,120 @@ use pqueue_storage::types::{CommandChecksum, CommandPosition, ShardKey};
 pub use fjord_coordinator::memory::MemoryCoordinator;
 pub use fjord_log::MemoryBlobStore;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentProfile {
+    Production,
+    Development,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestMode {
+    ObjectStoreCas,
+    PostgresManifestPointerFallback,
+    NoConditionalWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PqueueObjectLogConfig {
+    pub deployment_profile: DeploymentProfile,
+    pub manifest_mode: ManifestMode,
+    pub max_commands_per_segment: usize,
+    pub dev_unsafe_one_command_segments: bool,
+}
+
+impl Default for PqueueObjectLogConfig {
+    fn default() -> Self {
+        Self {
+            deployment_profile: DeploymentProfile::Production,
+            manifest_mode: ManifestMode::ObjectStoreCas,
+            max_commands_per_segment: 1024,
+            dev_unsafe_one_command_segments: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    EmptySegment,
+    OneCommandSegmentInProduction,
+    DevUnsafeFlagInProduction,
+    MissingConditionalWriteWithoutFallback,
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptySegment => write!(f, "max_commands_per_segment must be greater than zero"),
+            Self::OneCommandSegmentInProduction => {
+                write!(f, "one-command object segments are rejected in production")
+            }
+            Self::DevUnsafeFlagInProduction => {
+                write!(
+                    f,
+                    "dev_unsafe_one_command_segments cannot be set in production"
+                )
+            }
+            Self::MissingConditionalWriteWithoutFallback => write!(
+                f,
+                "object store without conditional write requires Postgres manifest pointer fallback"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl PqueueObjectLogConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_commands_per_segment == 0 {
+            return Err(ConfigError::EmptySegment);
+        }
+        if self.deployment_profile == DeploymentProfile::Production
+            && self.dev_unsafe_one_command_segments
+        {
+            return Err(ConfigError::DevUnsafeFlagInProduction);
+        }
+        if self.deployment_profile == DeploymentProfile::Production
+            && self.max_commands_per_segment == 1
+        {
+            return Err(ConfigError::OneCommandSegmentInProduction);
+        }
+        if self.manifest_mode == ManifestMode::NoConditionalWrite {
+            return Err(ConfigError::MissingConditionalWriteWithoutFallback);
+        }
+        Ok(())
+    }
+}
+
 pub struct FjordObjectLogStore {
     coordinator: Arc<dyn CoordinatorStore>,
     writer: WritePath,
     reader: ReadPath,
+    config: PqueueObjectLogConfig,
     epochs: Mutex<HashMap<ShardKey, u64>>,
     topics: Mutex<HashSet<String>>,
 }
 
 impl FjordObjectLogStore {
     pub fn new(coordinator: Arc<dyn CoordinatorStore>, blob: Arc<dyn BlobStore>) -> Self {
-        Self {
+        Self::new_with_config(coordinator, blob, PqueueObjectLogConfig::default())
+            .expect("default pqueue object-log config is valid")
+    }
+
+    pub fn new_with_config(
+        coordinator: Arc<dyn CoordinatorStore>,
+        blob: Arc<dyn BlobStore>,
+        config: PqueueObjectLogConfig,
+    ) -> Result<Self, ConfigError> {
+        config.validate()?;
+        Ok(Self {
             writer: WritePath::new(Arc::clone(&coordinator), Arc::clone(&blob)),
             reader: ReadPath::new(Arc::clone(&coordinator), blob),
             coordinator,
+            config,
             epochs: Mutex::new(HashMap::new()),
             topics: Mutex::new(HashSet::new()),
-        }
+        })
     }
 
     pub fn new_memory() -> (Self, Arc<MemoryBlobStore>) {
@@ -46,6 +143,10 @@ impl FjordObjectLogStore {
         let blob = Arc::new(MemoryBlobStore::new());
         let blob_dyn: Arc<dyn BlobStore> = blob.clone();
         (Self::new(coordinator, blob_dyn), blob)
+    }
+
+    pub fn config(&self) -> &PqueueObjectLogConfig {
+        &self.config
     }
 
     pub fn advance_epoch(&self, shard: &ShardKey, epoch: u64) {
