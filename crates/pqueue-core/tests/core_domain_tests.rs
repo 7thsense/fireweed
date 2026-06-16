@@ -195,9 +195,11 @@ fn core_domain_tests_identifier_timestamp_metadata_and_error_helpers() {
     let timestamp = UtcTimestamp::new(42, 123).unwrap();
     assert_eq!(timestamp.seconds, 42);
     let invalid_timestamp = UtcTimestamp::new(42, 1_000_000_000).unwrap_err();
-    assert!(invalid_timestamp
-        .to_string()
-        .contains("nanoseconds must be less"));
+    assert!(
+        invalid_timestamp
+            .to_string()
+            .contains("nanoseconds must be less")
+    );
 
     let mut metadata = Metadata::new();
     assert!(metadata.is_empty());
