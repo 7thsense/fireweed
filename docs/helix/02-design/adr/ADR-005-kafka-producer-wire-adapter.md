@@ -3,6 +3,11 @@ ddx:
   id: adr-kafka-producer-wire-adapter
   depends_on:
     - prd
+  review:
+    self_hash: 71580229772a08492d0c0f333e25c9aa9df5356ffadc04d1ce1731c162fd16b0
+    deps:
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # ADR-005: Kafka Producer Wire Adapter as P2 Compatibility Layer

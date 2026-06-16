@@ -5,6 +5,13 @@ ddx:
     - prd
     - adr-cqrs-log-projection-storage-model
     - td-storage-architecture-backend-contracts
+  review:
+    self_hash: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
+    deps:
+      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -58,6 +65,19 @@ Every PRD/ADR/TD scale claim references one of these records.
 **Evidence-ID convention**: this plan owns the canonical IDs **E0–E3**. All
 documents MUST reference these canonical E-IDs; no document mints its own
 evidence IDs.
+
+Release-gate mapping as of 2026-06-16:
+
+| Evidence ID | Source bead(s) |
+|-------------|----------------|
+| E0, E1 | `pqueue-7e2b3132` |
+| E2 | `pqueue-9afd88cc`, `pqueue-76d92a33` |
+| E3 | `pqueue-b1abd895`, `pqueue-472a09d4` |
+
+`scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3` validates
+these source beads directly when invoked with the corresponding
+`--tp002-*-source` flags. The gate may also scan generated ledger rows, but the
+source mapping is the reproducible release authority from a clean checkout.
 
 ### E0 — Per-queue throughput floor (stated requirement)
 

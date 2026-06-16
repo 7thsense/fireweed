@@ -6,6 +6,14 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - prd
     - concerns
+  review:
+    self_hash: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
+    deps:
+      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # Technical Design: TD-003 Sharding and Shard Ownership

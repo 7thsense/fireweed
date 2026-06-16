@@ -1,6 +1,10 @@
 ---
 ddx:
   id: prd
+  review:
+    self_hash: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+    deps: {}
+    reviewed_at: "2026-06-16T17:42:59Z"
 kind: product
 ---
 

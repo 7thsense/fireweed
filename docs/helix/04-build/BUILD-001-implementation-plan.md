@@ -16,6 +16,24 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
+  review:
+    self_hash: c58f64862d102898e239c7382cd6c762e52e0d1a1250b78af543ad2b5c26e578
+    deps:
+      adr-auth-tenancy-and-storage-isolation: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
+      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+      adr-granularity-mapping-and-claim-domain: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
+      adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
+      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      api-operator-repair-contract: 65ec2e36500a6c404ae53af1a65da26fcdcc0a07e0ef1578bae30ec94f2be6e6
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+      td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
+      td-s3-object-log-sqlite-projection-mode: ad13dfdb71f453157fc867e42582d9abfa99718beeb07c88c65e42cda2907ecf
+      td-sharding-and-shard-ownership: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
+      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
+      tp-governing-test-traceability: 1df6ca1830db0b53ee8aaeca8fa73fab6fbbd578a4718757616815c985ae06ae
+      tp-scale-substantiation: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
+      tp-verification-acceptance-criteria: 15f28d510bdac36217eeba3ea37849174111de98af410d6a5c59dd296125e6bf
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence
@@ -276,6 +294,11 @@ dependency order, follow the `Depends On` column.
 - Release gates: TP-003 §5 release column, backend conformance 100% for
   `postgres_native` and `object_log_sqlite_projection`, TP-002 E0-E3, and
   `product_validation_tests` at release shape.
+- Release gate reproducibility: `scripts/ci/release-gate.sh` validates TP-002
+  E0-E3 from source-backed DDx beads, not from pre-existing `target/` files:
+  E0/E1 = `pqueue-7e2b3132`, E2 = `pqueue-9afd88cc,pqueue-76d92a33`, and
+  E3 = `pqueue-b1abd895,pqueue-472a09d4`. The gate regenerates the aggregate
+  `product_validation_tests` ledger before strict ledger validation.
 - Operator-enabled release: all P0/core release gates plus API-002 operator
   suites and `operator_validation_tests`.
 - Every bead must add or extend tests before claiming behavior complete. A bead
@@ -311,3 +334,17 @@ BUILD-001 is complete when:
   `operator_validation_tests` green or explicitly left open as non-blocking P1
   work; and
 - no bead depends on chat history or scratch files for executable context.
+
+Completion evidence as of 2026-06-16:
+
+- `bash scripts/ci/verify-build-closure.sh --aggregate pqueue-fa406e7d`
+  reports live closure verified.
+- `bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 --tp002-e0e1-source pqueue-7e2b3132 --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4`
+  passes from source-backed evidence and regenerates
+  `target/pqueue-ledger/product_validation.jsonl`.
+- Local deployment validation passed for both committed backend profiles:
+  `local_postgres_deployment_smoke_tests` with Docker cleanup and
+  `local_object_log_deployment_smoke_tests`.
+- Product workflow smoke validation passed for both
+  `postgres_native` (seed 1701) and `object_log_sqlite_projection` (seed 1801),
+  with emitted workflow ledgers validated by `pqueue-verify-ledger --strict`.

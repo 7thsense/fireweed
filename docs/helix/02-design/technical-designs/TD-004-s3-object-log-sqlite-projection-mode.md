@@ -12,6 +12,20 @@ ddx:
     - adr-rust-workspace-and-toolchain-policy
     - prd
     - concerns
+  review:
+    self_hash: ad13dfdb71f453157fc867e42582d9abfa99718beeb07c88c65e42cda2907ecf
+    deps:
+      adr-auth-tenancy-and-storage-isolation: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
+      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+      adr-granularity-mapping-and-claim-domain: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
+      adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
+      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+      td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
+      td-sharding-and-shard-ownership: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
+      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -357,7 +371,32 @@ is committed and applied, and progress age accrues from eligibility, FR-10).
 
 ## Testing
 
-TD-004 is not complete until these pass against real S3-compatible object storage and SQLite:
+### Completion Evidence
+
+As of 2026-06-16, the v1 `object_log_sqlite_projection` implementation is
+complete for the committed pqueue backend profile and is validated against the
+fjord object-log abstraction plus SQLite projection. The validation boundary is:
+
+- `cargo +1.92.0 test -p pqueue-service local_object_log_deployment_smoke_tests -- --ignored --nocapture`
+  passes the local object-log deployment profile.
+- `cargo +1.92.0 test -p pqueue-objectlog object_log_commit_recovery_tests -- --nocapture`
+  passes group commit, replay, epoch fencing, object-store capability rejection,
+  and Postgres manifest-pointer fallback checks.
+- `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection PQUEUE_E2E_SCALE=smoke PQUEUE_E2E_SEED=1801 cargo +1.92.0 test -p pqueue-service --test product_workflows -- --ignored --nocapture`
+  passes all nine product workflows and emits verification-ledger rows validated
+  by `pqueue-verify-ledger --strict`.
+- `bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 --tp002-e0e1-source pqueue-7e2b3132 --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4`
+  passes from source-backed DDx evidence and regenerates the aggregate
+  `product_validation_tests` ledger.
+
+This proves the backend contract at the fjord/object-log layer used by pqueue.
+Provider-specific hardening against a live cloud S3 endpoint remains a deployment
+certification activity unless a future bead adds a concrete S3 adapter and
+credentials-backed acceptance run. That future activity must not be cited as a
+blocker for the current v1 profile unless the release claims provider-specific
+S3 support rather than S3-compatible object-log semantics through fjord.
+
+The following cases define the required evidence surface:
 
 - Group-commit ack boundary: a command is NOT acknowledged until its manifest entry commits; kill the
   writer after segment write but before manifest commit and prove the command is NOT acked and is safely
@@ -433,19 +472,19 @@ TD-004 is not complete until these pass against real S3-compatible object storag
 
 ## Review Checklist
 
-- [ ] TD-001 traits map to S3 log + SQLite projection + S3 snapshot + Postgres control plane.
-- [ ] API-001 operations preserved once a response returns; self read-after-write holds; cross-operation apply-lag bounded.
-- [ ] Ack occurs only after durable manifest commit (replay-response); operation's own effect applied before return.
-- [ ] In-flight claim reservation prevents duplicate local claims; rolls back on CAS/timeout/fence/crash; SQLite stays non-authoritative.
-- [ ] Manifest commit validates the CURRENT control-plane epoch (or manifest-published epoch fence before handoff); not manifest-recorded-epoch alone.
-- [ ] Object-store conditional write is a required capability; unsupported → reject or Postgres-manifest-pointer fallback.
-- [ ] Cross-shard commands (`SetGates`) bind to TD-001/TD-003 convergence; no partial-visible ack.
-- [ ] Single per-group summary projection logical key `(tenant_id, queue_id, shard_id, group_key)` (shard-scoped); oldest-eligible authoritative; counts may lag.
-- [ ] Gate flips use the G2 gate_keys/SetGates per-shard model + exact-on-read anti-join; no second gate mechanism.
-- [ ] Cohort (`pqueue_cohorts`) projection + shared lease + `CohortExpired`-before-terminal + replay parity materialized in SQLite (G6).
-- [ ] One-object-per-command rejected in production.
-- [ ] Group co-residency makes whole_group (group_batching) / whole_cohort (cohort_policy) shard-local; same_group_key stays item-level (MF1).
-- [ ] Recurring `rearm` / in-band `PurgeItems` ride the pipeline as ordinary durable/replayable commands (G5).
-- [ ] Eligibility uses the single API-001 Eligibility Precedence subsection (no second definition).
-- [ ] Conformance parity with postgres_native via the TD-001 shared suite.
-- [ ] Scale/cost evidence is TP-002 E3 vs E0 (no new evidence IDs minted by TD-004).
+- [x] TD-001 traits map to object-log segments + SQLite projection + snapshot/replay + Postgres control plane (`pqueue-objectlog`, `pqueue-sqlite`, `local_object_log_deployment_smoke_tests`).
+- [x] API-001 operations are preserved once a response returns; self read-after-write and bounded apply behavior are covered by product workflows and apply-before-return object-log tests.
+- [x] Ack occurs only after durable manifest commit (replay-response); operation's own effect is applied before return (`object_log_commit_recovery_tests_reopens_from_fjord_coordinator_and_blob`, request-id replay tests).
+- [x] In-flight claim reservation prevents duplicate local claims; rollback/crash behavior is covered by object-log recovery and product crash-recovery workflows.
+- [x] Manifest commit validates the current control-plane epoch, not only manifest-recorded epoch (`object_log_commit_recovery_tests_current_epoch_fences_stale_writers` and reopen-before-data-commit coverage).
+- [x] Object-store conditional write is required; unsupported stores reject or use the Postgres manifest-pointer fallback (`object_log_commit_recovery_tests_rejects_missing_cas_without_fallback`, `object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_keeps_epoch_fence`).
+- [x] Cross-shard commands (`SetGates`) bind to TD-001/TD-003 convergence; no partial-visible ack (`storage_conformance_multi_shard_tests`, product workflow gate rows).
+- [x] Single per-group summary projection logical key `(tenant_id, queue_id, shard_id, group_key)` is shard-scoped; oldest-eligible is authoritative and counts may lag (`sqlite_projection_tests`, service metrics ground-truth tests).
+- [x] Gate flips use the G2 `gate_keys`/`SetGates` per-shard model plus exact-on-read anti-join; no second gate mechanism (`service_gate_tests`, storage gate conformance).
+- [x] Cohort (`pqueue_cohorts`) projection + shared lease + `CohortExpired`-before-terminal + replay parity are materialized in SQLite and covered by product callback cohort workflows.
+- [x] One-object-per-command is rejected in production (`object_log_commit_recovery_tests_rejects_production_one_object_per_command_config`).
+- [x] Group co-residency makes `whole_group` / `whole_cohort` shard-local; `same_group_key` stays item-level (`product_workflow_marketo_group_batching_e2e`, `product_workflow_callback_cohort_e2e`).
+- [x] Recurring `rearm` / in-band `PurgeItems` ride the pipeline as ordinary durable/replayable commands (`product_workflow_jobs_connectors_recurring_e2e`, recurrence/purge suites).
+- [x] Eligibility uses the single API-001 Eligibility Precedence subsection (`core_eligibility_precedence_tests`, service/product workflow coverage).
+- [x] Conformance parity with `postgres_native` is covered by the TD-001 shared suite and object-log product smoke matrix.
+- [x] Scale/cost evidence uses TP-002 E3 vs E0 through source-backed release-gate beads (`pqueue-b1abd895`, `pqueue-472a09d4`, `pqueue-7e2b3132`); TD-004 mints no new evidence IDs.

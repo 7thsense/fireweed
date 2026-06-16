@@ -5,6 +5,13 @@ ddx:
     - product-vision
     - prd
     - concerns
+  review:
+    self_hash: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+    deps:
+      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+      product-vision: db0233e246975862c254e082d416a90599b8a401d31baa590a03ebf7171d5d86
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # ADR-001: CQRS Log Projection Storage Model

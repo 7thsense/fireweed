@@ -15,6 +15,23 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-governing-test-traceability
     - tp-scale-substantiation
+  review:
+    self_hash: 15f28d510bdac36217eeba3ea37849174111de98af410d6a5c59dd296125e6bf
+    deps:
+      adr-auth-tenancy-and-storage-isolation: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
+      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+      adr-granularity-mapping-and-claim-domain: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
+      adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
+      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      api-operator-repair-contract: 65ec2e36500a6c404ae53af1a65da26fcdcc0a07e0ef1578bae30ec94f2be6e6
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+      td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
+      td-s3-object-log-sqlite-projection-mode: ad13dfdb71f453157fc867e42582d9abfa99718beeb07c88c65e42cda2907ecf
+      td-sharding-and-shard-ownership: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
+      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
+      tp-governing-test-traceability: 1df6ca1830db0b53ee8aaeca8fa73fab6fbbd578a4718757616815c985ae06ae
+      tp-scale-substantiation: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -295,6 +312,13 @@ but not sufficient.
 | TP-002 E0 (per-queue floor ≥10M items/hr), E1, E2 (multi-shard + ≥1000-queue density), E3 (object-log cost/ack/recovery) | pass at TP-002 bars | release |
 | `AC-SEN` P0/core product workflow aggregate | AC-E2E-1..6 and AC-E2E-8..9 green with ledger evidence; INV-1..INV-10 = 0 where applicable | release |
 | Operator product workflow aggregate | AC-E2E-7 green with ledger evidence; INV-8 and INV-11 = 0 | operator-enabled release |
+
+The release gate is intentionally self-contained from a clean checkout:
+`scripts/ci/release-gate.sh` validates TP-002 E0-E3 from closed DDx source beads
+when passed `--tp002-e0e1-source`, `--tp002-e2-source`, and
+`--tp002-e3-source`, then regenerates and strictly validates the
+`product_validation_tests` aggregate ledger. It must not require pre-existing
+`target/pqueue-ledger/*.jsonl` artifacts to pass.
 
 ## 6. Verification Ledger
 

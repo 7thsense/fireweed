@@ -5,6 +5,13 @@ ddx:
     - prd
     - concerns
     - api-native-client-interface
+  review:
+    self_hash: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
+    deps:
+      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # ADR-004: Granularity Mapping and Claim Domain

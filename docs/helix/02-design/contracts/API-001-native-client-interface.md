@@ -5,6 +5,13 @@ ddx:
     - prd
     - concerns
     - adr-cqrs-log-projection-storage-model
+  review:
+    self_hash: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+    deps:
+      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
+      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+    reviewed_at: "2026-06-16T17:42:59Z"
 ---
 
 # Contract
