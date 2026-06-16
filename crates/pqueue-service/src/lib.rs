@@ -145,7 +145,24 @@ struct QueueItemLeaseKey {
 struct QueueAdminState {
     paused_queues: BTreeSet<(String, String)>,
     fenced_leases: BTreeSet<QueueItemLeaseKey>,
+    operations: BTreeMap<String, OperatorOperationRecord>,
+    operations_by_request: BTreeMap<OperatorOperationRequestKey, String>,
     command_position: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct OperatorOperationRequestKey {
+    tenant_id: String,
+    queue_id: String,
+    request_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct OperatorOperationRecord {
+    tenant_id: String,
+    queue_id: String,
+    request_fingerprint: String,
+    response: OperatorItemsResponse,
 }
 
 impl QueueAdminState {
@@ -411,6 +428,14 @@ pub fn app_with_state(state: AppState) -> Router {
         .route(
             "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/retention:run",
             post(run_retention),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/operations/{operation_id}",
+            get(get_operation),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/operations/{operation_id}/cancel",
+            post(cancel_operation),
         )
         .route(
             "/v1/tenants/{tenant_id}/queues/{queue_id}/metrics",
@@ -929,6 +954,17 @@ async fn operator_items_response(
     state.auth.authorize_operator_repair()?;
     let body: OperatorItemsRequest = parse_json(req).await?;
     validate_operator_items_request(&body, kind)?;
+    let request_fingerprint = serde_json::to_string(&body).expect("operator request serializes");
+    let request_key = OperatorOperationRequestKey {
+        tenant_id: tenant_id.clone(),
+        queue_id: queue_id.clone(),
+        request_id: body.request_id.clone(),
+    };
+
+    if let Some(existing) = existing_operator_operation(&state, &request_key, &request_fingerprint)?
+    {
+        return Ok(Json(existing));
+    }
 
     let matched = body
         .expected_match_count
@@ -958,15 +994,10 @@ async fn operator_items_response(
         })
         .collect();
 
-    Ok(Json(OperatorItemsResponse {
+    let operation_id = operation_id(&tenant_id, &queue_id, kind, &body.request_id);
+    let response = OperatorItemsResponse {
         request_id: body.request_id.clone(),
-        operation_id: format!(
-            "{}/{}/{}/{}",
-            tenant_id,
-            queue_id,
-            kind.operation_name(),
-            body.request_id
-        ),
+        operation_id: operation_id.clone(),
         state: OperatorOperationState::Succeeded,
         progress: OperatorOperationProgress {
             shards_total: 1,
@@ -987,7 +1018,139 @@ async fn operator_items_response(
         archive_idempotent: kind == OperatorRouteKind::Archive,
         retention_policy_enforced: kind == OperatorRouteKind::Retention,
         cohort_whole: body.cohort_whole,
-    }))
+    };
+
+    record_operator_operation(state, request_key, request_fingerprint, response.clone());
+    Ok(Json(response))
+}
+
+async fn get_operation(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id, operation_id)): Path<(String, String, String)>,
+    _req: Request<Body>,
+) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    state.auth.authorize_operator_repair()?;
+    let operation = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned")
+        .operations
+        .get(&operation_id)
+        .filter(|operation| operation.response.operation_id == operation_id)
+        .filter(|operation| operation.tenant_id == tenant_id && operation.queue_id == queue_id)
+        .map(|operation| operation.response.clone())
+        .ok_or_else(operation_not_found)?;
+    Ok(Json(operation))
+}
+
+async fn cancel_operation(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id, operation_id)): Path<(String, String, String)>,
+    _req: Request<Body>,
+) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    state.auth.authorize_operator_repair()?;
+    let mut admin = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned");
+    let operation = admin
+        .operations
+        .get_mut(&operation_id)
+        .filter(|operation| operation.response.operation_id == operation_id)
+        .filter(|operation| operation.tenant_id == tenant_id && operation.queue_id == queue_id)
+        .ok_or_else(operation_not_found)?;
+    operation.response.state = OperatorOperationState::Canceled;
+    Ok(Json(operation.response.clone()))
+}
+
+fn existing_operator_operation(
+    state: &AppState,
+    request_key: &OperatorOperationRequestKey,
+    request_fingerprint: &str,
+) -> Result<Option<OperatorItemsResponse>, ApiProblem> {
+    let admin = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned");
+    let Some(operation_id) = admin.operations_by_request.get(request_key) else {
+        return Ok(None);
+    };
+    let operation = admin
+        .operations
+        .get(operation_id)
+        .expect("request index should reference an operation");
+    if operation.request_fingerprint != request_fingerprint {
+        return Err(ApiProblem::new(
+            StatusCode::CONFLICT,
+            ApiErrorCode::RequestIdConflict,
+            "request_id already maps to a different operator operation",
+        ));
+    }
+    Ok(Some(operation.response.clone()))
+}
+
+fn record_operator_operation(
+    state: AppState,
+    request_key: OperatorOperationRequestKey,
+    request_fingerprint: String,
+    response: OperatorItemsResponse,
+) {
+    let mut admin = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned");
+    let tenant_id = request_key.tenant_id.clone();
+    let queue_id = request_key.queue_id.clone();
+    admin
+        .operations_by_request
+        .insert(request_key, response.operation_id.clone());
+    admin.operations.insert(
+        response.operation_id.clone(),
+        OperatorOperationRecord {
+            tenant_id,
+            queue_id,
+            request_fingerprint,
+            response,
+        },
+    );
+}
+
+fn operation_id(
+    tenant_id: &str,
+    queue_id: &str,
+    kind: OperatorRouteKind,
+    request_id: &str,
+) -> String {
+    format!(
+        "oper_{}_{}_{}_{}",
+        path_token(tenant_id),
+        path_token(queue_id),
+        kind.operation_name(),
+        path_token(request_id)
+    )
+}
+
+fn path_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn operation_not_found() -> ApiProblem {
+    ApiProblem::new(
+        StatusCode::NOT_FOUND,
+        ApiErrorCode::OperationNotFound,
+        "operation_id was not found",
+    )
 }
 
 fn validate_operator_items_request(

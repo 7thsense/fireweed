@@ -53,7 +53,10 @@ async fn operator_redrive_tests_failed_items_become_eligible_with_recorded_conve
     let redrive: OperatorItemsResponse = decode(response).await;
 
     assert_eq!(redrive.request_id, "redrive-1");
-    assert!(redrive.operation_id.ends_with("/redrive/redrive-1"));
+    assert_eq!(
+        redrive.operation_id,
+        "oper_tenant-a_queue-a_redrive_redrive-1"
+    );
     assert!(redrive.multi_shard_converged);
     assert!(redrive.idempotent_replay);
     assert!(redrive.cohort_whole);

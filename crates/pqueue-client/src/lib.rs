@@ -21,6 +21,7 @@ pub enum ApiErrorCode {
     RateLimit,
     StaleLease,
     OperatorForbidden,
+    OperationNotFound,
 }
 
 impl ApiErrorCode {
@@ -38,6 +39,7 @@ impl ApiErrorCode {
             Self::RateLimit => "rate-limit",
             Self::StaleLease => "stale-lease",
             Self::OperatorForbidden => "operator-forbidden",
+            Self::OperationNotFound => "operation-not-found",
         }
     }
 }
@@ -530,12 +532,14 @@ pub enum NativeRoute {
     OperatorPurgeItems,
     ArchiveItems,
     RunRetention,
+    GetOperation,
+    CancelOperation,
 }
 
 impl NativeRoute {
     pub const fn method(self) -> &'static str {
         match self {
-            Self::GetQueueMetrics => "GET",
+            Self::GetQueueMetrics | Self::GetOperation => "GET",
             _ => "POST",
         }
     }
@@ -559,6 +563,8 @@ impl NativeRoute {
             Self::OperatorPurgeItems => "PurgeQueueItems",
             Self::ArchiveItems => "ArchiveItems",
             Self::RunRetention => "RunRetention",
+            Self::GetOperation => "GetOperation",
+            Self::CancelOperation => "CancelOperation",
         }
     }
 
@@ -626,6 +632,25 @@ impl NativeRoute {
                 "/v1/tenants/{tenant_id}/queues/{}/operator/retention:run",
                 queue_id.expect("queue_id is required for RunRetention")
             ),
+            Self::GetOperation | Self::CancelOperation => {
+                panic!("use operation_path for operator operation routes")
+            }
+        }
+    }
+
+    pub fn operation_path(self, tenant_id: &str, queue_id: &str, operation_id: &str) -> String {
+        match self {
+            Self::GetOperation => {
+                format!(
+                    "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/operations/{operation_id}"
+                )
+            }
+            Self::CancelOperation => {
+                format!(
+                    "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/operations/{operation_id}/cancel"
+                )
+            }
+            _ => panic!("operation_path is only valid for operator operation routes"),
         }
     }
 }
