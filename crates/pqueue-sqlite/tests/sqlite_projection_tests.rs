@@ -85,6 +85,34 @@ fn sqlite_projection_tests_snapshot_plus_bounded_replay_applies_only_tail() {
 }
 
 #[test]
+fn sqlite_projection_tests_apply_before_return_advances_own_committed_sequence() {
+    let t = tenant();
+    let q = qid("sqlite-apply-before-return");
+    let projection = SqliteProjection::new_in_memory(shard(t, q, 0)).unwrap();
+
+    let applied = projection.apply_before_return(7).unwrap();
+    assert_eq!(applied, 7);
+    assert_eq!(projection.applied_sequence().unwrap(), 7);
+    assert_eq!(projection.apply_before_return(5).unwrap(), 7);
+}
+
+#[test]
+fn sqlite_projection_tests_bounded_apply_lag_reports_unrelated_reader_budget() {
+    let t = tenant();
+    let q = qid("sqlite-lag");
+    let projection = SqliteProjection::new_in_memory(shard(t, q, 0)).unwrap();
+    projection.set_applied_sequence(20).unwrap();
+
+    let within = projection.apply_lag_status(23, 3).unwrap();
+    assert_eq!(within.lag_sequences, 3);
+    assert!(within.within_bound);
+
+    let outside = projection.apply_lag_status(24, 3).unwrap();
+    assert_eq!(outside.lag_sequences, 4);
+    assert!(!outside.within_bound);
+}
+
+#[test]
 fn sqlite_projection_tests_lru_handle_cache_evicts_idle_shards() {
     let t = tenant();
     let q = qid("sqlite-lru");

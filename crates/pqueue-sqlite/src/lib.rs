@@ -19,6 +19,14 @@ pub struct CohortRow {
     pub state: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyLagStatus {
+    pub committed_sequence: u64,
+    pub applied_sequence: u64,
+    pub lag_sequences: u64,
+    pub within_bound: bool,
+}
+
 pub struct SqliteProjection {
     conn: Connection,
     shard_key: ShardKey,
@@ -164,6 +172,29 @@ impl SqliteProjection {
             applied_tail.push(sequence);
         }
         Ok(applied_tail)
+    }
+
+    pub fn apply_before_return(&self, committed_sequence: u64) -> rusqlite::Result<u64> {
+        let applied = self.applied_sequence()?;
+        if committed_sequence > applied {
+            self.set_applied_sequence(committed_sequence)?;
+        }
+        self.applied_sequence()
+    }
+
+    pub fn apply_lag_status(
+        &self,
+        committed_sequence: u64,
+        max_lag_sequences: u64,
+    ) -> rusqlite::Result<ApplyLagStatus> {
+        let applied_sequence = self.applied_sequence()?;
+        let lag_sequences = committed_sequence.saturating_sub(applied_sequence);
+        Ok(ApplyLagStatus {
+            committed_sequence,
+            applied_sequence,
+            lag_sequences,
+            within_bound: lag_sequences <= max_lag_sequences,
+        })
     }
 
     pub fn snapshot_bytes(&self) -> rusqlite::Result<Vec<u8>> {
