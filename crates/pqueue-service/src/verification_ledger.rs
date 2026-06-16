@@ -54,7 +54,7 @@ impl LedgerError {
         Self::new("missing required field").with_field(field)
     }
 
-    fn invalid_field(field: &str, message: impl Into<String>) -> Self {
+    fn invalid_field(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(message).with_field(field)
     }
 }
@@ -201,7 +201,7 @@ impl LedgerRow {
             }
         };
 
-        Ok(Self {
+        let row = Self {
             ac_ids: required_string_array(&object, "ac_ids")?,
             inv_ids: required_string_array(&object, "inv_ids")?,
             command: required_string_field(&object, "command")?,
@@ -213,8 +213,40 @@ impl LedgerRow {
             suite: required_string_field(&object, "suite")?,
             measurements: required_object_field(&object, "measurements")?,
             pass_bar: required_object_field(&object, "pass_bar")?,
-        })
+        };
+        row.validate_semantics()?;
+        Ok(row)
     }
+
+    fn validate_semantics(&self) -> Result<(), LedgerError> {
+        if self.suite.starts_with("performance_") {
+            validate_performance_row(self)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_performance_row(row: &LedgerRow) -> Result<(), LedgerError> {
+    required_nested_string_field(&row.environment, "environment", "instance_class")?;
+    required_nested_string_field(&row.measurements, "measurements", "deployment_shape")?;
+    required_nested_string_field(&row.measurements, "measurements", "workload_envelope")?;
+    required_nested_string_field(&row.measurements, "measurements", "query_plan")?;
+    let evidence_ids =
+        required_nested_string_array(&row.measurements, "measurements", "tp002_evidence_ids")?;
+    if !evidence_ids.iter().any(|id| id == "E0") {
+        return Err(LedgerError::invalid_field(
+            "measurements.tp002_evidence_ids",
+            "performance rows must cite TP-002 E0",
+        ));
+    }
+
+    required_nested_u64_field(&row.measurements, "measurements", "items_per_hour")?;
+    required_nested_u64_field(&row.measurements, "measurements", "p95_ms")?;
+    required_nested_u64_field(&row.measurements, "measurements", "p99_ms")?;
+    required_nested_u64_field(&row.pass_bar, "pass_bar", "e0_floor_items_per_hour")?;
+    required_nested_u64_field(&row.pass_bar, "pass_bar", "p95_ms_lt")?;
+    required_nested_u64_field(&row.pass_bar, "pass_bar", "p99_ms_lt")?;
+    Ok(())
 }
 
 fn required_field<'a>(
@@ -335,6 +367,90 @@ fn required_object_field(
             field,
             format!("expected object, found {}", other.kind()),
         )),
+    }
+}
+
+fn required_nested_string_field(
+    object: &BTreeMap<String, JsonValue>,
+    parent: &str,
+    field: &str,
+) -> Result<String, LedgerError> {
+    let full_field = format!("{parent}.{field}");
+    match object.get(field) {
+        Some(JsonValue::String(text)) if !text.trim().is_empty() => Ok(text.clone()),
+        Some(JsonValue::String(_)) => Err(LedgerError::invalid_field(
+            full_field,
+            "string field must not be empty",
+        )),
+        Some(other) => Err(LedgerError::invalid_field(
+            full_field,
+            format!("expected string, found {}", other.kind()),
+        )),
+        None => Err(LedgerError::missing_field(&full_field)),
+    }
+}
+
+fn required_nested_string_array(
+    object: &BTreeMap<String, JsonValue>,
+    parent: &str,
+    field: &str,
+) -> Result<Vec<String>, LedgerError> {
+    let full_field = format!("{parent}.{field}");
+    let items = match object.get(field) {
+        Some(JsonValue::Array(items)) => items,
+        Some(other) => {
+            return Err(LedgerError::invalid_field(
+                full_field,
+                format!("expected array, found {}", other.kind()),
+            ));
+        }
+        None => return Err(LedgerError::missing_field(&full_field)),
+    };
+
+    if items.is_empty() {
+        return Err(LedgerError::invalid_field(
+            full_field,
+            "array field must not be empty",
+        ));
+    }
+
+    let mut values = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            JsonValue::String(text) if !text.trim().is_empty() => values.push(text.clone()),
+            JsonValue::String(_) => {
+                return Err(LedgerError::invalid_field(
+                    full_field,
+                    "array entries must not be empty",
+                ));
+            }
+            other => {
+                return Err(LedgerError::invalid_field(
+                    full_field,
+                    format!("expected string entries, found {}", other.kind()),
+                ));
+            }
+        }
+    }
+
+    Ok(values)
+}
+
+fn required_nested_u64_field(
+    object: &BTreeMap<String, JsonValue>,
+    parent: &str,
+    field: &str,
+) -> Result<u64, LedgerError> {
+    let full_field = format!("{parent}.{field}");
+    match object.get(field) {
+        Some(JsonValue::Number(number)) => number.parse::<u64>().map_err(|_| {
+            LedgerError::invalid_field(full_field, "expected 64-bit unsigned integer")
+        }),
+        Some(other) => Err(LedgerError::invalid_field(
+            full_field,
+            format!("expected number, found {}", other.kind()),
+        )),
+        None => Err(LedgerError::missing_field(&full_field)),
     }
 }
 

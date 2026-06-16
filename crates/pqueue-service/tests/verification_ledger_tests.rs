@@ -1,4 +1,6 @@
-use pqueue_service::verification_ledger::{run_from_args, validate_ledger_file};
+use pqueue_service::verification_ledger::{
+    run_from_args, validate_ledger_file, validate_ledger_text,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -36,6 +38,40 @@ fn verification_ledger_tests() {
         .expect_err("CLI validation should fail for the same missing field");
         assert_eq!(cli_err.field.as_deref(), Some(*expected_field));
     }
+}
+
+#[test]
+fn verification_ledger_tests_require_performance_scale_fields() {
+    let missing = serde_json::json!({
+        "ac_ids": ["AC-LAT-1"],
+        "inv_ids": ["INV-4"],
+        "command": "cargo test -p pqueue-service performance_batch_operation_tests",
+        "exit_status": 0,
+        "backend_profile": "postgres_native",
+        "scale": "smoke",
+        "seed": 6200,
+        "environment": {
+            "instance_class": "local-dev"
+        },
+        "suite": "performance_batch_operation_tests",
+        "measurements": {
+            "deployment_shape": "single-deployment",
+            "workload_envelope": "E1",
+            "query_plan": "synthetic smoke query plan",
+            "tp002_evidence_ids": ["E0", "E1"],
+            "items_per_hour": 10000000,
+            "p95_ms": 125
+        },
+        "pass_bar": {
+            "e0_floor_items_per_hour": 10000000,
+            "p95_ms_lt": 250,
+            "p99_ms_lt": 1000
+        }
+    });
+
+    let err = validate_ledger_text(&format!("{missing}\n"))
+        .expect_err("performance rows must include p99 measurements");
+    assert_eq!(err.field.as_deref(), Some("measurements.p99_ms"));
 }
 
 fn fixture_paths() -> Vec<(PathBuf, &'static str)> {
