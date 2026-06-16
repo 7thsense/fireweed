@@ -30,9 +30,12 @@ PY
 fi
 
 python3 - "$AGGREGATE" <<'PY'
-import json, subprocess, sys
+import json, pathlib, sys
 aggregate=sys.argv[1]
-items=json.loads(subprocess.check_output(["ddx","bead","list","--all","--json"], text=True))
+items=[]
+for line in pathlib.Path(".ddx/beads.jsonl").read_text().splitlines():
+    if line.strip():
+        items.append(json.loads(line))
 by_id={i["id"]:i for i in items}
 agg=by_id.get(aggregate)
 if not agg:
@@ -42,13 +45,22 @@ if agg.get("status")!="closed":
     print(f"{aggregate}: aggregate is not closed", file=sys.stderr)
     sys.exit(1)
 open_deps=[]
+missing_evidence=[]
 for dep in agg.get("dependencies", []):
     dep_id=dep["depends_on_id"]
     item=by_id.get(dep_id)
     if not item or item.get("status")!="closed":
         open_deps.append(dep_id)
+    elif not item.get("closing_commit_sha"):
+        missing_evidence.append(dep_id)
 if open_deps:
     print("open required dependency beads: " + ", ".join(open_deps), file=sys.stderr)
+    sys.exit(1)
+if missing_evidence:
+    print("closed dependency beads without closing_commit_sha: " + ", ".join(missing_evidence), file=sys.stderr)
+    sys.exit(1)
+if not agg.get("closing_commit_sha"):
+    print(f"{aggregate}: aggregate lacks closing_commit_sha", file=sys.stderr)
     sys.exit(1)
 print(f"{aggregate}: live closure verified")
 PY
