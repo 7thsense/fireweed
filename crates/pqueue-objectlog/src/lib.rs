@@ -49,11 +49,65 @@ impl FjordObjectLogStore {
     }
 
     pub fn advance_epoch(&self, shard: &ShardKey, epoch: u64) {
-        self.epochs.lock().insert(shard.clone(), epoch);
+        self.commit_epoch_fence(shard, epoch)
+            .expect("epoch fence commit must succeed");
     }
 
-    fn current_epoch(&self, shard: &ShardKey) -> u64 {
-        *self.epochs.lock().entry(shard.clone()).or_insert(0)
+    pub fn commit_epoch_fence(&self, shard: &ShardKey, epoch: u64) -> Result<(), LogStoreError> {
+        let topic = epoch_topic_for_shard(shard);
+        self.ensure_topic(&topic)?;
+        self.writer
+            .produce(&[ProduceBatch {
+                topic,
+                partition: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                base_sequence: -1,
+                record_count: 1,
+                payload: epoch.to_be_bytes().to_vec(),
+            }])
+            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
+        self.epochs.lock().insert(shard.clone(), epoch);
+        Ok(())
+    }
+
+    pub fn find_by_request_id(
+        &self,
+        shard: &ShardKey,
+        request_id: &RequestId,
+    ) -> Result<Option<(CommandPosition, CommandEnvelope)>, LogStoreError> {
+        let page = self.read_all(shard)?;
+        Ok(page
+            .commands
+            .into_iter()
+            .find(|(_, envelope)| envelope.request_id.as_ref() == Some(request_id)))
+    }
+
+    fn current_epoch(&self, shard: &ShardKey) -> Result<u64, LogStoreError> {
+        if let Some(epoch) = self.epochs.lock().get(shard).copied() {
+            return Ok(epoch);
+        }
+        let topic = epoch_topic_for_shard(shard);
+        if self
+            .coordinator
+            .topic_partitions(&topic)
+            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?
+            .is_none()
+        {
+            self.epochs.lock().insert(shard.clone(), 0);
+            return Ok(0);
+        }
+        let fetched = self
+            .reader
+            .fetch(&topic, 0, 0)
+            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
+        let epoch = fetched
+            .last()
+            .map(|batch| decode_epoch(&batch.payload))
+            .transpose()?
+            .unwrap_or(0);
+        self.epochs.lock().insert(shard.clone(), epoch);
+        Ok(epoch)
     }
 
     fn ensure_topic(&self, topic: &str) -> Result<(), LogStoreError> {
@@ -71,6 +125,23 @@ impl FjordObjectLogStore {
         self.topics.lock().insert(topic.to_string());
         Ok(())
     }
+
+    fn read_all(&self, shard: &ShardKey) -> Result<CommandPage, LogStoreError> {
+        let topic = topic_for_shard(shard);
+        if self
+            .coordinator
+            .topic_partitions(&topic)
+            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?
+            .is_none()
+        {
+            return Err(LogStoreError::ShardNotFound);
+        }
+        let fetched = self
+            .reader
+            .fetch(&topic, 0, 0)
+            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
+        decode_page(shard, fetched, usize::MAX)
+    }
 }
 
 impl LogStore for FjordObjectLogStore {
@@ -80,7 +151,7 @@ impl LogStore for FjordObjectLogStore {
         expected_epoch: Option<u64>,
         commands: Vec<CommandEnvelope>,
     ) -> Result<AppendBatchResult, LogStoreError> {
-        let current_epoch = self.current_epoch(shard);
+        let current_epoch = self.current_epoch(shard)?;
         if expected_epoch.is_some_and(|expected| expected != current_epoch) {
             return Err(LogStoreError::StalEpoch {
                 expected: expected_epoch.unwrap(),
@@ -169,6 +240,10 @@ fn topic_for_shard(shard: &ShardKey) -> String {
     )
 }
 
+fn epoch_topic_for_shard(shard: &ShardKey) -> String {
+    format!("{}_epoch", topic_for_shard(shard))
+}
+
 fn sanitize(input: &str) -> String {
     input
         .chars()
@@ -180,6 +255,13 @@ fn sanitize(input: &str) -> String {
             }
         })
         .collect()
+}
+
+fn decode_epoch(payload: &[u8]) -> Result<u64, LogStoreError> {
+    let bytes: [u8; 8] = payload
+        .try_into()
+        .map_err(|_| LogStoreError::StorageFailure("invalid epoch fence payload".to_string()))?;
+    Ok(u64::from_be_bytes(bytes))
 }
 
 fn decode_page(

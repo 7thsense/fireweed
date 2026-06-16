@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use pqueue_core::{ClientItemKey, ItemId, QueueId, TenantId, UtcTimestamp};
+use pqueue_core::{ClientItemKey, ItemId, QueueId, RequestId, TenantId, UtcTimestamp};
 use pqueue_objectlog::{FjordObjectLogStore, MemoryBlobStore, MemoryCoordinator};
 use pqueue_storage::commands::{
     BatchClaimCommand, BatchPushCommand, CommandEnvelope, CommandId, PushItem, QueueCommand,
@@ -64,7 +64,7 @@ fn push_envelope(t: &TenantId, q: &QueueId, shard_id: u32, seq: u32) -> CommandE
 fn claim_envelope(t: &TenantId, q: &QueueId, shard_id: u32, seq: u32) -> CommandEnvelope {
     CommandEnvelope {
         command_id: CommandId::new(format!("cmd-claim-{seq}")),
-        request_id: None,
+        request_id: Some(RequestId::new(format!("req-claim-{seq}")).unwrap()),
         tenant_id: t.clone(),
         queue_id: q.clone(),
         shard_id: ShardId::new(shard_id),
@@ -178,4 +178,73 @@ async fn object_log_commit_recovery_tests_current_epoch_fences_stale_writers() {
         .await
         .unwrap();
     assert_eq!(current.last_position.backend_epoch, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn object_log_commit_recovery_tests_epoch_fence_survives_reopen_before_data_commit() {
+    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
+        Arc::new(MemoryCoordinator::new());
+    let blob = Arc::new(MemoryBlobStore::new());
+    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
+    let t = tenant();
+    let q = qid("object-log-reopen-fence");
+    let shard = shard(t.clone(), q.clone(), 0);
+
+    first.commit_epoch_fence(&shard, 1).unwrap();
+    drop(first);
+    let reopened = FjordObjectLogStore::new(coordinator, blob_dyn);
+    let object_count_after_fence = blob.object_count();
+
+    let stale = reopened
+        .append_batch(&shard, Some(0), vec![push_envelope(&t, &q, 0, 0)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stale,
+        LogStoreError::StalEpoch {
+            expected: 0,
+            current: 1
+        }
+    );
+    assert_eq!(
+        blob.object_count(),
+        object_count_after_fence,
+        "stale writer must not append a data object after epoch handoff"
+    );
+
+    let current = reopened
+        .append_batch(&shard, Some(1), vec![push_envelope(&t, &q, 0, 1)])
+        .await
+        .unwrap();
+    assert_eq!(current.last_position.backend_epoch, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn object_log_commit_recovery_tests_request_id_replay_finds_committed_command_after_reopen() {
+    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
+        Arc::new(MemoryCoordinator::new());
+    let blob = Arc::new(MemoryBlobStore::new());
+    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
+    let t = tenant();
+    let q = qid("object-log-request-replay");
+    let shard = shard(t.clone(), q.clone(), 0);
+
+    first
+        .append_batch(&shard, Some(0), vec![claim_envelope(&t, &q, 0, 7)])
+        .await
+        .unwrap();
+    drop(first);
+
+    let reopened = FjordObjectLogStore::new(coordinator, blob_dyn);
+    let request_id = RequestId::new("req-claim-7").unwrap();
+    let replayed = reopened
+        .find_by_request_id(&shard, &request_id)
+        .unwrap()
+        .expect("committed request_id should be replayable");
+
+    assert_eq!(replayed.0.sequence, 0);
+    assert_eq!(replayed.1.request_id.as_ref(), Some(&request_id));
+    assert!(matches!(replayed.1.command, QueueCommand::BatchClaim(_)));
 }
