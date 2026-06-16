@@ -1,0 +1,23 @@
+[package]
+name = "pqueue-objectlog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-storage = { path = "../pqueue-storage" }
+fjord-coordinator = { path = "../../../fjord/crates/fjord-coordinator" }
+fjord-log = { path = "../../../fjord/crates/fjord-log" }
+bytes = "1.10"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "object_log_commit_recovery_tests"
+path = "tests/object_log_commit_recovery_tests.rs"
