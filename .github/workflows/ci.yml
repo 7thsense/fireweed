@@ -15,11 +15,14 @@ jobs:
       - name: Install Rust 1.92.0
         run: rustup toolchain install 1.92.0 --profile minimal --component clippy rustfmt llvm-tools-preview
 
+      - name: Install Rust nightly for branch coverage
+        run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+
       - name: Install cargo tooling
         run: |
           cargo install --locked cargo-deny --version 0.19.0
           cargo install --locked cargo-machete --version 0.9.1
           cargo install --locked cargo-llvm-cov --version 0.8.2
 
-      - name: PR gate (bootstrap)
-        run: bash scripts/ci/pr-gate.sh --mode bootstrap
+      - name: PR gate (enforcing)
+        run: bash scripts/ci/pr-gate.sh --mode enforcing

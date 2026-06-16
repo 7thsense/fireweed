@@ -1,0 +1,16 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  nightly-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy rustfmt llvm-tools-preview
+      - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+      - run: cargo install --locked cargo-llvm-cov --version 0.8.2
+      - run: bash scripts/ci/nightly-gate.sh

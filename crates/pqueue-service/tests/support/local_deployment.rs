@@ -67,7 +67,7 @@ async fn connect_with_retry(
 ) {
     let mut last_error = None;
     for database_url in database_urls {
-        for _ in 0..6 {
+        for _ in 0..60 {
             match tokio_postgres::connect(database_url, NoTls).await {
                 Ok(connection) => return connection,
                 Err(err) => {

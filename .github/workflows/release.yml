@@ -1,0 +1,14 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy rustfmt llvm-tools-preview
+      - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+      - run: cargo install --locked cargo-llvm-cov --version 0.8.2
+      - run: bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3
