@@ -142,9 +142,10 @@ fn run_product_workflow(suite: &str) {
         .find(|workflow| workflow.suite == suite)
         .expect("suite must be registered");
     let cfg = E2eConfig::from_env();
-    assert_eq!(
-        cfg.scale, "smoke",
-        "B-061 only claims smoke-scale product workflow harness execution"
+    assert!(
+        matches!(cfg.scale.as_str(), "smoke" | "release"),
+        "unknown product workflow scale {}",
+        cfg.scale
     );
     assert!(
         matches!(
@@ -219,7 +220,7 @@ fn write_ledger_row(
         },
         "pass_bar": {
             "comparison": "within-bar",
-            "threshold": "smoke"
+            "threshold": cfg.scale
         }
     });
 
