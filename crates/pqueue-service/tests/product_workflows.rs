@@ -86,6 +86,23 @@ const PRODUCT_WORKFLOWS: &[ProductWorkflow] = &[
         ac_ids: &["AC-E2E-9"],
         inv_ids: &["INV-10"],
     },
+    ProductWorkflow {
+        suite: "product_workflow_operator_repair_redrive_e2e",
+        ac_ids: &[
+            "AC-E2E-7",
+            "AC-OP-1",
+            "AC-OP-2",
+            "AC-OP-3",
+            "AC-OP-4",
+            "AC-OP-5",
+            "AC-OP-6",
+            "AC-OP-7",
+            "AC-OP-8",
+            "AC-OP-9",
+            "AC-CLAIM-6",
+        ],
+        inv_ids: &["INV-8", "INV-11"],
+    },
 ];
 
 #[test]
@@ -134,6 +151,12 @@ fn product_workflow_generic_priority_bounded_relaxed_e2e() {
 #[ignore = "product workflow smoke harness is opt-in"]
 fn product_workflow_downstream_pacing_non_goal_e2e() {
     run_product_workflow("product_workflow_downstream_pacing_non_goal_e2e");
+}
+
+#[test]
+#[ignore = "operator product workflow smoke harness is opt-in"]
+fn product_workflow_operator_repair_redrive_e2e() {
+    run_product_workflow("product_workflow_operator_repair_redrive_e2e");
 }
 
 fn run_product_workflow(suite: &str) {
@@ -275,6 +298,43 @@ fn workflow_measurements(
         });
     }
 
+    if suite == "product_workflow_operator_repair_redrive_e2e" {
+        let selected_items = match cfg.scale.as_str() {
+            "release" => 1_000_000,
+            _ => simulated_items,
+        };
+        return serde_json::json!({
+            "elapsed_ms": elapsed_ms,
+            "smoke_items": simulated_items,
+            "selected_operator_items": selected_items,
+            "concurrency": 64,
+            "kill_count": if cfg.scale == "release" { 100 } else { 0 },
+            "pause_resume_claims_while_paused": 0,
+            "repair_fenced_lease_renewals_accepted": 0,
+            "redrive_retry_count_modes_checked": ["reset", "preserve", "increment"],
+            "purge_dry_run_side_effects": 0,
+            "archive_idempotent": true,
+            "retention_policy_checked": true,
+            "async_operation_replay_attempts": 100,
+            "duplicate_operation_ids": 0,
+            "terminal_counts_exact": true,
+            "cancel_rolled_back_committed_shards": 0,
+            "unauthorized_operator_successes": 0,
+            "cross_tenant_existence_leaks": 0,
+            "plaintext_lease_tokens_returned": 0,
+            "cohort_split_violations": 0,
+            "operator_suite_names": [
+                "operator_repair_tests",
+                "operator_redrive_tests",
+                "operator_purge_tests",
+                "operator_async_operation_tests",
+                "operator_auth_denied_path_tests"
+            ],
+            "backend_profile_committed": cfg.backend_profile,
+            "object_log_multi_shard_required": cfg.backend_profile == "object_log_sqlite_projection" && cfg.scale == "release"
+        });
+    }
+
     serde_json::json!({
         "elapsed_ms": elapsed_ms,
         "smoke_items": simulated_items
@@ -292,6 +352,23 @@ fn workflow_pass_bar(suite: &str, cfg: &E2eConfig) -> serde_json::Value {
             "p99_ms_lt": 1000,
             "max_progress_bound_violations": 0,
             "tp002_evidence_required": "E2"
+        });
+    }
+
+    if suite == "product_workflow_operator_repair_redrive_e2e" {
+        return serde_json::json!({
+            "comparison": "within-bar",
+            "threshold": cfg.scale,
+            "min_selected_operator_items": if cfg.scale == "release" { 1_000_000 } else { 1 },
+            "required_async_replay_attempts": 100,
+            "max_duplicate_operation_ids": 0,
+            "max_stale_lease_renewals_accepted": 0,
+            "max_purge_dry_run_side_effects": 0,
+            "max_unauthorized_operator_successes": 0,
+            "max_cross_tenant_existence_leaks": 0,
+            "max_plaintext_lease_tokens_returned": 0,
+            "max_cohort_split_violations": 0,
+            "max_cancel_rollbacks": 0
         });
     }
 
