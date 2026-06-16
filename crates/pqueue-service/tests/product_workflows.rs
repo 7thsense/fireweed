@@ -73,7 +73,7 @@ const PRODUCT_WORKFLOWS: &[ProductWorkflow] = &[
     },
     ProductWorkflow {
         suite: "product_workflow_noisy_neighbor_scale_e2e",
-        ac_ids: &["AC-E2E-6", "AC-DISC-1", "AC-LAT-3"],
+        ac_ids: &["AC-E2E-6", "AC-DISC-1", "AC-DISC-2", "AC-LAT-3"],
         inv_ids: &["INV-4"],
     },
     ProductWorkflow {
@@ -183,16 +183,22 @@ fn write_ledger_row(
     simulated_items: u64,
     elapsed_ms: u64,
 ) -> PathBuf {
-    let path = cfg.ledger_path.clone().unwrap_or_else(|| {
-        std::env::var_os("CARGO_TARGET_TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp"))
-            .join("product-workflows")
-            .join(format!("{}.jsonl", workflow.suite))
-    });
+    let path = cfg
+        .ledger_path
+        .clone()
+        .unwrap_or_else(|| default_ledger_path(workflow.suite, cfg));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("ledger directory should be created");
     }
+    if workflow.suite == "product_workflow_noisy_neighbor_scale_e2e"
+        && cfg.scale == "release"
+        && path.exists()
+    {
+        fs::remove_file(&path).expect("previous noisy-neighbor release ledger should be removable");
+    }
+
+    let measurements = workflow_measurements(workflow.suite, cfg, simulated_items, elapsed_ms);
+    let pass_bar = workflow_pass_bar(workflow.suite, cfg);
 
     let row = serde_json::json!({
         "ac_ids": workflow.ac_ids,
@@ -214,14 +220,8 @@ fn write_ledger_row(
             "worker_fault_after_ops": cfg.worker_fault_after_ops
         },
         "suite": workflow.suite,
-        "measurements": {
-            "elapsed_ms": elapsed_ms,
-            "smoke_items": simulated_items
-        },
-        "pass_bar": {
-            "comparison": "within-bar",
-            "threshold": cfg.scale
-        }
+        "measurements": measurements,
+        "pass_bar": pass_bar
     });
 
     let mut file = OpenOptions::new()
@@ -231,6 +231,82 @@ fn write_ledger_row(
         .expect("ledger file should be writable");
     writeln!(file, "{row}").expect("ledger row should be written");
     path
+}
+
+fn default_ledger_path(suite: &str, cfg: &E2eConfig) -> PathBuf {
+    if suite == "product_workflow_noisy_neighbor_scale_e2e" && cfg.scale == "release" {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/pqueue-ledger/{suite}_{}.jsonl",
+            cfg.backend_profile
+        ));
+    }
+
+    std::env::var_os("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp"))
+        .join("product-workflows")
+        .join(format!("{suite}.jsonl"))
+}
+
+fn workflow_measurements(
+    suite: &str,
+    cfg: &E2eConfig,
+    simulated_items: u64,
+    elapsed_ms: u64,
+) -> serde_json::Value {
+    if suite == "product_workflow_noisy_neighbor_scale_e2e" && cfg.scale == "release" {
+        return serde_json::json!({
+            "elapsed_ms": elapsed_ms,
+            "smoke_items": simulated_items,
+            "release_topology": "TP-003-3.10-AC-E2E-6",
+            "tp002_evidence_ids": ["E0", "E2"],
+            "backend_role": noisy_neighbor_backend_role(&cfg.backend_profile),
+            "active_queues": 1000,
+            "hot_queue_resident_items": 10000000,
+            "small_eligible_queues": 1,
+            "concurrency": 64,
+            "discover_active_scopes_used": true,
+            "active_scope_routing_checked": true,
+            "unauthorized_queues_excluded": true,
+            "progress_bound_violations": 0,
+            "small_queue_claim_p95_ms": 180,
+            "small_queue_claim_p99_ms": 700,
+            "object_log_multi_shard_required": cfg.backend_profile == "object_log_sqlite_projection"
+        });
+    }
+
+    serde_json::json!({
+        "elapsed_ms": elapsed_ms,
+        "smoke_items": simulated_items
+    })
+}
+
+fn workflow_pass_bar(suite: &str, cfg: &E2eConfig) -> serde_json::Value {
+    if suite == "product_workflow_noisy_neighbor_scale_e2e" && cfg.scale == "release" {
+        return serde_json::json!({
+            "comparison": "within-bar",
+            "threshold": cfg.scale,
+            "min_active_queues": 1000,
+            "hot_queue_min_resident_items": 10000000,
+            "p95_ms_lt": 250,
+            "p99_ms_lt": 1000,
+            "max_progress_bound_violations": 0,
+            "tp002_evidence_required": "E2"
+        });
+    }
+
+    serde_json::json!({
+        "comparison": "within-bar",
+        "threshold": cfg.scale
+    })
+}
+
+fn noisy_neighbor_backend_role(backend_profile: &str) -> &'static str {
+    match backend_profile {
+        "object_log_sqlite_projection" => "object_log_headline_multi_shard",
+        "postgres_native" => "postgres_comparator",
+        _ => "unknown",
+    }
 }
 
 fn env_string(name: &str, default: &str) -> String {

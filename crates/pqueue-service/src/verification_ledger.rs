@@ -222,11 +222,125 @@ impl LedgerRow {
         if self.suite.starts_with("performance_") {
             validate_performance_row(self)?;
         }
+        if self.suite == "product_workflow_noisy_neighbor_scale_e2e" && self.scale == "release" {
+            validate_noisy_neighbor_release_row(self)?;
+        }
         if self.suite == "object_log_commit_recovery_tests" {
             validate_object_log_e3_row(self)?;
         }
         Ok(())
     }
+}
+
+fn validate_noisy_neighbor_release_row(row: &LedgerRow) -> Result<(), LedgerError> {
+    for required in ["AC-E2E-6", "AC-DISC-1", "AC-DISC-2", "AC-LAT-3"] {
+        if !row.ac_ids.iter().any(|id| id == required) {
+            return Err(LedgerError::invalid_field(
+                "ac_ids",
+                format!("AC-E2E-6 release rows must cite {required}"),
+            ));
+        }
+    }
+
+    let evidence_ids =
+        required_nested_string_array(&row.measurements, "measurements", "tp002_evidence_ids")?;
+    if !evidence_ids.iter().any(|id| id == "E2") {
+        return Err(LedgerError::invalid_field(
+            "measurements.tp002_evidence_ids",
+            "AC-E2E-6 release rows must cite TP-002 E2",
+        ));
+    }
+
+    let backend_role =
+        required_nested_string_field(&row.measurements, "measurements", "backend_role")?;
+    match row.backend_profile.as_str() {
+        "object_log_sqlite_projection" if backend_role == "object_log_headline_multi_shard" => {}
+        "postgres_native" if backend_role == "postgres_comparator" => {}
+        _ => {
+            return Err(LedgerError::invalid_field(
+                "measurements.backend_role",
+                "AC-E2E-6 release rows must mark object-log as headline and Postgres as comparator",
+            ));
+        }
+    }
+
+    let active_queues =
+        required_nested_u64_field(&row.measurements, "measurements", "active_queues")?;
+    let min_active_queues =
+        required_nested_u64_field(&row.pass_bar, "pass_bar", "min_active_queues")?;
+    if active_queues < min_active_queues {
+        return Err(LedgerError::invalid_field(
+            "measurements.active_queues",
+            "AC-E2E-6 release rows must cover the active-queue density bar",
+        ));
+    }
+
+    let hot_queue_items = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "hot_queue_resident_items",
+    )?;
+    let min_hot_queue_items =
+        required_nested_u64_field(&row.pass_bar, "pass_bar", "hot_queue_min_resident_items")?;
+    if hot_queue_items < min_hot_queue_items {
+        return Err(LedgerError::invalid_field(
+            "measurements.hot_queue_resident_items",
+            "AC-E2E-6 release rows must cover the hot-queue resident item bar",
+        ));
+    }
+
+    let p95 = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "small_queue_claim_p95_ms",
+    )?;
+    let p99 = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "small_queue_claim_p99_ms",
+    )?;
+    let p95_lt = required_nested_u64_field(&row.pass_bar, "pass_bar", "p95_ms_lt")?;
+    let p99_lt = required_nested_u64_field(&row.pass_bar, "pass_bar", "p99_ms_lt")?;
+    if p95 >= p95_lt {
+        return Err(LedgerError::invalid_field(
+            "measurements.small_queue_claim_p95_ms",
+            "AC-E2E-6 p95 must stay below the pass bar",
+        ));
+    }
+    if p99 >= p99_lt {
+        return Err(LedgerError::invalid_field(
+            "measurements.small_queue_claim_p99_ms",
+            "AC-E2E-6 p99 must stay below the pass bar",
+        ));
+    }
+
+    let progress_violations = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "progress_bound_violations",
+    )?;
+    let max_progress_violations =
+        required_nested_u64_field(&row.pass_bar, "pass_bar", "max_progress_bound_violations")?;
+    if progress_violations > max_progress_violations {
+        return Err(LedgerError::invalid_field(
+            "measurements.progress_bound_violations",
+            "AC-E2E-6 release rows must report no progress-bound violations",
+        ));
+    }
+
+    for field in [
+        "discover_active_scopes_used",
+        "active_scope_routing_checked",
+        "unauthorized_queues_excluded",
+    ] {
+        if !required_nested_bool_field(&row.measurements, "measurements", field)? {
+            return Err(LedgerError::invalid_field(
+                format!("measurements.{field}"),
+                "AC-E2E-6 routing evidence flags must be true",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_performance_row(row: &LedgerRow) -> Result<(), LedgerError> {

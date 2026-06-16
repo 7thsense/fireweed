@@ -120,6 +120,55 @@ fn verification_ledger_tests_require_multi_shard_scale_out_fields() {
 }
 
 #[test]
+fn verification_ledger_tests_require_noisy_neighbor_release_traceability() {
+    let missing = serde_json::json!({
+        "ac_ids": ["AC-E2E-6", "AC-DISC-1", "AC-LAT-3"],
+        "inv_ids": ["INV-4"],
+        "command": "PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_noisy_neighbor_scale_e2e -- --ignored",
+        "exit_status": 0,
+        "backend_profile": "object_log_sqlite_projection",
+        "scale": "release",
+        "seed": 1701,
+        "environment": {
+            "instance_class": "local-dev"
+        },
+        "suite": "product_workflow_noisy_neighbor_scale_e2e",
+        "measurements": {
+            "elapsed_ms": 1,
+            "smoke_items": 1000,
+            "release_topology": "TP-003-3.10-AC-E2E-6",
+            "tp002_evidence_ids": ["E0", "E2"],
+            "backend_role": "object_log_headline_multi_shard",
+            "active_queues": 1000,
+            "hot_queue_resident_items": 10000000,
+            "small_eligible_queues": 1,
+            "concurrency": 64,
+            "discover_active_scopes_used": true,
+            "active_scope_routing_checked": true,
+            "unauthorized_queues_excluded": true,
+            "progress_bound_violations": 0,
+            "small_queue_claim_p95_ms": 180,
+            "small_queue_claim_p99_ms": 700,
+            "object_log_multi_shard_required": true
+        },
+        "pass_bar": {
+            "comparison": "within-bar",
+            "threshold": "release",
+            "min_active_queues": 1000,
+            "hot_queue_min_resident_items": 10000000,
+            "p95_ms_lt": 250,
+            "p99_ms_lt": 1000,
+            "max_progress_bound_violations": 0,
+            "tp002_evidence_required": "E2"
+        }
+    });
+
+    let err = validate_ledger_text(&format!("{missing}\n"))
+        .expect_err("AC-E2E-6 release rows must cite AC-DISC-2");
+    assert_eq!(err.field.as_deref(), Some("ac_ids"));
+}
+
+#[test]
 fn verification_ledger_tests_require_object_log_e3_fields() {
     let missing = serde_json::json!({
         "ac_ids": ["AC-LAT-1", "AC-LAT-2", "AC-LAT-3", "AC-LAT-4"],
