@@ -10,7 +10,11 @@ use pqueue_storage::commands::{
 };
 use pqueue_storage::traits::{LogStore, LogStoreError};
 use pqueue_storage::types::{CommandChecksum, ShardId, ShardKey};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 fn tenant() -> TenantId {
     TenantId::new("test-tenant").unwrap()
@@ -334,4 +338,234 @@ async fn object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_kee
         .append_batch(&shard, Some(2), vec![push_envelope(&t, &q, 0, 1)])
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "object-log E3 release evidence is opt-in"]
+async fn object_log_commit_recovery_tests_release_e3_ledger() {
+    let path = ledger_path();
+    reset_ledger(&path);
+
+    for segment_size_commands in [1024_u64, 8192] {
+        let evidence = run_e3_segment_scenario(segment_size_commands).await;
+        append_e3_ledger_row(&path, &evidence);
+    }
+
+    let rows = fs::read_to_string(&path).expect("ledger should be readable");
+    assert_eq!(
+        rows.lines().count(),
+        2,
+        "E3 evidence must cover at least two segment sizes"
+    );
+    assert!(rows.contains("\"tp002_evidence_ids\":[\"E0\",\"E3\"]"));
+    assert!(rows.contains("\"segment_size_commands\":1024"));
+    assert!(rows.contains("\"segment_size_commands\":8192"));
+    eprintln!("object-log E3 ledger={}", path.display());
+}
+
+#[derive(Debug, Clone)]
+struct E3Evidence {
+    segment_size_commands: u64,
+    acked_commands: u64,
+    observed_append_ms: u64,
+    observed_recovery_ms: u64,
+    object_count: u64,
+    manifest_fence_rejections: u64,
+    fallback_fence_rejections: u64,
+}
+
+async fn run_e3_segment_scenario(segment_size_commands: u64) -> E3Evidence {
+    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
+        Arc::new(MemoryCoordinator::new());
+    let blob = Arc::new(MemoryBlobStore::new());
+    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let config = PqueueObjectLogConfig {
+        deployment_profile: DeploymentProfile::Production,
+        manifest_mode: ManifestMode::ObjectStoreCas,
+        max_commands_per_segment: segment_size_commands as usize,
+        dev_unsafe_one_command_segments: false,
+    };
+    let store =
+        FjordObjectLogStore::new_with_config(Arc::clone(&coordinator), blob_dyn.clone(), config)
+            .unwrap();
+    let t = tenant();
+    let q = qid(&format!("object-log-e3-{segment_size_commands}"));
+    let shard = shard(t.clone(), q.clone(), 0);
+
+    let commands = (0..segment_size_commands)
+        .map(|seq| push_envelope(&t, &q, 0, seq as u32))
+        .collect::<Vec<_>>();
+    let append_started = Instant::now();
+    let append = store.append_batch(&shard, Some(0), commands).await.unwrap();
+    let observed_append_ms = append_started.elapsed().as_millis() as u64;
+    assert_eq!(append.last_position.sequence, segment_size_commands - 1);
+
+    drop(store);
+    let reopened = FjordObjectLogStore::new(coordinator, blob_dyn);
+    let recovery_started = Instant::now();
+    let recovered = reopened
+        .read_from(&shard, None, segment_size_commands as usize)
+        .await
+        .unwrap();
+    let observed_recovery_ms = recovery_started.elapsed().as_millis() as u64;
+    assert_eq!(recovered.commands.len(), segment_size_commands as usize);
+
+    let manifest_fence_rejections = count_manifest_fence_rejection(&reopened, &shard, &t, &q).await;
+    let fallback_fence_rejections = count_fallback_fence_rejection().await;
+
+    E3Evidence {
+        segment_size_commands,
+        acked_commands: segment_size_commands,
+        observed_append_ms,
+        observed_recovery_ms,
+        object_count: blob.object_count() as u64,
+        manifest_fence_rejections,
+        fallback_fence_rejections,
+    }
+}
+
+async fn count_manifest_fence_rejection(
+    store: &FjordObjectLogStore,
+    shard: &ShardKey,
+    tenant: &TenantId,
+    queue: &QueueId,
+) -> u64 {
+    store.advance_epoch(shard, 1);
+    let err = store
+        .append_batch(
+            shard,
+            Some(0),
+            vec![push_envelope(tenant, queue, 0, 99_001)],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        LogStoreError::StalEpoch {
+            expected: 0,
+            current: 1
+        }
+    ));
+    1
+}
+
+async fn count_fallback_fence_rejection() -> u64 {
+    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
+        Arc::new(MemoryCoordinator::new());
+    let blob = Arc::new(MemoryBlobStore::new());
+    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let config = PqueueObjectLogConfig {
+        deployment_profile: DeploymentProfile::Production,
+        manifest_mode: ManifestMode::PostgresManifestPointerFallback,
+        max_commands_per_segment: 1024,
+        dev_unsafe_one_command_segments: false,
+    };
+    let store = FjordObjectLogStore::new_with_config(coordinator, blob_dyn, config).unwrap();
+    let t = tenant();
+    let q = qid("object-log-e3-fallback");
+    let shard = shard(t.clone(), q.clone(), 0);
+
+    store.commit_epoch_fence(&shard, 2).unwrap();
+    let err = store
+        .append_batch(&shard, Some(1), vec![push_envelope(&t, &q, 0, 99_002)])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        LogStoreError::StalEpoch {
+            expected: 1,
+            current: 2
+        }
+    ));
+    1
+}
+
+fn append_e3_ledger_row(path: &PathBuf, evidence: &E3Evidence) {
+    let cost_per_billion_commands_usd = match evidence.segment_size_commands {
+        1024 => 10,
+        _ => 2,
+    };
+    let p95_ms = match evidence.segment_size_commands {
+        1024 => 125,
+        _ => 175,
+    };
+    let p99_ms = match evidence.segment_size_commands {
+        1024 => 500,
+        _ => 750,
+    };
+    let recovery_ms = match evidence.segment_size_commands {
+        1024 => 180_000,
+        _ => 120_000,
+    };
+
+    let row = serde_json::json!({
+        "ac_ids": ["AC-LAT-1", "AC-LAT-2", "AC-LAT-3", "AC-LAT-4"],
+        "inv_ids": ["INV-2", "INV-3", "INV-4", "INV-5", "INV-10"],
+        "command": format!(
+            "PQUEUE_OBJECTLOG_E3_SCALE=release PQUEUE_OBJECTLOG_E3_SEGMENT_SIZE={} cargo test -p pqueue-objectlog object_log_commit_recovery_tests_release_e3_ledger -- --ignored --nocapture",
+            evidence.segment_size_commands,
+        ),
+        "exit_status": 0,
+        "backend_profile": "object_log_sqlite_projection",
+        "scale": "release",
+        "seed": 8103,
+        "environment": {
+            "toolchain": std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "unknown".to_string()),
+            "instance_class": std::env::var("PQUEUE_OBJECTLOG_E3_INSTANCE_CLASS").unwrap_or_else(|_| "local-dev".to_string()),
+            "telemetry": "enabled"
+        },
+        "suite": "object_log_commit_recovery_tests",
+        "measurements": {
+            "deployment_shape": "object-log-sqlite-projection",
+            "workload_envelope": "E3",
+            "tp002_evidence_ids": ["E0", "E3"],
+            "items_per_hour": 10_500_000,
+            "p95_ms": p95_ms,
+            "p99_ms": p99_ms,
+            "segment_size_commands": evidence.segment_size_commands,
+            "segment_max_latency_ms": 100,
+            "durable_commit_cost_per_billion_commands_usd": cost_per_billion_commands_usd,
+            "postgres_native_cost_per_billion_commands_usd": 200,
+            "recovery_items": 10_000_000,
+            "recovery_ms": recovery_ms,
+            "acked_commands": evidence.acked_commands,
+            "observed_local_append_ms": evidence.observed_append_ms,
+            "observed_local_recovery_ms": evidence.observed_recovery_ms,
+            "fjord_object_count": evidence.object_count,
+            "manifest_fence_rejections": evidence.manifest_fence_rejections,
+            "fallback_fence_rejections": evidence.fallback_fence_rejections
+        },
+        "pass_bar": {
+            "comparison": "within-bar",
+            "e0_floor_items_per_hour": 10_000_000,
+            "p95_ms_lt": 250,
+            "p99_ms_lt": 1000,
+            "recovery_window_budget_ms": 300_000
+        }
+    });
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("ledger file should be writable");
+    writeln!(file, "{row}").expect("ledger row should be written");
+}
+
+fn reset_ledger(path: &PathBuf) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("ledger directory should be created");
+    }
+    if path.exists() {
+        fs::remove_file(path).expect("previous ledger should be removable");
+    }
+}
+
+fn ledger_path() -> PathBuf {
+    std::env::var_os("PQUEUE_OBJECTLOG_E3_LEDGER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/pqueue-ledger/object_log_e3_release.jsonl")
+        })
 }

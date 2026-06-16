@@ -222,6 +222,9 @@ impl LedgerRow {
         if self.suite.starts_with("performance_") {
             validate_performance_row(self)?;
         }
+        if self.suite == "object_log_commit_recovery_tests" {
+            validate_object_log_e3_row(self)?;
+        }
         Ok(())
     }
 }
@@ -246,6 +249,103 @@ fn validate_performance_row(row: &LedgerRow) -> Result<(), LedgerError> {
     required_nested_u64_field(&row.pass_bar, "pass_bar", "e0_floor_items_per_hour")?;
     required_nested_u64_field(&row.pass_bar, "pass_bar", "p95_ms_lt")?;
     required_nested_u64_field(&row.pass_bar, "pass_bar", "p99_ms_lt")?;
+    Ok(())
+}
+
+fn validate_object_log_e3_row(row: &LedgerRow) -> Result<(), LedgerError> {
+    if row.backend_profile != "object_log_sqlite_projection" {
+        return Err(LedgerError::invalid_field(
+            "backend_profile",
+            "object-log E3 rows must use object_log_sqlite_projection",
+        ));
+    }
+    required_nested_string_field(&row.environment, "environment", "instance_class")?;
+    required_nested_string_field(&row.measurements, "measurements", "deployment_shape")?;
+    required_nested_string_field(&row.measurements, "measurements", "workload_envelope")?;
+    let evidence_ids =
+        required_nested_string_array(&row.measurements, "measurements", "tp002_evidence_ids")?;
+    for required in ["E0", "E3"] {
+        if !evidence_ids.iter().any(|id| id == required) {
+            return Err(LedgerError::invalid_field(
+                "measurements.tp002_evidence_ids",
+                format!("object-log E3 rows must cite TP-002 {required}"),
+            ));
+        }
+    }
+
+    let items_per_hour =
+        required_nested_u64_field(&row.measurements, "measurements", "items_per_hour")?;
+    let p95_ms = required_nested_u64_field(&row.measurements, "measurements", "p95_ms")?;
+    let p99_ms = required_nested_u64_field(&row.measurements, "measurements", "p99_ms")?;
+    required_nested_u64_field(&row.measurements, "measurements", "segment_size_commands")?;
+    required_nested_u64_field(&row.measurements, "measurements", "segment_max_latency_ms")?;
+    let object_log_cost = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "durable_commit_cost_per_billion_commands_usd",
+    )?;
+    let postgres_cost = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "postgres_native_cost_per_billion_commands_usd",
+    )?;
+    let recovery_items =
+        required_nested_u64_field(&row.measurements, "measurements", "recovery_items")?;
+    let recovery_ms = required_nested_u64_field(&row.measurements, "measurements", "recovery_ms")?;
+    required_nested_u64_field(&row.measurements, "measurements", "acked_commands")?;
+    required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "manifest_fence_rejections",
+    )?;
+    required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "fallback_fence_rejections",
+    )?;
+
+    let e0_floor = required_nested_u64_field(&row.pass_bar, "pass_bar", "e0_floor_items_per_hour")?;
+    let p95_lt = required_nested_u64_field(&row.pass_bar, "pass_bar", "p95_ms_lt")?;
+    let p99_lt = required_nested_u64_field(&row.pass_bar, "pass_bar", "p99_ms_lt")?;
+    let recovery_budget =
+        required_nested_u64_field(&row.pass_bar, "pass_bar", "recovery_window_budget_ms")?;
+
+    if items_per_hour < e0_floor {
+        return Err(LedgerError::invalid_field(
+            "measurements.items_per_hour",
+            "object-log E3 throughput must meet the E0 floor",
+        ));
+    }
+    if p95_ms >= p95_lt {
+        return Err(LedgerError::invalid_field(
+            "measurements.p95_ms",
+            "object-log E3 p95 must be below the pass bar",
+        ));
+    }
+    if p99_ms >= p99_lt {
+        return Err(LedgerError::invalid_field(
+            "measurements.p99_ms",
+            "object-log E3 p99 must be below the pass bar",
+        ));
+    }
+    if object_log_cost >= postgres_cost {
+        return Err(LedgerError::invalid_field(
+            "measurements.durable_commit_cost_per_billion_commands_usd",
+            "object-log E3 cost must beat postgres_native at high sustained volume",
+        ));
+    }
+    if recovery_items < 10_000_000 {
+        return Err(LedgerError::invalid_field(
+            "measurements.recovery_items",
+            "object-log E3 recovery must cover a 10M-item projection",
+        ));
+    }
+    if recovery_ms > recovery_budget {
+        return Err(LedgerError::invalid_field(
+            "measurements.recovery_ms",
+            "object-log E3 recovery must fit within the recovery-window budget",
+        ));
+    }
     Ok(())
 }
 

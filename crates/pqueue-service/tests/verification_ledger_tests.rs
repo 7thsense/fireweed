@@ -74,6 +74,50 @@ fn verification_ledger_tests_require_performance_scale_fields() {
     assert_eq!(err.field.as_deref(), Some("measurements.p99_ms"));
 }
 
+#[test]
+fn verification_ledger_tests_require_object_log_e3_fields() {
+    let missing = serde_json::json!({
+        "ac_ids": ["AC-LAT-1", "AC-LAT-2", "AC-LAT-3", "AC-LAT-4"],
+        "inv_ids": ["INV-2", "INV-3", "INV-4", "INV-5", "INV-10"],
+        "command": "PQUEUE_OBJECTLOG_E3_SCALE=release cargo test -p pqueue-objectlog object_log_commit_recovery_tests",
+        "exit_status": 0,
+        "backend_profile": "object_log_sqlite_projection",
+        "scale": "release",
+        "seed": 8103,
+        "environment": {
+            "instance_class": "local-dev"
+        },
+        "suite": "object_log_commit_recovery_tests",
+        "measurements": {
+            "deployment_shape": "object-log-sqlite-projection",
+            "workload_envelope": "E3",
+            "tp002_evidence_ids": ["E0", "E3"],
+            "items_per_hour": 10000000,
+            "p95_ms": 125,
+            "p99_ms": 500,
+            "segment_size_commands": 1024,
+            "segment_max_latency_ms": 100,
+            "durable_commit_cost_per_billion_commands_usd": 10,
+            "postgres_native_cost_per_billion_commands_usd": 200,
+            "recovery_items": 10000000,
+            "acked_commands": 1024,
+            "manifest_fence_rejections": 1,
+            "fallback_fence_rejections": 1
+        },
+        "pass_bar": {
+            "comparison": "within-bar",
+            "e0_floor_items_per_hour": 10000000,
+            "p95_ms_lt": 250,
+            "p99_ms_lt": 1000,
+            "recovery_window_budget_ms": 300000
+        }
+    });
+
+    let err = validate_ledger_text(&format!("{missing}\n"))
+        .expect_err("object-log E3 rows must include recovery timing");
+    assert_eq!(err.field.as_deref(), Some("measurements.recovery_ms"));
+}
+
 fn fixture_paths() -> Vec<(PathBuf, &'static str)> {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     vec![
