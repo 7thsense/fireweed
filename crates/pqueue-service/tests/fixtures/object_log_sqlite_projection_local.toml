@@ -1,0 +1,4 @@
+backend_profile = "object_log_sqlite_projection"
+object_log_root = "object-log"
+sqlite_projection_root = "sqlite-projection"
+segment_max_commands = 1024
