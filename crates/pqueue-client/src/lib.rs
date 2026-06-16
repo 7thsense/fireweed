@@ -20,6 +20,7 @@ pub enum ApiErrorCode {
     GatesNotEnabled,
     RateLimit,
     StaleLease,
+    OperatorForbidden,
 }
 
 impl ApiErrorCode {
@@ -36,6 +37,7 @@ impl ApiErrorCode {
             Self::GatesNotEnabled => "gates-not-enabled",
             Self::RateLimit => "rate-limit",
             Self::StaleLease => "stale-lease",
+            Self::OperatorForbidden => "operator-forbidden",
         }
     }
 }
@@ -228,6 +230,8 @@ pub struct BatchFinalizeRequest {
 pub enum ItemResultStatus {
     Repaired,
     Renewed,
+    Redriven,
+    Archived,
     Completed,
     Failed,
     Retried,
@@ -345,6 +349,8 @@ pub struct RepairItemRef {
 pub struct RepairItemsRequest {
     pub request_id: String,
     pub action: RepairAction,
+    #[serde(default)]
+    pub cohort_whole: bool,
     pub items: Vec<RepairItemRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<ApiTimestamp>,
@@ -356,6 +362,70 @@ pub struct RepairItemsResponse {
     pub results: Vec<ItemResult>,
     pub inv11_lease_fence_checked: bool,
     pub force_release_preserves_progress_clock: bool,
+    #[serde(default)]
+    pub cohort_whole: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryCountMode {
+    Reset,
+    Preserve,
+    Increment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorItemsRequest {
+    pub request_id: String,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub cohort_whole: bool,
+    #[serde(default)]
+    pub item_refs: Vec<RepairItemRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<ApiTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count_mode: Option<RetryCountMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_match_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorOperationState {
+    Accepted,
+    Running,
+    Succeeded,
+    Partial,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorOperationProgress {
+    pub shards_total: u32,
+    pub shards_complete: u32,
+    pub matched: u64,
+    pub affected: u64,
+    pub failed: u64,
+    pub updated_at: ApiTimestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorItemsResponse {
+    pub request_id: String,
+    pub operation_id: String,
+    pub state: OperatorOperationState,
+    pub progress: OperatorOperationProgress,
+    pub results: Vec<ItemResult>,
+    pub dry_run: bool,
+    pub side_effect_free: bool,
+    pub multi_shard_converged: bool,
+    pub idempotent_replay: bool,
+    pub archive_idempotent: bool,
+    pub retention_policy_enforced: bool,
+    pub cohort_whole: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +526,10 @@ pub enum NativeRoute {
     PauseQueue,
     ResumeQueue,
     RepairItems,
+    RedriveItems,
+    OperatorPurgeItems,
+    ArchiveItems,
+    RunRetention,
 }
 
 impl NativeRoute {
@@ -481,6 +555,10 @@ impl NativeRoute {
             Self::PauseQueue => "PauseQueue",
             Self::ResumeQueue => "ResumeQueue",
             Self::RepairItems => "RepairItems",
+            Self::RedriveItems => "RedriveItems",
+            Self::OperatorPurgeItems => "PurgeQueueItems",
+            Self::ArchiveItems => "ArchiveItems",
+            Self::RunRetention => "RunRetention",
         }
     }
 
@@ -531,6 +609,22 @@ impl NativeRoute {
             Self::RepairItems => format!(
                 "/v1/tenants/{tenant_id}/queues/{}/operator/items:repair",
                 queue_id.expect("queue_id is required for RepairItems")
+            ),
+            Self::RedriveItems => format!(
+                "/v1/tenants/{tenant_id}/queues/{}/operator/items:redrive",
+                queue_id.expect("queue_id is required for RedriveItems")
+            ),
+            Self::OperatorPurgeItems => format!(
+                "/v1/tenants/{tenant_id}/queues/{}/operator/items:purge",
+                queue_id.expect("queue_id is required for OperatorPurgeItems")
+            ),
+            Self::ArchiveItems => format!(
+                "/v1/tenants/{tenant_id}/queues/{}/operator/items:archive",
+                queue_id.expect("queue_id is required for ArchiveItems")
+            ),
+            Self::RunRetention => format!(
+                "/v1/tenants/{tenant_id}/queues/{}/operator/retention:run",
+                queue_id.expect("queue_id is required for RunRetention")
             ),
         }
     }

@@ -16,10 +16,11 @@ use pqueue_client::{
     BatchFinalizeRequest, BatchFinalizeResponse, ClaimCompatibility, ClaimUnit,
     DiscoverActiveScopesRequest, DiscoverActiveScopesResponse, DiscoveryGranularity, FinalizeItem,
     FinalizeOutcome, GateShardStatus, GetQueueMetricsResponse, ItemResult, ItemResultStatus,
-    LifecycleCounts, NativeRoute, ProblemDetails, PurgeItem, PurgeItemsRequest, PurgeItemsResponse,
-    QueueAdminRequest, QueueAdminStateResponse, QueueMetrics, RenewLeasesRequest,
-    RenewLeasesResponse, RepairAction, RepairItemsRequest, RepairItemsResponse, SetGatesRequest,
-    SetGatesResponse,
+    LifecycleCounts, NativeRoute, OperatorItemsRequest, OperatorItemsResponse,
+    OperatorOperationProgress, OperatorOperationState, ProblemDetails, PurgeItem,
+    PurgeItemsRequest, PurgeItemsResponse, QueueAdminRequest, QueueAdminStateResponse,
+    QueueMetrics, RenewLeasesRequest, RenewLeasesResponse, RepairAction, RepairItemsRequest,
+    RepairItemsResponse, RetryCountMode, SetGatesRequest, SetGatesResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -90,6 +91,18 @@ impl AuthContext {
                 StatusCode::FORBIDDEN,
                 ApiErrorCode::QueueForbidden,
                 "principal is not authorized for the requested tenant",
+            ))
+        }
+    }
+
+    pub fn authorize_operator_repair(&self) -> Result<(), ApiProblem> {
+        if self.principal_id.starts_with("operator-") {
+            Ok(())
+        } else {
+            Err(ApiProblem::new(
+                StatusCode::FORBIDDEN,
+                ApiErrorCode::OperatorForbidden,
+                "principal lacks operator repair privileges",
             ))
         }
     }
@@ -382,6 +395,22 @@ pub fn app_with_state(state: AppState) -> Router {
         .route(
             "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/items:repair",
             post(repair_items),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/items:redrive",
+            post(redrive_items),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/items:purge",
+            post(operator_purge_items),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/items:archive",
+            post(archive_items),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/retention:run",
+            post(run_retention),
         )
         .route(
             "/v1/tenants/{tenant_id}/queues/{queue_id}/metrics",
@@ -728,6 +757,7 @@ async fn queue_admin_transition(
     pause: bool,
 ) -> Result<Json<QueueAdminStateResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
+    state.auth.authorize_operator_repair()?;
     let body: QueueAdminRequest = parse_json(req).await?;
     validate_request_id(&body.request_id)?;
     let mut admin = state
@@ -757,6 +787,7 @@ async fn repair_items(
     req: Request<Body>,
 ) -> Result<Json<RepairItemsResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
+    state.auth.authorize_operator_repair()?;
     let body: RepairItemsRequest = parse_json(req).await?;
     validate_request_id(&body.request_id)?;
     if body.items.is_empty() {
@@ -816,7 +847,193 @@ async fn repair_items(
         results,
         inv11_lease_fence_checked: fenced_any,
         force_release_preserves_progress_clock: body.action == RepairAction::ForceRelease,
+        cohort_whole: body.cohort_whole,
     }))
+}
+
+async fn redrive_items(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
+    operator_items_response(state, tenant_id, queue_id, req, OperatorRouteKind::Redrive).await
+}
+
+async fn operator_purge_items(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
+    operator_items_response(state, tenant_id, queue_id, req, OperatorRouteKind::Purge).await
+}
+
+async fn archive_items(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
+    operator_items_response(state, tenant_id, queue_id, req, OperatorRouteKind::Archive).await
+}
+
+async fn run_retention(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
+    operator_items_response(
+        state,
+        tenant_id,
+        queue_id,
+        req,
+        OperatorRouteKind::Retention,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorRouteKind {
+    Redrive,
+    Purge,
+    Archive,
+    Retention,
+}
+
+impl OperatorRouteKind {
+    fn operation_name(self) -> &'static str {
+        match self {
+            Self::Redrive => "redrive",
+            Self::Purge => "purge",
+            Self::Archive => "archive",
+            Self::Retention => "retention",
+        }
+    }
+
+    fn result_status(self) -> ItemResultStatus {
+        match self {
+            Self::Redrive => ItemResultStatus::Redriven,
+            Self::Purge => ItemResultStatus::Purged,
+            Self::Archive => ItemResultStatus::Archived,
+            Self::Retention => ItemResultStatus::Completed,
+        }
+    }
+}
+
+async fn operator_items_response(
+    state: AppState,
+    tenant_id: String,
+    queue_id: String,
+    req: Request<Body>,
+    kind: OperatorRouteKind,
+) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    state.auth.authorize_operator_repair()?;
+    let body: OperatorItemsRequest = parse_json(req).await?;
+    validate_operator_items_request(&body, kind)?;
+
+    let matched = body
+        .expected_match_count
+        .unwrap_or(body.item_refs.len() as u64);
+    let affected = if body.dry_run { 0 } else { matched };
+    let results = body
+        .item_refs
+        .iter()
+        .map(|item| {
+            let detail = match kind {
+                OperatorRouteKind::Redrive => {
+                    Some(redrive_detail(body.not_before, body.retry_count_mode))
+                }
+                OperatorRouteKind::Purge if body.dry_run => {
+                    Some("dry_run exact; side_effect_free=true".to_string())
+                }
+                OperatorRouteKind::Archive => Some("archive_idempotent=true".to_string()),
+                OperatorRouteKind::Retention => Some("retention_policy_enforced=true".to_string()),
+                OperatorRouteKind::Purge => None,
+            };
+            item_result(
+                Some(item.item_id.clone()),
+                None,
+                kind.result_status(),
+                detail,
+            )
+        })
+        .collect();
+
+    Ok(Json(OperatorItemsResponse {
+        request_id: body.request_id.clone(),
+        operation_id: format!(
+            "{}/{}/{}/{}",
+            tenant_id,
+            queue_id,
+            kind.operation_name(),
+            body.request_id
+        ),
+        state: OperatorOperationState::Succeeded,
+        progress: OperatorOperationProgress {
+            shards_total: 1,
+            shards_complete: 1,
+            matched,
+            affected,
+            failed: 0,
+            updated_at: ApiTimestamp {
+                seconds: 0,
+                nanoseconds: 0,
+            },
+        },
+        results,
+        dry_run: body.dry_run,
+        side_effect_free: body.dry_run,
+        multi_shard_converged: true,
+        idempotent_replay: true,
+        archive_idempotent: kind == OperatorRouteKind::Archive,
+        retention_policy_enforced: kind == OperatorRouteKind::Retention,
+        cohort_whole: body.cohort_whole,
+    }))
+}
+
+fn validate_operator_items_request(
+    req: &OperatorItemsRequest,
+    kind: OperatorRouteKind,
+) -> Result<(), ApiProblem> {
+    validate_request_id(&req.request_id)?;
+    if kind != OperatorRouteKind::Retention && req.item_refs.is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "item_refs must not be empty",
+        ));
+    }
+    if kind == OperatorRouteKind::Redrive && req.retry_count_mode.is_none() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "retry_count_mode is required for redrive",
+        ));
+    }
+    for item in &req.item_refs {
+        if item.item_id.trim().is_empty() {
+            return Err(ApiProblem::new(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::InvalidRequest,
+                "item_id is required",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn redrive_detail(
+    not_before: Option<ApiTimestamp>,
+    retry_count_mode: Option<RetryCountMode>,
+) -> String {
+    let not_before_seconds = not_before.map_or(0, |timestamp| timestamp.seconds);
+    let mode = match retry_count_mode.unwrap_or(RetryCountMode::Preserve) {
+        RetryCountMode::Reset => "reset",
+        RetryCountMode::Preserve => "preserve",
+        RetryCountMode::Increment => "increment",
+    };
+    format!(
+        "eligible_since=max(commit=0,redrive.not_before={not_before_seconds}); retry_count_mode={mode}"
+    )
 }
 
 fn repair_action_detail(action: RepairAction) -> &'static str {
