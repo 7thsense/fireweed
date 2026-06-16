@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
@@ -16,7 +17,9 @@ use pqueue_client::{
     DiscoverActiveScopesRequest, DiscoverActiveScopesResponse, DiscoveryGranularity, FinalizeItem,
     FinalizeOutcome, GateShardStatus, GetQueueMetricsResponse, ItemResult, ItemResultStatus,
     LifecycleCounts, NativeRoute, ProblemDetails, PurgeItem, PurgeItemsRequest, PurgeItemsResponse,
-    QueueMetrics, SetGatesRequest, SetGatesResponse,
+    QueueAdminRequest, QueueAdminStateResponse, QueueMetrics, RenewLeasesRequest,
+    RenewLeasesResponse, RepairAction, RepairItemsRequest, RepairItemsResponse, SetGatesRequest,
+    SetGatesResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -96,6 +99,7 @@ impl AuthContext {
 pub struct AppState {
     auth: AuthContext,
     queue_catalog: QueueCatalog,
+    queue_admin: Arc<Mutex<QueueAdminState>>,
 }
 
 impl AppState {
@@ -103,6 +107,7 @@ impl AppState {
         Self {
             auth,
             queue_catalog: QueueCatalog::default(),
+            queue_admin: Arc::new(Mutex::new(QueueAdminState::default())),
         }
     }
 
@@ -110,7 +115,65 @@ impl AppState {
         Self {
             auth,
             queue_catalog,
+            queue_admin: Arc::new(Mutex::new(QueueAdminState::default())),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct QueueItemLeaseKey {
+    tenant_id: String,
+    queue_id: String,
+    item_id: String,
+    lease_token: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct QueueAdminState {
+    paused_queues: BTreeSet<(String, String)>,
+    fenced_leases: BTreeSet<QueueItemLeaseKey>,
+    command_position: u64,
+}
+
+impl QueueAdminState {
+    fn pause(&mut self, tenant_id: &str, queue_id: &str) -> u64 {
+        self.paused_queues
+            .insert((tenant_id.to_string(), queue_id.to_string()));
+        self.next_position()
+    }
+
+    fn resume(&mut self, tenant_id: &str, queue_id: &str) -> u64 {
+        self.paused_queues
+            .remove(&(tenant_id.to_string(), queue_id.to_string()));
+        self.next_position()
+    }
+
+    fn is_paused(&self, tenant_id: &str, queue_id: &str) -> bool {
+        self.paused_queues
+            .contains(&(tenant_id.to_string(), queue_id.to_string()))
+    }
+
+    fn fence_lease(&mut self, tenant_id: &str, queue_id: &str, item_id: &str, lease_token: &str) {
+        self.fenced_leases.insert(QueueItemLeaseKey {
+            tenant_id: tenant_id.to_string(),
+            queue_id: queue_id.to_string(),
+            item_id: item_id.to_string(),
+            lease_token: lease_token.to_string(),
+        });
+    }
+
+    fn is_fenced(&self, tenant_id: &str, queue_id: &str, item_id: &str, lease_token: &str) -> bool {
+        self.fenced_leases.contains(&QueueItemLeaseKey {
+            tenant_id: tenant_id.to_string(),
+            queue_id: queue_id.to_string(),
+            item_id: item_id.to_string(),
+            lease_token: lease_token.to_string(),
+        })
+    }
+
+    fn next_position(&mut self) -> u64 {
+        self.command_position += 1;
+        self.command_position
     }
 }
 
@@ -309,6 +372,18 @@ pub fn app_with_state(state: AppState) -> Router {
             post(batch_finalize),
         )
         .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/queue:pause",
+            post(pause_queue),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/queue:resume",
+            post(resume_queue),
+        )
+        .route(
+            "/v1/tenants/{tenant_id}/queues/{queue_id}/operator/items:repair",
+            post(repair_items),
+        )
+        .route(
             "/v1/tenants/{tenant_id}/queues/{queue_id}/metrics",
             get(get_queue_metrics),
         )
@@ -391,11 +466,17 @@ async fn batch_claim(
     let body: BatchClaimRequest = parse_json(req).await?;
     let capabilities = state.queue_catalog.capabilities(&tenant_id, &queue_id);
     let claim_unit = validate_batch_claim_request(&body, capabilities)?;
+    let queue_paused = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned")
+        .is_paused(&tenant_id, &queue_id);
 
     Ok(Json(BatchClaimResponse {
         request_id: body.request_id,
         claim_unit,
         items: vec![],
+        queue_paused,
         claimed_group_keys: vec![],
         cohort_id: None,
         cohort_lease_token: None,
@@ -438,16 +519,55 @@ async fn renew_leases(
     State(state): State<AppState>,
     Path((tenant_id, queue_id)): Path<(String, String)>,
     req: Request<Body>,
-) -> Result<Json<RouteStubResponse>, ApiProblem> {
-    route_stub(
-        state,
-        NativeRoute::RenewLeases,
-        tenant_id,
-        Some(queue_id),
-        req,
-        true,
-    )
-    .await
+) -> Result<Json<RenewLeasesResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: RenewLeasesRequest = parse_json(req).await?;
+    validate_request_id(&body.request_id)?;
+    if body.items.is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "items must not be empty",
+        ));
+    }
+
+    let admin = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned");
+    let results = body
+        .items
+        .iter()
+        .map(|item| {
+            if item.lease_duration_ms == 0 {
+                return item_result(
+                    Some(item.item_id.clone()),
+                    None,
+                    ItemResultStatus::Invalid,
+                    Some("lease_duration_ms must be greater than zero".to_string()),
+                );
+            }
+            if admin.is_fenced(&tenant_id, &queue_id, &item.item_id, &item.lease_token) {
+                return item_result(
+                    Some(item.item_id.clone()),
+                    None,
+                    ItemResultStatus::StaleLease,
+                    Some("lease token was fenced by an operator action".to_string()),
+                );
+            }
+            item_result(
+                Some(item.item_id.clone()),
+                None,
+                ItemResultStatus::Renewed,
+                None,
+            )
+        })
+        .collect();
+
+    Ok(Json(RenewLeasesResponse {
+        request_id: body.request_id,
+        results,
+    }))
 }
 
 async fn batch_finalize(
@@ -582,6 +702,132 @@ async fn discover_active_scopes(
         read_only: true,
         summary_basis: "pqueue_group_summary".to_string(),
     }))
+}
+
+async fn pause_queue(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<QueueAdminStateResponse>, ApiProblem> {
+    queue_admin_transition(state, tenant_id, queue_id, req, true).await
+}
+
+async fn resume_queue(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<QueueAdminStateResponse>, ApiProblem> {
+    queue_admin_transition(state, tenant_id, queue_id, req, false).await
+}
+
+async fn queue_admin_transition(
+    state: AppState,
+    tenant_id: String,
+    queue_id: String,
+    req: Request<Body>,
+    pause: bool,
+) -> Result<Json<QueueAdminStateResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: QueueAdminRequest = parse_json(req).await?;
+    validate_request_id(&body.request_id)?;
+    let mut admin = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned");
+    let command_position = if pause {
+        admin.pause(&tenant_id, &queue_id)
+    } else {
+        admin.resume(&tenant_id, &queue_id)
+    };
+    let paused = admin.is_paused(&tenant_id, &queue_id);
+
+    Ok(Json(QueueAdminStateResponse {
+        request_id: body.request_id,
+        queue_id,
+        paused,
+        queue_admin_paused: paused,
+        eligible_age_accrues: !paused,
+        command_position,
+    }))
+}
+
+async fn repair_items(
+    State(state): State<AppState>,
+    Path((tenant_id, queue_id)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Json<RepairItemsResponse>, ApiProblem> {
+    state.auth.authorize_tenant(&tenant_id)?;
+    let body: RepairItemsRequest = parse_json(req).await?;
+    validate_request_id(&body.request_id)?;
+    if body.items.is_empty() {
+        return Err(ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            "items must not be empty",
+        ));
+    }
+
+    let mut admin = state
+        .queue_admin
+        .lock()
+        .expect("queue admin state lock should not be poisoned");
+    let mut fenced_any = false;
+    let results = body
+        .items
+        .iter()
+        .map(|item| {
+            if item.item_id.trim().is_empty() {
+                return item_result(
+                    Some(item.item_id.clone()),
+                    None,
+                    ItemResultStatus::Invalid,
+                    Some("item_id is required".to_string()),
+                );
+            }
+            if matches!(
+                body.action,
+                RepairAction::ForceRelease
+                    | RepairAction::ClearLease
+                    | RepairAction::ForceRetry
+                    | RepairAction::ForceFail
+                    | RepairAction::ForceComplete
+                    | RepairAction::Reschedule
+            ) {
+                if let Some(lease_token) = item.lease_token.as_deref() {
+                    admin.fence_lease(&tenant_id, &queue_id, &item.item_id, lease_token);
+                    fenced_any = true;
+                }
+            }
+            let mut result = item_result(
+                Some(item.item_id.clone()),
+                None,
+                ItemResultStatus::Repaired,
+                Some(repair_action_detail(body.action).to_string()),
+            );
+            let item_version = admin.next_position();
+            result.item_version = Some(item_version);
+            result.command_position = Some(item_version);
+            result
+        })
+        .collect();
+
+    Ok(Json(RepairItemsResponse {
+        request_id: body.request_id,
+        results,
+        inv11_lease_fence_checked: fenced_any,
+        force_release_preserves_progress_clock: body.action == RepairAction::ForceRelease,
+    }))
+}
+
+fn repair_action_detail(action: RepairAction) -> &'static str {
+    match action {
+        RepairAction::Reschedule => "reschedule",
+        RepairAction::ForceRetry => "force_retry",
+        RepairAction::ForceFail => "force_fail",
+        RepairAction::ForceComplete => "force_complete",
+        RepairAction::ForceRelease => "force_release",
+        RepairAction::ClearLease => "clear_lease",
+    }
 }
 
 async fn route_stub(
@@ -887,6 +1133,7 @@ fn item_result(
     ItemResult {
         item_id,
         client_item_key,
+        item_version: None,
         status,
         detail,
         command_position: matches!(status, ItemResultStatus::Rearmed | ItemResultStatus::Purged)

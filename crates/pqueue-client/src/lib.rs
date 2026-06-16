@@ -19,6 +19,7 @@ pub enum ApiErrorCode {
     CommitTimeout,
     GatesNotEnabled,
     RateLimit,
+    StaleLease,
 }
 
 impl ApiErrorCode {
@@ -34,6 +35,7 @@ impl ApiErrorCode {
             Self::CommitTimeout => "commit-timeout",
             Self::GatesNotEnabled => "gates-not-enabled",
             Self::RateLimit => "rate-limit",
+            Self::StaleLease => "stale-lease",
         }
     }
 }
@@ -164,6 +166,8 @@ pub struct BatchClaimResponse {
     pub request_id: String,
     pub claim_unit: ClaimUnit,
     pub items: Vec<ClaimedItem>,
+    #[serde(default)]
+    pub queue_paused: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claimed_group_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,6 +226,8 @@ pub struct BatchFinalizeRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemResultStatus {
+    Repaired,
+    Renewed,
     Completed,
     Failed,
     Retried,
@@ -241,6 +247,8 @@ pub struct ItemResult {
     pub item_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_item_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_version: Option<u64>,
     pub status: ItemResultStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -277,6 +285,77 @@ pub struct PurgeItemsResponse {
     pub tombstone_replay_safe: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tombstone_retention_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewLeaseItem {
+    pub item_id: String,
+    pub lease_token: String,
+    pub lease_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewLeasesRequest {
+    pub request_id: String,
+    pub items: Vec<RenewLeaseItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewLeasesResponse {
+    pub request_id: String,
+    pub results: Vec<ItemResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueAdminRequest {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueAdminStateResponse {
+    pub request_id: String,
+    pub queue_id: String,
+    pub paused: bool,
+    pub queue_admin_paused: bool,
+    pub eligible_age_accrues: bool,
+    pub command_position: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairAction {
+    Reschedule,
+    ForceRetry,
+    ForceFail,
+    ForceComplete,
+    ForceRelease,
+    ClearLease,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairItemRef {
+    pub item_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairItemsRequest {
+    pub request_id: String,
+    pub action: RepairAction,
+    pub items: Vec<RepairItemRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<ApiTimestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairItemsResponse {
+    pub request_id: String,
+    pub results: Vec<ItemResult>,
+    pub inv11_lease_fence_checked: bool,
+    pub force_release_preserves_progress_clock: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,6 +453,9 @@ pub enum NativeRoute {
     BatchFinalize,
     GetQueueMetrics,
     DiscoverActiveScopes,
+    PauseQueue,
+    ResumeQueue,
+    RepairItems,
 }
 
 impl NativeRoute {
@@ -396,6 +478,9 @@ impl NativeRoute {
             Self::BatchFinalize => "BatchFinalize",
             Self::GetQueueMetrics => "GetQueueMetrics",
             Self::DiscoverActiveScopes => "DiscoverActiveScopes",
+            Self::PauseQueue => "PauseQueue",
+            Self::ResumeQueue => "ResumeQueue",
+            Self::RepairItems => "RepairItems",
         }
     }
 
@@ -434,6 +519,18 @@ impl NativeRoute {
             Self::GetQueueMetrics => format!(
                 "/v1/tenants/{tenant_id}/queues/{}/metrics",
                 queue_id.expect("queue_id is required for GetQueueMetrics")
+            ),
+            Self::PauseQueue => format!(
+                "/v1/tenants/{tenant_id}/queues/{}/operator/queue:pause",
+                queue_id.expect("queue_id is required for PauseQueue")
+            ),
+            Self::ResumeQueue => format!(
+                "/v1/tenants/{tenant_id}/queues/{}/operator/queue:resume",
+                queue_id.expect("queue_id is required for ResumeQueue")
+            ),
+            Self::RepairItems => format!(
+                "/v1/tenants/{tenant_id}/queues/{}/operator/items:repair",
+                queue_id.expect("queue_id is required for RepairItems")
             ),
         }
     }
@@ -533,6 +630,7 @@ mod tests {
                 group_key: Some("callback-42".to_string()),
                 lease_token: None,
             }],
+            queue_paused: false,
             claimed_group_keys: vec![],
             cohort_id: Some("cohort-a".to_string()),
             cohort_lease_token: Some("cohort-lease-a".to_string()),
@@ -554,6 +652,7 @@ mod tests {
             results: vec![ItemResult {
                 item_id: Some("item-a".to_string()),
                 client_item_key: None,
+                item_version: None,
                 status: ItemResultStatus::Rearmed,
                 detail: None,
                 command_position: Some(7),
@@ -566,6 +665,7 @@ mod tests {
             results: vec![ItemResult {
                 item_id: None,
                 client_item_key: Some("key-a".to_string()),
+                item_version: None,
                 status: ItemResultStatus::Purged,
                 detail: None,
                 command_position: Some(8),
