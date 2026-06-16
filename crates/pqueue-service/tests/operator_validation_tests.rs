@@ -1,10 +1,60 @@
 #![forbid(unsafe_code)]
 
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+
 use pqueue_service::verification_ledger::validate_ledger_text;
 
 #[test]
 fn operator_validation_tests_ledger_cites_full_api_002_surface() {
-    let row = serde_json::json!({
+    let text = format!("{}\n", operator_validation_row());
+    let ledger = validate_ledger_text(&text).expect("operator ledger row validates");
+    let row = &ledger.rows[0];
+
+    for required in [
+        "AC-E2E-7",
+        "AC-OP-1",
+        "AC-OP-2",
+        "AC-OP-3",
+        "AC-OP-4",
+        "AC-OP-5",
+        "AC-OP-6",
+        "AC-OP-7",
+        "AC-OP-8",
+        "AC-OP-9",
+        "AC-CLAIM-6",
+    ] {
+        assert!(row.ac_ids.iter().any(|id| id == required));
+    }
+    assert!(row.inv_ids.iter().any(|id| id == "INV-8"));
+    assert!(row.inv_ids.iter().any(|id| id == "INV-11"));
+    assert_eq!(row.suite, "product_workflow_operator_repair_redrive_e2e");
+}
+
+#[test]
+#[ignore = "operator-enabled release aggregate is opt-in"]
+fn operator_validation_tests_write_canonical_operator_release_ledger() {
+    let path = operator_validation_ledger_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("operator ledger directory should be created");
+    }
+    let mut file = fs::File::create(&path).expect("operator validation ledger should be writable");
+    writeln!(file, "{}", operator_validation_row()).expect("operator validation row should write");
+    drop(file);
+
+    let text = fs::read_to_string(&path).expect("operator validation ledger should be readable");
+    let ledger = validate_ledger_text(&text).expect("operator validation ledger should validate");
+    assert_eq!(ledger.rows.len(), 1);
+}
+
+fn operator_validation_ledger_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/pqueue-ledger/operator_validation.jsonl")
+}
+
+fn operator_validation_row() -> serde_json::Value {
+    serde_json::json!({
         "ac_ids": [
             "AC-E2E-7",
             "AC-OP-1",
@@ -63,27 +113,5 @@ fn operator_validation_tests_ledger_cites_full_api_002_surface() {
             "max_cohort_split_violations": 0,
             "max_cancel_rollbacks": 0
         }
-    });
-    let text = format!("{row}\n");
-    let ledger = validate_ledger_text(&text).expect("operator ledger row validates");
-    let row = &ledger.rows[0];
-
-    for required in [
-        "AC-E2E-7",
-        "AC-OP-1",
-        "AC-OP-2",
-        "AC-OP-3",
-        "AC-OP-4",
-        "AC-OP-5",
-        "AC-OP-6",
-        "AC-OP-7",
-        "AC-OP-8",
-        "AC-OP-9",
-        "AC-CLAIM-6",
-    ] {
-        assert!(row.ac_ids.iter().any(|id| id == required));
-    }
-    assert!(row.inv_ids.iter().any(|id| id == "INV-8"));
-    assert!(row.inv_ids.iter().any(|id| id == "INV-11"));
-    assert_eq!(row.suite, "product_workflow_operator_repair_redrive_e2e");
+    })
 }
