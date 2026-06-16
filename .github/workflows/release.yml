@@ -1,18 +1,62 @@
 name: release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v0.1.0"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
 
 jobs:
-  release-gate:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
+
       - run: |
           bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 \
             --tp002-e0e1-source pqueue-7e2b3132 \
             --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 \
             --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Package binaries
+        run: bash scripts/release/package-binaries.sh "${{ steps.release.outputs.version }}"
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" target/release-dist/* --clobber
+          else
+            gh release create "$tag" target/release-dist/* \
+              --title "$tag" \
+              --notes "pqueue $tag binary release. Supported backend profiles: postgres_native and object_log_sqlite_projection."
+          fi
