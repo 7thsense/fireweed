@@ -169,6 +169,50 @@ fn verification_ledger_tests_require_noisy_neighbor_release_traceability() {
 }
 
 #[test]
+fn verification_ledger_tests_require_zero_invariant_stress_violations() {
+    let invalid = serde_json::json!({
+        "ac_ids": ["AC-CLAIM-1", "AC-E2E-1"],
+        "inv_ids": ["INV-1", "INV-2", "INV-3", "INV-4", "INV-5", "INV-6", "INV-7", "INV-8", "INV-9", "INV-10"],
+        "command": "cargo test -p pqueue-service invariant_stress_matrix_tests -- --ignored --nocapture",
+        "exit_status": 0,
+        "backend_profile": "object_log_sqlite_projection",
+        "scale": "release",
+        "seed": 7503,
+        "environment": {
+            "instance_class": "local-dev"
+        },
+        "suite": "invariant_stress_matrix_tests",
+        "measurements": {
+            "concurrency": 256,
+            "resident_item_sizes": [1000000, 10000000],
+            "soak_profile": "TP-003-section-2-release-soak",
+            "kill_count": 1000,
+            "skewed_priority_distribution": true,
+            "skewed_group_distribution": true,
+            "inv1_violations": 0,
+            "inv2_violations": 0,
+            "inv3_violations": 0,
+            "inv4_violations": 1,
+            "inv5_violations": 0,
+            "inv6_violations": 0,
+            "inv7_violations": 0,
+            "inv8_violations": 0,
+            "inv9_violations": 0,
+            "inv10_violations": 0
+        },
+        "pass_bar": {
+            "comparison": "within-bar",
+            "threshold": "release",
+            "max_invariant_violations": 0
+        }
+    });
+
+    let err = validate_ledger_text(&format!("{invalid}\n"))
+        .expect_err("P0/core invariant stress rows must record zero violations");
+    assert_eq!(err.field.as_deref(), Some("measurements.inv4_violations"));
+}
+
+#[test]
 fn verification_ledger_tests_require_object_log_e3_fields() {
     let missing = serde_json::json!({
         "ac_ids": ["AC-LAT-1", "AC-LAT-2", "AC-LAT-3", "AC-LAT-4"],

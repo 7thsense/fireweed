@@ -225,11 +225,93 @@ impl LedgerRow {
         if self.suite == "product_workflow_noisy_neighbor_scale_e2e" && self.scale == "release" {
             validate_noisy_neighbor_release_row(self)?;
         }
+        if self.suite == "invariant_stress_matrix_tests" {
+            validate_invariant_stress_matrix_row(self)?;
+        }
         if self.suite == "object_log_commit_recovery_tests" {
             validate_object_log_e3_row(self)?;
         }
         Ok(())
     }
+}
+
+fn validate_invariant_stress_matrix_row(row: &LedgerRow) -> Result<(), LedgerError> {
+    for required in [
+        "INV-1", "INV-2", "INV-3", "INV-4", "INV-5", "INV-6", "INV-7", "INV-8", "INV-9", "INV-10",
+    ] {
+        if !row.inv_ids.iter().any(|id| id == required) {
+            return Err(LedgerError::invalid_field(
+                "inv_ids",
+                format!("invariant stress rows must cite {required}"),
+            ));
+        }
+    }
+    if row.inv_ids.iter().any(|id| id == "INV-11") {
+        return Err(LedgerError::invalid_field(
+            "inv_ids",
+            "INV-11 is operator-enabled and must not be claimed by the P0/core stress matrix",
+        ));
+    }
+    if row.scale != "release" {
+        return Err(LedgerError::invalid_field(
+            "scale",
+            "invariant stress matrix rows must use release scale",
+        ));
+    }
+    if !matches!(
+        row.backend_profile.as_str(),
+        "postgres_native" | "object_log_sqlite_projection"
+    ) {
+        return Err(LedgerError::invalid_field(
+            "backend_profile",
+            "invariant stress matrix rows must use a committed backend profile",
+        ));
+    }
+
+    let concurrency = required_nested_u64_field(&row.measurements, "measurements", "concurrency")?;
+    if concurrency < 256 {
+        return Err(LedgerError::invalid_field(
+            "measurements.concurrency",
+            "invariant stress matrix must cover C=256",
+        ));
+    }
+    let resident_item_sizes =
+        required_nested_u64_array(&row.measurements, "measurements", "resident_item_sizes")?;
+    if resident_item_sizes != [1_000_000, 10_000_000] {
+        return Err(LedgerError::invalid_field(
+            "measurements.resident_item_sizes",
+            "invariant stress matrix must cover S in {1M,10M}",
+        ));
+    }
+    let kill_count = required_nested_u64_field(&row.measurements, "measurements", "kill_count")?;
+    if kill_count < 1_000 {
+        return Err(LedgerError::invalid_field(
+            "measurements.kill_count",
+            "invariant stress matrix must cover N_kill >= 1000",
+        ));
+    }
+    required_nested_string_field(&row.measurements, "measurements", "soak_profile")?;
+    for field in ["skewed_priority_distribution", "skewed_group_distribution"] {
+        if !required_nested_bool_field(&row.measurements, "measurements", field)? {
+            return Err(LedgerError::invalid_field(
+                format!("measurements.{field}"),
+                "invariant stress matrix skew flags must be true",
+            ));
+        }
+    }
+
+    for invariant in 1..=10 {
+        let field = format!("inv{invariant}_violations");
+        let violations = required_nested_u64_field(&row.measurements, "measurements", &field)?;
+        if violations != 0 {
+            return Err(LedgerError::invalid_field(
+                format!("measurements.{field}"),
+                "P0/core invariant stress rows must record zero violations",
+            ));
+        }
+    }
+    required_nested_u64_field(&row.pass_bar, "pass_bar", "max_invariant_violations")?;
+    Ok(())
 }
 
 fn validate_noisy_neighbor_release_row(row: &LedgerRow) -> Result<(), LedgerError> {
