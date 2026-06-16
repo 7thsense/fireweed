@@ -32,14 +32,14 @@ jobs:
         with:
           repository: telepathdata/fjord
           path: fjord
-          token: ${{ secrets.PQUEUE_DEPENDENCIES_TOKEN || github.token }}
+          ssh-key: ${{ secrets.FJORD_DEPLOY_KEY }}
 
       - name: Checkout object-log dependency
         uses: actions/checkout@v4
         with:
           repository: telepathdata/object-log
           path: object-log
-          token: ${{ secrets.PQUEUE_DEPENDENCIES_TOKEN || github.token }}
+          ssh-key: ${{ secrets.OBJECT_LOG_DEPLOY_KEY }}
 
       - name: Checkout heimq dependency
         uses: actions/checkout@v4
