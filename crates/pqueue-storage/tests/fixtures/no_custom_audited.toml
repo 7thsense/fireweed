@@ -1,0 +1,12 @@
+schema_version = 1
+reviewer = "fixture"
+reviewed_at = "2026-06-16"
+workspace_scope = "audited no custom concurrency"
+
+[[audits]]
+crate = "pqueue-storage"
+no_custom_concurrency = true
+source_globs_checked = ["crates/pqueue-storage/src/**/*.rs"]
+dependency_primitives = ["parking_lot::Mutex"]
+custom_structures = []
+loom_tests = []

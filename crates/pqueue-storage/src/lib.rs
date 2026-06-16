@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod commands;
+pub mod concurrency_registry;
 pub mod fault_injection;
 pub mod memory;
 pub mod multi_shard;

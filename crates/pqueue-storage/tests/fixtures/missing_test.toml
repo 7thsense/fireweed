@@ -1,0 +1,12 @@
+schema_version = 1
+reviewer = "fixture"
+reviewed_at = "2026-06-16"
+workspace_scope = "custom structure missing loom record"
+
+[[audits]]
+crate = "pqueue-storage"
+no_custom_concurrency = false
+source_globs_checked = ["crates/pqueue-storage/src/**/*.rs"]
+dependency_primitives = []
+custom_structures = ["SharedProjectionCache"]
+loom_tests = []
