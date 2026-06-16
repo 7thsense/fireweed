@@ -249,6 +249,137 @@ fn validate_performance_row(row: &LedgerRow) -> Result<(), LedgerError> {
     required_nested_u64_field(&row.pass_bar, "pass_bar", "e0_floor_items_per_hour")?;
     required_nested_u64_field(&row.pass_bar, "pass_bar", "p95_ms_lt")?;
     required_nested_u64_field(&row.pass_bar, "pass_bar", "p99_ms_lt")?;
+    if row.suite == "performance_multi_shard_scale_out_tests" {
+        validate_multi_shard_scale_out_row(row, &evidence_ids)?;
+    }
+    Ok(())
+}
+
+fn validate_multi_shard_scale_out_row(
+    row: &LedgerRow,
+    evidence_ids: &[String],
+) -> Result<(), LedgerError> {
+    if row.backend_profile != "object_log_sqlite_projection" {
+        return Err(LedgerError::invalid_field(
+            "backend_profile",
+            "E2 scale-out headline rows must use object_log_sqlite_projection",
+        ));
+    }
+    if !evidence_ids.iter().any(|id| id == "E2") {
+        return Err(LedgerError::invalid_field(
+            "measurements.tp002_evidence_ids",
+            "E2 scale-out rows must cite TP-002 E2",
+        ));
+    }
+
+    let shard_counts =
+        required_nested_u64_array(&row.measurements, "measurements", "shard_counts")?;
+    if shard_counts != [2, 4, 8] {
+        return Err(LedgerError::invalid_field(
+            "measurements.shard_counts",
+            "E2 scale-out rows must cover shard counts 2, 4, and 8",
+        ));
+    }
+
+    let throughputs = required_nested_u64_array(
+        &row.measurements,
+        "measurements",
+        "items_per_hour_by_shard_count",
+    )?;
+    if throughputs.len() != shard_counts.len() {
+        return Err(LedgerError::invalid_field(
+            "measurements.items_per_hour_by_shard_count",
+            "throughput series must align with shard_counts",
+        ));
+    }
+    if !throughputs.windows(2).all(|pair| pair[1] >= pair[0]) {
+        return Err(LedgerError::invalid_field(
+            "measurements.items_per_hour_by_shard_count",
+            "E2 scale-out throughput must be monotonic non-decreasing",
+        ));
+    }
+
+    let single_deployment_ceiling = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "single_deployment_ceiling_items_per_hour",
+    )?;
+    let eight_shard = *throughputs
+        .last()
+        .ok_or_else(|| LedgerError::missing_field("measurements.items_per_hour_by_shard_count"))?;
+    let required_at_eight =
+        required_nested_u64_field(&row.pass_bar, "pass_bar", "eight_shard_min_items_per_hour")?;
+    if required_at_eight < single_deployment_ceiling.saturating_mul(4) {
+        return Err(LedgerError::invalid_field(
+            "pass_bar.eight_shard_min_items_per_hour",
+            "E2 pass bar must require at least 4x the single-deployment ceiling",
+        ));
+    }
+    if eight_shard < required_at_eight {
+        return Err(LedgerError::invalid_field(
+            "measurements.items_per_hour_by_shard_count",
+            "8-shard throughput must satisfy the E2 4x pass bar",
+        ));
+    }
+
+    let scale_out_multiple = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "scale_out_multiple_at_8_shards_x100",
+    )?;
+    let minimum_multiple = required_nested_u64_field(
+        &row.pass_bar,
+        "pass_bar",
+        "minimum_scale_out_multiple_at_8_shards_x100",
+    )?;
+    if scale_out_multiple < minimum_multiple {
+        return Err(LedgerError::invalid_field(
+            "measurements.scale_out_multiple_at_8_shards_x100",
+            "E2 scale-out multiple must satisfy the pass bar",
+        ));
+    }
+
+    let progress_violations = required_nested_u64_field(
+        &row.measurements,
+        "measurements",
+        "progress_bound_violations",
+    )?;
+    if progress_violations != 0 {
+        return Err(LedgerError::invalid_field(
+            "measurements.progress_bound_violations",
+            "E2 scale-out rows must report zero progress-bound violations",
+        ));
+    }
+    if !required_nested_bool_field(
+        &row.measurements,
+        "measurements",
+        "independent_storage_units",
+    )? {
+        return Err(LedgerError::invalid_field(
+            "measurements.independent_storage_units",
+            "E2 scale-out rows must use independent storage units",
+        ));
+    }
+    if !required_nested_bool_field(
+        &row.measurements,
+        "measurements",
+        "queue_global_progress_checked",
+    )? {
+        return Err(LedgerError::invalid_field(
+            "measurements.queue_global_progress_checked",
+            "E2 scale-out rows must check queue-global progress",
+        ));
+    }
+    if !required_nested_bool_field(
+        &row.pass_bar,
+        "pass_bar",
+        "monotonic_non_decreasing_required",
+    )? {
+        return Err(LedgerError::invalid_field(
+            "pass_bar.monotonic_non_decreasing_required",
+            "E2 pass bar must require monotonic non-decreasing throughput",
+        ));
+    }
     Ok(())
 }
 
@@ -552,6 +683,64 @@ fn required_nested_u64_field(
         )),
         None => Err(LedgerError::missing_field(&full_field)),
     }
+}
+
+fn required_nested_bool_field(
+    object: &BTreeMap<String, JsonValue>,
+    parent: &str,
+    field: &str,
+) -> Result<bool, LedgerError> {
+    let full_field = format!("{parent}.{field}");
+    match object.get(field) {
+        Some(JsonValue::Bool(value)) => Ok(*value),
+        Some(other) => Err(LedgerError::invalid_field(
+            full_field,
+            format!("expected boolean, found {}", other.kind()),
+        )),
+        None => Err(LedgerError::missing_field(&full_field)),
+    }
+}
+
+fn required_nested_u64_array(
+    object: &BTreeMap<String, JsonValue>,
+    parent: &str,
+    field: &str,
+) -> Result<Vec<u64>, LedgerError> {
+    let full_field = format!("{parent}.{field}");
+    let items = match object.get(field) {
+        Some(JsonValue::Array(items)) => items,
+        Some(other) => {
+            return Err(LedgerError::invalid_field(
+                full_field,
+                format!("expected array, found {}", other.kind()),
+            ));
+        }
+        None => return Err(LedgerError::missing_field(&full_field)),
+    };
+
+    if items.is_empty() {
+        return Err(LedgerError::invalid_field(
+            full_field,
+            "array field must not be empty",
+        ));
+    }
+
+    let mut values = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            JsonValue::Number(number) => values.push(number.parse::<u64>().map_err(|_| {
+                LedgerError::invalid_field(&full_field, "expected 64-bit unsigned integers")
+            })?),
+            other => {
+                return Err(LedgerError::invalid_field(
+                    &full_field,
+                    format!("expected number entries, found {}", other.kind()),
+                ));
+            }
+        }
+    }
+
+    Ok(values)
 }
 
 struct JsonParser<'a> {

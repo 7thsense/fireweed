@@ -75,6 +75,51 @@ fn verification_ledger_tests_require_performance_scale_fields() {
 }
 
 #[test]
+fn verification_ledger_tests_require_multi_shard_scale_out_fields() {
+    let missing = serde_json::json!({
+        "ac_ids": ["AC-E2E-6", "AC-LAT-3"],
+        "inv_ids": ["INV-4"],
+        "command": "cargo test -p pqueue-service performance_multi_shard_scale_out_tests -- --ignored --nocapture",
+        "exit_status": 0,
+        "backend_profile": "object_log_sqlite_projection",
+        "scale": "release",
+        "seed": 7202,
+        "environment": {
+            "instance_class": "local-dev"
+        },
+        "suite": "performance_multi_shard_scale_out_tests",
+        "measurements": {
+            "deployment_shape": "multi-shard-horizontal-object-log",
+            "workload_envelope": "E2",
+            "query_plan": "release-plan: fan-out claim across independent object-log projections",
+            "tp002_evidence_ids": ["E0", "E2"],
+            "items_per_hour": 42000000,
+            "items_per_hour_by_shard_count": [20000000, 30000000, 42000000],
+            "single_deployment_ceiling_items_per_hour": 10000000,
+            "scale_out_multiple_at_8_shards_x100": 420,
+            "independent_storage_units": true,
+            "queue_global_progress_checked": true,
+            "progress_bound_violations": 0,
+            "p95_ms": 180,
+            "p99_ms": 700
+        },
+        "pass_bar": {
+            "comparison": "within-bar",
+            "e0_floor_items_per_hour": 10000000,
+            "eight_shard_min_items_per_hour": 40000000,
+            "minimum_scale_out_multiple_at_8_shards_x100": 400,
+            "monotonic_non_decreasing_required": true,
+            "p95_ms_lt": 250,
+            "p99_ms_lt": 1000
+        }
+    });
+
+    let err = validate_ledger_text(&format!("{missing}\n"))
+        .expect_err("multi-shard E2 rows must include shard counts");
+    assert_eq!(err.field.as_deref(), Some("measurements.shard_counts"));
+}
+
+#[test]
 fn verification_ledger_tests_require_object_log_e3_fields() {
     let missing = serde_json::json!({
         "ac_ids": ["AC-LAT-1", "AC-LAT-2", "AC-LAT-3", "AC-LAT-4"],
