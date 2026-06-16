@@ -2282,6 +2282,7 @@ dependencies = [
  "bytes",
  "parking_lot",
  "pqueue-core",
+ "serde_json",
  "tokio",
 ]
 
