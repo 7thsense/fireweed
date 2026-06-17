@@ -9,7 +9,11 @@
 //! `docs/deployment/container-runtime-contract.md` documents and that the Helm
 //! chart populates.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     Router,
@@ -17,6 +21,10 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
+};
+use pqueue_objectlog::{
+    DeploymentProfile, ManifestMode, S3CompatibleCredentials, S3CompatibleObjectLogConfig,
+    probe_s3_compatible_object_path,
 };
 use tokio_postgres::NoTls;
 
@@ -70,6 +78,12 @@ pub enum ConfigError {
     InvalidListenAddr { value: String, source: String },
     /// `PQUEUE_BACKEND_PROFILE` names a profile outside production scope.
     UnsupportedBackendProfile(String),
+    /// Required object-log runtime configuration is missing.
+    MissingObjectLogRuntimeEnv(&'static str),
+    /// `PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS` is not a positive integer.
+    InvalidObjectLogSegmentMaxCommands { value: String, source: String },
+    /// S3-compatible object-log configuration failed validation.
+    InvalidObjectLogConfig(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -84,6 +98,16 @@ impl std::fmt::Display for ConfigError {
                 "PQUEUE_BACKEND_PROFILE `{value}` is not supported; expected \
                  `postgres_native` or `object_log_sqlite_projection`"
             ),
+            Self::MissingObjectLogRuntimeEnv(key) => {
+                write!(f, "`{key}` is required for `object_log_sqlite_projection`")
+            }
+            Self::InvalidObjectLogSegmentMaxCommands { value, source } => write!(
+                f,
+                "PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS `{value}` is not a valid positive integer: {source}"
+            ),
+            Self::InvalidObjectLogConfig(source) => {
+                write!(f, "object-log runtime configuration is invalid: {source}")
+            }
         }
     }
 }
@@ -103,6 +127,19 @@ pub struct RuntimeConfig {
     pub tenants: Vec<String>,
     /// PostgreSQL connection URL used by postgres-native readiness checks.
     pub postgres_database_url: Option<String>,
+    /// Object-log runtime dependencies used by object-log readiness checks.
+    pub object_log: Option<ObjectLogRuntimeConfig>,
+}
+
+/// Runtime dependencies required by the `object_log_sqlite_projection` profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectLogRuntimeConfig {
+    /// PostgreSQL control-plane URL used by object-log manifest/control-plane wiring.
+    pub postgres_control_plane_url: String,
+    /// S3-compatible object-log configuration.
+    pub s3: S3CompatibleObjectLogConfig,
+    /// Local SQLite projection directory.
+    pub sqlite_projection_dir: PathBuf,
 }
 
 impl RuntimeConfig {
@@ -144,6 +181,13 @@ impl RuntimeConfig {
             })
             .unwrap_or_default();
         let postgres_database_url = non_empty(getter("PQUEUE_POSTGRES_DATABASE_URL"));
+        let object_log = match backend_profile {
+            BackendProfile::PostgresNative => None,
+            BackendProfile::ObjectLogSqliteProjection => Some(ObjectLogRuntimeConfig::from_getter(
+                &getter,
+                postgres_database_url.clone(),
+            )?),
+        };
 
         Ok(Self {
             listen_addr,
@@ -151,6 +195,7 @@ impl RuntimeConfig {
             principal_id,
             tenants,
             postgres_database_url,
+            object_log,
         })
     }
 
@@ -171,9 +216,74 @@ impl RuntimeConfig {
                 .clone()
                 .map(ReadinessCheck::Postgres)
                 .unwrap_or(ReadinessCheck::MissingPostgresDatabaseUrl),
-            BackendProfile::ObjectLogSqliteProjection => ReadinessCheck::Ready,
+            BackendProfile::ObjectLogSqliteProjection => self
+                .object_log
+                .clone()
+                .map(ReadinessCheck::ObjectLogSqliteProjection)
+                .unwrap_or_else(|| {
+                    ReadinessCheck::ObjectLogConfigurationError(
+                        "object-log runtime configuration is missing".to_string(),
+                    )
+                }),
         }
     }
+}
+
+impl ObjectLogRuntimeConfig {
+    fn from_getter(
+        getter: &impl Fn(&str) -> Option<String>,
+        postgres_database_url: Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let postgres_control_plane_url = postgres_database_url.ok_or(
+            ConfigError::MissingObjectLogRuntimeEnv("PQUEUE_POSTGRES_DATABASE_URL"),
+        )?;
+        let endpoint_url = required_env(getter, "PQUEUE_OBJECT_LOG_ENDPOINT")?;
+        let bucket = required_env(getter, "PQUEUE_OBJECT_LOG_BUCKET")?;
+        let region = required_env(getter, "PQUEUE_OBJECT_LOG_REGION")?;
+        let access_key_id = required_env(getter, "PQUEUE_OBJECT_LOG_ACCESS_KEY_ID")?;
+        let secret_access_key = required_env(getter, "PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY")?;
+        let segment_max_commands_raw =
+            required_env(getter, "PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS")?;
+        let max_commands_per_segment =
+            segment_max_commands_raw.parse::<usize>().map_err(|err| {
+                ConfigError::InvalidObjectLogSegmentMaxCommands {
+                    value: segment_max_commands_raw.clone(),
+                    source: err.to_string(),
+                }
+            })?;
+        let sqlite_projection_dir =
+            PathBuf::from(required_env(getter, "PQUEUE_SQLITE_PROJECTION_DIR")?);
+
+        let s3 = S3CompatibleObjectLogConfig {
+            endpoint_url,
+            bucket,
+            region,
+            credentials: S3CompatibleCredentials {
+                access_key_id,
+                secret_access_key,
+            },
+            force_path_style: true,
+            deployment_profile: DeploymentProfile::Production,
+            manifest_mode: ManifestMode::ObjectStoreCas,
+            max_commands_per_segment,
+            dev_unsafe_one_command_segments: false,
+        };
+        s3.validate()
+            .map_err(|err| ConfigError::InvalidObjectLogConfig(err.to_string()))?;
+
+        Ok(Self {
+            postgres_control_plane_url,
+            s3,
+            sqlite_projection_dir,
+        })
+    }
+}
+
+fn required_env(
+    getter: &impl Fn(&str) -> Option<String>,
+    key: &'static str,
+) -> Result<String, ConfigError> {
+    non_empty(getter(key)).ok_or(ConfigError::MissingObjectLogRuntimeEnv(key))
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -218,6 +328,10 @@ pub enum ReadinessCheck {
     MissingPostgresDatabaseUrl,
     /// `postgres_native` is ready only when PostgreSQL accepts a trivial query.
     Postgres(String),
+    /// `object_log_sqlite_projection` has invalid or incomplete configuration.
+    ObjectLogConfigurationError(String),
+    /// `object_log_sqlite_projection` dependencies must be usable.
+    ObjectLogSqliteProjection(ObjectLogRuntimeConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -242,7 +356,65 @@ async fn checked_readiness(State(state): State<HealthState>) -> Response {
         )
             .into_response(),
         ReadinessCheck::Postgres(database_url) => postgres_readiness(&database_url).await,
+        ReadinessCheck::ObjectLogConfigurationError(reason) => {
+            (StatusCode::SERVICE_UNAVAILABLE, reason).into_response()
+        }
+        ReadinessCheck::ObjectLogSqliteProjection(config) => {
+            object_log_sqlite_readiness(config).await
+        }
     }
+}
+
+async fn object_log_sqlite_readiness(config: ObjectLogRuntimeConfig) -> Response {
+    if config.postgres_control_plane_url.trim().is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "postgres control-plane url is not configured",
+        )
+            .into_response();
+    }
+    if ensure_sqlite_projection_dir(&config.sqlite_projection_dir).is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sqlite projection directory is not usable",
+        )
+            .into_response();
+    }
+
+    let s3 = config.s3;
+    let key = object_log_readiness_key();
+    let probe = tokio::task::spawn_blocking(move || {
+        probe_s3_compatible_object_path(&s3, &key, b"pqueue-object-log-readiness-v1")
+    });
+    match tokio::time::timeout(Duration::from_secs(2), probe).await {
+        Ok(Ok(Ok(()))) => (StatusCode::OK, "ready").into_response(),
+        Ok(Ok(Err(_))) | Ok(Err(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "object-log storage probe failed",
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "object-log storage probe timed out",
+        )
+            .into_response(),
+    }
+}
+
+fn ensure_sqlite_projection_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    let probe_path = path.join(format!(".pqueue-readiness-{}", std::process::id()));
+    std::fs::write(&probe_path, b"ok")?;
+    std::fs::remove_file(probe_path)?;
+    Ok(())
+}
+
+fn object_log_readiness_key() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("pqueue/readiness/{}/{nanos}.probe", std::process::id())
 }
 
 async fn postgres_readiness(database_url: &str) -> Response {
@@ -299,6 +471,13 @@ pub fn help_text() -> String {
          \x20\x20PQUEUE_PRINCIPAL_ID      bootstrap principal id (default {default_principal})\n\
          \x20\x20PQUEUE_TENANTS           comma-separated tenant allowlist (default empty)\n\
          \x20\x20PQUEUE_POSTGRES_DATABASE_URL  required by postgres_native readiness\n\
+         \x20\x20PQUEUE_OBJECT_LOG_ENDPOINT     required by object_log_sqlite_projection\n\
+         \x20\x20PQUEUE_OBJECT_LOG_BUCKET       required by object_log_sqlite_projection\n\
+         \x20\x20PQUEUE_OBJECT_LOG_REGION       required by object_log_sqlite_projection\n\
+         \x20\x20PQUEUE_OBJECT_LOG_ACCESS_KEY_ID      required by object_log_sqlite_projection\n\
+         \x20\x20PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY  required by object_log_sqlite_projection\n\
+         \x20\x20PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS  required by object_log_sqlite_projection\n\
+         \x20\x20PQUEUE_SQLITE_PROJECTION_DIR   required by object_log_sqlite_projection\n\
          \n\
          HEALTH:\n\
          \x20\x20GET {liveness}   liveness probe (200 ok)\n\
@@ -335,6 +514,13 @@ mod tests {
             "PQUEUE_POSTGRES_DATABASE_URL" => {
                 Some("postgres://pqueue:pqueue@postgres:5432/pqueue".to_string())
             }
+            "PQUEUE_OBJECT_LOG_ENDPOINT" => Some("http://minio.local:9000".to_string()),
+            "PQUEUE_OBJECT_LOG_BUCKET" => Some("pqueue-object-log".to_string()),
+            "PQUEUE_OBJECT_LOG_REGION" => Some("us-east-1".to_string()),
+            "PQUEUE_OBJECT_LOG_ACCESS_KEY_ID" => Some("minioadmin".to_string()),
+            "PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY" => Some("minioadmin-secret".to_string()),
+            "PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS" => Some("1024".to_string()),
+            "PQUEUE_SQLITE_PROJECTION_DIR" => Some("/var/lib/pqueue/sqlite".to_string()),
             _ => None,
         })
         .expect("overrides are valid");
@@ -348,6 +534,15 @@ mod tests {
         assert_eq!(
             config.postgres_database_url,
             Some("postgres://pqueue:pqueue@postgres:5432/pqueue".to_string())
+        );
+        let object_log = config.object_log.expect("object-log config should parse");
+        assert_eq!(object_log.s3.endpoint_url, "http://minio.local:9000");
+        assert_eq!(object_log.s3.bucket, "pqueue-object-log");
+        assert_eq!(object_log.s3.region, "us-east-1");
+        assert_eq!(object_log.s3.max_commands_per_segment, 1024);
+        assert_eq!(
+            object_log.sqlite_projection_dir,
+            PathBuf::from("/var/lib/pqueue/sqlite")
         );
     }
 
@@ -390,6 +585,13 @@ mod tests {
         assert!(help.contains("PQUEUE_LISTEN_ADDR"));
         assert!(help.contains("PQUEUE_BACKEND_PROFILE"));
         assert!(help.contains("PQUEUE_POSTGRES_DATABASE_URL"));
+        assert!(help.contains("PQUEUE_OBJECT_LOG_ENDPOINT"));
+        assert!(help.contains("PQUEUE_OBJECT_LOG_BUCKET"));
+        assert!(help.contains("PQUEUE_OBJECT_LOG_REGION"));
+        assert!(help.contains("PQUEUE_OBJECT_LOG_ACCESS_KEY_ID"));
+        assert!(help.contains("PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY"));
+        assert!(help.contains("PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS"));
+        assert!(help.contains("PQUEUE_SQLITE_PROJECTION_DIR"));
         assert!(help.contains("postgres_native"));
         assert!(help.contains("object_log_sqlite_projection"));
         assert!(help.contains(LIVENESS_PATH));

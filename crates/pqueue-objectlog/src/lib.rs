@@ -206,6 +206,55 @@ impl From<ConfigError> for S3CompatibleConfigError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3CompatibleProbeError {
+    Config(S3CompatibleConfigError),
+    Put(String),
+    Get(String),
+    MissingProbeObject,
+    ProbePayloadMismatch,
+}
+
+impl std::fmt::Display for S3CompatibleProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(err) => write!(f, "{err}"),
+            Self::Put(err) => write!(f, "S3-compatible object-log PUT probe failed: {err}"),
+            Self::Get(err) => write!(f, "S3-compatible object-log GET probe failed: {err}"),
+            Self::MissingProbeObject => {
+                write!(f, "S3-compatible object-log probe object is missing")
+            }
+            Self::ProbePayloadMismatch => {
+                write!(f, "S3-compatible object-log probe payload mismatch")
+            }
+        }
+    }
+}
+
+impl std::error::Error for S3CompatibleProbeError {}
+
+impl From<S3CompatibleConfigError> for S3CompatibleProbeError {
+    fn from(value: S3CompatibleConfigError) -> Self {
+        Self::Config(value)
+    }
+}
+
+pub fn probe_s3_compatible_object_path(
+    config: &S3CompatibleObjectLogConfig,
+    key: &str,
+    payload: &[u8],
+) -> Result<(), S3CompatibleProbeError> {
+    let blob = config.blob_store()?;
+    blob.put(key, payload.to_vec())
+        .map_err(S3CompatibleProbeError::Put)?;
+    let fetched = blob.get(key).map_err(S3CompatibleProbeError::Get)?;
+    match fetched {
+        Some(bytes) if bytes == payload => Ok(()),
+        Some(_) => Err(S3CompatibleProbeError::ProbePayloadMismatch),
+        None => Err(S3CompatibleProbeError::MissingProbeObject),
+    }
+}
+
 pub struct FjordObjectLogStore {
     coordinator: Arc<dyn CoordinatorStore>,
     writer: WritePath,
