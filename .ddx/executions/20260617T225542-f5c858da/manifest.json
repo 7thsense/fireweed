@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260617T225542-f5c858da",
+  "bead_id": "pqueue-5b5e9094",
+  "base_rev": "20a66e661d849083a1f185a1b28bfe40b3e8920d",
+  "created_at": "2026-06-17T22:55:42.417334977Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-5b5e9094",
+    "title": "Render Helm object-log values, secrets, and PVC contract without embedded credentials",
+    "description": "PROBLEM: The chart has partial `object_log_sqlite_projection` environment and volume rendering, but the static Helm gate must prove the complete S3-compatible runtime contract is templated without hard-coded credentials.\n\nROOT CAUSE: `charts/pqueue/templates/configmap.yaml:14` through `charts/pqueue/templates/configmap.yaml:19` render only endpoint, bucket, region, segment max commands, and SQLite projection path; `charts/pqueue/templates/deployment.yaml:50` through `charts/pqueue/templates/deployment.yaml:60` source only access key and secret key from a Secret; `charts/pqueue/values.yaml:75` through `charts/pqueue/values.yaml:82` provide default object-log connection and secret references, while `scripts/ci/kind/runtime-secrets.yaml:15` through `scripts/ci/kind/runtime-secrets.yaml:16` contain MinIO fixture credentials that must remain CI-only and not become chart defaults.\n\nPROPOSED FIX: Update `charts/pqueue/**` and Helm CI values/schema so `object_log_sqlite_projection` renders all runtime-required object-log and SQLite projection settings, uses Secret references for credentials only, supports MinIO/S3-compatible connection knobs needed by the runtime, and preserves PVC behavior for SQLite projection storage. Keep CI fixture credentials outside chart defaults and add static assertions through the existing Helm gate where possible.\n\nGOVERNING ARTIFACTS: Parent bead `pqueue-3546063c`; `docs/helix/04-build/DEPLOYMENT-READINESS.md`; `docs/deployment/helm-static-validation.md`; `docs/deployment/container-runtime-contract.md`.\n\nNON-SCOPE: Cloud-provider-specific IAM/TLS hardening beyond an S3-compatible MinIO proof. Replacing the existing fjord object-log abstraction or queue semantics. Runtime adapter construction and kind restart/replay workflow are handled by sibling beads.",
+    "acceptance": "1. TestHelmObjectLogProfileTemplatesRuntimeContract: `bash scripts/ci/helm-gate.sh` passes and renders `object_log_sqlite_projection` with endpoint, bucket, region, segment settings, SQLite projection path, credential Secret refs, Postgres control-plane Secret refs, and projection PVC/volume mounts.\n2. TestHelmObjectLogProfileHasNoHardCodedCredentials: `bash scripts/ci/helm-gate.sh` passes and includes a check that rendered chart output does not embed MinIO access keys, secret keys, or CI fixture credentials in ConfigMaps, pod env values, or default values.\n3. TestHelmPostgresNativeRegression: `bash scripts/ci/helm-gate.sh` continues to render and validate `postgres_native` without object-log-only env or volume regressions.\n4. TestQualityGates: `go test ./...` and `lefthook run pre-commit` pass from the repository root, alongside the Helm command in AC1.",
+    "parent": "pqueue-c3dd271c",
+    "labels": [
+      "area:object-log",
+      "area:integration",
+      "kind:implementation",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field .readiness_checks.evidence of type string\",\"fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\"}",
+          "created_at": "2026-06-17T22:55:41.113367259Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260617T225542-f5c858da",
+    "prompt": ".ddx/executions/20260617T225542-f5c858da/prompt.md",
+    "manifest": ".ddx/executions/20260617T225542-f5c858da/manifest.json",
+    "result": ".ddx/executions/20260617T225542-f5c858da/result.json",
+    "checks": ".ddx/executions/20260617T225542-f5c858da/checks.json",
+    "usage": ".ddx/executions/20260617T225542-f5c858da/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-5b5e9094-20260617T225542-f5c858da"
+  },
+  "prompt_sha": "a9d15d39a8903760f982ba080c9c04bf5e5601e434b14cab9ccaca4dbfbfaa8b"
+}
