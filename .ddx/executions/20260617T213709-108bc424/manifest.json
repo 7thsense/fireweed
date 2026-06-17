@@ -1,0 +1,53 @@
+{
+  "attempt_id": "20260617T213709-108bc424",
+  "bead_id": "pqueue-c4a93050",
+  "base_rev": "fbc2edb44bbca6a1d61395b78759206a8266e904",
+  "created_at": "2026-06-17T21:37:09.527347424Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-c4a93050",
+    "title": "Add kind Helm integration harness",
+    "description": "Add the reusable kind-based Helm integration harness. This bead builds or loads the pqueue container image, creates a disposable kind cluster, installs the Helm chart with a selected backend profile, waits for readiness, runs a smoke check, and cleans up by default.\n\nThe script must support at least:\n- `--backend postgres_native`\n- `--backend object_log_sqlite_projection`\n- `--dry-run` to print the planned commands/values without creating a cluster\n- `--help`\n\nIn-scope files:\n- scripts/ci/kind-helm-test.sh\n- scripts/ci/kind/** helper manifests or values files\n- charts/pqueue/** only for values needed by the harness\n- docs/** for local prerequisites\nOut-of-scope:\n- Proving each backend end-to-end; separate beads run the harness for each backend and fix backend-specific issues.",
+    "acceptance": "1. `bash scripts/ci/kind-helm-test.sh --help` exits 0 and documents required tools.\n2. `bash scripts/ci/kind-helm-test.sh --backend postgres_native --dry-run` exits 0.\n3. `bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection --dry-run` exits 0.\n4. The script checks for required tools (`docker`, `kind`, `kubectl`, `helm`) and exits with a clear message when one is missing.",
+    "parent": "pqueue-3546063c",
+    "labels": [
+      "area:integration",
+      "kind:test",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field .readiness_checks.evidence of type string\",\"fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\"}",
+          "created_at": "2026-06-17T21:37:08.652144294Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "build-implementation-plan"
+    }
+  },
+  "governing": [
+    {
+      "id": "build-implementation-plan",
+      "path": "docs/helix/04-build/BUILD-001-implementation-plan.md",
+      "title": "Build Plan: BUILD-001 Implementation Sequence"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260617T213709-108bc424",
+    "prompt": ".ddx/executions/20260617T213709-108bc424/prompt.md",
+    "manifest": ".ddx/executions/20260617T213709-108bc424/manifest.json",
+    "result": ".ddx/executions/20260617T213709-108bc424/result.json",
+    "checks": ".ddx/executions/20260617T213709-108bc424/checks.json",
+    "usage": ".ddx/executions/20260617T213709-108bc424/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-c4a93050-20260617T213709-108bc424"
+  },
+  "prompt_sha": "ae3f5edce3a57ead23687f46e29b96dae330bcb795193ac6cf77daac9264bd9a"
+}
