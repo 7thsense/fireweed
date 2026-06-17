@@ -1,0 +1,54 @@
+{
+  "attempt_id": "20260617T214845-83692da7",
+  "bead_id": "pqueue-3c600abe",
+  "base_rev": "bd169c0be239708d364db4c3baa46d85c30eb1c7",
+  "created_at": "2026-06-17T21:48:45.971502232Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-3c600abe",
+    "title": "Prove postgres_native Helm deployment in kind",
+    "description": "Use the kind Helm harness to prove the postgres_native backend profile. The test must install any required PostgreSQL dependency, configure pqueue to use it, wait for rollout, and run a smoke workflow that exercises enqueue/dequeue or the closest existing service health/queue behavior.\n\nStart by inspecting existing local PostgreSQL service tests in crates/pqueue-service/tests/local_postgres_deployment_smoke_tests.rs and support modules. Reuse their expected workflow where possible rather than inventing a separate behavioral contract.\n\nIn-scope files:\n- scripts/ci/kind-helm-test.sh and scripts/ci/kind/**\n- charts/pqueue/** postgres values/templates\n- crates/pqueue-service/** only for narrow config or health endpoints required to make the deployed service testable\n- docs/** for backend install notes\nOut-of-scope:\n- object_log_sqlite_projection runtime proof.",
+    "acceptance": "1. `bash scripts/ci/kind-helm-test.sh --backend postgres_native` passes on a machine with Docker/kind available.\n2. The harness waits for the pqueue Deployment rollout and verifies service readiness through Kubernetes, not only by rendering templates.\n3. The smoke check exercises a queue operation or documented service health path that depends on a working PostgreSQL connection.\n4. The chart documents the postgres_native values required for production operators.",
+    "parent": "pqueue-3546063c",
+    "labels": [
+      "area:integration",
+      "kind:test",
+      "phase:deployment-readiness",
+      "plan-2026-06-17",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"`bash scripts/ci/kind-helm-test.sh --backend postgres_native` passes on a machine with Docker/kind available.\",\"kind\":\"build-gate\",\"verifiable\":true},{\"ac\":2,\"text\":\"The harness waits for the pqueue Deployment rollout and verifies service readiness through Kubernetes, not only by rendering templates.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"The smoke check exercises a queue operation or documented service health path that depends on a working PostgreSQL connection.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":4,\"text\":\"The chart documents the postgres_native values required for production operators.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-06-17T21:46:14.544323906Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.25 threshold=0.50 verifiable=1/4"
+        }
+      ],
+      "spec-id": "build-implementation-plan"
+    }
+  },
+  "governing": [
+    {
+      "id": "build-implementation-plan",
+      "path": "docs/helix/04-build/BUILD-001-implementation-plan.md",
+      "title": "Build Plan: BUILD-001 Implementation Sequence"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260617T214845-83692da7",
+    "prompt": ".ddx/executions/20260617T214845-83692da7/prompt.md",
+    "manifest": ".ddx/executions/20260617T214845-83692da7/manifest.json",
+    "result": ".ddx/executions/20260617T214845-83692da7/result.json",
+    "checks": ".ddx/executions/20260617T214845-83692da7/checks.json",
+    "usage": ".ddx/executions/20260617T214845-83692da7/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-3c600abe-20260617T214845-83692da7"
+  },
+  "prompt_sha": "d98b4f6e357bdba0e61e1beff23a2fb597d0021396d96080a31000b7474b8da2"
+}
