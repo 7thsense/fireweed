@@ -3,7 +3,8 @@
 use pqueue_core::{ClientItemKey, ItemId, QueueId, RequestId, TenantId, UtcTimestamp};
 use pqueue_objectlog::{
     ConfigError, DeploymentProfile, FjordObjectLogStore, ManifestMode, MemoryBlobStore,
-    MemoryCoordinator, PqueueObjectLogConfig,
+    MemoryCoordinator, PqueueObjectLogConfig, S3CompatibleConfigError, S3CompatibleCredentials,
+    S3CompatibleObjectLogConfig,
 };
 use pqueue_storage::commands::{
     BatchClaimCommand, BatchPushCommand, CommandEnvelope, CommandId, PushItem, QueueCommand,
@@ -83,6 +84,23 @@ fn claim_envelope(t: &TenantId, q: &QueueId, shard_id: u32, seq: u32) -> Command
         }),
         checksum: CommandChecksum(10 + seq),
         created_at: ts(seq as i64),
+    }
+}
+
+fn valid_s3_compatible_config() -> S3CompatibleObjectLogConfig {
+    S3CompatibleObjectLogConfig {
+        endpoint_url: "http://minio.local:9000".to_string(),
+        bucket: "pqueue-object-log".to_string(),
+        region: "us-east-1".to_string(),
+        credentials: S3CompatibleCredentials {
+            access_key_id: "minioadmin".to_string(),
+            secret_access_key: "minioadmin-secret".to_string(),
+        },
+        force_path_style: true,
+        deployment_profile: DeploymentProfile::Production,
+        manifest_mode: ManifestMode::ObjectStoreCas,
+        max_commands_per_segment: 1024,
+        dev_unsafe_one_command_segments: false,
     }
 }
 
@@ -254,6 +272,137 @@ async fn object_log_commit_recovery_tests_request_id_replay_finds_committed_comm
     assert_eq!(replayed.0.sequence, 0);
     assert_eq!(replayed.1.request_id.as_ref(), Some(&request_id));
     assert!(matches!(replayed.1.command, QueueCommand::BatchClaim(_)));
+}
+
+#[test]
+fn test_s3_compatible_constructor_config_accepts_minio_object_store_cas_config() {
+    let config = valid_s3_compatible_config();
+
+    config.validate().unwrap();
+    assert_eq!(config.endpoint_url, "http://minio.local:9000");
+    assert_eq!(config.bucket, "pqueue-object-log");
+    assert_eq!(config.region, "us-east-1");
+    assert_eq!(config.credentials.access_key_id, "minioadmin");
+    assert!(config.force_path_style);
+    assert_eq!(config.manifest_mode, ManifestMode::ObjectStoreCas);
+    assert_eq!(config.max_commands_per_segment, 1024);
+
+    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
+        Arc::new(MemoryCoordinator::new());
+    let store = FjordObjectLogStore::new_s3_compatible(coordinator, config).unwrap();
+    assert_eq!(store.config().manifest_mode, ManifestMode::ObjectStoreCas);
+    assert_eq!(store.config().max_commands_per_segment, 1024);
+}
+
+#[test]
+fn test_s3_compatible_constructor_config_accepts_postgres_manifest_pointer_fallback() {
+    let mut config = valid_s3_compatible_config();
+    config.endpoint_url = "https://s3.us-west-2.amazonaws.com".to_string();
+    config.region = "us-west-2".to_string();
+    config.manifest_mode = ManifestMode::PostgresManifestPointerFallback;
+    config.max_commands_per_segment = 4096;
+
+    config.validate().unwrap();
+    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
+        Arc::new(MemoryCoordinator::new());
+    let store = FjordObjectLogStore::new_s3_compatible(coordinator, config).unwrap();
+    assert_eq!(
+        store.config().manifest_mode,
+        ManifestMode::PostgresManifestPointerFallback
+    );
+    assert_eq!(store.config().max_commands_per_segment, 4096);
+}
+
+#[test]
+fn test_s3_compatible_constructor_rejects_invalid_endpoint_bucket_credentials_and_segments() {
+    let mut config = valid_s3_compatible_config();
+
+    config.endpoint_url = " ".to_string();
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::MissingEndpoint)
+    );
+
+    config = valid_s3_compatible_config();
+    config.endpoint_url = "minio.local:9000".to_string();
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::InvalidEndpoint)
+    );
+
+    config = valid_s3_compatible_config();
+    config.bucket = "".to_string();
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::MissingBucket)
+    );
+
+    config = valid_s3_compatible_config();
+    config.bucket = "ab".to_string();
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::InvalidBucket)
+    );
+
+    config = valid_s3_compatible_config();
+    config.bucket = "Bad Bucket".to_string();
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::InvalidBucket)
+    );
+
+    config = valid_s3_compatible_config();
+    config.credentials.secret_access_key = "".to_string();
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::MissingCredentials)
+    );
+
+    config = valid_s3_compatible_config();
+    config.max_commands_per_segment = 0;
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::ObjectLog(
+            ConfigError::EmptySegment
+        ))
+    );
+}
+
+#[test]
+fn test_s3_compatible_constructor_rejects_production_unsafe_manifest_segment_combinations() {
+    let mut config = valid_s3_compatible_config();
+    config.manifest_mode = ManifestMode::NoConditionalWrite;
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::ObjectLog(
+            ConfigError::MissingConditionalWriteWithoutFallback
+        ))
+    );
+
+    config = valid_s3_compatible_config();
+    config.max_commands_per_segment = 1;
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::ObjectLog(
+            ConfigError::OneCommandSegmentInProduction
+        ))
+    );
+
+    config = valid_s3_compatible_config();
+    config.dev_unsafe_one_command_segments = true;
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::ObjectLog(
+            ConfigError::DevUnsafeFlagInProduction
+        ))
+    );
+
+    config = valid_s3_compatible_config();
+    config.force_path_style = false;
+    assert_eq!(
+        config.validate(),
+        Err(S3CompatibleConfigError::UnsupportedAddressingMode)
+    );
 }
 
 #[test]

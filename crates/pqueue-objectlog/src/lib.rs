@@ -21,6 +21,7 @@ use pqueue_storage::types::{CommandChecksum, CommandPosition, ShardKey};
 
 pub use fjord_coordinator::memory::MemoryCoordinator;
 pub use fjord_log::MemoryBlobStore;
+pub use fjord_log::s3::S3BlobStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentProfile {
@@ -107,6 +108,104 @@ impl PqueueObjectLogConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3CompatibleCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3CompatibleObjectLogConfig {
+    pub endpoint_url: String,
+    pub bucket: String,
+    pub region: String,
+    pub credentials: S3CompatibleCredentials,
+    pub force_path_style: bool,
+    pub deployment_profile: DeploymentProfile,
+    pub manifest_mode: ManifestMode,
+    pub max_commands_per_segment: usize,
+    pub dev_unsafe_one_command_segments: bool,
+}
+
+impl S3CompatibleObjectLogConfig {
+    pub fn pqueue_config(&self) -> PqueueObjectLogConfig {
+        PqueueObjectLogConfig {
+            deployment_profile: self.deployment_profile,
+            manifest_mode: self.manifest_mode,
+            max_commands_per_segment: self.max_commands_per_segment,
+            dev_unsafe_one_command_segments: self.dev_unsafe_one_command_segments,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), S3CompatibleConfigError> {
+        validate_endpoint_url(&self.endpoint_url)?;
+        validate_bucket(&self.bucket)?;
+        validate_region(&self.region)?;
+        validate_credentials(&self.credentials)?;
+        if !self.force_path_style {
+            return Err(S3CompatibleConfigError::UnsupportedAddressingMode);
+        }
+        self.pqueue_config()
+            .validate()
+            .map_err(S3CompatibleConfigError::ObjectLog)?;
+        Ok(())
+    }
+
+    pub fn blob_store(&self) -> Result<S3BlobStore, S3CompatibleConfigError> {
+        self.validate()?;
+        Ok(S3BlobStore::new(
+            self.endpoint_url.trim(),
+            self.region.trim(),
+            self.bucket.trim(),
+            self.credentials.access_key_id.trim(),
+            self.credentials.secret_access_key.trim(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3CompatibleConfigError {
+    MissingEndpoint,
+    InvalidEndpoint,
+    MissingBucket,
+    InvalidBucket,
+    MissingRegion,
+    MissingCredentials,
+    UnsupportedAddressingMode,
+    ObjectLog(ConfigError),
+}
+
+impl std::fmt::Display for S3CompatibleConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingEndpoint => write!(f, "S3-compatible endpoint URL is required"),
+            Self::InvalidEndpoint => write!(
+                f,
+                "S3-compatible endpoint URL must be http(s) with a non-empty host"
+            ),
+            Self::MissingBucket => write!(f, "S3-compatible bucket is required"),
+            Self::InvalidBucket => write!(f, "S3-compatible bucket name is invalid"),
+            Self::MissingRegion => write!(f, "S3-compatible region is required"),
+            Self::MissingCredentials => {
+                write!(f, "S3-compatible access key and secret key are required")
+            }
+            Self::UnsupportedAddressingMode => write!(
+                f,
+                "pqueue-objectlog S3-compatible runtime currently requires path-style addressing"
+            ),
+            Self::ObjectLog(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for S3CompatibleConfigError {}
+
+impl From<ConfigError> for S3CompatibleConfigError {
+    fn from(value: ConfigError) -> Self {
+        Self::ObjectLog(value)
+    }
+}
+
 pub struct FjordObjectLogStore {
     coordinator: Arc<dyn CoordinatorStore>,
     writer: WritePath,
@@ -136,6 +235,22 @@ impl FjordObjectLogStore {
             epochs: Mutex::new(HashMap::new()),
             topics: Mutex::new(HashSet::new()),
         })
+    }
+
+    pub fn new_s3_compatible(
+        coordinator: Arc<dyn CoordinatorStore>,
+        config: S3CompatibleObjectLogConfig,
+    ) -> Result<Self, S3CompatibleConfigError> {
+        config.validate()?;
+        let pqueue_config = config.pqueue_config();
+        let blob: Arc<dyn BlobStore> = Arc::new(S3BlobStore::new(
+            config.endpoint_url.trim(),
+            config.region.trim(),
+            config.bucket.trim(),
+            config.credentials.access_key_id.trim(),
+            config.credentials.secret_access_key.trim(),
+        ));
+        Self::new_with_config(coordinator, blob, pqueue_config).map_err(Into::into)
     }
 
     pub fn new_memory() -> (Self, Arc<MemoryBlobStore>) {
@@ -243,6 +358,64 @@ impl FjordObjectLogStore {
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         decode_page(shard, fetched, usize::MAX)
     }
+}
+
+fn validate_endpoint_url(endpoint_url: &str) -> Result<(), S3CompatibleConfigError> {
+    let endpoint_url = endpoint_url.trim();
+    if endpoint_url.is_empty() {
+        return Err(S3CompatibleConfigError::MissingEndpoint);
+    }
+    if endpoint_url.chars().any(char::is_whitespace) {
+        return Err(S3CompatibleConfigError::InvalidEndpoint);
+    }
+    let without_scheme = endpoint_url
+        .strip_prefix("http://")
+        .or_else(|| endpoint_url.strip_prefix("https://"))
+        .ok_or(S3CompatibleConfigError::InvalidEndpoint)?;
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if host.is_empty() || host == ":" || host.starts_with(':') {
+        return Err(S3CompatibleConfigError::InvalidEndpoint);
+    }
+    Ok(())
+}
+
+fn validate_bucket(bucket: &str) -> Result<(), S3CompatibleConfigError> {
+    let bucket = bucket.trim();
+    if bucket.is_empty() {
+        return Err(S3CompatibleConfigError::MissingBucket);
+    }
+    if !(3..=63).contains(&bucket.len())
+        || !bucket
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '.')
+        || bucket.starts_with(['-', '.'])
+        || bucket.ends_with(['-', '.'])
+        || bucket.contains("..")
+    {
+        return Err(S3CompatibleConfigError::InvalidBucket);
+    }
+    Ok(())
+}
+
+fn validate_region(region: &str) -> Result<(), S3CompatibleConfigError> {
+    if region.trim().is_empty() {
+        return Err(S3CompatibleConfigError::MissingRegion);
+    }
+    Ok(())
+}
+
+fn validate_credentials(
+    credentials: &S3CompatibleCredentials,
+) -> Result<(), S3CompatibleConfigError> {
+    if credentials.access_key_id.trim().is_empty()
+        || credentials.secret_access_key.trim().is_empty()
+    {
+        return Err(S3CompatibleConfigError::MissingCredentials);
+    }
+    Ok(())
 }
 
 impl LogStore for FjordObjectLogStore {
