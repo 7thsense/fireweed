@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260617T223423-be653170",
+  "bead_id": "pqueue-e7d735e9",
+  "base_rev": "f2a85050e5df1c2c93353352f90a62fe88f5791c",
+  "created_at": "2026-06-17T22:34:23.98235247Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-e7d735e9",
+    "title": "Add S3-compatible fjord object-log constructor and config tests",
+    "description": "PROBLEM: `pqueue-objectlog` can validate abstract object-log semantics, but it has no concrete S3-compatible runtime constructor for MinIO/S3, so deployment readiness cannot prove the durable log path.\n\nROOT CAUSE: `crates/pqueue-objectlog/src/lib.rs:22` and `crates/pqueue-objectlog/src/lib.rs:23` only re-export fjord memory helpers; `crates/pqueue-objectlog/src/lib.rs:120` through `crates/pqueue-objectlog/src/lib.rs:145` construct `FjordObjectLogStore` from an injected `BlobStore` or in-memory `MemoryBlobStore`, with no endpoint/bucket/region/credential-based S3-compatible constructor.\n\nPROPOSED FIX: Add an S3-compatible object-log configuration type and constructor/adapter in `crates/pqueue-objectlog/**` that builds the fjord blob path from endpoint, bucket, region, credentials, path-style/MinIO compatibility, conditional-write capability, and segment settings. Validate production safety rules and expose explicit errors for missing credentials, invalid bucket/endpoint, unsupported CAS behavior without fallback, and unsafe one-command segments.\n\nGOVERNING ARTIFACTS: Parent bead `pqueue-3546063c`; `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md`; `docs/helix/04-build/DEPLOYMENT-READINESS.md`; `docs/deployment/container-runtime-contract.md`.\n\nNON-SCOPE: Cloud-provider-specific IAM/TLS hardening beyond an S3-compatible MinIO proof. Replacing the existing fjord object-log abstraction or queue semantics. Helm chart edits, kind MinIO orchestration, and deployment documentation changes are handled by sibling beads.",
+    "acceptance": "1. TestS3CompatibleConstructorConfig: `cargo test -p pqueue-objectlog -- --nocapture` passes and includes tests proving valid MinIO/S3-compatible endpoint, bucket, region, credentials, segment settings, path-style mode, and conditional-write/fallback configuration are accepted.\n2. TestS3CompatibleConstructorRejectsInvalidConfig: `cargo test -p pqueue-objectlog -- --nocapture` passes and includes negative tests for missing endpoint, bucket, credentials, invalid segment settings, and production-unsafe manifest/segment combinations.\n3. TestObjectLogRegressionSuite: existing object-log recovery, fencing, manifest, and memory-backed tests continue to pass under `cargo test -p pqueue-objectlog -- --nocapture`.\n4. TestQualityGates: `go test ./...` and `lefthook run pre-commit` pass from the repository root, alongside the Rust command in AC1.",
+    "parent": "pqueue-c3dd271c",
+    "labels": [
+      "area:object-log",
+      "area:integration",
+      "kind:implementation",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"acceptance criteria dropped or altered\",\"fingerprint\":\"a5009c61c899c35222e0cf80f68291112e4b76a566f9e181735e2281652ab1f2\",\"policy_mode\":\"warn-only\",\"reason\":\"rewrite_rejected\",\"rule_id\":\"pre_claim_intake.rewrite_rejected\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"a5009c61c899c35222e0cf80f68291112e4b76a566f9e181735e2281652ab1f2\"}",
+          "created_at": "2026-06-17T22:34:20.959605087Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "rewrite_rejected"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260617T223423-be653170",
+    "prompt": ".ddx/executions/20260617T223423-be653170/prompt.md",
+    "manifest": ".ddx/executions/20260617T223423-be653170/manifest.json",
+    "result": ".ddx/executions/20260617T223423-be653170/result.json",
+    "checks": ".ddx/executions/20260617T223423-be653170/checks.json",
+    "usage": ".ddx/executions/20260617T223423-be653170/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-e7d735e9-20260617T223423-be653170"
+  },
+  "prompt_sha": "af43731faef227dc47648104457231f109b3bb12164c2bebddde6be826817982"
+}
