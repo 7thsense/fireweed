@@ -38,11 +38,7 @@ EOF
 
 tar -C "$(dirname "$STAGE_DIR")" -czf "$ARCHIVE" "$(basename "$STAGE_DIR")"
 
-if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$DIST_DIR" && sha256sum "$(basename "$ARCHIVE")" > SHA256SUMS)
-else
-    (cd "$DIST_DIR" && shasum -a 256 "$(basename "$ARCHIVE")" > SHA256SUMS)
-fi
+bash scripts/release/write-checksums.sh "$DIST_DIR"
 
 echo "$ARCHIVE"
 echo "${DIST_DIR}/SHA256SUMS"
