@@ -58,8 +58,9 @@ OPTIONS:
 
 The harness builds the pqueue container image, creates a kind cluster, loads the
 image into that cluster, applies local runtime-secret fixtures, installs the
-Helm chart with the selected CI backend values file, waits for readiness, checks
-GET /readyz through kubectl port-forward, and deletes the cluster by default.
+postgres_native PostgreSQL dependency when required, installs the Helm chart
+with the selected CI backend values file, waits for readiness, checks GET
+/readyz through kubectl port-forward, and deletes the cluster by default.
 EOF
 }
 
@@ -83,6 +84,10 @@ require_tools() {
     require_tool kind
     require_tool kubectl
     require_tool helm
+}
+
+kubectl_cmd() {
+    kubectl --context "kind-${CLUSTER_NAME}" "$@"
 }
 
 values_file_for() {
@@ -178,6 +183,9 @@ validate_config() {
     [[ "${SMOKE_PORT}" =~ ^[0-9]+$ ]] || die "--smoke-port must be a TCP port number"
     [[ -f "$(values_file_for "${BACKEND}")" ]] || die "missing values file for backend: ${BACKEND}"
     [[ -f "${KIND_DIR}/runtime-secrets.yaml" ]] || die "missing helper manifest: ${KIND_DIR}/runtime-secrets.yaml"
+    if [[ "${BACKEND}" == "postgres_native" ]]; then
+        [[ -f "${KIND_DIR}/postgres.yaml" ]] || die "missing postgres helper manifest: ${KIND_DIR}/postgres.yaml"
+    fi
 
     if [[ -z "${CLUSTER_NAME}" ]]; then
         CLUSTER_NAME="pqueue-${BACKEND//_/-}-$$"
@@ -208,11 +216,16 @@ dry_run_plan() {
         print_cmd kind create cluster --name "${CLUSTER_NAME}"
     fi
     print_cmd kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"
-    echo "+ kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
-    print_cmd kubectl -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
-    print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
-    print_cmd kubectl -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
-    print_cmd kubectl -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" cluster-info
+    echo "+ kubectl --context kind-${CLUSTER_NAME} create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl --context kind-${CLUSTER_NAME} apply -f -"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
+    if [[ "${BACKEND}" == "postgres_native" ]]; then
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
+    fi
+    print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
     echo "+ GET http://127.0.0.1:${SMOKE_PORT}/readyz"
     if [[ "${KEEP_CLUSTER}" == false ]]; then
         print_cmd kind delete cluster --name "${CLUSTER_NAME}"
@@ -240,6 +253,17 @@ wait_for_port_forward() {
     return 1
 }
 
+wait_for_kubernetes_api() {
+    echo "waiting for Kubernetes API for kind cluster ${CLUSTER_NAME}"
+    for _ in {1..60}; do
+        if kubectl_cmd cluster-info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    die "timed out waiting for Kubernetes API for kind cluster ${CLUSTER_NAME}"
+}
+
 smoke_readyz() {
     local run_dir log_path response_path
     run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
@@ -247,8 +271,8 @@ smoke_readyz() {
     log_path="${run_dir}/port-forward.log"
     response_path="${run_dir}/readyz.response"
 
-    print_cmd kubectl -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
-    kubectl -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
+    kubectl_cmd -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
     PF_PID=$!
 
     wait_for_port_forward "${log_path}"
@@ -269,8 +293,8 @@ smoke_readyz() {
 }
 
 create_namespace() {
-    echo "+ kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
-    kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    echo "+ kubectl --context kind-${CLUSTER_NAME} create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl --context kind-${CLUSTER_NAME} apply -f -"
+    kubectl_cmd create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_cmd apply -f -
 }
 
 main() {
@@ -305,9 +329,18 @@ main() {
     fi
     CLUSTER_CREATED=true
     run kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"
+    wait_for_kubernetes_api
     create_namespace
-    run kubectl -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
+    kubectl_cmd -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
+    if [[ "${BACKEND}" == "postgres_native" ]]; then
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
+        kubectl_cmd -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
+        kubectl_cmd -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
+    fi
     run helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
+        --kube-context "kind-${CLUSTER_NAME}" \
         --namespace "${NAMESPACE}" \
         --values "${values}" \
         --set "fullnameOverride=${RELEASE_NAME}" \
@@ -316,7 +349,8 @@ main() {
         --set "image.pullPolicy=IfNotPresent" \
         --wait \
         --timeout "${TIMEOUT}"
-    run kubectl -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
+    kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     smoke_readyz
 
     echo "=== kind Helm integration smoke PASSED ==="

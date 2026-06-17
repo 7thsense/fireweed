@@ -9,9 +9,16 @@
 //! `docs/deployment/container-runtime-contract.md` documents and that the Helm
 //! chart populates.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use tokio_postgres::NoTls;
 
 use crate::{AppState, AuthContext, app_with_state};
 
@@ -94,6 +101,8 @@ pub struct RuntimeConfig {
     pub principal_id: String,
     /// Tenants the bootstrap principal is authorized for.
     pub tenants: Vec<String>,
+    /// PostgreSQL connection URL used by postgres-native readiness checks.
+    pub postgres_database_url: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -134,12 +143,14 @@ impl RuntimeConfig {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let postgres_database_url = non_empty(getter("PQUEUE_POSTGRES_DATABASE_URL"));
 
         Ok(Self {
             listen_addr,
             backend_profile,
             principal_id,
             tenants,
+            postgres_database_url,
         })
     }
 
@@ -150,7 +161,18 @@ impl RuntimeConfig {
 
     /// Builds the full HTTP router (health surface plus the API-001 app).
     pub fn router(&self) -> Router {
-        service_router(AppState::new(self.auth_context()))
+        service_router_with_readiness(AppState::new(self.auth_context()), self.readiness_check())
+    }
+
+    fn readiness_check(&self) -> ReadinessCheck {
+        match self.backend_profile {
+            BackendProfile::PostgresNative => self
+                .postgres_database_url
+                .clone()
+                .map(ReadinessCheck::Postgres)
+                .unwrap_or(ReadinessCheck::MissingPostgresDatabaseUrl),
+            BackendProfile::ObjectLogSqliteProjection => ReadinessCheck::Ready,
+        }
     }
 }
 
@@ -168,11 +190,39 @@ pub fn service_router(state: AppState) -> Router {
     health_router().merge(app_with_state(state))
 }
 
+/// Builds the production service router with backend-specific readiness checks.
+pub fn service_router_with_readiness(state: AppState, readiness: ReadinessCheck) -> Router {
+    health_router_with_readiness(readiness).merge(app_with_state(state))
+}
+
 /// Builds the standalone liveness/readiness health router.
 pub fn health_router() -> Router {
     Router::new()
         .route(LIVENESS_PATH, get(liveness))
         .route(READINESS_PATH, get(readiness))
+}
+
+fn health_router_with_readiness(readiness: ReadinessCheck) -> Router {
+    Router::new()
+        .route(LIVENESS_PATH, get(liveness))
+        .route(READINESS_PATH, get(checked_readiness))
+        .with_state(HealthState { readiness })
+}
+
+/// Backend dependency checked by the production readiness endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadinessCheck {
+    /// No backend dependency is currently wired into the health path.
+    Ready,
+    /// `postgres_native` requires a configured PostgreSQL URL.
+    MissingPostgresDatabaseUrl,
+    /// `postgres_native` is ready only when PostgreSQL accepts a trivial query.
+    Postgres(String),
+}
+
+#[derive(Debug, Clone)]
+struct HealthState {
+    readiness: ReadinessCheck,
 }
 
 async fn liveness() -> &'static str {
@@ -181,6 +231,49 @@ async fn liveness() -> &'static str {
 
 async fn readiness() -> &'static str {
     "ready"
+}
+
+async fn checked_readiness(State(state): State<HealthState>) -> Response {
+    match state.readiness {
+        ReadinessCheck::Ready => (StatusCode::OK, "ready").into_response(),
+        ReadinessCheck::MissingPostgresDatabaseUrl => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "postgres database url is not configured",
+        )
+            .into_response(),
+        ReadinessCheck::Postgres(database_url) => postgres_readiness(&database_url).await,
+    }
+}
+
+async fn postgres_readiness(database_url: &str) -> Response {
+    let connect = tokio_postgres::connect(database_url, NoTls);
+    let Ok(connect_result) = tokio::time::timeout(Duration::from_secs(2), connect).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "postgres readiness timed out",
+        )
+            .into_response();
+    };
+    let Ok((client, connection)) = connect_result else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "postgres connection failed",
+        )
+            .into_response();
+    };
+
+    let connection_task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let query = tokio::time::timeout(Duration::from_secs(2), client.simple_query("SELECT 1")).await;
+    drop(client);
+    connection_task.abort();
+
+    match query {
+        Ok(Ok(_)) => (StatusCode::OK, "ready").into_response(),
+        Ok(Err(_)) => (StatusCode::SERVICE_UNAVAILABLE, "postgres query failed").into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "postgres query timed out").into_response(),
+    }
 }
 
 /// Returns the `--help` text documenting the runtime configuration contract.
@@ -205,6 +298,7 @@ pub fn help_text() -> String {
          \x20\x20                         object_log_sqlite_projection\n\
          \x20\x20PQUEUE_PRINCIPAL_ID      bootstrap principal id (default {default_principal})\n\
          \x20\x20PQUEUE_TENANTS           comma-separated tenant allowlist (default empty)\n\
+         \x20\x20PQUEUE_POSTGRES_DATABASE_URL  required by postgres_native readiness\n\
          \n\
          HEALTH:\n\
          \x20\x20GET {liveness}   liveness probe (200 ok)\n\
@@ -228,6 +322,7 @@ mod tests {
         assert_eq!(config.backend_profile, BackendProfile::PostgresNative);
         assert_eq!(config.principal_id, DEFAULT_PRINCIPAL_ID);
         assert!(config.tenants.is_empty());
+        assert_eq!(config.postgres_database_url, None);
     }
 
     #[test]
@@ -237,6 +332,9 @@ mod tests {
             "PQUEUE_BACKEND_PROFILE" => Some("object_log_sqlite_projection".to_string()),
             "PQUEUE_PRINCIPAL_ID" => Some("operator-deploy".to_string()),
             "PQUEUE_TENANTS" => Some(" tenant-a , tenant-b ,".to_string()),
+            "PQUEUE_POSTGRES_DATABASE_URL" => {
+                Some("postgres://pqueue:pqueue@postgres:5432/pqueue".to_string())
+            }
             _ => None,
         })
         .expect("overrides are valid");
@@ -247,6 +345,10 @@ mod tests {
         );
         assert_eq!(config.principal_id, "operator-deploy");
         assert_eq!(config.tenants, vec!["tenant-a", "tenant-b"]);
+        assert_eq!(
+            config.postgres_database_url,
+            Some("postgres://pqueue:pqueue@postgres:5432/pqueue".to_string())
+        );
     }
 
     #[test]
@@ -287,6 +389,7 @@ mod tests {
         let help = help_text();
         assert!(help.contains("PQUEUE_LISTEN_ADDR"));
         assert!(help.contains("PQUEUE_BACKEND_PROFILE"));
+        assert!(help.contains("PQUEUE_POSTGRES_DATABASE_URL"));
         assert!(help.contains("postgres_native"));
         assert!(help.contains("object_log_sqlite_projection"));
         assert!(help.contains(LIVENESS_PATH));

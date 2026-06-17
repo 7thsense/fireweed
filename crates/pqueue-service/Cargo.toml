@@ -14,7 +14,8 @@ pqueue-storage = { path = "../pqueue-storage" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-time-0_3"] }
 
 [lib]
 path = "src/lib.rs"
@@ -23,5 +24,4 @@ path = "src/lib.rs"
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-time-0_3"] }
 tower = { version = "0.5", features = ["util"] }

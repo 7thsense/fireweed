@@ -35,10 +35,12 @@ By default the script:
 2. creates a disposable `kind` cluster;
 3. loads `pqueue:ci` into the cluster;
 4. applies `scripts/ci/kind/runtime-secrets.yaml`;
-5. installs `charts/pqueue` with the selected CI values file;
-6. waits for the Helm release and deployment rollout;
-7. checks `GET /readyz` through `kubectl port-forward`;
-8. deletes the `kind` cluster on exit.
+5. for `postgres_native`, installs the disposable PostgreSQL fixture in
+   `scripts/ci/kind/postgres.yaml` and waits for its Deployment rollout;
+6. installs `charts/pqueue` with the selected CI values file;
+7. waits for the Helm release and pqueue Deployment rollout;
+8. checks `GET /readyz` through `kubectl port-forward`;
+9. deletes the `kind` cluster on exit.
 
 Use `--keep-cluster` to preserve the cluster for debugging.
 
@@ -55,7 +57,10 @@ the image, the Helm values file, helper manifests, and the exact command plan.
 ## Helper manifests
 
 `scripts/ci/kind/runtime-secrets.yaml` creates the Kubernetes Secrets that the
-Helm chart expects for the supported backend profiles. The current service
-binary validates the backend profile and serves health endpoints without opening
-backend connections; later backend-specific beads can extend the same harness
-with Postgres and MinIO runtime dependencies as those paths become live.
+Helm chart expects for the supported backend profiles.
+
+For `postgres_native`, `scripts/ci/kind/postgres.yaml` creates an ephemeral
+PostgreSQL Deployment and Service named `postgres`. The pqueue Secret points at
+that Service. The service readiness endpoint opens a PostgreSQL connection and
+runs `SELECT 1`, so the kind smoke proves Kubernetes rollout plus a working
+database dependency instead of only proving template rendering.

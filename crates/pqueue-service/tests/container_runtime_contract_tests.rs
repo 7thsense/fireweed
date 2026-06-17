@@ -7,7 +7,8 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use pqueue_service::runtime::{
-    LIVENESS_PATH, READINESS_PATH, RuntimeConfig, health_router, service_router,
+    LIVENESS_PATH, READINESS_PATH, ReadinessCheck, RuntimeConfig, health_router, service_router,
+    service_router_with_readiness,
 };
 use tower::ServiceExt;
 
@@ -75,4 +76,43 @@ async fn service_router_serves_health_alongside_api() {
         .await
         .expect("router should respond");
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn production_readiness_fails_without_postgres_url_for_postgres_native() {
+    let config =
+        RuntimeConfig::from_getter(|key| (key == "PQUEUE_TENANTS").then(|| "tenant-a".to_string()))
+            .expect("defaults are valid");
+
+    let response = config
+        .router()
+        .oneshot(
+            Request::builder()
+                .uri(READINESS_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router should respond");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn production_readiness_can_be_configured_as_ready_for_non_postgres_profiles() {
+    let router = service_router_with_readiness(
+        pqueue_service::AppState::new(RuntimeConfig::from_getter(|_| None).unwrap().auth_context()),
+        ReadinessCheck::Ready,
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(READINESS_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router should respond");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_text(response.into_body()).await, "ready");
 }

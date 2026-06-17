@@ -1972,6 +1972,7 @@ dependencies = [
 [[package]]
 name = "object-log"
 version = "0.1.0"
+source = "git+https://github.com/easel/object-log?rev=e859c8c#e859c8c8ccc40053d8f7de1c2d5ced452001f9c9"
 dependencies = [
  "async-trait",
  "bytes",

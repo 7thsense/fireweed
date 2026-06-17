@@ -46,7 +46,10 @@ contract: do not claim more runtime behavior than the binary actually implements
 - Default port: `8080` (the image `EXPOSE`s 8080 and defaults
   `PQUEUE_LISTEN_ADDR=0.0.0.0:8080`).
 - Liveness probe: `GET /healthz` → `200 ok`.
-- Readiness probe: `GET /readyz` → `200 ready`.
+- Readiness probe: `GET /readyz` → `200 ready` after profile-specific
+  dependencies are ready. For `postgres_native`, readiness opens PostgreSQL and
+  runs `SELECT 1`; it returns `503` while the database URL is missing or the
+  query fails.
 - Both probes share the configured listener with the API-001 routes, so a single
   Kubernetes `containerPort` covers the API and health checks.
 
@@ -62,23 +65,23 @@ non-zero before binding.
 | `PQUEUE_BACKEND_PROFILE` | no | `postgres_native` | Backend profile. Must be `postgres_native` or `object_log_sqlite_projection`; any other value is rejected. |
 | `PQUEUE_PRINCIPAL_ID` | no | `pqueue-service` | Bootstrap principal id for the service auth context. |
 | `PQUEUE_TENANTS` | no | empty | Comma-separated tenant allowlist for the bootstrap principal. Blank entries are ignored. |
+| `PQUEUE_POSTGRES_DATABASE_URL` | yes for `postgres_native` readiness | none | PostgreSQL connection URL used by the `postgres_native` readiness check. |
 
 ## Backend-Profile Settings Required by Helm (Reserved Contract)
 
 These keys are the runtime configuration the Helm deployment must supply for each
-supported backend profile. They are **reserved** here as the deployment contract:
-backend connection wiring is owned by later deployment-readiness beads, so the v1
-`pqueue-service` binary validates the selected profile name but does not yet open
-these connections. Helm values and Kubernetes Secrets must populate them when the
-corresponding backend wiring lands; the names below are the agreed contract.
+supported backend profile. Helm values and Kubernetes Secrets populate the
+environment contract below.
 
 ### `postgres_native`
 
 - `PQUEUE_BACKEND_PROFILE=postgres_native`.
-- Postgres control-plane and data-plane connection (URL/host/port/database and
-  credentials), sourced from a Kubernetes Secret. The existing local proof fixture
-  uses a `host=… port=5432 user=pqueue password=pqueue dbname=pqueue` shaped DSN
-  (`crates/pqueue-service/tests/fixtures/postgres_native_local.toml`).
+- `PQUEUE_POSTGRES_DATABASE_URL`, sourced from a Kubernetes Secret, must point at
+  the PostgreSQL control-plane and data-plane database. The existing local proof
+  fixture uses a `host=... port=5432 user=pqueue password=pqueue dbname=pqueue`
+  shaped DSN (`crates/pqueue-service/tests/fixtures/postgres_native_local.toml`).
+- `GET /readyz` opens that database connection and runs `SELECT 1`; Kubernetes
+  readiness stays unavailable until the database accepts the query.
 - Shard-count bounds per the sharding design (TD-003).
 - Resource limits, telemetry, and credentials/secret references per the
   deployment-readiness contract's "Required Artifacts" section.
