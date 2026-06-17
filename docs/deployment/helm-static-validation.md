@@ -37,6 +37,31 @@ The profile inputs are checked-in test values, merged over
 - `charts/pqueue/ci/postgres-native-values.yaml`
 - `charts/pqueue/ci/object-log-sqlite-projection-values.yaml`
 
+For `object_log_sqlite_projection`, the static gate preserves the runtime
+surface consumed by `pqueue-service`:
+
+| Helm value | Rendered runtime key or object |
+|------------|--------------------------------|
+| `backend.profile` | `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection` |
+| `backend.postgres.existingSecret` | Secret reference `pqueue-postgres` |
+| `backend.postgres.databaseUrlKey` | Secret key `database-url` for `PQUEUE_POSTGRES_DATABASE_URL` |
+| `backend.objectLog.endpoint` | `PQUEUE_OBJECT_LOG_ENDPOINT=http://minio:9000` |
+| `backend.objectLog.bucket` | `PQUEUE_OBJECT_LOG_BUCKET=pqueue-object-log` |
+| `backend.objectLog.region` | `PQUEUE_OBJECT_LOG_REGION=us-east-1` |
+| `backend.objectLog.segmentMaxCommands` | `PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS=1024` |
+| `backend.objectLog.existingSecret` | Secret reference `pqueue-object-log` |
+| `backend.objectLog.accessKeyIdKey` | Secret key `access-key-id` for `PQUEUE_OBJECT_LOG_ACCESS_KEY_ID` |
+| `backend.objectLog.secretAccessKeyKey` | Secret key `secret-access-key` for `PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY` |
+| `backend.sqliteProjection.mountPath` | `PQUEUE_SQLITE_PROJECTION_DIR=/var/lib/pqueue/projection` and matching volume mount |
+| `backend.shardCount.min` / `backend.shardCount.max` | `PQUEUE_SHARD_COUNT_MIN` / `PQUEUE_SHARD_COUNT_MAX` |
+| `persistence.enabled=true` | SQLite projection PVC and `sqlite-projection` volume |
+| `persistence.existingClaim` | Existing SQLite projection PVC claim name override |
+| `persistence.accessModes`, `persistence.size`, `persistence.storageClass` | SQLite projection PVC access modes, storage request, and optional class |
+
+The static gate proves Helm renders those names and rejects fixture credentials
+in rendered manifests. Runtime proof still belongs to the kind gate:
+`bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection`.
+
 ## Prerequisites
 
 - **helm** (v3.8+ or v4) on `PATH`.
@@ -73,3 +98,11 @@ bash scripts/ci/helm-gate.sh
 
 The script exits non-zero on the first lint, template, or schema-validation
 failure.
+
+Pair this static gate with the object-log runtime and kind proof commands:
+
+```sh
+cargo test -p pqueue-objectlog -- --nocapture
+cargo test -p pqueue-service --test container_runtime_contract_tests -- --nocapture
+bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection
+```

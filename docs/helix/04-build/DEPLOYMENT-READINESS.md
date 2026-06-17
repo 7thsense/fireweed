@@ -45,7 +45,7 @@ supported backend profile:
 | Profile | Required local production proof |
 |---------|---------------------------------|
 | `postgres_native` | Helm install into `kind` with Postgres-backed control plane, log, projection, idempotency, leases, and metrics. |
-| `object_log_sqlite_projection` | Helm install into `kind` with Postgres control plane, SQLite projection, and S3-compatible object storage exercised through MinIO if the runtime backend supports that path. |
+| `object_log_sqlite_projection` | Helm install into `kind` with Postgres control plane, PVC-backed SQLite projection, and S3-compatible object storage exercised through MinIO. |
 
 The `kind` proof is the minimum production-readiness gate. It is not a substitute
 for environment-specific capacity planning, credentials, monitoring, backups, or
@@ -91,7 +91,7 @@ be cut:
 - Postgres dependency wiring for the control plane and, in `postgres_native`,
   the data plane.
 - S3-compatible object storage wiring for `object_log_sqlite_projection`, using
-  MinIO in the local `kind` proof when the runtime supports it.
+  MinIO in the local `kind` proof.
 - Documented runtime configuration for shard count bounds, object-log segment
   settings, SQLite projection storage, credentials/secrets, telemetry, and
   resource limits.
@@ -109,8 +109,7 @@ called production-deployable:
 - Helm chart lint/render checks for every supported backend values profile.
 - `kind` install/upgrade/uninstall smoke for `postgres_native`.
 - `kind` install/upgrade/uninstall smoke for `object_log_sqlite_projection`,
-  including MinIO-backed S3-compatible object storage when supported by the
-  runtime.
+  including MinIO-backed S3-compatible object storage.
 - Strict verification-ledger validation for both backend profiles.
 - A negative check that no release evidence cites pre-existing `target/` files
   instead of source-backed DDx evidence.
@@ -134,11 +133,41 @@ A production-readiness release must record:
 
 ## S3 / Object-Log Boundary
 
-`object_log_sqlite_projection` currently means the fjord object-log plus SQLite
-projection backend specified by TD-004. Existing evidence validates object-log
-behavior at the abstraction/local fixture layer: group commit, manifest fencing,
-replay, object-store capability rejection/fallback, SQLite projection, product
-smoke, and release ledger behavior.
+`object_log_sqlite_projection` means the fjord object-log plus SQLite projection
+backend specified by TD-004. Runtime and Helm configuration for this profile is
+concrete, not reserved:
+
+- `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection`.
+- `PQUEUE_POSTGRES_DATABASE_URL`, sourced from Secret `pqueue-postgres`, key
+  `database-url`, is required for the Postgres control plane and
+  manifest-pointer/fencing boundary.
+- `PQUEUE_OBJECT_LOG_ENDPOINT`, `PQUEUE_OBJECT_LOG_BUCKET`,
+  `PQUEUE_OBJECT_LOG_REGION`, and `PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS` are
+  rendered from `backend.objectLog.endpoint`, `backend.objectLog.bucket`,
+  `backend.objectLog.region`, and `backend.objectLog.segmentMaxCommands`.
+- `PQUEUE_OBJECT_LOG_ACCESS_KEY_ID` and
+  `PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY` are sourced from Secret
+  `pqueue-object-log`, keys `access-key-id` and `secret-access-key`.
+- `PQUEUE_SQLITE_PROJECTION_DIR` is rendered from
+  `backend.sqliteProjection.mountPath`; the CI/default path is
+  `/var/lib/pqueue/projection`.
+- `PQUEUE_SHARD_COUNT_MIN` and `PQUEUE_SHARD_COUNT_MAX` are rendered from
+  `backend.shardCount.min` and `backend.shardCount.max`; they bound the
+  deployment shard-count contract for the selected backend.
+- Production-like Kubernetes proofs must use a PVC for the SQLite projection
+  path (`persistence.enabled=true`, default claim name
+  `<release-fullname>-sqlite-projection`, configured by
+  `persistence.existingClaim`, `persistence.accessModes`, `persistence.size`,
+  and `persistence.storageClass`) rather than relying on local disk as a
+  durability boundary.
+- Object-log segment settings must keep
+  `PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS > 1`; the checked-in CI profile uses
+  `1024`.
+
+Existing evidence validates object-log behavior at the abstraction/local fixture
+layer: group commit, manifest fencing, replay, object-store capability
+rejection/fallback, SQLite projection, product smoke, and release ledger
+behavior.
 
 That evidence is sufficient for the BUILD-001 S3-compatible object-log semantics
 claim. It is not a provider-specific live cloud S3 deployment certification.
@@ -150,8 +179,37 @@ Provider-specific S3 readiness requires a later bead with:
 - a live acceptance run or explicitly approved emulator boundary;
 - release evidence separate from the fjord/local fixture proof.
 
-The local production-readiness proof may use MinIO as the S3-compatible object
-store for `object_log_sqlite_projection` when the runtime supports MinIO-backed
-execution. If MinIO is not supported by the runtime at that point, the release
-must record the unsupported boundary and must not claim S3-compatible Kubernetes
-deployment readiness for `object_log_sqlite_projection`.
+The local production-readiness proof uses MinIO as the S3-compatible object
+store for `object_log_sqlite_projection`. The canonical command is:
+
+```sh
+bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection
+```
+
+The proof boundary is:
+
+- Helm renders the object-log runtime environment, Postgres control-plane Secret
+  reference, object-store credential Secret reference, and PVC-backed SQLite
+  projection mount.
+- The pqueue pod reaches `/readyz` only after the runtime validates its required
+  object-log configuration, verifies the SQLite projection directory, and probes
+  the configured S3-compatible MinIO bucket.
+- Release evidence must cover restart/replay for this profile: after a pqueue
+  pod restart, acknowledged state is recovered from MinIO object-log
+  segments/snapshots plus the SQLite projection path, and readiness returns to
+  `ready`.
+
+This proves S3-compatible MinIO readiness for the Kubernetes proof. It does not
+claim cloud-provider-specific S3 certification, IAM policy validation,
+provider-managed TLS/certificate hardening, provider-specific conditional-write
+semantics, or production certification for AWS S3, GCS S3 interop, or any other
+named cloud object store.
+
+Required verification commands for this boundary:
+
+```sh
+cargo test -p pqueue-objectlog -- --nocapture
+cargo test -p pqueue-service --test container_runtime_contract_tests -- --nocapture
+bash scripts/ci/helm-gate.sh
+bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection
+```
