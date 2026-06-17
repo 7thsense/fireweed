@@ -1,0 +1,57 @@
+{
+  "bead_id": "pqueue-d923bbdf",
+  "attempt_id": "20260617T212834-c6aa6e39",
+  "base_rev": "a783de2672fc8002b27a4e1fe8cde3ca7044d554",
+  "result_rev": "aea512bc4f5b7624e86e0c454128124e4cdfd45c",
+  "implementation_rev": "aea512bc4f5b7624e86e0c454128124e4cdfd45c",
+  "outcome": "task_succeeded",
+  "status": "success",
+  "detail": "success",
+  "candidate_ref": "refs/ddx/iterations/20260617T212834-c6aa6e39/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260617T212834-c6aa6e39",
+      "result_rev": "aea512bc4f5b7624e86e0c454128124e4cdfd45c",
+      "implementer_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "requested_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "actual_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "claude-tui",
+  "model": "opus-4.7",
+  "predicted_power": 10,
+  "predicted_cost_usd_per_1k_tokens": 0.045,
+  "predicted_cost_source": "subscription",
+  "session_id": "eb-e650f8db",
+  "duration_ms": 304973,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260617T212834-c6aa6e39",
+  "prompt_file": ".ddx/executions/20260617T212834-c6aa6e39/prompt.md",
+  "manifest_file": ".ddx/executions/20260617T212834-c6aa6e39/manifest.json",
+  "result_file": ".ddx/executions/20260617T212834-c6aa6e39/result.json",
+  "usage_file": ".ddx/executions/20260617T212834-c6aa6e39/usage.json",
+  "rate_limit_budget": 300000000000,
+  "started_at": "2026-06-17T21:28:34.870706056Z",
+  "finished_at": "2026-06-17T21:33:39.844685345Z"
+}
