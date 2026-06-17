@@ -1,0 +1,101 @@
+{
+  "attempt_id": "20260617T233749-a9fa11c7",
+  "bead_id": "pqueue-ce2ade85",
+  "base_rev": "d9fe6dfc97c6adfc7d36902dc3c623e7901e1dc2",
+  "created_at": "2026-06-17T23:37:49.334897858Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-ce2ade85",
+    "title": "Prove object_log_sqlite_projection Helm deployment in kind",
+    "description": "Use the kind Helm harness to prove the object_log_sqlite_projection backend profile. The target is the fjord/object-log plus SQLite projection mode with an S3-compatible object-store deployment path if the runtime supports it. In kind, prefer MinIO as the S3-compatible service so the test does not depend on cloud credentials.\n\nImportant current constraint: TD-004 evidence validates object-log behavior against the fjord abstraction/local fixtures, not provider-specific live S3. If pqueue currently lacks an S3 adapter/configuration path for this backend, do not fake the proof. Instead, leave this bead open or blocked with a concrete follow-up bead describing the missing adapter/config contract, and make the failure visible in the release readiness document.\n\nStart by inspecting crates/pqueue-service/tests/local_object_log_deployment_smoke_tests.rs, crates/pqueue-service/tests/support/local_object_log.rs, and object-log runtime configuration.\n\nIn-scope files:\n- scripts/ci/kind-helm-test.sh and scripts/ci/kind/**\n- charts/pqueue/** object-log values/templates\n- crates/pqueue-service/** only for narrow S3/object-log runtime configuration or health endpoints needed by the charted deployment\n- docs/** for object-log/S3 backend production notes\nOut-of-scope:\n- Cloud-provider-specific IAM/TLS hardening beyond S3-compatible test proof.",
+    "acceptance": "1. `bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection` passes on a machine with Docker/kind available, using MinIO or another documented S3-compatible service if supported.\n2. The harness waits for pqueue rollout, verifies object-log profile readiness, and runs a smoke workflow that exercises persistence through the object-log path.\n3. The test includes a restart/replay or equivalent durability check showing the SQLite projection can recover from object-log state.\n4. If S3-compatible object-log deployment cannot be supported by current code, this bead is not closed; a blocking bead is filed with exact missing files/config and the readiness doc states the gap.",
+    "parent": "pqueue-3546063c",
+    "labels": [
+      "area:integration",
+      "kind:test",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness check timed out after 5m0s (pqueue-ce2ade85)\",\"fingerprint\":\"869b49c7c356b8ca74ae433e8d71974b3a288d3c27520fafe6086f1d44fc9c2f\",\"policy_mode\":\"warn-only\",\"reason\":\"timeout\",\"rule_id\":\"pre_claim_intake.timeout\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"869b49c7c356b8ca74ae433e8d71974b3a288d3c27520fafe6086f1d44fc9c2f\"}",
+          "created_at": "2026-06-17T22:17:28.640231103Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "timeout"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.5\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[],\"requested_min_power\":10}",
+          "created_at": "2026-06-17T22:24:20.275310443Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.5 reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260617T221729-e617d877\",\"harness\":\"codex\",\"model\":\"gpt-5.5\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":3570316,\"output_tokens\":15039,\"total_tokens\":3585355,\"cost_usd\":0,\"duration_ms\":410766,\"exit_code\":0}",
+          "created_at": "2026-06-17T22:24:20.287246722Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=3585355 model=gpt-5.5"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.5\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260617T221729-e617d877\",\"bead_id\":\"pqueue-ce2ade85\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-06-17T22:24:21.12963991Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=gpt-5.5 harness=codex"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"ce533866d78b8f2d825a663290f12b1267eec2b0\",\"classification\":\"blocked\",\"detail\":\"mixed_commit_and_no_changes_rationale\",\"rationale\":\"The attempt found a durable prerequisite gap: pqueue has no S3/MinIO object-log runtime adapter/configuration path and readiness only checks /readyz, so the Helm proof would be false. The worker reports a blocking bead pqueue-934931b0 and readiness documentation for the gap.\",\"recommended_action\":\"release_claim_mark_blocked\",\"result_rev\":\"b57e9c6a96baf64223248934880198e6b3e82ed8\",\"session_id\":\"eb-53911c9d\",\"status\":\"execution_failed\",\"suggested_amendments\":[{\"target\":\"deps\",\"amendment\":\"Add dependency on pqueue-934931b0 as the blocking prerequisite for proving object_log_sqlite_projection in kind.\"}],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-06-17T22:24:49.372089559Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "blocked: release_claim_mark_blocked"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\nrationale: status: blocked\nreason: Current pqueue runtime cannot truthfully satisfy the object_log_sqlite_projection kind Helm proof. crates/pqueue-service/src/runtime.rs marks object_log_sqlite_projection readiness as unconditionally ready instead of validating Postgres control-plane, S3-compatible object-log, segment settings, credentials, or SQLite projection recovery. crates/pqueue-objectlog/src/lib.rs only constructs FjordObjectLogStore with fjord memory coordinator/blob stores and exposes no S3/MinIO runtime adapter path. scripts/ci/kind-helm-test.sh installs no MinIO fixture and only checks GET /readyz, so acceptance criteria 1-3 would be a false proof.\nblocking_bead: pqueue-934931b0\nreadiness_gap_documented_in: docs/helix/04-build/DEPLOYMENT-READINESS.md\norchestrator_action: leave_open\ndecision_audit={\"failure_class\":\"blocked\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.5\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.5\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=b57e9c6a96baf64223248934880198e6b3e82ed8\nbase_rev=ce533866d78b8f2d825a663290f12b1267eec2b0\noutcome_reason=blocked",
+          "created_at": "2026-06-17T22:24:49.394775696Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"acceptance criteria dropped or altered\",\"fingerprint\":\"a5009c61c899c35222e0cf80f68291112e4b76a566f9e181735e2281652ab1f2\",\"policy_mode\":\"warn-only\",\"reason\":\"rewrite_rejected\",\"rule_id\":\"pre_claim_intake.rewrite_rejected\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"a5009c61c899c35222e0cf80f68291112e4b76a566f9e181735e2281652ab1f2\"}",
+          "created_at": "2026-06-17T23:37:48.465078151Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "rewrite_rejected"
+        }
+      ],
+      "spec-id": "td-s3-object-log-sqlite-projection-mode"
+    }
+  },
+  "governing": [
+    {
+      "id": "td-s3-object-log-sqlite-projection-mode",
+      "path": "docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md",
+      "title": "Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260617T233749-a9fa11c7",
+    "prompt": ".ddx/executions/20260617T233749-a9fa11c7/prompt.md",
+    "manifest": ".ddx/executions/20260617T233749-a9fa11c7/manifest.json",
+    "result": ".ddx/executions/20260617T233749-a9fa11c7/result.json",
+    "checks": ".ddx/executions/20260617T233749-a9fa11c7/checks.json",
+    "usage": ".ddx/executions/20260617T233749-a9fa11c7/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-ce2ade85-20260617T233749-a9fa11c7"
+  },
+  "prompt_sha": "7958258c2902588f6b7008cc1856ab0eb05e44686cd38a43de8fa1d2d8343598"
+}
