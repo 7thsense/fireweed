@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260617T224322-b37159df",
+  "bead_id": "pqueue-27c6299f",
+  "base_rev": "9307b3b57e0e66bafd536c247821e7086f51c26b",
+  "created_at": "2026-06-17T22:43:23.173185332Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-27c6299f",
+    "title": "Wire object-log S3 runtime env parsing and readiness validation",
+    "description": "PROBLEM: The service accepts `object_log_sqlite_projection`, but the container runtime does not parse S3-compatible object-log configuration, SQLite projection storage settings, or validate live object-store connectivity before reporting readiness.\n\nROOT CAUSE: `crates/pqueue-service/src/runtime.rs:93` through `crates/pqueue-service/src/runtime.rs:106` define runtime config with only `postgres_database_url`; `crates/pqueue-service/src/runtime.rs:146` only reads `PQUEUE_POSTGRES_DATABASE_URL`; `crates/pqueue-service/src/runtime.rs:167` through `crates/pqueue-service/src/runtime.rs:175` returns `ReadinessCheck::Ready` for `ObjectLogSqliteProjection` without checking S3-compatible object storage, SQLite projection path, segment settings, credentials, or Postgres control-plane configuration.\n\nPROPOSED FIX: Extend `RuntimeConfig` and runtime tests to parse and validate the object-log environment contract: `PQUEUE_OBJECT_LOG_ENDPOINT`, `PQUEUE_OBJECT_LOG_BUCKET`, `PQUEUE_OBJECT_LOG_REGION`, `PQUEUE_OBJECT_LOG_ACCESS_KEY_ID`, `PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY`, `PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS`, `PQUEUE_SQLITE_PROJECTION_DIR`, and required Postgres control-plane URL. Add a readiness path that instantiates or probes the configured object-log path and verifies the SQLite projection directory is usable before returning ready.\n\nGOVERNING ARTIFACTS: Parent bead `pqueue-3546063c`; `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md`; `docs/helix/04-build/DEPLOYMENT-READINESS.md`; `docs/deployment/container-runtime-contract.md`.\n\nNON-SCOPE: Cloud-provider-specific IAM/TLS hardening beyond an S3-compatible MinIO proof. Replacing the existing fjord object-log abstraction or queue semantics. Helm rendering, kind orchestration, and prose documentation changes are handled by sibling beads.",
+    "acceptance": "1. TestObjectLogRuntimeEnvValidation: `cargo test -p pqueue-service --test container_runtime_contract_tests -- --nocapture` passes and covers required env/config validation for `object_log_sqlite_projection`, including endpoint, bucket, region, credentials, segment max commands, SQLite projection directory, and Postgres control-plane URL.\n2. TestObjectLogReadinessRequiresConfiguredDependencies: `cargo test -p pqueue-service --test container_runtime_contract_tests -- --nocapture` passes and proves `/readyz` returns unavailable when required object-log or SQLite projection configuration is missing or unusable.\n3. TestObjectLogReadinessProbesConfiguredPath: `cargo test -p pqueue-service --test container_runtime_contract_tests -- --nocapture` passes and proves readiness validates the configured S3-compatible object-log path instead of returning unconditional ready.\n4. TestQualityGates: `go test ./...` and `lefthook run pre-commit` pass from the repository root, alongside the Rust command in AC1.",
+    "parent": "pqueue-c3dd271c",
+    "labels": [
+      "area:object-log",
+      "area:integration",
+      "kind:implementation",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260617T224322-b37159df",
+    "prompt": ".ddx/executions/20260617T224322-b37159df/prompt.md",
+    "manifest": ".ddx/executions/20260617T224322-b37159df/manifest.json",
+    "result": ".ddx/executions/20260617T224322-b37159df/result.json",
+    "checks": ".ddx/executions/20260617T224322-b37159df/checks.json",
+    "usage": ".ddx/executions/20260617T224322-b37159df/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-27c6299f-20260617T224322-b37159df"
+  },
+  "prompt_sha": "75d9b5e70bfc4c21905e7c793d6a96b5adfe3e9c274dbecc481ee51c156a9020"
+}
