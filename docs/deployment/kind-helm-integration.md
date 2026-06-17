@@ -52,6 +52,15 @@ The object-log production-readiness smoke command is:
 bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection
 ```
 
+Current status: this proof is blocked until `pqueue-b9f75588` lands. The
+existing harness path can render/install the object-log chart values and check
+`/readyz`, but the deployment proof is not complete until the harness also
+deploys MinIO or an equivalent S3-compatible service, creates/configures the
+`pqueue-object-log` bucket, writes through the configured object-log runtime
+path, restarts or rolls out pqueue, and verifies SQLite projection recovery
+from object-log state. Do not cite the command above as completed release
+evidence until those checks are present and passing.
+
 For `object_log_sqlite_projection`, the Helm CI values render this runtime
 contract:
 

@@ -179,14 +179,27 @@ Provider-specific S3 readiness requires a later bead with:
 - a live acceptance run or explicitly approved emulator boundary;
 - release evidence separate from the fjord/local fixture proof.
 
-The local production-readiness proof uses MinIO as the S3-compatible object
-store for `object_log_sqlite_projection`. The canonical command is:
+Current deployment gap: the chart and runtime can render and validate the
+`object_log_sqlite_projection` object-log configuration, but the kind proof is
+not complete until `pqueue-b9f75588` lands. The missing proof surface is:
+
+- `scripts/ci/kind-helm-test.sh` and `scripts/ci/kind/**` must deploy MinIO or
+  an equivalent S3-compatible service, create/configure the
+  `pqueue-object-log` bucket, and wait for those dependencies before installing
+  pqueue.
+- The deployed service smoke must write through the configured object-log
+  runtime path, not only check `GET /readyz`.
+- The proof must restart or roll out the pqueue pod and verify state can be
+  recovered from object-log segments/snapshots plus the SQLite projection path.
+
+Until that bead closes, the local production-readiness proof for
+`object_log_sqlite_projection` remains blocked. The target command is:
 
 ```sh
 bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection
 ```
 
-The proof boundary is:
+The required proof boundary is:
 
 - Helm renders the object-log runtime environment, Postgres control-plane Secret
   reference, object-store credential Secret reference, and PVC-backed SQLite
