@@ -1,0 +1,11 @@
+# Keep the build context small and reproducible: ship only workspace source and
+# manifests. Build outputs, VCS, tooling, and execution evidence are excluded.
+target/
+**/target/
+.git/
+.gitignore
+.ddx/
+.agents/
+.claude/
+Dockerfile
+.dockerignore
