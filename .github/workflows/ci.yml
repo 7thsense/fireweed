@@ -52,3 +52,17 @@ jobs:
 
       - name: PR gate (enforcing)
         run: bash scripts/ci/pr-gate.sh --mode enforcing
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pqueue
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Helm static validation gate
+        run: bash scripts/ci/helm-gate.sh

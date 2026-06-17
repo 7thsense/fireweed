@@ -1,0 +1,11 @@
+# CI test values: object_log_sqlite_projection backend profile.
+#
+# Consumed by scripts/ci/helm-gate.sh for the deterministic static Helm
+# validation gate (helm lint + helm template + kubeconform). These values are
+# merged over charts/pqueue/values.yaml; selecting this profile exercises the
+# object-log env vars, SQLite projection volume mount, and the projection PVC
+# template paths that the default profile does not render.
+backend:
+  profile: object_log_sqlite_projection
+image:
+  tag: ci
