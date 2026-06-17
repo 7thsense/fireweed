@@ -15,7 +15,15 @@ For each supported backend profile (`postgres_native` and
    `charts/pqueue/values.schema.json`.
 2. **`helm template`** — renders the chart to manifests using the profile's CI
    values file.
-3. **`kubeconform`** — validates the rendered manifests against the pinned
+3. **Rendered contract assertions** — checks that each profile renders only the
+   expected runtime contract. The object-log profile must include object-store
+   endpoint/bucket/region/segment values, Postgres and object-store Secret refs,
+   SQLite projection path, and the projection PVC/volume mount. The
+   postgres-native profile must not render object-log-only env vars, PVCs, or
+   volume mounts. Both profiles reject local CI fixture credentials in rendered
+   manifests, and chart defaults are checked for those credentials before any
+   profile render.
+4. **`kubeconform`** — validates the rendered manifests against the pinned
    Kubernetes API schema set (`-strict`, fails on unknown fields).
 
 The gate performs **no** cluster operations. `kind` cluster creation and runtime

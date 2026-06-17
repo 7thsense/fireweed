@@ -247,7 +247,7 @@
             },
             "segmentMaxCommands": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 2
             },
             "existingSecret": {
               "type": "string",

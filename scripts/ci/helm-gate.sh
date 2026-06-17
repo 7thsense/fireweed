@@ -133,6 +133,88 @@ values_file_for() {
     esac
 }
 
+assert_contains() {
+    local file="$1"
+    local needle="$2"
+    local description="$3"
+    if ! grep -Fq -- "$needle" "$file"; then
+        err "missing ${description}: ${needle}"
+        exit 1
+    fi
+}
+
+assert_not_contains() {
+    local file="$1"
+    local needle="$2"
+    local description="$3"
+    if grep -Fq -- "$needle" "$file"; then
+        err "unexpected ${description}: ${needle}"
+        exit 1
+    fi
+}
+
+assert_no_fixture_credentials() {
+    local file="$1"
+    local description="$2"
+    local forbidden
+    for forbidden in \
+        "minioadmin" \
+        "minioadmin-secret" \
+        "postgres://pqueue:pqueue@postgres:5432/pqueue"
+    do
+        assert_not_contains "$file" "$forbidden" "${description} fixture credential"
+    done
+}
+
+assert_object_log_contract() {
+    local rendered="$1"
+
+    assert_contains "$rendered" 'PQUEUE_BACKEND_PROFILE: "object_log_sqlite_projection"' "object-log backend profile"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ENDPOINT: "http://minio:9000"' "object-log endpoint"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_BUCKET: "pqueue-object-log"' "object-log bucket"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_REGION: "us-east-1"' "object-log region"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS: "1024"' "object-log segment max commands"
+    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_DIR: "/var/lib/pqueue/projection"' "SQLite projection path"
+    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_DATABASE_URL' "Postgres control-plane env"
+    assert_contains "$rendered" 'name: "pqueue-postgres"' "Postgres control-plane Secret reference"
+    assert_contains "$rendered" 'key: "database-url"' "Postgres control-plane Secret key"
+    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_ACCESS_KEY_ID' "object-log access key env"
+    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY' "object-log secret key env"
+    assert_contains "$rendered" 'name: "pqueue-object-log"' "object-log credential Secret reference"
+    assert_contains "$rendered" 'key: "access-key-id"' "object-log access key Secret key"
+    assert_contains "$rendered" 'key: "secret-access-key"' "object-log secret key Secret key"
+    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "SQLite projection PVC"
+    assert_contains "$rendered" 'name: sqlite-projection' "SQLite projection volume"
+    assert_contains "$rendered" 'mountPath: "/var/lib/pqueue/projection"' "SQLite projection volume mount"
+    assert_contains "$rendered" 'claimName: pqueue-object-log-sqlite-projection-sqlite-projection' "SQLite projection PVC claim"
+    assert_no_fixture_credentials "$rendered" "object-log rendered manifest"
+}
+
+assert_postgres_native_contract() {
+    local rendered="$1"
+
+    assert_contains "$rendered" 'PQUEUE_BACKEND_PROFILE: "postgres_native"' "postgres-native backend profile"
+    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_DATABASE_URL' "Postgres database env"
+    assert_contains "$rendered" 'secretKeyRef:' "Postgres database Secret reference"
+    assert_not_contains "$rendered" 'PQUEUE_OBJECT_LOG_' "postgres-native object-log env"
+    assert_not_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_DIR' "postgres-native SQLite projection env"
+    assert_not_contains "$rendered" 'sqlite-projection' "postgres-native SQLite projection volume or PVC"
+    assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "postgres-native PVC"
+    assert_no_fixture_credentials "$rendered" "postgres-native rendered manifest"
+}
+
+assert_profile_contract() {
+    local profile="$1"
+    local rendered="$2"
+
+    echo "--- rendered contract assertions [${profile}] ---"
+    case "$profile" in
+        postgres_native) assert_postgres_native_contract "$rendered" ;;
+        object_log_sqlite_projection) assert_object_log_contract "$rendered" ;;
+        *) err "no rendered contract assertions for profile: ${profile}"; exit 1 ;;
+    esac
+}
+
 main() {
     require helm
 
@@ -143,6 +225,7 @@ main() {
     echo "profiles:            ${PROFILES[*]}"
 
     ensure_kubeconform
+    assert_no_fixture_credentials "${CHART_DIR}/values.yaml" "chart default values"
 
     for profile in "${PROFILES[@]}"; do
         local values
@@ -155,12 +238,16 @@ main() {
         echo "--- helm template + kubeconform [${profile}] ---"
         # -strict rejects unknown fields; -kubernetes-version pins the API
         # schema set; reading from stdin keeps the render deterministic.
-        helm template "pqueue-${profile//_/-}" "$CHART_DIR" --values "$values" \
-            | "$KUBECONFORM_BIN" \
+        local rendered
+        rendered="$(mktemp)"
+        helm template "pqueue-${profile//_/-}" "$CHART_DIR" --values "$values" >"$rendered"
+        assert_profile_contract "$profile" "$rendered"
+        "$KUBECONFORM_BIN" \
                 -strict \
                 -summary \
                 -kubernetes-version "$KUBERNETES_VERSION" \
-                -
+                - <"$rendered"
+        rm -f "$rendered"
     done
 
     echo "=== helm static validation gate PASSED ==="
