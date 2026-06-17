@@ -1,0 +1,19 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/deployment/container-runtime-contract.md",
+    "docs/deployment/helm-static-validation.md",
+    "docs/deployment/kind-helm-integration.md",
+    "docs/helix/04-build/DEPLOYMENT-READINESS.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/deployment/kind-helm-integration.md",
+      "line": 7,
+      "rule_id": "prose.specificity.actor_action",
+      "severity": "advisory",
+      "rationale": "The sentence says something enables or supports work without naming the actor, action, artifact, or boundary.",
+      "suggested_edit": "Name the actor, action, artifact, or boundary that makes the statement concrete."
+    }
+  ]
+}
