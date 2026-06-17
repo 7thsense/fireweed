@@ -302,3 +302,12 @@
 {"event":"release","lock_name":"index.lock","operation":"index.commit","holder_pid":2013209,"acquired_at":"2026-06-17T22:17:29.265583266Z","released_at":"2026-06-17T22:17:29.286439583Z","duration_ms":20}
 {"event":"release","lock_name":"tracker.lock","operation":"pre_dispatch_commits","holder_pid":2013209,"acquired_at":"2026-06-17T22:17:29.249249163Z","released_at":"2026-06-17T22:17:29.286525791Z","duration_ms":37}
 {"event":"acquire","lock_name":"tracker.lock","operation":"pre_dispatch_checkpoint","holder_pid":2013209,"acquired_at":"2026-06-17T22:17:29.293503091Z"}
+{"event":"acquire","lock_name":"index.lock","operation":"index.read-tree","holder_pid":2013209,"acquired_at":"2026-06-17T22:17:29.340184147Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.read-tree","holder_pid":2013209,"acquired_at":"2026-06-17T22:17:29.340184147Z","released_at":"2026-06-17T22:17:29.343919443Z","duration_ms":3}
+{"event":"release","lock_name":"tracker.lock","operation":"pre_dispatch_checkpoint","holder_pid":2013209,"acquired_at":"2026-06-17T22:17:29.293503091Z","released_at":"2026-06-17T22:17:29.344047151Z","duration_ms":50}
+{"event":"acquire","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":2013209,"acquired_at":"2026-06-17T22:24:49.419670006Z"}
+{"event":"release","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":2013209,"acquired_at":"2026-06-17T22:24:49.419670006Z","released_at":"2026-06-17T22:24:49.419789381Z"}
+{"event":"acquire","lock_name":"index.lock","operation":"index.add","holder_pid":2013209,"acquired_at":"2026-06-17T22:24:49.427347066Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.add","holder_pid":2013209,"acquired_at":"2026-06-17T22:24:49.427347066Z","released_at":"2026-06-17T22:24:49.434502292Z","duration_ms":7}
+{"event":"acquire","lock_name":"index.lock","operation":"index.commit","holder_pid":2013209,"acquired_at":"2026-06-17T22:24:49.438491426Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.commit","holder_pid":2013209,"acquired_at":"2026-06-17T22:24:49.438491426Z","released_at":"2026-06-17T22:24:49.458262348Z","duration_ms":19}
