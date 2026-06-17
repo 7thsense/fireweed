@@ -1,0 +1,16 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/deployment/kind-helm-integration.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/deployment/kind-helm-integration.md",
+      "line": 7,
+      "rule_id": "prose.specificity.actor_action",
+      "severity": "advisory",
+      "rationale": "The sentence says something enables or supports work without naming the actor, action, artifact, or boundary.",
+      "suggested_edit": "Name the actor, action, artifact, or boundary that makes the statement concrete."
+    }
+  ]
+}
