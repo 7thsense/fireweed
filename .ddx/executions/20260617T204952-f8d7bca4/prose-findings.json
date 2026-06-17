@@ -1,0 +1,24 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/helix/04-build/DEPLOYMENT-READINESS.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/helix/04-build/DEPLOYMENT-READINESS.md",
+      "line": 94,
+      "rule_id": "prose.specificity.actor_action",
+      "severity": "advisory",
+      "rationale": "The sentence says something enables or supports work without naming the actor, action, artifact, or boundary.",
+      "suggested_edit": "Name the actor, action, artifact, or boundary that makes the statement concrete."
+    },
+    {
+      "file": "docs/helix/04-build/DEPLOYMENT-READINESS.md",
+      "line": 154,
+      "rule_id": "prose.specificity.actor_action",
+      "severity": "advisory",
+      "rationale": "The sentence says something enables or supports work without naming the actor, action, artifact, or boundary.",
+      "suggested_edit": "Name the actor, action, artifact, or boundary that makes the statement concrete."
+    }
+  ]
+}
