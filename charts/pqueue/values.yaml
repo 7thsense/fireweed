@@ -1,0 +1,97 @@
+replicaCount: 1
+
+image:
+  repository: pqueue
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+containerPort: 8080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+config:
+  listenAddr: 0.0.0.0:8080
+  principalId: pqueue-service
+  tenants: []
+
+backend:
+  profile: postgres_native
+  shardCount:
+    min: 1
+    max: 1
+  postgres:
+    existingSecret: pqueue-postgres
+    databaseUrlKey: database-url
+  objectLog:
+    endpoint: http://minio:9000
+    bucket: pqueue-object-log
+    region: us-east-1
+    segmentMaxCommands: 1024
+    existingSecret: pqueue-object-log
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+  sqliteProjection:
+    mountPath: /var/lib/pqueue/projection
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 8Gi
+  annotations: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

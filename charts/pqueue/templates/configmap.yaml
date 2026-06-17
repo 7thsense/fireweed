@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pqueue.fullname" . }}-config
+  labels:
+    {{- include "pqueue.labels" . | nindent 4 }}
+data:
+  PQUEUE_LISTEN_ADDR: {{ .Values.config.listenAddr | quote }}
+  PQUEUE_BACKEND_PROFILE: {{ .Values.backend.profile | quote }}
+  PQUEUE_PRINCIPAL_ID: {{ .Values.config.principalId | quote }}
+  PQUEUE_TENANTS: {{ join "," .Values.config.tenants | quote }}
+  PQUEUE_SHARD_COUNT_MIN: {{ .Values.backend.shardCount.min | quote }}
+  PQUEUE_SHARD_COUNT_MAX: {{ .Values.backend.shardCount.max | quote }}
+  {{- if eq .Values.backend.profile "object_log_sqlite_projection" }}
+  PQUEUE_OBJECT_LOG_ENDPOINT: {{ .Values.backend.objectLog.endpoint | quote }}
+  PQUEUE_OBJECT_LOG_BUCKET: {{ .Values.backend.objectLog.bucket | quote }}
+  PQUEUE_OBJECT_LOG_REGION: {{ .Values.backend.objectLog.region | quote }}
+  PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS: {{ .Values.backend.objectLog.segmentMaxCommands | quote }}
+  PQUEUE_SQLITE_PROJECTION_DIR: {{ .Values.backend.sqliteProjection.mountPath | quote }}
+  {{- end }}
