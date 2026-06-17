@@ -1,0 +1,43 @@
+{
+  "attempt_id": "20260617T205901-3ab33d0e",
+  "bead_id": "pqueue-611b6645",
+  "base_rev": "9d5161d5848894639e4515d83ec38098c210bb4b",
+  "created_at": "2026-06-17T20:59:01.691046531Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-611b6645",
+    "title": "Define pqueue container image and runtime config contract",
+    "description": "Add a reproducible container image build for the pqueue service and document the runtime configuration contract consumed by Helm. The image must run the production service binary without relying on local source mounts.\n\nStart by inspecting existing workspace binaries and service configuration in Cargo.toml, crates/pqueue-service/**, scripts/release/**, and README/docs. Reuse existing release/profile settings where possible.\n\nIn-scope files:\n- Dockerfile\n- .dockerignore\n- scripts/release/** if image packaging helpers are useful\n- docs/** for runtime env/config contract\n- crates/pqueue-service/** only for narrow runtime config/help output needed by container deployment\nOut-of-scope:\n- Helm chart templates; add only docs/examples needed for the image contract.\n- Changing queue backend semantics.",
+    "acceptance": "1. `docker build -t pqueue:dev .` passes.\n2. `docker run --rm pqueue:dev --help` or the service binary's documented health/help command exits 0 and proves the image entrypoint works.\n3. `cargo +1.92.0 build --release --workspace` passes.\n4. Docs or README state the image entrypoint, required environment/config keys, health endpoint/port, and backend-profile settings needed by Helm.",
+    "parent": "pqueue-3546063c",
+    "labels": [
+      "area:container",
+      "kind:implementation",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "spec-id": "build-implementation-plan"
+    }
+  },
+  "governing": [
+    {
+      "id": "build-implementation-plan",
+      "path": "docs/helix/04-build/BUILD-001-implementation-plan.md",
+      "title": "Build Plan: BUILD-001 Implementation Sequence"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260617T205901-3ab33d0e",
+    "prompt": ".ddx/executions/20260617T205901-3ab33d0e/prompt.md",
+    "manifest": ".ddx/executions/20260617T205901-3ab33d0e/manifest.json",
+    "result": ".ddx/executions/20260617T205901-3ab33d0e/result.json",
+    "checks": ".ddx/executions/20260617T205901-3ab33d0e/checks.json",
+    "usage": ".ddx/executions/20260617T205901-3ab33d0e/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-611b6645-20260617T205901-3ab33d0e"
+  },
+  "prompt_sha": "46e7ed24464f4bede1f6f48e6c0b32997df42cd422490955864406f78be9236e"
+}
