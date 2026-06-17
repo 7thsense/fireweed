@@ -1,0 +1,43 @@
+{
+  "attempt_id": "20260617T212049-05321ecf",
+  "bead_id": "pqueue-4c08f11b",
+  "base_rev": "7dabecb6088e0215d25886a59e2306f5205eb39c",
+  "created_at": "2026-06-17T21:20:49.670568103Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-4c08f11b",
+    "title": "Create Helm chart skeleton and backend values schema",
+    "description": "Create the initial Helm chart for installing pqueue in Kubernetes. The chart must expose values for image, service, resources, probes, persistence where needed, and backend profile selection for postgres_native and object_log_sqlite_projection.\n\nUse charts/pqueue as the chart root. Prefer a values.schema.json so CI can validate operator-facing values. Templates should render without cluster access and should not require secrets committed to the repository.\n\nIn-scope files:\n- charts/pqueue/Chart.yaml\n- charts/pqueue/values.yaml\n- charts/pqueue/values.schema.json\n- charts/pqueue/templates/**\n- docs/** only for chart usage notes if needed\nOut-of-scope:\n- kind execution harness and GitHub Actions wiring.\n- Provider-specific S3 implementation beyond chart values needed for object_log_sqlite_projection.",
+    "acceptance": "1. `helm lint charts/pqueue` passes.\n2. `helm template pqueue charts/pqueue --set backend.profile=postgres_native` passes and renders a Deployment, Service, ConfigMap/Secret references, and probes.\n3. `helm template pqueue charts/pqueue --set backend.profile=object_log_sqlite_projection` passes and renders object-log profile configuration without hard-coded credentials.\n4. `helm template pqueue charts/pqueue --values charts/pqueue/values.yaml` passes.",
+    "parent": "pqueue-3546063c",
+    "labels": [
+      "area:helm",
+      "kind:implementation",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "spec-id": "build-implementation-plan"
+    }
+  },
+  "governing": [
+    {
+      "id": "build-implementation-plan",
+      "path": "docs/helix/04-build/BUILD-001-implementation-plan.md",
+      "title": "Build Plan: BUILD-001 Implementation Sequence"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260617T212049-05321ecf",
+    "prompt": ".ddx/executions/20260617T212049-05321ecf/prompt.md",
+    "manifest": ".ddx/executions/20260617T212049-05321ecf/manifest.json",
+    "result": ".ddx/executions/20260617T212049-05321ecf/result.json",
+    "checks": ".ddx/executions/20260617T212049-05321ecf/checks.json",
+    "usage": ".ddx/executions/20260617T212049-05321ecf/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-4c08f11b-20260617T212049-05321ecf"
+  },
+  "prompt_sha": "7ff6834d8a087128fec1503c75f190121b47207b7c673ca26e2c147f8b04a166"
+}
