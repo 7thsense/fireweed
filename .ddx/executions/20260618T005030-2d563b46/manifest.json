@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260618T005030-2d563b46",
+  "bead_id": "pqueue-7846b800",
+  "base_rev": "dd31624a0ebedc8eb2529b17907c8aaa67bfebc8",
+  "created_at": "2026-06-18T00:50:30.718486597Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-7846b800",
+    "title": "Add local deployment release gate orchestration",
+    "description": "PROBLEM: There is no single local deployment-release gate that composes the existing release gate, Helm static validation, chart packaging, docs/microsite checks, and kind backend smoke matrix while tolerating documented local Docker/kind unavailability.\n\nROOT CAUSE: `scripts/ci/release-gate.sh:103` starts the existing release gate at Rust coverage/product validation only, `scripts/ci/helm-gate.sh:231` packages and validates the chart separately, and `scripts/ci/kind-helm-test.sh:309` requires Docker/kind/kubectl/helm for real runs without a parent deployment gate that can document local cluster skips.\n\nPROPOSED FIX: Create `scripts/ci/deployment-release-gate.sh` as the local orchestrator. It should run `bash scripts/ci/release-gate.sh`, `bash scripts/ci/helm-gate.sh`, chart packaging, and docs/microsite validation; then run `bash scripts/ci/kind-helm-test.sh --backend postgres_native` and `bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection` only when Docker/kind/kubectl/helm are present and Docker is usable. If cluster tools are missing locally, print an explicit documented skip for only the kind portion and fail on any non-cluster check failure.\n\nGOVERNING ARTIFACTS: Parent bead `pqueue-4d588c37`; epic `pqueue-3546063c`; `docs/helix/04-build/BUILD-001-implementation-plan.md`; `docs/helix/04-build/DEPLOYMENT-READINESS.md`; `docs/deployment/helm-static-validation.md`; `docs/deployment/kind-helm-integration.md`.\n\nDEPENDENCY IDS: `pqueue-728222f1`, `pqueue-0f1e8ba6`.\n\nNON-SCOPE: Cutting the release tag.",
+    "acceptance": "1. TestDeploymentReleaseGateRunsNonClusterChecks: `bash scripts/ci/deployment-release-gate.sh` runs `bash scripts/ci/release-gate.sh`, `bash scripts/ci/helm-gate.sh`, Helm chart packaging, and docs/microsite validation before any kind skip is allowed.\n2. TestDeploymentReleaseGateLocalKindSkipsAreDocumented: on a host without usable Docker/kind, `bash scripts/ci/deployment-release-gate.sh` exits successfully only when the skipped portion is limited to the kind backend matrix and the output names the missing local capability.\n3. TestDeploymentReleaseGateRunsBothBackendsWhenToolsExist: with Docker, kind, kubectl, and helm available, the gate runs `bash scripts/ci/kind-helm-test.sh --backend postgres_native` and `bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection`.\n4. TestReleaseGateCompositionPreserved: existing `bash scripts/ci/release-gate.sh` still passes independently and is invoked by the deployment gate without changing its existing behavior unless the change is explicitly documented in the script output.\n5. TestQualityGates: `go test ./...` and `lefthook run pre-commit` pass from the repository root after the gate script changes.",
+    "parent": "pqueue-4d588c37",
+    "labels": [
+      "area:ci",
+      "kind:release",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness check timed out after 5m0s (pqueue-7846b800)\",\"fingerprint\":\"f0a111a0c11daab3f24469c25a0cbaa2529ffbe8aff199b454b02ac5ed9a0ecd\",\"policy_mode\":\"warn-only\",\"reason\":\"timeout\",\"rule_id\":\"pre_claim_intake.timeout\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"f0a111a0c11daab3f24469c25a0cbaa2529ffbe8aff199b454b02ac5ed9a0ecd\"}",
+          "created_at": "2026-06-18T00:50:29.779052845Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "timeout"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260618T005030-2d563b46",
+    "prompt": ".ddx/executions/20260618T005030-2d563b46/prompt.md",
+    "manifest": ".ddx/executions/20260618T005030-2d563b46/manifest.json",
+    "result": ".ddx/executions/20260618T005030-2d563b46/result.json",
+    "checks": ".ddx/executions/20260618T005030-2d563b46/checks.json",
+    "usage": ".ddx/executions/20260618T005030-2d563b46/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-7846b800-20260618T005030-2d563b46"
+  },
+  "prompt_sha": "a3a1eb664f787e09f9de9e9ecf1d13312633424c19ce714f78febfe8e0e351a0"
+}
