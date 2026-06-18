@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260618T005759-bc05cc96",
+  "bead_id": "pqueue-5badddeb",
+  "base_rev": "4e872bab06e9392e91a70700fef2d01f580132d8",
+  "created_at": "2026-06-18T00:57:59.703267074Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-5badddeb",
+    "title": "Record deployment release proof evidence",
+    "description": "PROBLEM: The deployment release gate needs release-note-ready evidence, but the current scripts do not produce one deployment proof record containing commit SHA, chart version, image coordinates, backend profiles, and commands run.\n\nROOT CAUSE: `scripts/ci/release-gate.sh:23` validates existing release ledgers with product-validation fields, `scripts/ci/helm-gate.sh:222` only prints chart/static-validation context, and `scripts/ci/kind-helm-test.sh:317` prints per-run backend context without emitting a consolidated release proof ledger.\n\nPROPOSED FIX: Extend `scripts/ci/deployment-release-gate.sh` and, if useful, add `docs/**` release proof ledger documentation so the deployment gate writes a deterministic evidence file under `target/` containing commit SHA, chart version, image tag and digest when available, backend profiles tested, commands run, exit statuses, environment skips, and paths to supporting artifacts. Keep evidence suitable for release notes and distinguish local environment skips from CI matrix proof.\n\nGOVERNING ARTIFACTS: Parent bead `pqueue-4d588c37`; epic `pqueue-3546063c`; `docs/helix/04-build/BUILD-001-implementation-plan.md`; `docs/helix/04-build/DEPLOYMENT-READINESS.md`; `docs/deployment/operator-release-artifacts.md`.\n\nDEPENDENCY IDS: `pqueue-728222f1`, `pqueue-0f1e8ba6`.\n\nNON-SCOPE: Cutting the release tag.",
+    "acceptance": "1. TestDeploymentProofLedgerSchema: `bash scripts/ci/deployment-release-gate.sh` writes a deployment proof evidence file with commit SHA, chart version, backend profiles tested, commands run, exit status for each command, and any documented local Docker/kind skip.\n2. TestDeploymentProofImageEvidenceOptional: when image tag and digest inputs are available through environment variables or release artifacts, the evidence records them; when unavailable locally, the evidence records a clear unavailable value without failing non-release local runs.\n3. TestDeploymentProofReleaseNotesReady: the evidence output is documented or formatted so release notes can cite the exact command list, backend profile matrix, chart package/version, and supporting ledger/artifact paths.\n4. TestDeploymentProofDoesNotMaskFailures: command failures in release gate, Helm static validation, chart packaging, docs/microsite validation, or CI-capable kind runs produce a failing deployment gate and a non-passing evidence status.\n5. TestQualityGates: `go test ./...` and `lefthook run pre-commit` pass from the repository root after the evidence changes.",
+    "parent": "pqueue-4d588c37",
+    "labels": [
+      "area:ci",
+      "area:docs",
+      "kind:release",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260618T005759-bc05cc96",
+    "prompt": ".ddx/executions/20260618T005759-bc05cc96/prompt.md",
+    "manifest": ".ddx/executions/20260618T005759-bc05cc96/manifest.json",
+    "result": ".ddx/executions/20260618T005759-bc05cc96/result.json",
+    "checks": ".ddx/executions/20260618T005759-bc05cc96/checks.json",
+    "usage": ".ddx/executions/20260618T005759-bc05cc96/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-5badddeb-20260618T005759-bc05cc96"
+  },
+  "prompt_sha": "968c1f9789462eb4c5d7b219b1c8d5f8b42f39d615f21da70cfaf4def924fb11"
+}
