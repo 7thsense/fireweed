@@ -2,6 +2,13 @@
 
 ## Documentation
 
+- [Operator microsite](docs/operator/index.html) is a static, openable
+  first-screen console for install commands, backend profile choice, release
+  artifact links, and production-readiness status.
+- [Operator deployment guide](docs/deployment/operator-guide.md) covers
+  `helm install`, upgrade, uninstall, values, `postgres_native`,
+  `object_log_sqlite_projection`, S3/MinIO, `kind` smoke tests, release
+  artifacts, troubleshooting, and known production gaps.
 - [Operator release artifacts](docs/deployment/operator-release-artifacts.md)
   states where to obtain published images, Helm chart packages, binary
   archives, checksums, and the commands to verify them before deployment.

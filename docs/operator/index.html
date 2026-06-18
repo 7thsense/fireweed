@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pqueue Operator Console</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f7f6f1;
+        --ink: #161616;
+        --muted: #595852;
+        --line: #c9c4b7;
+        --panel: #fffffb;
+        --field: #22211e;
+        --field-2: #2e312c;
+        --accent: #0f766e;
+        --accent-2: #9f1239;
+        --ok: #146c43;
+        --warn: #b45309;
+        --blocked: #b91c1c;
+        --shadow: 0 16px 40px rgba(31, 28, 22, 0.14);
+        font-family:
+          "Aptos", "Segoe UI", "Liberation Sans", system-ui, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background:
+          linear-gradient(90deg, rgba(22, 22, 22, 0.04) 1px, transparent 1px) 0
+            0 / 44px 44px,
+          linear-gradient(rgba(22, 22, 22, 0.04) 1px, transparent 1px) 0 0 /
+            44px 44px,
+          var(--paper);
+        color: var(--ink);
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .shell {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        padding-bottom: 18px;
+        border-bottom: 2px solid var(--ink);
+      }
+
+      .brand {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-family: "Georgia", "Times New Roman", serif;
+        font-size: 34px;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      .brand span {
+        color: var(--muted);
+        font-size: 14px;
+        text-transform: uppercase;
+      }
+
+      nav {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      nav a,
+      .link-button {
+        border: 1px solid var(--ink);
+        border-radius: 4px;
+        padding: 8px 10px;
+        background: var(--panel);
+        text-decoration: none;
+        font-size: 14px;
+      }
+
+      .operator-grid {
+        display: grid;
+        grid-template-columns: 1.25fr 0.75fr;
+        gap: 18px;
+        padding: 22px 0 18px;
+        min-height: 72vh;
+      }
+
+      section {
+        background: rgba(255, 255, 251, 0.88);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        box-shadow: var(--shadow);
+      }
+
+      .panel-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .panel-heading h2,
+      .panel-heading h3 {
+        margin: 0;
+        font-size: 17px;
+        letter-spacing: 0;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 4px;
+        padding: 4px 7px;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .badge.ok {
+        background: #dcefe4;
+        color: var(--ok);
+      }
+
+      .badge.warn {
+        background: #fff0d8;
+        color: var(--warn);
+      }
+
+      .badge.blocked {
+        background: #fde2e2;
+        color: var(--blocked);
+      }
+
+      .commands {
+        display: grid;
+        gap: 12px;
+        padding: 16px;
+      }
+
+      .command-block {
+        background: var(--field);
+        color: #f8f5eb;
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .command-block .label {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 9px 12px;
+        background: var(--field-2);
+        color: #d5d0c2;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      pre {
+        margin: 0;
+        padding: 14px 12px 16px;
+        overflow-x: auto;
+        font-size: 13px;
+        line-height: 1.48;
+      }
+
+      code {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      .profile-list,
+      .status-list,
+      .doc-list {
+        display: grid;
+        gap: 12px;
+        padding: 16px;
+      }
+
+      .profile,
+      .status-row,
+      .doc-row {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px;
+        background: var(--panel);
+      }
+
+      .profile h3,
+      .status-row h3,
+      .doc-row h3 {
+        margin: 0 0 7px;
+        font-size: 16px;
+      }
+
+      .profile p,
+      .status-row p,
+      .doc-row p,
+      .note p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.45;
+        font-size: 14px;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px;
+      }
+
+      .note {
+        padding: 16px;
+        border-top: 1px solid var(--line);
+      }
+
+      .diagram {
+        padding: 14px 16px 18px;
+      }
+
+      .diagram svg {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+
+      .diagram text {
+        font:
+          700 13px "Aptos",
+          "Segoe UI",
+          sans-serif;
+        fill: #161616;
+      }
+
+      .diagram .thin {
+        font-weight: 500;
+        fill: #595852;
+      }
+
+      footer {
+        padding: 18px 0 6px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      @media (max-width: 900px) {
+        .operator-grid,
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .operator-grid {
+          min-height: auto;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .shell {
+          padding: 16px;
+        }
+
+        .brand {
+          flex-direction: column;
+          gap: 2px;
+        }
+
+        .brand h1 {
+          font-size: 29px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div class="brand">
+          <h1>pqueue</h1>
+          <span>operator console</span>
+        </div>
+        <nav aria-label="Deployment documents">
+          <a href="../deployment/operator-guide.md">Guide</a>
+          <a href="../deployment/operator-release-artifacts.md">Artifacts</a>
+          <a href="../deployment/helm-static-validation.md">Helm gate</a>
+          <a href="../deployment/kind-helm-integration.md">kind smoke</a>
+        </nav>
+      </header>
+
+      <main class="operator-grid">
+        <section aria-labelledby="install-title">
+          <div class="panel-heading">
+            <h2 id="install-title">Install Path</h2>
+            <span class="badge warn">verify first</span>
+          </div>
+          <div class="commands">
+            <div class="command-block">
+              <div class="label">
+                <span>release artifacts</span>
+                <span>checksums + image digest</span>
+              </div>
+              <pre><code>OWNER=&lt;github-owner&gt;
+REPO=pqueue
+TAG=v0.1.0
+VERSION="${TAG#v}"
+DIST_DIR="release-${TAG}"
+
+gh release download "$TAG" --repo "${OWNER}/${REPO}" \
+  --pattern "pqueue-${VERSION}-*.tar.gz" \
+  --pattern "pqueue-${VERSION}.tgz" \
+  --pattern "pqueue-service-image.txt" \
+  --pattern "pqueue-helm-chart.txt" \
+  --pattern "SHA256SUMS" \
+  --dir "$DIST_DIR"
+
+(cd "$DIST_DIR" &amp;&amp; shasum -a 256 -c SHA256SUMS)</code></pre>
+            </div>
+            <div class="command-block">
+              <div class="label">
+                <span>helm install</span>
+                <span>postgres_native</span>
+              </div>
+              <pre><code>NAMESPACE=pqueue
+RELEASE=pqueue
+IMAGE="ghcr.io/${OWNER}/pqueue-service"
+
+kubectl create namespace "$NAMESPACE"
+kubectl -n "$NAMESPACE" create secret generic pqueue-postgres \
+  --from-literal=database-url='postgres://pqueue:pqueue@postgres.example:5432/pqueue'
+
+helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
+  --namespace "$NAMESPACE" \
+  --set image.repository="$IMAGE" \
+  --set image.tag="$VERSION" \
+  --set backend.profile=postgres_native</code></pre>
+            </div>
+            <div class="command-block">
+              <div class="label">
+                <span>kind smoke</span>
+                <span>local proof</span>
+              </div>
+              <pre><code>bash scripts/ci/helm-gate.sh
+bash scripts/ci/kind-helm-test.sh --backend postgres_native
+bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code></pre>
+            </div>
+          </div>
+        </section>
+
+        <div>
+          <section aria-labelledby="profiles-title">
+            <div class="panel-heading">
+              <h2 id="profiles-title">Backend Profiles</h2>
+              <span class="badge ok">BUILD-001 scope</span>
+            </div>
+            <div class="profile-list">
+              <article class="profile">
+                <h3>postgres_native</h3>
+                <p>
+                  Reference correctness backend. Requires PostgreSQL Secret
+                  <code>pqueue-postgres</code> with key
+                  <code>database-url</code>.
+                </p>
+              </article>
+              <article class="profile">
+                <h3>object_log_sqlite_projection</h3>
+                <p>
+                  Postgres control plane, S3-compatible object log, and
+                  PVC-backed SQLite projection. The local production proof must
+                  use MinIO and verify restart/replay.
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <section aria-labelledby="status-title" style="margin-top: 18px">
+            <div class="panel-heading">
+              <h2 id="status-title">Production Status</h2>
+              <span class="badge blocked">gated</span>
+            </div>
+            <div class="status-list">
+              <article class="status-row">
+                <h3><span class="badge ok">target</span> postgres_native</h3>
+                <p>
+                  Production-readiness claim needs release artifact
+                  verification, Helm static validation, and a passing kind
+                  install/upgrade/uninstall smoke for that release.
+                </p>
+              </article>
+              <article class="status-row">
+                <h3>
+                  <span class="badge blocked">blocked</span>
+                  object_log_sqlite_projection
+                </h3>
+                <p>
+                  Do not overclaim cloud S3 certification. Current scope is
+                  MinIO S3-compatible proof only, and the proof is incomplete
+                  until bucket setup, object-log writes, restart/replay, and
+                  SQLite recovery pass in kind.
+                </p>
+              </article>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <div class="split">
+        <section aria-labelledby="topology-title">
+          <div class="panel-heading">
+            <h2 id="topology-title">Runtime Topology</h2>
+          </div>
+          <div class="diagram" aria-hidden="true">
+            <svg viewBox="0 0 760 260" role="img">
+              <rect
+                x="20"
+                y="30"
+                width="160"
+                height="70"
+                rx="6"
+                fill="#fffffb"
+                stroke="#161616"
+              />
+              <text x="48" y="62">Helm release</text>
+              <text x="48" y="84" class="thin">charts/pqueue</text>
+              <path d="M180 65 H285" stroke="#161616" stroke-width="3" />
+              <path
+                d="M275 55 L295 65 L275 75"
+                fill="none"
+                stroke="#161616"
+                stroke-width="3"
+              />
+              <rect
+                x="295"
+                y="30"
+                width="170"
+                height="70"
+                rx="6"
+                fill="#dcefe4"
+                stroke="#146c43"
+              />
+              <text x="322" y="62">pqueue-service</text>
+              <text x="322" y="84" class="thin">/healthz + /readyz</text>
+              <path d="M465 65 H575" stroke="#161616" stroke-width="3" />
+              <path
+                d="M565 55 L585 65 L565 75"
+                fill="none"
+                stroke="#161616"
+                stroke-width="3"
+              />
+              <rect
+                x="585"
+                y="30"
+                width="155"
+                height="70"
+                rx="6"
+                fill="#fff0d8"
+                stroke="#b45309"
+              />
+              <text x="620" y="62">Postgres</text>
+              <text x="620" y="84" class="thin">control/data</text>
+              <path d="M380 100 V158" stroke="#161616" stroke-width="3" />
+              <path
+                d="M370 148 L380 168 L390 148"
+                fill="none"
+                stroke="#161616"
+                stroke-width="3"
+              />
+              <rect
+                x="225"
+                y="168"
+                width="170"
+                height="62"
+                rx="6"
+                fill="#fde2e2"
+                stroke="#b91c1c"
+              />
+              <text x="255" y="194">MinIO / S3</text>
+              <text x="255" y="216" class="thin">object log</text>
+              <rect
+                x="425"
+                y="168"
+                width="185"
+                height="62"
+                rx="6"
+                fill="#fffffb"
+                stroke="#161616"
+              />
+              <text x="455" y="194">SQLite PVC</text>
+              <text x="455" y="216" class="thin">projection cache</text>
+              <path d="M395 198 H425" stroke="#161616" stroke-width="3" />
+            </svg>
+          </div>
+        </section>
+
+        <section aria-labelledby="docs-title">
+          <div class="panel-heading">
+            <h2 id="docs-title">Runbooks</h2>
+          </div>
+          <div class="doc-list">
+            <article class="doc-row">
+              <h3>
+                <a href="../deployment/operator-guide.md">Operator guide</a>
+              </h3>
+              <p>
+                Helm install, upgrade, uninstall, values reference,
+                troubleshooting, and known production gaps.
+              </p>
+            </article>
+            <article class="doc-row">
+              <h3>
+                <a href="../deployment/container-runtime-contract.md"
+                  >Runtime contract</a
+                >
+              </h3>
+              <p>
+                Environment variables, backend-profile settings, health probes,
+                and readiness behavior.
+              </p>
+            </article>
+            <article class="doc-row">
+              <h3>
+                <a href="../helix/04-build/DEPLOYMENT-READINESS.md"
+                  >Readiness contract</a
+                >
+              </h3>
+              <p>
+                Formal production gate and S3-compatible object-log
+                certification boundary.
+              </p>
+            </article>
+          </div>
+        </section>
+      </div>
+
+      <footer>
+        Static docs page. Open this file from the repository root at
+        <code>docs/operator/index.html</code>.
+      </footer>
+    </div>
+  </body>
+</html>
