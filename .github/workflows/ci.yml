@@ -53,8 +53,14 @@ jobs:
       - name: PR gate (enforcing)
         run: bash scripts/ci/pr-gate.sh --mode enforcing
 
-  helm:
+  deployment:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - postgres_native
+          - object_log_sqlite_projection
     steps:
       - name: Checkout pqueue
         uses: actions/checkout@v4
@@ -64,5 +70,20 @@ jobs:
         with:
           version: v3.16.3
 
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.0
+
+      - name: Install kind
+        run: |
+          curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
+          sudo install -m 0755 kind /usr/local/bin/kind
+
       - name: Helm static validation gate
         run: bash scripts/ci/helm-gate.sh
+
+      - name: kind Helm integration proof (${{ matrix.backend }})
+        env:
+          KIND_NODE_IMAGE: kindest/node:v1.31.0
+        run: bash scripts/ci/kind-helm-test.sh --backend ${{ matrix.backend }}

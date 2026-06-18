@@ -52,11 +52,31 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.0
+
+      - name: Install kind
+        run: |
+          curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
+          sudo install -m 0755 kind /usr/local/bin/kind
+
       - run: |
           bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 \
             --tp002-e0e1-source pqueue-7e2b3132 \
             --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 \
             --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4
+
+      - name: Deployment release gate
+        env:
+          KIND_NODE_IMAGE: kindest/node:v1.31.0
+        run: bash scripts/ci/deployment-release-gate.sh
 
       - name: Resolve release tag
         id: release

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -179,6 +180,81 @@ func TestReleaseGateOrderingPreserved(t *testing.T) {
 	} {
 		if !strings.Contains(workflow, source) {
 			t.Fatalf("release gate source changed or missing: %s", source)
+		}
+	}
+}
+
+func TestActionsDeploymentMatrixProfiles(t *testing.T) {
+	workflow := readFile(t, ".github/workflows/ci.yml")
+	match := regexp.MustCompile(`(?s)matrix:[ \t]*\n[ \t]+backend:[ \t]*\n(.*?)\n    steps:`).FindStringSubmatch(workflow)
+	if match == nil {
+		t.Fatalf("ci workflow must define the exact deployment backend matrix")
+	}
+	profileMatches := regexp.MustCompile(`(?m)^\s+- ([a-z_]+)\s*$`).FindAllStringSubmatch(match[1], -1)
+	profiles := make([]string, 0, len(profileMatches))
+	for _, profile := range profileMatches {
+		profiles = append(profiles, profile[1])
+	}
+	want := []string{"postgres_native", "object_log_sqlite_projection"}
+	if len(profiles) != len(want) {
+		t.Fatalf("deployment matrix must contain exactly %v, got %v", want, profiles)
+	}
+	for i := range want {
+		if profiles[i] != want[i] {
+			t.Fatalf("deployment matrix must contain exactly %v in order, got %v", want, profiles)
+		}
+	}
+}
+
+func TestActionsHelmStaticValidationIncluded(t *testing.T) {
+	workflow := readFile(t, ".github/workflows/ci.yml")
+	assertWorkflowOrder(t, workflow,
+		"name: Helm static validation gate",
+		"bash scripts/ci/helm-gate.sh",
+		"name: kind Helm integration proof (${{ matrix.backend }})",
+	)
+}
+
+func TestActionsKindMatrixIsNotSkipped(t *testing.T) {
+	workflow := readFile(t, ".github/workflows/ci.yml")
+	for _, want := range []string{
+		"runs-on: ubuntu-latest",
+		"version: v1.31.0",
+		"curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64",
+		"KIND_NODE_IMAGE: kindest/node:v1.31.0",
+		"bash scripts/ci/kind-helm-test.sh --backend ${{ matrix.backend }}",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("ci deployment workflow missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"SKIPPED kind backend matrix",
+		"skipped_local_environment",
+		"--dry-run",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("ci deployment matrix must not accept local skip/dry-run proof via %q", forbidden)
+		}
+	}
+}
+
+func TestActionsReleaseGateComposition(t *testing.T) {
+	workflow := readFile(t, ".github/workflows/release.yml")
+	assertWorkflowOrder(t, workflow,
+		"bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3",
+		"name: Deployment release gate",
+		"bash scripts/ci/deployment-release-gate.sh",
+		"name: Resolve release tag",
+	)
+	for _, want := range []string{
+		"version: v3.16.3",
+		"version: v1.31.0",
+		"curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64",
+		"KIND_NODE_IMAGE: kindest/node:v1.31.0",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("release deployment gate workflow missing %q", want)
 		}
 	}
 }
@@ -532,6 +608,11 @@ func writeExecutable(t *testing.T, dir, name, content string) {
 }
 
 func assertOutputOrder(t *testing.T, output string, needles ...string) {
+	t.Helper()
+	assertWorkflowOrder(t, output, needles...)
+}
+
+func assertWorkflowOrder(t *testing.T, output string, needles ...string) {
 	t.Helper()
 	previous := -1
 	for _, needle := range needles {
