@@ -37,6 +37,7 @@ func TestReleaseWorkflowPublishesContainerDigest(t *testing.T) {
 		"steps.container-build.outputs.digest",
 		"target/release-dist/pqueue-service-image.txt",
 		"scripts/release/write-container-image-evidence.sh",
+		"scripts/release/verify-release-artifacts.sh",
 	}
 	for _, needle := range required {
 		if !strings.Contains(workflow, needle) {
@@ -62,17 +63,8 @@ func TestReleaseWorkflowPublishesContainerDigest(t *testing.T) {
 	}
 }
 
-func TestContainerPublishingEvidenceChecksummed(t *testing.T) {
-	dist := filepath.Join(t.TempDir(), "release-dist")
-	if err := os.MkdirAll(dist, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dist, "pqueue-0.1.0-linux.tar.gz"), []byte("binary archive"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dist, "pqueue-service-image.txt"), []byte("digest=sha256:abc123"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+func TestReleaseChecksumAggregation(t *testing.T) {
+	dist := completeReleaseDistFixture(t)
 
 	cmd := exec.Command("bash", "scripts/release/write-checksums.sh", dist)
 	out, err := cmd.CombinedOutput()
@@ -81,7 +73,12 @@ func TestContainerPublishingEvidenceChecksummed(t *testing.T) {
 	}
 
 	sums := readFile(t, filepath.Join(dist, "SHA256SUMS"))
-	for _, artifact := range []string{"pqueue-0.1.0-linux.tar.gz", "pqueue-service-image.txt"} {
+	for _, artifact := range []string{
+		"pqueue-0.2.0-x86_64-linux.tar.gz",
+		"pqueue-0.2.0.tgz",
+		"pqueue-helm-chart.txt",
+		"pqueue-service-image.txt",
+	} {
 		if !strings.Contains(sums, artifact) {
 			t.Fatalf("SHA256SUMS missing %s:\n%s", artifact, sums)
 		}
@@ -95,13 +92,67 @@ func TestContainerPublishingEvidenceChecksummed(t *testing.T) {
 	workflow := readFile(t, ".github/workflows/release.yml")
 	evidenceIndex := strings.Index(workflow, "scripts/release/write-container-image-evidence.sh")
 	checksumIndex := strings.Index(workflow, "scripts/release/write-checksums.sh target/release-dist")
+	verifyIndex := strings.Index(workflow, "name: Verify release artifact set")
 	publishIndex := strings.Index(workflow, "name: Publish release assets")
-	if evidenceIndex == -1 || checksumIndex == -1 || publishIndex == -1 {
-		t.Fatalf("release workflow missing evidence, checksum, or publish step")
+	if evidenceIndex == -1 || checksumIndex == -1 || verifyIndex == -1 || publishIndex == -1 {
+		t.Fatalf("release workflow missing evidence, checksum, verification, or publish step")
 	}
-	if !(evidenceIndex < checksumIndex && checksumIndex < publishIndex) {
-		t.Fatalf("release workflow must write image evidence, refresh checksums, then publish assets")
+	if !(evidenceIndex < checksumIndex && checksumIndex < verifyIndex && verifyIndex < publishIndex) {
+		t.Fatalf("release workflow must write image evidence, refresh checksums, verify artifacts, then publish assets")
 	}
+}
+
+func TestReleaseArtifactSetVerification(t *testing.T) {
+	dist := completeReleaseDistFixture(t)
+	writeReleaseChecksums(t, dist)
+
+	verify := func(t *testing.T, releaseDist string, wantPass bool) {
+		t.Helper()
+		cmd := exec.Command("bash", "scripts/release/verify-release-artifacts.sh", "--version", "0.2.0", "--dist", releaseDist)
+		out, err := cmd.CombinedOutput()
+		if wantPass && err != nil {
+			t.Fatalf("verify-release-artifacts failed: %v\n%s", err, out)
+		}
+		if !wantPass && err == nil {
+			t.Fatalf("verify-release-artifacts unexpectedly passed:\n%s", out)
+		}
+	}
+
+	verify(t, dist, true)
+
+	for _, missing := range []string{
+		"pqueue-0.2.0-x86_64-linux.tar.gz",
+		"pqueue-0.2.0.tgz",
+		"pqueue-helm-chart.txt",
+		"pqueue-service-image.txt",
+		"SHA256SUMS",
+	} {
+		t.Run("missing_"+missing, func(t *testing.T) {
+			dist := completeReleaseDistFixture(t)
+			writeReleaseChecksums(t, dist)
+			if err := os.Remove(filepath.Join(dist, missing)); err != nil {
+				t.Fatal(err)
+			}
+			verify(t, dist, false)
+		})
+	}
+
+	t.Run("missing_binary_checksum_entry", func(t *testing.T) {
+		dist := completeReleaseDistFixture(t)
+		writeReleaseChecksums(t, dist)
+		sums := readFile(t, filepath.Join(dist, "SHA256SUMS"))
+		filtered := make([]string, 0)
+		for _, line := range strings.Split(sums, "\n") {
+			if strings.Contains(line, "pqueue-0.2.0-x86_64-linux.tar.gz") || line == "" {
+				continue
+			}
+			filtered = append(filtered, line)
+		}
+		if err := os.WriteFile(filepath.Join(dist, "SHA256SUMS"), []byte(strings.Join(filtered, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		verify(t, dist, false)
+	})
 }
 
 func TestReleaseGateOrderingPreserved(t *testing.T) {
@@ -138,4 +189,42 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(content)
+}
+
+func completeReleaseDistFixture(t *testing.T) string {
+	t.Helper()
+	dist := filepath.Join(t.TempDir(), "release-dist")
+	if err := os.MkdirAll(dist, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, dist, "pqueue-0.2.0-x86_64-linux.tar.gz", "binary archive")
+	writeFixtureFile(t, dist, "pqueue-0.2.0.tgz", "helm chart archive")
+	writeFixtureFile(t, dist, "pqueue-helm-chart.txt", strings.Join([]string{
+		"artifact=pqueue-helm-chart",
+		"chart=pqueue",
+		"version=0.2.0",
+		"package=pqueue-0.2.0.tgz",
+		"package_sha256=unused",
+	}, "\n"))
+	writeFixtureFile(t, dist, "pqueue-service-image.txt", strings.Join([]string{
+		"artifact=pqueue-service-container-image",
+		"digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}, "\n"))
+	return dist
+}
+
+func writeFixtureFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeReleaseChecksums(t *testing.T, dist string) {
+	t.Helper()
+	cmd := exec.Command("bash", "scripts/release/write-checksums.sh", dist)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("write-checksums failed: %v\n%s", err, out)
+	}
 }

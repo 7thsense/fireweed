@@ -130,6 +130,12 @@ jobs:
             --output target/release-dist/pqueue-service-image.txt
           bash scripts/release/write-checksums.sh target/release-dist
 
+      - name: Verify release artifact set
+        run: |
+          bash scripts/release/verify-release-artifacts.sh \
+            --version "${{ steps.release.outputs.version }}" \
+            --dist target/release-dist
+
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
