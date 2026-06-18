@@ -1,0 +1,7 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/deployment/operator-release-artifacts.md",
+    "docs/helix/04-build/DEPLOYMENT-READINESS.md"
+  ]
+}
