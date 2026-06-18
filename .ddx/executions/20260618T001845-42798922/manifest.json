@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260618T001845-42798922",
+  "bead_id": "pqueue-8841f52b",
+  "base_rev": "c00062e8213f3ce15cd8a888b5cafd34805a96f6",
+  "created_at": "2026-06-18T00:18:45.617819684Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-8841f52b",
+    "title": "Document operator artifact locations and verification",
+    "description": "PROBLEM: Operators need one documented place to obtain and verify the image, Helm chart, binary archives, and checksums, but the current docs emphasize local image builds and readiness evidence instead of published artifact coordinates.\n\nROOT CAUSE: `README.md:13` through `README.md:20` documents only local `docker build` and `docker run` commands, while `docs/helix/04-build/DEPLOYMENT-READINESS.md:117` through `docs/helix/04-build/DEPLOYMENT-READINESS.md:132` lists release evidence that must be recorded but does not provide operator-facing obtain/verify instructions for the final artifact set.\n\nPROPOSED FIX: Update `docs/**` and README release instructions to state where operators obtain the container image, Helm chart package or OCI chart, binary archives, and `SHA256SUMS`; include verification commands for checksums and digest comparison; preserve backend support boundaries for `postgres_native` and `object_log_sqlite_projection`.\n\nGOVERNING ARTIFACTS: Parent bead `pqueue-3546063c`; `docs/helix/04-build/DEPLOYMENT-READINESS.md`; `docs/deployment/container-runtime-contract.md`; `docs/deployment/kind-helm-integration.md`; current `v0.1.0` release behavior in `.github/workflows/release.yml`.\n\nDEPENDENCY IDS: none supplied by parent.\n\nNON-SCOPE: Creating a tag or GitHub release in this bead; final release execution is a separate bead.",
+    "acceptance": "1. TestOperatorArtifactDocsCoverLocations: docs or README state where operators obtain the image, chart package or OCI chart coordinates, binary archives, and `SHA256SUMS`.\n2. TestOperatorArtifactVerificationDocs: docs include checksum verification for binary/chart artifacts and digest verification for the container image.\n3. TestBackendBoundaryDocsPreserved: docs keep the supported backend profile language for `postgres_native` and `object_log_sqlite_projection` and do not overclaim cloud-provider-specific S3 certification beyond the existing MinIO/S3-compatible proof boundary.\n4. TestQualityGates: `go test ./...` and `lefthook run pre-commit` pass from the repository root after docs edits.",
+    "parent": "pqueue-728222f1",
+    "labels": [
+      "area:release",
+      "area:docs",
+      "kind:ci",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260618T001845-42798922",
+    "prompt": ".ddx/executions/20260618T001845-42798922/prompt.md",
+    "manifest": ".ddx/executions/20260618T001845-42798922/manifest.json",
+    "result": ".ddx/executions/20260618T001845-42798922/result.json",
+    "checks": ".ddx/executions/20260618T001845-42798922/checks.json",
+    "usage": ".ddx/executions/20260618T001845-42798922/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-8841f52b-20260618T001845-42798922"
+  },
+  "prompt_sha": "944d5e4f18dd490eb84cbb10d40b18e379a47c6aeabeb2e33230d11f533a33f7"
+}
