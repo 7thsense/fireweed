@@ -2,6 +2,9 @@
 
 ## Documentation
 
+- [Operator release artifacts](docs/deployment/operator-release-artifacts.md)
+  states where to obtain published images, Helm chart packages, binary
+  archives, checksums, and the commands to verify them before deployment.
 - [Production deployment readiness](docs/helix/04-build/DEPLOYMENT-READINESS.md)
   defines the Helm, kind, `postgres_native`,
   `object_log_sqlite_projection`, MinIO, and S3/object-log release-readiness
@@ -10,9 +13,25 @@
   defines the `pqueue-service` image entrypoint, environment/config keys, health
   endpoint/port, and backend-profile settings consumed by Helm.
 
-## Container Image
+## Release Artifacts
 
-Build and smoke-check the service image:
+Published releases provide:
+
+- container image `ghcr.io/<owner>/pqueue-service:<version>` plus
+  `ghcr.io/<owner>/pqueue-service:sha-<commit>`;
+- Helm chart package `pqueue-<version>.tgz`;
+- binary archives `pqueue-<version>-<target-triple>.tar.gz`;
+- `SHA256SUMS`;
+- release evidence files `pqueue-service-image.txt` and
+  `pqueue-helm-chart.txt`.
+
+Operators should download the GitHub Release assets, verify `SHA256SUMS`, and
+compare the image tag digest against `pqueue-service-image.txt` before
+deployment. See
+[operator release artifacts](docs/deployment/operator-release-artifacts.md) for
+the exact commands.
+
+For local development, build and smoke-check the service image:
 
 ```sh
 docker build -t pqueue:dev .

@@ -119,7 +119,12 @@ called production-deployable:
 A production-readiness release must record:
 
 - exact commit SHA and release artifact versions;
+- operator artifact coordinates for the published container image, Helm chart
+  package, binary archive set, and `SHA256SUMS`, following
+  [operator release artifacts](../../deployment/operator-release-artifacts.md);
 - Helm chart version and rendered values used for each backend profile;
+- checksum verification for release assets and digest verification for the
+  container image tag that operators deploy;
 - `kind` cluster version, Kubernetes version, and node image;
 - Postgres and MinIO image/version inputs used by the local proof;
 - commands, exit status, environment variables, profiles, scale, seed, and

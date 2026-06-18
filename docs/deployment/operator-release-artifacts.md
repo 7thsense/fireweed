@@ -1,0 +1,112 @@
+# Operator Release Artifacts
+
+This is the operator-facing location for obtaining and verifying pqueue release
+artifacts. Replace `OWNER`, `REPO`, and `v0.1.0` with the release repository and
+tag you are installing from.
+
+The current release workflow publishes:
+
+| Artifact | Coordinate |
+|----------|------------|
+| Container image | `ghcr.io/OWNER/pqueue-service:<version>` and `ghcr.io/OWNER/pqueue-service:sha-<commit>` |
+| Container image digest evidence | GitHub Release asset `pqueue-service-image.txt` |
+| Helm chart package | GitHub Release asset `pqueue-<version>.tgz` |
+| Helm chart evidence | GitHub Release asset `pqueue-helm-chart.txt` |
+| Binary archives | GitHub Release assets `pqueue-<version>-<target-triple>.tar.gz` |
+| Checksums | GitHub Release asset `SHA256SUMS` |
+
+For example, release tag `v0.1.0` uses version `0.1.0`, so the chart package is
+`pqueue-0.1.0.tgz` and binary archives are named like
+`pqueue-0.1.0-x86_64-linux.tar.gz`. The `v0.1.0` workflow publishes the Helm
+chart as a GitHub Release package asset; it does not publish an OCI chart.
+
+## Download
+
+With the GitHub CLI:
+
+```sh
+OWNER=<github-owner>
+REPO=pqueue
+TAG=v0.1.0
+VERSION="${TAG#v}"
+DIST_DIR="release-${TAG}"
+
+mkdir -p "$DIST_DIR"
+gh release download "$TAG" \
+  --repo "${OWNER}/${REPO}" \
+  --pattern "pqueue-${VERSION}-*.tar.gz" \
+  --pattern "pqueue-${VERSION}.tgz" \
+  --pattern "pqueue-service-image.txt" \
+  --pattern "pqueue-helm-chart.txt" \
+  --pattern "SHA256SUMS" \
+  --dir "$DIST_DIR"
+```
+
+Without `gh`, download the same assets from:
+
+```text
+https://github.com/OWNER/REPO/releases/tag/v0.1.0
+```
+
+## Verify Checksums
+
+Run checksum verification before extracting binary archives or installing the
+chart package:
+
+```sh
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$DIST_DIR" && sha256sum -c SHA256SUMS)
+else
+  (cd "$DIST_DIR" && shasum -a 256 -c SHA256SUMS)
+fi
+```
+
+`SHA256SUMS` covers the release files, including binary archives, the Helm chart
+package, `pqueue-service-image.txt`, and `pqueue-helm-chart.txt`.
+
+Operators with a source checkout can also verify a downloaded distribution with
+the repository helper from the repository root:
+
+```sh
+bash scripts/release/verify-release-artifacts.sh \
+  --version "$VERSION" \
+  --dist "$DIST_DIR"
+```
+
+## Verify Container Image Digest
+
+The release workflow writes the pushed image digest to
+`pqueue-service-image.txt`. Verify the tag still resolves to that digest before
+deployment:
+
+```sh
+IMAGE_OWNER="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+IMAGE="ghcr.io/${IMAGE_OWNER}/pqueue-service"
+DIGEST="$(awk -F= '$1 == "digest" { print $2 }' "${DIST_DIR}/pqueue-service-image.txt")"
+REMOTE_DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" | awk '/Digest:/ { print $2; exit }')"
+
+test "$REMOTE_DIGEST" = "$DIGEST"
+docker pull "${IMAGE}@${DIGEST}"
+```
+
+Deploy by digest where possible:
+
+```text
+ghcr.io/<lowercase-owner>/pqueue-service@sha256:<digest>
+```
+
+`pqueue-service-image.txt` also records `version_coordinate`, `sha_coordinate`,
+and `digest_coordinate` for audit trails.
+
+## Backend Support Boundary
+
+The release artifact set is valid for the BUILD-001 supported backend profiles:
+
+- `postgres_native`
+- `object_log_sqlite_projection`
+
+`object_log_sqlite_projection` release readiness is bounded to the documented
+MinIO S3-compatible proof unless a later release publishes provider-specific
+cloud S3 evidence. These artifacts do not certify AWS S3, GCS S3 interop, IAM
+policy, provider TLS/certificate hardening, or provider-specific
+conditional-write behavior.
