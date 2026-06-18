@@ -29,7 +29,7 @@ bash scripts/ci/deployment-release-gate.sh
   `passed_with_local_environment_skip`.
 - Any local skip is limited to the disposable kind backend matrix because a
   required local Docker/kind capability is unavailable.
-- The proof references the 0.2.2 chart package and both supported backend
+- The proof references the 0.2.3 chart package and both supported backend
   profiles.
 
 ## Rerun Note
@@ -82,9 +82,9 @@ already packaged `pqueue-service` and `pqueue-verify-ledger` binaries. Because
 `v0.2.1` was already pushed, the deployment-ready target moved to `v0.2.2`
 rather than rewriting the tag.
 
-The local `v0.2.2` deployment-gate rerun was blocked before packaging by the
-dirty sibling `fjord` checkout under `.ddx-exec-wt`, where
-`crates/fjord-log` was deleted outside this execution worktree. The release
-workflow checks out `telepathdata/fjord` fresh, and upstream still contains
-`crates/fjord-log/Cargo.toml`, so the `v0.2.2` tag workflow remains the
-clean-checkout proof for this rerun.
+The `v0.2.2` tag workflow failed before the release gate because the release
+checkout resolved the current `telepathdata/fjord` tree, where `crates/fjord-log`
+has been removed. `pqueue-objectlog` now consumes `object-log` directly at the
+same revision as `fjord-coordinator`, preserving the coordinator sequencer while
+removing the stale path dependency. Because `v0.2.2` was already pushed, the
+deployment-ready target moved to `v0.2.3` rather than rewriting the tag.

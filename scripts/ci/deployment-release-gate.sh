@@ -232,10 +232,7 @@ if os.environ.get("PQUEUE_IMAGE_EVIDENCE_FILE"):
 else:
     if os.environ.get("PQUEUE_RELEASE_DIST"):
         image_evidence_candidates.append(Path(os.environ["PQUEUE_RELEASE_DIST"]) / "pqueue-service-image.txt")
-    image_evidence_candidates.extend([
-        repo_root / "target/release-dist/pqueue-service-image.txt",
-        package_dir / "pqueue-service-image.txt",
-    ])
+    image_evidence_candidates.append(package_dir / "pqueue-service-image.txt")
 
 image_file = {}
 image_file_path = None

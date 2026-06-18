@@ -1067,18 +1067,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fjord-log"
-version = "0.1.0"
-dependencies = [
- "aws-sdk-s3",
- "bytes",
- "fjord-coordinator",
- "object-log",
- "parking_lot",
- "tokio",
-]
-
-[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1972,10 +1960,11 @@ dependencies = [
 
 [[package]]
 name = "object-log"
-version = "0.1.0"
-source = "git+https://github.com/easel/object-log?rev=973d839#973d8397b26012fac26ecf4b1551e93d0856779c"
+version = "0.2.0"
+source = "git+https://github.com/easel/object-log?rev=0adc8b0#0adc8b0f39925db4be9bf487de770bcfef91681d"
 dependencies = [
  "async-trait",
+ "aws-sdk-s3",
  "bytes",
  "serde",
  "serde_json",
@@ -2187,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-client"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "pqueue-core",
  "serde",
@@ -2195,14 +2184,14 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "pqueue-kafka"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2218,11 +2207,12 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "fjord-coordinator",
- "fjord-log",
+ "futures-util",
+ "object-log",
  "parking_lot",
  "pqueue-core",
  "pqueue-storage",
@@ -2233,7 +2223,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "pqueue-core",
  "pqueue-storage",
@@ -2248,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-service"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "axum",
  "pqueue-client",
@@ -2267,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "pqueue-core",
  "pqueue-storage",
@@ -2278,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-storage"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "parking_lot",
