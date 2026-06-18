@@ -10,7 +10,9 @@
 //! chart populates.
 
 use std::{
+    io::{Read, Write},
     net::SocketAddr,
+    net::TcpStream,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,10 +23,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-};
-use pqueue_objectlog::{
-    DeploymentProfile, ManifestMode, S3CompatibleCredentials, S3CompatibleObjectLogConfig,
-    probe_s3_compatible_object_path,
 };
 use tokio_postgres::NoTls;
 
@@ -70,6 +68,109 @@ impl BackendProfile {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentProfile {
+    Production,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestMode {
+    ObjectStoreCas,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3CompatibleCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3CompatibleObjectLogConfig {
+    pub endpoint_url: String,
+    pub bucket: String,
+    pub region: String,
+    pub credentials: S3CompatibleCredentials,
+    pub force_path_style: bool,
+    pub deployment_profile: DeploymentProfile,
+    pub manifest_mode: ManifestMode,
+    pub max_commands_per_segment: usize,
+    pub dev_unsafe_one_command_segments: bool,
+}
+
+impl S3CompatibleObjectLogConfig {
+    fn validate(&self) -> Result<(), S3CompatibleConfigError> {
+        validate_endpoint_url(&self.endpoint_url)?;
+        validate_bucket(&self.bucket)?;
+        validate_region(&self.region)?;
+        validate_credentials(&self.credentials)?;
+        if !self.force_path_style {
+            return Err(S3CompatibleConfigError::UnsupportedAddressingMode);
+        }
+        if self.max_commands_per_segment == 0 {
+            return Err(S3CompatibleConfigError::EmptySegment);
+        }
+        if self.deployment_profile == DeploymentProfile::Production
+            && self.dev_unsafe_one_command_segments
+        {
+            return Err(S3CompatibleConfigError::DevUnsafeFlagInProduction);
+        }
+        if self.deployment_profile == DeploymentProfile::Production
+            && self.max_commands_per_segment == 1
+        {
+            return Err(S3CompatibleConfigError::OneCommandSegmentInProduction);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum S3CompatibleConfigError {
+    MissingEndpoint,
+    InvalidEndpoint,
+    MissingBucket,
+    InvalidBucket,
+    MissingRegion,
+    MissingCredentials,
+    UnsupportedAddressingMode,
+    EmptySegment,
+    OneCommandSegmentInProduction,
+    DevUnsafeFlagInProduction,
+}
+
+impl std::fmt::Display for S3CompatibleConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingEndpoint => write!(f, "S3-compatible endpoint URL is required"),
+            Self::InvalidEndpoint => write!(
+                f,
+                "S3-compatible endpoint URL must be http(s) with a non-empty host"
+            ),
+            Self::MissingBucket => write!(f, "S3-compatible bucket is required"),
+            Self::InvalidBucket => write!(f, "S3-compatible bucket name is invalid"),
+            Self::MissingRegion => write!(f, "S3-compatible region is required"),
+            Self::MissingCredentials => {
+                write!(f, "S3-compatible access key and secret key are required")
+            }
+            Self::UnsupportedAddressingMode => write!(
+                f,
+                "object-log S3-compatible runtime currently requires path-style addressing"
+            ),
+            Self::EmptySegment => write!(f, "max_commands_per_segment must be greater than zero"),
+            Self::OneCommandSegmentInProduction => {
+                write!(f, "one-command object segments are rejected in production")
+            }
+            Self::DevUnsafeFlagInProduction => {
+                write!(
+                    f,
+                    "dev_unsafe_one_command_segments cannot be set in production"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for S3CompatibleConfigError {}
 
 /// Error returned when the runtime configuration is invalid.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +393,59 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn validate_endpoint_url(endpoint_url: &str) -> Result<(), S3CompatibleConfigError> {
+    let endpoint_url = endpoint_url.trim();
+    if endpoint_url.is_empty() {
+        return Err(S3CompatibleConfigError::MissingEndpoint);
+    }
+    let without_scheme = endpoint_url
+        .strip_prefix("http://")
+        .or_else(|| endpoint_url.strip_prefix("https://"))
+        .ok_or(S3CompatibleConfigError::InvalidEndpoint)?;
+    let host = without_scheme.split('/').next().unwrap_or_default();
+    if host.is_empty() {
+        return Err(S3CompatibleConfigError::InvalidEndpoint);
+    }
+    Ok(())
+}
+
+fn validate_bucket(bucket: &str) -> Result<(), S3CompatibleConfigError> {
+    let bucket = bucket.trim();
+    if bucket.is_empty() {
+        return Err(S3CompatibleConfigError::MissingBucket);
+    }
+    let valid = bucket.len() >= 3
+        && bucket.len() <= 63
+        && bucket
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(S3CompatibleConfigError::InvalidBucket)
+    }
+}
+
+fn validate_region(region: &str) -> Result<(), S3CompatibleConfigError> {
+    if region.trim().is_empty() {
+        Err(S3CompatibleConfigError::MissingRegion)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_credentials(
+    credentials: &S3CompatibleCredentials,
+) -> Result<(), S3CompatibleConfigError> {
+    if credentials.access_key_id.trim().is_empty()
+        || credentials.secret_access_key.trim().is_empty()
+    {
+        Err(S3CompatibleConfigError::MissingCredentials)
+    } else {
+        Ok(())
+    }
+}
+
 /// Builds the router served by the container entrypoint.
 ///
 /// Merges the [`health_router`] liveness/readiness probes with the API-001
@@ -415,6 +569,130 @@ fn object_log_readiness_key() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("pqueue/readiness/{}/{nanos}.probe", std::process::id())
+}
+
+fn probe_s3_compatible_object_path(
+    config: &S3CompatibleObjectLogConfig,
+    key: &str,
+    payload: &[u8],
+) -> Result<(), S3CompatibleProbeError> {
+    config.validate().map_err(S3CompatibleProbeError::Config)?;
+    let endpoint = HttpEndpoint::parse(&config.endpoint_url)?;
+    let path = endpoint.path_for(&config.bucket, key);
+    let put_response = http_request(&endpoint, "PUT", &path, payload)?;
+    if !put_response.status_success {
+        return Err(S3CompatibleProbeError::Put);
+    }
+    let get_response = http_request(&endpoint, "GET", &path, &[])?;
+    if !get_response.status_success {
+        return Err(S3CompatibleProbeError::Get);
+    }
+    if get_response.body == payload {
+        Ok(())
+    } else {
+        Err(S3CompatibleProbeError::ProbePayloadMismatch)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HttpEndpoint {
+    host_header: String,
+    address: String,
+    base_path: String,
+}
+
+impl HttpEndpoint {
+    fn parse(endpoint_url: &str) -> Result<Self, S3CompatibleProbeError> {
+        let endpoint_url = endpoint_url.trim().trim_end_matches('/');
+        let without_scheme = endpoint_url
+            .strip_prefix("http://")
+            .ok_or(S3CompatibleProbeError::UnsupportedEndpointScheme)?;
+        let (host_port, base_path) = without_scheme
+            .split_once('/')
+            .map(|(host, path)| (host, format!("/{path}")))
+            .unwrap_or((without_scheme, String::new()));
+        if host_port.is_empty() {
+            return Err(S3CompatibleProbeError::UnsupportedEndpointScheme);
+        }
+        let address = if host_port.contains(':') {
+            host_port.to_string()
+        } else {
+            format!("{host_port}:80")
+        };
+        Ok(Self {
+            host_header: host_port.to_string(),
+            address,
+            base_path,
+        })
+    }
+
+    fn path_for(&self, bucket: &str, key: &str) -> String {
+        format!(
+            "{}/{}/{}",
+            self.base_path.trim_end_matches('/'),
+            bucket.trim_matches('/'),
+            key.trim_start_matches('/')
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HttpResponse {
+    status_success: bool,
+    body: Vec<u8>,
+}
+
+fn http_request(
+    endpoint: &HttpEndpoint,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<HttpResponse, S3CompatibleProbeError> {
+    let mut stream =
+        TcpStream::connect(&endpoint.address).map_err(|_| S3CompatibleProbeError::Connect)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| S3CompatibleProbeError::Io)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| S3CompatibleProbeError::Io)?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        endpoint.host_header,
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .map_err(|_| S3CompatibleProbeError::Io)?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|_| S3CompatibleProbeError::Io)?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or(S3CompatibleProbeError::InvalidResponse)?;
+    let header = String::from_utf8_lossy(&response[..header_end]);
+    let status_line = header.lines().next().unwrap_or_default();
+    Ok(HttpResponse {
+        status_success: status_line.contains(" 200 ")
+            || status_line.contains(" 201 ")
+            || status_line.contains(" 204 "),
+        body: response[header_end + 4..].to_vec(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum S3CompatibleProbeError {
+    Config(S3CompatibleConfigError),
+    UnsupportedEndpointScheme,
+    Connect,
+    Io,
+    InvalidResponse,
+    Put,
+    Get,
+    ProbePayloadMismatch,
 }
 
 async fn postgres_readiness(database_url: &str) -> Response {

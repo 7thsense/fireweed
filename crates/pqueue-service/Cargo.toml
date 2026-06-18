@@ -9,7 +9,6 @@ license.workspace = true
 axum = "0.8"
 pqueue-client = { path = "../pqueue-client" }
 pqueue-core = { path = "../pqueue-core" }
-pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-postgres = { path = "../pqueue-postgres" }
 pqueue-storage = { path = "../pqueue-storage" }
 serde = { version = "1.0", features = ["derive"] }
@@ -22,6 +21,7 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-time-
 path = "src/lib.rs"
 
 [dev-dependencies]
+pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }

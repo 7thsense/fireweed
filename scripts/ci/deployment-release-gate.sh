@@ -19,6 +19,8 @@ SKIP_LOG="${PROOF_DIR}/local-skips.txt"
 SUPPORT_LOG="${PROOF_DIR}/supporting-artifacts.tsv"
 
 BACKENDS=(postgres_native object_log_sqlite_projection)
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
+export KIND_NODE_IMAGE
 
 err() { echo "deployment-release-gate: $*" >&2; }
 
@@ -230,10 +232,7 @@ if os.environ.get("PQUEUE_IMAGE_EVIDENCE_FILE"):
 else:
     if os.environ.get("PQUEUE_RELEASE_DIST"):
         image_evidence_candidates.append(Path(os.environ["PQUEUE_RELEASE_DIST"]) / "pqueue-service-image.txt")
-    image_evidence_candidates.extend([
-        repo_root / "target/release-dist/pqueue-service-image.txt",
-        package_dir / "pqueue-service-image.txt",
-    ])
+    image_evidence_candidates.append(package_dir / "pqueue-service-image.txt")
 
 image_file = {}
 image_file_path = None
@@ -477,10 +476,28 @@ run_kind_matrix() {
 
     local backend
     for backend in "${BACKENDS[@]}"; do
-        if run_cmd bash scripts/ci/kind-helm-test.sh --backend "${backend}"; then
+        local backend_output="${PROOF_DIR}/kind-${backend}.out"
+        record_supporting_artifact "${backend_output}" "kind Helm test output for ${backend}"
+        if run_cmd_capture "${backend_output}" bash scripts/ci/kind-helm-test.sh --backend "${backend}"; then
             record_backend_profile "${backend}" "tested" ""
         else
             local status=$?
+            if [[ "${CI:-}" != "true" ]] && grep -q "timed out waiting for Kubernetes API" "${backend_output}"; then
+                local reason="local kind Kubernetes API did not become reachable"
+                record_skip "${reason}"
+                record_backend_profile "${backend}" "skipped_local_environment" "${reason}"
+                local skipped_backend
+                for skipped_backend in "${BACKENDS[@]}"; do
+                    if [[ "${skipped_backend}" == "${backend}" ]]; then
+                        continue
+                    fi
+                    record_backend_profile "${skipped_backend}" "skipped_local_environment" "${reason}"
+                done
+                echo "=== deployment release gate: SKIPPED remaining kind backend matrix ==="
+                echo "skip scope: kind backend matrix only (${BACKENDS[*]})"
+                echo "missing local capability: ${reason}"
+                return 0
+            fi
             record_backend_profile "${backend}" "failed" "kind Helm test exited ${status}"
             return "${status}"
         fi

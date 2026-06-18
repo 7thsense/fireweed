@@ -128,7 +128,7 @@ async fn object_log_commit_recovery_tests_group_commit_uses_fjord_blob_once() {
     assert_eq!(
         blob.object_count(),
         1,
-        "fjord-log groups one flush into one object"
+        "object-log groups one flush into one object"
     );
     let page = store.read_from(&shard, None, 10).await.unwrap();
     assert_eq!(page.commands.len(), 3);
@@ -145,7 +145,7 @@ async fn object_log_commit_recovery_tests_reopens_from_fjord_coordinator_and_blo
     let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
         Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
     let t = tenant();
     let q = qid("object-log-recovery");
@@ -210,7 +210,7 @@ async fn object_log_commit_recovery_tests_epoch_fence_survives_reopen_before_dat
     let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
         Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
     let t = tenant();
     let q = qid("object-log-reopen-fence");
@@ -250,7 +250,7 @@ async fn object_log_commit_recovery_tests_request_id_replay_finds_committed_comm
     let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
         Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
     let t = tenant();
     let q = qid("object-log-request-replay");
@@ -455,7 +455,7 @@ async fn object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_kee
     let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
         Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let config = PqueueObjectLogConfig {
         deployment_profile: DeploymentProfile::Production,
         manifest_mode: ManifestMode::PostgresManifestPointerFallback,
@@ -527,7 +527,7 @@ async fn run_e3_segment_scenario(segment_size_commands: u64) -> E3Evidence {
     let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
         Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let config = PqueueObjectLogConfig {
         deployment_profile: DeploymentProfile::Production,
         manifest_mode: ManifestMode::ObjectStoreCas,
@@ -602,7 +602,7 @@ async fn count_fallback_fence_rejection() -> u64 {
     let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
         Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn fjord_log::BlobStore> = blob.clone();
+    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let config = PqueueObjectLogConfig {
         deployment_profile: DeploymentProfile::Production,
         manifest_mode: ManifestMode::PostgresManifestPointerFallback,

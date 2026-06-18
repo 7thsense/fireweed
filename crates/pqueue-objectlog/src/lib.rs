@@ -1,10 +1,17 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
-use fjord_coordinator::{CommitOutcome, CoordinatorStore};
-use fjord_log::{BlobStore, FetchedBatch, ProduceBatch, ReadPath, WritePath};
+use bytes::Bytes;
+use fjord_coordinator::{CoordinatorSequencer, CoordinatorStore, ProducerMeta, partition_key};
+use futures_util::future::join_all;
+use object_log::{
+    AppendOutcome, BlobStore, Durability as ObjectLogDurability, FetchedBatch, FlushConfig,
+    LogEngine,
+};
 use parking_lot::Mutex;
 use pqueue_core::{
     ClientItemKey, DecimalValue, ItemId, PriorityValue, QueueId, RequestId, TenantId, UtcTimestamp,
@@ -20,8 +27,7 @@ use pqueue_storage::traits::{
 use pqueue_storage::types::{CommandChecksum, CommandPosition, ShardKey};
 
 pub use fjord_coordinator::memory::MemoryCoordinator;
-pub use fjord_log::MemoryBlobStore;
-pub use fjord_log::s3::S3BlobStore;
+pub use object_log::{MemoryBlobStore, S3BlobStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentProfile {
@@ -245,11 +251,12 @@ pub fn probe_s3_compatible_object_path(
     payload: &[u8],
 ) -> Result<(), S3CompatibleProbeError> {
     let blob = config.blob_store()?;
-    blob.put(key, payload.to_vec())
-        .map_err(S3CompatibleProbeError::Put)?;
-    let fetched = blob.get(key).map_err(S3CompatibleProbeError::Get)?;
+    block_on_object_log(blob.put(key, Bytes::copy_from_slice(payload)))
+        .map_err(|err| S3CompatibleProbeError::Put(err.to_string()))?;
+    let fetched = block_on_object_log(blob.get(key))
+        .map_err(|err| S3CompatibleProbeError::Get(err.to_string()))?;
     match fetched {
-        Some(bytes) if bytes == payload => Ok(()),
+        Some(bytes) if bytes.as_ref() == payload => Ok(()),
         Some(_) => Err(S3CompatibleProbeError::ProbePayloadMismatch),
         None => Err(S3CompatibleProbeError::MissingProbeObject),
     }
@@ -257,8 +264,7 @@ pub fn probe_s3_compatible_object_path(
 
 pub struct FjordObjectLogStore {
     coordinator: Arc<dyn CoordinatorStore>,
-    writer: WritePath,
-    reader: ReadPath,
+    engine: LogEngine<CoordinatorSequencer>,
     config: PqueueObjectLogConfig,
     epochs: Mutex<HashMap<ShardKey, u64>>,
     topics: Mutex<HashSet<String>>,
@@ -276,9 +282,14 @@ impl FjordObjectLogStore {
         config: PqueueObjectLogConfig,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
+        let flush = FlushConfig {
+            max_batches: config.max_commands_per_segment,
+            linger: Duration::from_millis(1),
+            ..FlushConfig::default()
+        };
+        let sequencer = Arc::new(CoordinatorSequencer::new(Arc::clone(&coordinator)));
         Ok(Self {
-            writer: WritePath::new(Arc::clone(&coordinator), Arc::clone(&blob)),
-            reader: ReadPath::new(Arc::clone(&coordinator), blob),
+            engine: LogEngine::new(blob, sequencer, flush, "pqueue/"),
             coordinator,
             config,
             epochs: Mutex::new(HashMap::new()),
@@ -319,18 +330,25 @@ impl FjordObjectLogStore {
     }
 
     pub fn commit_epoch_fence(&self, shard: &ShardKey, epoch: u64) -> Result<(), LogStoreError> {
+        block_on_object_log(self.commit_epoch_fence_async(shard, epoch))
+    }
+
+    async fn commit_epoch_fence_async(
+        &self,
+        shard: &ShardKey,
+        epoch: u64,
+    ) -> Result<(), LogStoreError> {
         let topic = epoch_topic_for_shard(shard);
         self.ensure_topic(&topic)?;
-        self.writer
-            .produce(&[ProduceBatch {
-                topic,
-                partition: 0,
-                producer_id: -1,
-                producer_epoch: -1,
-                base_sequence: -1,
-                record_count: 1,
-                payload: epoch.to_be_bytes().to_vec(),
-            }])
+        self.engine
+            .produce(
+                partition_key(&topic, 0),
+                Bytes::copy_from_slice(&epoch.to_be_bytes()),
+                1,
+                ProducerMeta::non_idempotent(),
+                ObjectLogDurability::Sequenced,
+            )
+            .await
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         self.epochs.lock().insert(shard.clone(), epoch);
         Ok(())
@@ -348,7 +366,7 @@ impl FjordObjectLogStore {
             .find(|(_, envelope)| envelope.request_id.as_ref() == Some(request_id)))
     }
 
-    fn current_epoch(&self, shard: &ShardKey) -> Result<u64, LogStoreError> {
+    async fn current_epoch_async(&self, shard: &ShardKey) -> Result<u64, LogStoreError> {
         if let Some(epoch) = self.epochs.lock().get(shard).copied() {
             return Ok(epoch);
         }
@@ -363,8 +381,9 @@ impl FjordObjectLogStore {
             return Ok(0);
         }
         let fetched = self
-            .reader
-            .fetch(&topic, 0, 0)
+            .engine
+            .fetch(&partition_key(&topic, 0), 0, usize::MAX)
+            .await
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         let epoch = fetched
             .last()
@@ -392,6 +411,10 @@ impl FjordObjectLogStore {
     }
 
     fn read_all(&self, shard: &ShardKey) -> Result<CommandPage, LogStoreError> {
+        block_on_object_log(self.read_all_async(shard))
+    }
+
+    async fn read_all_async(&self, shard: &ShardKey) -> Result<CommandPage, LogStoreError> {
         let topic = topic_for_shard(shard);
         if self
             .coordinator
@@ -402,11 +425,26 @@ impl FjordObjectLogStore {
             return Err(LogStoreError::ShardNotFound);
         }
         let fetched = self
-            .reader
-            .fetch(&topic, 0, 0)
+            .engine
+            .fetch(&partition_key(&topic, 0), 0, usize::MAX)
+            .await
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         decode_page(shard, fetched, usize::MAX)
     }
+}
+
+fn block_on_object_log<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return tokio::task::block_in_place(|| handle.block_on(future));
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("object-log runtime")
+        .block_on(future)
 }
 
 fn validate_endpoint_url(endpoint_url: &str) -> Result<(), S3CompatibleConfigError> {
@@ -474,7 +512,7 @@ impl LogStore for FjordObjectLogStore {
         expected_epoch: Option<u64>,
         commands: Vec<CommandEnvelope>,
     ) -> Result<AppendBatchResult, LogStoreError> {
-        let current_epoch = self.current_epoch(shard)?;
+        let current_epoch = self.current_epoch_async(shard).await?;
         if expected_epoch.is_some_and(|expected| expected != current_epoch) {
             return Err(LogStoreError::StalEpoch {
                 expected: expected_epoch.unwrap(),
@@ -486,28 +524,26 @@ impl LogStore for FjordObjectLogStore {
 
         let batches = commands
             .iter()
-            .map(|command| {
-                encode_record(current_epoch, command).map(|payload| ProduceBatch {
-                    topic: topic.clone(),
-                    partition: 0,
-                    producer_id: -1,
-                    producer_epoch: -1,
-                    base_sequence: -1,
-                    record_count: 1,
-                    payload,
-                })
-            })
+            .map(|command| encode_record(current_epoch, command).map(Bytes::from))
             .collect::<Result<Vec<_>, _>>()?;
-        let outcomes = self
-            .writer
-            .produce(&batches)
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
+        let partition = partition_key(&topic, 0);
+        let outcomes = join_all(batches.into_iter().map(|payload| {
+            self.engine.produce(
+                partition.clone(),
+                payload,
+                1,
+                ProducerMeta::non_idempotent(),
+                ObjectLogDurability::Sequenced,
+            )
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<AppendOutcome>, _>>()
+        .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         let last_sequence = outcomes
             .last()
-            .map(|outcome| match outcome {
-                CommitOutcome::Assigned { base_offset, .. } => *base_offset as u64,
-                CommitOutcome::Duplicate { base_offset } => *base_offset as u64,
-            })
+            .and_then(|outcome| outcome.base_offset)
+            .map(|base_offset| base_offset as u64)
             .unwrap_or(0);
 
         Ok(AppendBatchResult {
@@ -543,8 +579,9 @@ impl LogStore for FjordObjectLogStore {
 
         let fetch_offset = position.map(|pos| pos.sequence as i64 + 1).unwrap_or(0);
         let fetched = self
-            .reader
-            .fetch(&topic, 0, fetch_offset)
+            .engine
+            .fetch(&partition_key(&topic, 0), fetch_offset, usize::MAX)
+            .await
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         decode_page(shard, fetched, limit)
     }

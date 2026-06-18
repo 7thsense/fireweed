@@ -9,13 +9,12 @@ license.workspace = true
 pqueue-core = { path = "../pqueue-core" }
 pqueue-storage = { path = "../pqueue-storage" }
 fjord-coordinator = { path = "../../../fjord/crates/fjord-coordinator" }
-fjord-log = { path = "../../../fjord/crates/fjord-log" }
+object-log = { git = "https://github.com/easel/object-log", rev = "0adc8b0", features = ["s3"] }
 bytes = "1.10"
+futures-util = "0.3"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[dev-dependencies]
 tokio = { version = "1.44", features = ["macros", "rt-multi-thread"] }
 
 [[test]]

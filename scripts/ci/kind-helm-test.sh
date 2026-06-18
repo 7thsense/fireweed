@@ -185,6 +185,8 @@ validate_config() {
     [[ -f "${KIND_DIR}/runtime-secrets.yaml" ]] || die "missing helper manifest: ${KIND_DIR}/runtime-secrets.yaml"
     if [[ "${BACKEND}" == "postgres_native" ]]; then
         [[ -f "${KIND_DIR}/postgres.yaml" ]] || die "missing postgres helper manifest: ${KIND_DIR}/postgres.yaml"
+    else
+        [[ -f "${KIND_DIR}/object-log.yaml" ]] || die "missing object-log helper manifest: ${KIND_DIR}/object-log.yaml"
     fi
 
     if [[ -z "${CLUSTER_NAME}" ]]; then
@@ -222,6 +224,9 @@ dry_run_plan() {
     if [[ "${BACKEND}" == "postgres_native" ]]; then
         print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
         print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
+    else
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/object-log.yaml"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/minio --timeout "${TIMEOUT}"
     fi
     print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
@@ -338,6 +343,11 @@ main() {
         kubectl_cmd -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
         print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
         kubectl_cmd -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
+    else
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/object-log.yaml"
+        kubectl_cmd -n "${NAMESPACE}" apply -f "${KIND_DIR}/object-log.yaml"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/minio --timeout "${TIMEOUT}"
+        kubectl_cmd -n "${NAMESPACE}" rollout status deployment/minio --timeout "${TIMEOUT}"
     fi
     run helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
         --kube-context "kind-${CLUSTER_NAME}" \

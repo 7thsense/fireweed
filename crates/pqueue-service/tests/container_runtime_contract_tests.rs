@@ -11,11 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use pqueue_objectlog::{
-    DeploymentProfile, ManifestMode, S3CompatibleCredentials, S3CompatibleObjectLogConfig,
-};
 use pqueue_service::runtime::{
-    LIVENESS_PATH, ObjectLogRuntimeConfig, READINESS_PATH, ReadinessCheck, RuntimeConfig,
+    DeploymentProfile, LIVENESS_PATH, ManifestMode, ObjectLogRuntimeConfig, READINESS_PATH,
+    ReadinessCheck, RuntimeConfig, S3CompatibleCredentials, S3CompatibleObjectLogConfig,
     health_router, service_router, service_router_with_readiness,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

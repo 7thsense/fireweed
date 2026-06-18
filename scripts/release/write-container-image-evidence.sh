@@ -8,6 +8,7 @@ SHA_TAG=""
 DIGEST=""
 COMMIT=""
 OUTPUT="target/release-dist/pqueue-service-image.txt"
+DOCKERFILE="Dockerfile"
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -17,6 +18,7 @@ while [[ "$#" -gt 0 ]]; do
         --sha-tag) SHA_TAG="${2:-}"; shift 2 ;;
         --digest) DIGEST="${2:-}"; shift 2 ;;
         --commit) COMMIT="${2:-}"; shift 2 ;;
+        --dockerfile) DOCKERFILE="${2:-}"; shift 2 ;;
         --output) OUTPUT="${2:-}"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -47,5 +49,5 @@ digest_coordinate=${IMAGE}@${DIGEST}
 version_coordinate=${VERSION_TAG}
 sha_coordinate=${SHA_TAG}
 source_commit=${COMMIT}
-dockerfile=Dockerfile
+dockerfile=${DOCKERFILE}
 EOF

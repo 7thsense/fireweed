@@ -322,7 +322,7 @@
               </div>
               <pre><code>OWNER=&lt;github-owner&gt;
 REPO=pqueue
-TAG=v0.1.0
+TAG=v0.2.3
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 
@@ -396,7 +396,7 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
           <section aria-labelledby="status-title" style="margin-top: 18px">
             <div class="panel-heading">
               <h2 id="status-title">Production Status</h2>
-              <span class="badge blocked">gated</span>
+              <span class="badge ok">release gated</span>
             </div>
             <div class="status-list">
               <article class="status-row">
@@ -409,14 +409,14 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
               </article>
               <article class="status-row">
                 <h3>
-                  <span class="badge blocked">blocked</span>
+                  <span class="badge ok">target</span>
                   object_log_sqlite_projection
                 </h3>
                 <p>
-                  Do not overclaim cloud S3 certification. Current scope is
-                  MinIO S3-compatible proof only, and the proof is incomplete
-                  until bucket setup, object-log writes, restart/replay, and
-                  SQLite recovery pass in kind.
+                  Do not overclaim cloud S3 certification. Current production
+                  scope is MinIO S3-compatible proof only, including bucket
+                  setup, object-log writes, restart/replay, and SQLite recovery
+                  in kind.
                 </p>
               </article>
             </div>
