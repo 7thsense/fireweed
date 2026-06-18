@@ -74,6 +74,13 @@ jobs:
       - name: Package binaries
         run: bash scripts/release/package-binaries.sh "${{ steps.release.outputs.version }}"
 
+      - name: Package Helm chart
+        run: |
+          bash scripts/release/package-helm-chart.sh \
+            --version "${{ steps.release.outputs.version }}" \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --destination target/release-dist
+
       - name: Resolve container image coordinates
         id: container
         shell: bash

@@ -25,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CHART_DIR="${REPO_ROOT}/charts/pqueue"
 CACHE_DIR="${REPO_ROOT}/target/helm-gate/bin"
+PACKAGE_DIR="${REPO_ROOT}/target/helm-gate/release-dist"
 
 # Pinned tool / schema versions. Bump deliberately; the checksum table below
 # must be updated in lockstep with KUBECONFORM_VERSION.
@@ -226,6 +227,11 @@ main() {
 
     ensure_kubeconform
     assert_no_fixture_credentials "${CHART_DIR}/values.yaml" "chart default values"
+
+    echo "--- helm package ---"
+    rm -rf "$PACKAGE_DIR"
+    mkdir -p "$PACKAGE_DIR"
+    helm package "$CHART_DIR" --destination "$PACKAGE_DIR"
 
     for profile in "${PROFILES[@]}"; do
         local values
