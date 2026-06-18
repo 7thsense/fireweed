@@ -30,14 +30,16 @@ func TestReleaseWorkflowPublishesContainerDigest(t *testing.T) {
 		"username: ${{ github.actor }}",
 		"password: ${{ github.token }}",
 		"docker/build-push-action@v6",
-		"context: ./pqueue",
-		"file: ./pqueue/Dockerfile",
+		"context: ./pqueue/target/release-image",
+		"file: ./pqueue/target/release-image/Dockerfile",
 		"push: true",
 		"ghcr.io/${owner}/pqueue-service",
 		"version_tag=${image}:${{ steps.release.outputs.version }}",
 		"sha_tag=${image}:sha-${GITHUB_SHA}",
 		"steps.container-build.outputs.digest",
 		"target/release-dist/pqueue-service-image.txt",
+		"cp Dockerfile.prebuilt target/release-image/Dockerfile",
+		"--dockerfile Dockerfile.prebuilt",
 		"scripts/release/write-container-image-evidence.sh",
 		"scripts/release/verify-release-artifacts.sh",
 	}
@@ -57,7 +59,7 @@ func TestReleaseWorkflowPublishesContainerDigest(t *testing.T) {
 		"version_coordinate=${VERSION_TAG}",
 		"sha_coordinate=${SHA_TAG}",
 		"source_commit=${COMMIT}",
-		"dockerfile=Dockerfile",
+		"dockerfile=${DOCKERFILE}",
 	} {
 		if !strings.Contains(evidence, needle) {
 			t.Fatalf("container evidence helper missing %q", needle)

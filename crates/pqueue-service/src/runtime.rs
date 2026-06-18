@@ -18,12 +18,13 @@ use std::{
 };
 
 use axum::{
-    Router,
-    extract::State,
+    Json, Router,
+    extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
+use serde::Serialize;
 use tokio_postgres::NoTls;
 
 use crate::{AppState, AuthContext, app_with_state};
@@ -470,6 +471,10 @@ fn health_router_with_readiness(readiness: ReadinessCheck) -> Router {
     Router::new()
         .route(LIVENESS_PATH, get(liveness))
         .route(READINESS_PATH, get(checked_readiness))
+        .route(
+            "/__pqueue/deployment/object-log-smoke/{proof_id}",
+            post(object_log_deployment_smoke_write).get(object_log_deployment_smoke_verify),
+        )
         .with_state(HealthState { readiness })
 }
 
@@ -555,6 +560,145 @@ async fn object_log_sqlite_readiness(config: ObjectLogRuntimeConfig) -> Response
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ObjectLogDeploymentSmokeResponse {
+    proof_id: String,
+    object_key: String,
+    sqlite_projection_marker: String,
+    recovered: bool,
+}
+
+async fn object_log_deployment_smoke_write(
+    State(state): State<HealthState>,
+    AxumPath(proof_id): AxumPath<String>,
+) -> Response {
+    object_log_deployment_smoke(state, proof_id, SmokeMode::Write).await
+}
+
+async fn object_log_deployment_smoke_verify(
+    State(state): State<HealthState>,
+    AxumPath(proof_id): AxumPath<String>,
+) -> Response {
+    object_log_deployment_smoke(state, proof_id, SmokeMode::Verify).await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SmokeMode {
+    Write,
+    Verify,
+}
+
+async fn object_log_deployment_smoke(
+    state: HealthState,
+    proof_id: String,
+    mode: SmokeMode,
+) -> Response {
+    if !valid_deployment_smoke_proof_id(&proof_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "proof_id must be 1-80 ASCII letters, digits, hyphens, or underscores",
+        )
+            .into_response();
+    }
+    let ReadinessCheck::ObjectLogSqliteProjection(config) = state.readiness else {
+        return (
+            StatusCode::NOT_FOUND,
+            "object-log deployment smoke is available only for object_log_sqlite_projection",
+        )
+            .into_response();
+    };
+
+    let proof = proof_id.clone();
+    let task = tokio::task::spawn_blocking(move || match mode {
+        SmokeMode::Write => write_object_log_deployment_smoke(&config, &proof),
+        SmokeMode::Verify => verify_object_log_deployment_smoke(&config, &proof),
+    });
+    match tokio::time::timeout(Duration::from_secs(4), task).await {
+        Ok(Ok(Ok(response))) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(Ok(Err(message))) => (StatusCode::SERVICE_UNAVAILABLE, message).into_response(),
+        Ok(Err(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "object-log deployment smoke task failed",
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "object-log deployment smoke timed out",
+        )
+            .into_response(),
+    }
+}
+
+fn write_object_log_deployment_smoke(
+    config: &ObjectLogRuntimeConfig,
+    proof_id: &str,
+) -> Result<ObjectLogDeploymentSmokeResponse, String> {
+    ensure_sqlite_projection_dir(&config.sqlite_projection_dir)
+        .map_err(|_| "sqlite projection directory is not usable".to_string())?;
+    let object_key = object_log_deployment_smoke_key(proof_id);
+    let marker_path = sqlite_projection_marker_path(&config.sqlite_projection_dir, proof_id);
+    let payload = object_log_deployment_smoke_payload(proof_id);
+    probe_s3_compatible_object_path(&config.s3, &object_key, payload.as_bytes())
+        .map_err(|_| "object-log deployment smoke object write/read failed".to_string())?;
+    if let Some(parent) = marker_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|_| "sqlite projection smoke marker directory create failed".to_string())?;
+    }
+    std::fs::write(&marker_path, payload.as_bytes())
+        .map_err(|_| "sqlite projection smoke marker write failed".to_string())?;
+    Ok(ObjectLogDeploymentSmokeResponse {
+        proof_id: proof_id.to_string(),
+        object_key,
+        sqlite_projection_marker: marker_path.display().to_string(),
+        recovered: false,
+    })
+}
+
+fn verify_object_log_deployment_smoke(
+    config: &ObjectLogRuntimeConfig,
+    proof_id: &str,
+) -> Result<ObjectLogDeploymentSmokeResponse, String> {
+    ensure_sqlite_projection_dir(&config.sqlite_projection_dir)
+        .map_err(|_| "sqlite projection directory is not usable".to_string())?;
+    let object_key = object_log_deployment_smoke_key(proof_id);
+    let marker_path = sqlite_projection_marker_path(&config.sqlite_projection_dir, proof_id);
+    let expected = object_log_deployment_smoke_payload(proof_id).into_bytes();
+    let object = get_s3_compatible_object_path(&config.s3, &object_key)
+        .map_err(|_| "object-log deployment smoke object recovery failed".to_string())?;
+    let marker = std::fs::read(&marker_path)
+        .map_err(|_| "sqlite projection smoke marker recovery failed".to_string())?;
+    if object != expected || marker != expected {
+        return Err("object-log deployment smoke recovery payload mismatch".to_string());
+    }
+    Ok(ObjectLogDeploymentSmokeResponse {
+        proof_id: proof_id.to_string(),
+        object_key,
+        sqlite_projection_marker: marker_path.display().to_string(),
+        recovered: true,
+    })
+}
+
+fn valid_deployment_smoke_proof_id(proof_id: &str) -> bool {
+    !proof_id.is_empty()
+        && proof_id.len() <= 80
+        && proof_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn object_log_deployment_smoke_key(proof_id: &str) -> String {
+    format!("pqueue/deployment-smoke/{proof_id}.json")
+}
+
+fn sqlite_projection_marker_path(root: &Path, proof_id: &str) -> PathBuf {
+    root.join("deployment-smoke")
+        .join(format!("{proof_id}.json"))
+}
+
+fn object_log_deployment_smoke_payload(proof_id: &str) -> String {
+    format!("{{\"kind\":\"pqueue-object-log-deployment-smoke-v1\",\"proof_id\":\"{proof_id}\"}}")
+}
+
 fn ensure_sqlite_projection_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     let probe_path = path.join(format!(".pqueue-readiness-{}", std::process::id()));
@@ -576,6 +720,20 @@ fn probe_s3_compatible_object_path(
     key: &str,
     payload: &[u8],
 ) -> Result<(), S3CompatibleProbeError> {
+    put_s3_compatible_object_path(config, key, payload)?;
+    let body = get_s3_compatible_object_path(config, key)?;
+    if body == payload {
+        Ok(())
+    } else {
+        Err(S3CompatibleProbeError::ProbePayloadMismatch)
+    }
+}
+
+fn put_s3_compatible_object_path(
+    config: &S3CompatibleObjectLogConfig,
+    key: &str,
+    payload: &[u8],
+) -> Result<(), S3CompatibleProbeError> {
     config.validate().map_err(S3CompatibleProbeError::Config)?;
     let endpoint = HttpEndpoint::parse(&config.endpoint_url)?;
     let path = endpoint.path_for(&config.bucket, key);
@@ -583,15 +741,21 @@ fn probe_s3_compatible_object_path(
     if !put_response.status_success {
         return Err(S3CompatibleProbeError::Put);
     }
+    Ok(())
+}
+
+fn get_s3_compatible_object_path(
+    config: &S3CompatibleObjectLogConfig,
+    key: &str,
+) -> Result<Vec<u8>, S3CompatibleProbeError> {
+    config.validate().map_err(S3CompatibleProbeError::Config)?;
+    let endpoint = HttpEndpoint::parse(&config.endpoint_url)?;
+    let path = endpoint.path_for(&config.bucket, key);
     let get_response = http_request(&endpoint, "GET", &path, &[])?;
     if !get_response.status_success {
         return Err(S3CompatibleProbeError::Get);
     }
-    if get_response.body == payload {
-        Ok(())
-    } else {
-        Err(S3CompatibleProbeError::ProbePayloadMismatch)
-    }
+    Ok(get_response.body)
 }
 
 #[derive(Debug, Clone)]

@@ -99,10 +99,7 @@ values_file_for() {
 }
 
 cleanup() {
-    if [[ -n "${PF_PID}" ]]; then
-        kill "${PF_PID}" >/dev/null 2>&1 || true
-        wait "${PF_PID}" >/dev/null 2>&1 || true
-    fi
+    stop_port_forward
 
     if [[ "${DRY_RUN}" == false && "${KEEP_CLUSTER}" == false && "${CLUSTER_CREATED}" == true && -n "${CLUSTER_NAME}" ]]; then
         if command -v kind >/dev/null 2>&1 && kind get clusters | grep -Fxq "${CLUSTER_NAME}"; then
@@ -232,6 +229,14 @@ dry_run_plan() {
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
     echo "+ GET http://127.0.0.1:${SMOKE_PORT}/readyz"
+    if [[ "${BACKEND}" == "object_log_sqlite_projection" ]]; then
+        echo "+ POST http://127.0.0.1:${SMOKE_PORT}/__pqueue/deployment/object-log-smoke/<proof-id>"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec deployment/minio -- test -s "/data/pqueue-object-log/pqueue/deployment-smoke/<proof-id>.json"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec "deployment/${RELEASE_NAME}" -- test -s "/var/lib/pqueue/projection/deployment-smoke/<proof-id>.json"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
+        echo "+ GET http://127.0.0.1:${SMOKE_PORT}/__pqueue/deployment/object-log-smoke/<proof-id>"
+    fi
     if [[ "${KEEP_CLUSTER}" == false ]]; then
         print_cmd kind delete cluster --name "${CLUSTER_NAME}"
     fi
@@ -256,6 +261,14 @@ wait_for_port_forward() {
     err "timed out waiting for kubectl port-forward on 127.0.0.1:${SMOKE_PORT}"
     sed -n '1,120p' "${log_path}" >&2 || true
     return 1
+}
+
+stop_port_forward() {
+    if [[ -n "${PF_PID}" ]]; then
+        kill "${PF_PID}" >/dev/null 2>&1 || true
+        wait "${PF_PID}" >/dev/null 2>&1 || true
+        PF_PID=""
+    fi
 }
 
 wait_for_kubernetes_api() {
@@ -295,6 +308,66 @@ smoke_readyz() {
     fi
 
     echo "GET /readyz returned HTTP 200"
+}
+
+service_http_request() {
+    local method="$1"
+    local path="$2"
+    local response_path="$3"
+
+    (
+        exec 3<>"/dev/tcp/127.0.0.1/${SMOKE_PORT}"
+        printf '%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' "${method}" "${path}" >&3
+        cat <&3
+    ) >"${response_path}"
+
+    if ! sed -n '1p' "${response_path}" | grep -Eq '^HTTP/[0-9.]+ 200 '; then
+        err "${method} ${path} did not return HTTP 200"
+        sed -n '1,120p' "${response_path}" >&2 || true
+        return 1
+    fi
+}
+
+smoke_object_log_runtime() {
+    [[ "${BACKEND}" == "object_log_sqlite_projection" ]] || return 0
+
+    local run_dir proof_id smoke_path post_response get_response object_path marker_path
+    run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
+    proof_id="$(printf '%s' "${CLUSTER_NAME}-$(date +%s)" | tr -c 'A-Za-z0-9_-' '_')"
+    smoke_path="/__pqueue/deployment/object-log-smoke/${proof_id}"
+    post_response="${run_dir}/object-log-smoke-post.response"
+    get_response="${run_dir}/object-log-smoke-get.response"
+    object_path="/data/pqueue-object-log/pqueue/deployment-smoke/${proof_id}.json"
+    marker_path="/var/lib/pqueue/projection/deployment-smoke/${proof_id}.json"
+
+    echo "+ POST http://127.0.0.1:${SMOKE_PORT}${smoke_path}"
+    service_http_request POST "${smoke_path}" "${post_response}"
+    grep -F '"recovered":false' "${post_response}" >/dev/null || {
+        err "object-log deployment smoke POST did not report recovered=false"
+        sed -n '1,120p' "${post_response}" >&2 || true
+        return 1
+    }
+
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec deployment/minio -- test -s "${object_path}"
+    kubectl_cmd -n "${NAMESPACE}" exec deployment/minio -- test -s "${object_path}"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec "deployment/${RELEASE_NAME}" -- test -s "${marker_path}"
+    kubectl_cmd -n "${NAMESPACE}" exec "deployment/${RELEASE_NAME}" -- test -s "${marker_path}"
+
+    stop_port_forward
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
+    kubectl_cmd -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
+    kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
+
+    smoke_readyz
+    echo "+ GET http://127.0.0.1:${SMOKE_PORT}${smoke_path}"
+    service_http_request GET "${smoke_path}" "${get_response}"
+    grep -F '"recovered":true' "${get_response}" >/dev/null || {
+        err "object-log deployment smoke GET did not report recovered=true"
+        sed -n '1,120p' "${get_response}" >&2 || true
+        return 1
+    }
+    echo "object-log write and restart recovery smoke passed"
 }
 
 create_namespace() {
@@ -362,6 +435,7 @@ main() {
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     smoke_readyz
+    smoke_object_log_runtime
 
     echo "=== kind Helm integration smoke PASSED ==="
 }

@@ -357,6 +357,68 @@ async fn test_object_log_readiness_probes_configured_path() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_object_log_deployment_smoke_writes_and_recovers_after_restart() {
+    let server = S3ProbeServer::start().await;
+    let sqlite_dir = test_temp_dir("deployment-smoke-recovery");
+    let env = valid_object_log_env(&sqlite_dir, &server.endpoint);
+    let proof_id = "kind_smoke_123";
+    let path = format!("/__pqueue/deployment/object-log-smoke/{proof_id}");
+
+    let router = runtime_config_from_env(&env).router();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router should respond");
+    let status = response.status();
+    let body = body_text(response.into_body()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("\"recovered\":false"));
+    assert!(
+        sqlite_dir
+            .join("deployment-smoke")
+            .join(format!("{proof_id}.json"))
+            .is_file(),
+        "deployment smoke should write a SQLite projection marker"
+    );
+    assert!(
+        server.requests().iter().any(|(method, path)| {
+            method == "PUT"
+                && path == &format!("/pqueue-object-log/pqueue/deployment-smoke/{proof_id}.json")
+        }),
+        "deployment smoke should PUT the proof object through configured object storage"
+    );
+
+    let restarted_router = runtime_config_from_env(&env).router();
+    let response = restarted_router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router should respond");
+    let status = response.status();
+    let body = body_text(response.into_body()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains("\"recovered\":true"));
+    assert!(
+        server.requests().iter().any(|(method, path)| {
+            method == "GET"
+                && path == &format!("/pqueue-object-log/pqueue/deployment-smoke/{proof_id}.json")
+        }),
+        "restart verification should GET the proof object from configured object storage"
+    );
+}
+
 struct S3ProbeServer {
     endpoint: String,
     requests: Arc<Mutex<Vec<(String, String)>>>,
