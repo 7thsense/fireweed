@@ -182,6 +182,78 @@ func TestReleaseGateOrderingPreserved(t *testing.T) {
 	}
 }
 
+func TestDeploymentReleaseGateRunsNonClusterChecks(t *testing.T) {
+	result := runDeploymentReleaseGateWithStubs(t, stubOptions{dockerInfoSucceeds: false})
+	if result.err != nil {
+		t.Fatalf("deployment release gate failed: %v\n%s", result.err, result.output)
+	}
+
+	output := result.output
+	assertOutputOrder(t, output,
+		"+++ bash scripts/ci/release-gate.sh",
+		"+++ bash scripts/ci/helm-gate.sh",
+		"+++ bash scripts/release/package-helm-chart.sh",
+		"+++ validate docs/microsite",
+		"SKIPPED kind backend matrix",
+	)
+
+	for _, want := range []string{
+		"bash\tscripts/ci/release-gate.sh",
+		"bash\tscripts/ci/helm-gate.sh",
+		"bash\tscripts/release/package-helm-chart.sh",
+	} {
+		if !strings.Contains(result.log, want) {
+			t.Fatalf("deployment gate did not run %q; log:\n%s\noutput:\n%s", want, result.log, output)
+		}
+	}
+	if strings.Contains(result.log, "scripts/ci/kind-helm-test.sh") {
+		t.Fatalf("kind matrix must not run when Docker is unusable; log:\n%s", result.log)
+	}
+}
+
+func TestDeploymentReleaseGateLocalKindSkipsAreDocumented(t *testing.T) {
+	result := runDeploymentReleaseGateWithStubs(t, stubOptions{dockerInfoSucceeds: false})
+	if result.err != nil {
+		t.Fatalf("deployment release gate failed: %v\n%s", result.err, result.output)
+	}
+
+	for _, want := range []string{
+		"SKIPPED kind backend matrix",
+		"skip scope: kind backend matrix only (postgres_native object_log_sqlite_projection)",
+		"missing local capability:",
+		"docker daemon not usable: docker info failed",
+		"non-cluster deployment release checks passed before this kind-only skip",
+	} {
+		if !strings.Contains(result.output, want) {
+			t.Fatalf("deployment gate skip output missing %q:\n%s", want, result.output)
+		}
+	}
+}
+
+func TestDeploymentReleaseGateRunsBothBackendsWhenToolsExist(t *testing.T) {
+	result := runDeploymentReleaseGateWithStubs(t, stubOptions{dockerInfoSucceeds: true})
+	if result.err != nil {
+		t.Fatalf("deployment release gate failed: %v\n%s", result.err, result.output)
+	}
+
+	assertOutputOrder(t, result.output,
+		"+++ bash scripts/ci/kind-helm-test.sh --backend postgres_native",
+		"+++ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection",
+		"=== deployment release gate PASSED ===",
+	)
+	for _, want := range []string{
+		"bash\tscripts/ci/kind-helm-test.sh\t--backend\tpostgres_native",
+		"bash\tscripts/ci/kind-helm-test.sh\t--backend\tobject_log_sqlite_projection",
+	} {
+		if !strings.Contains(result.log, want) {
+			t.Fatalf("deployment gate did not run %q; log:\n%s\noutput:\n%s", want, result.log, result.output)
+		}
+	}
+	if strings.Contains(result.output, "SKIPPED kind backend matrix") {
+		t.Fatalf("kind matrix must not skip when all local tools are stubbed usable:\n%s", result.output)
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	content, err := os.ReadFile(path)
@@ -226,5 +298,84 @@ func writeReleaseChecksums(t *testing.T, dist string) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("write-checksums failed: %v\n%s", err, out)
+	}
+}
+
+type stubOptions struct {
+	dockerInfoSucceeds bool
+}
+
+type gateResult struct {
+	output string
+	log    string
+	err    error
+}
+
+func runDeploymentReleaseGateWithStubs(t *testing.T, opts stubOptions) gateResult {
+	t.Helper()
+	realBash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realPython, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeExecutable(t, bin, "bash", "#!/bin/sh\n"+
+		"printf 'bash' >> \"$PQUEUE_GATE_TEST_LOG\"\n"+
+		"for arg in \"$@\"; do printf '\\t%s' \"$arg\" >> \"$PQUEUE_GATE_TEST_LOG\"; done\n"+
+		"printf '\\n' >> \"$PQUEUE_GATE_TEST_LOG\"\n"+
+		"case \"$1\" in\n"+
+		"  scripts/ci/release-gate.sh|scripts/ci/helm-gate.sh|scripts/release/package-helm-chart.sh|scripts/ci/kind-helm-test.sh) exit 0 ;;\n"+
+		"  *) exec "+realBash+" \"$@\" ;;\n"+
+		"esac\n")
+	writeExecutable(t, bin, "python3", "#!/bin/sh\nexec "+realPython+" \"$@\"\n")
+	writeExecutable(t, bin, "helm", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, bin, "kind", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, bin, "kubectl", "#!/bin/sh\nexit 0\n")
+	dockerStatus := "1"
+	if opts.dockerInfoSucceeds {
+		dockerStatus = "0"
+	}
+	writeExecutable(t, bin, "docker", "#!/bin/sh\n"+
+		"if [ \"$1\" = info ]; then exit "+dockerStatus+"; fi\n"+
+		"exit 0\n")
+
+	cmd := exec.Command(realBash, "scripts/ci/deployment-release-gate.sh")
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PQUEUE_GATE_TEST_LOG="+logPath,
+	)
+	out, runErr := cmd.CombinedOutput()
+	log := ""
+	if content, err := os.ReadFile(logPath); err == nil {
+		log = string(content)
+	}
+	return gateResult{output: string(out), log: log, err: runErr}
+}
+
+func writeExecutable(t *testing.T, dir, name, content string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertOutputOrder(t *testing.T, output string, needles ...string) {
+	t.Helper()
+	previous := -1
+	for _, needle := range needles {
+		current := strings.Index(output, needle)
+		if current == -1 {
+			t.Fatalf("output missing %q:\n%s", needle, output)
+		}
+		if current <= previous {
+			t.Fatalf("output order violation at %q:\n%s", needle, output)
+		}
+		previous = current
 	}
 }
