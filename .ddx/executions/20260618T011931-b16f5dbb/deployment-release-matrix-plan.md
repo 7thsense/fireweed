@@ -29,7 +29,7 @@ bash scripts/ci/deployment-release-gate.sh
   `passed_with_local_environment_skip`.
 - Any local skip is limited to the disposable kind backend matrix because a
   required local Docker/kind capability is unavailable.
-- The proof references the 0.2.1 chart package and both supported backend
+- The proof references the 0.2.2 chart package and both supported backend
   profiles.
 
 ## Rerun Note
@@ -70,5 +70,21 @@ wait for that fixture before installing pqueue for the object-log profile.
 Because the `v0.2.0` tag had already been pushed to the failed commit, the
 deployment-ready target moved to `v0.2.1` rather than rewriting the tag. The
 fifth local run used the `0.2.1` release metadata and passed with the same
-documented local kind API skip; the strict CI proof is expected from the
-`v0.2.1` tag workflow.
+documented local kind API skip; the strict CI proof ran in the `v0.2.1` tag
+workflow and reached the container image publication step.
+
+The `v0.2.1` tag workflow was cancelled while `docker/build-push-action`
+performed a cold release Docker build. The release gate, strict deployment
+gate, binary archive packaging, and Helm chart packaging had already completed
+successfully before cancellation. The command fingerprint changed after moving
+release image publication to a prebuilt-binary context assembled from the
+already packaged `pqueue-service` and `pqueue-verify-ledger` binaries. Because
+`v0.2.1` was already pushed, the deployment-ready target moved to `v0.2.2`
+rather than rewriting the tag.
+
+The local `v0.2.2` deployment-gate rerun was blocked before packaging by the
+dirty sibling `fjord` checkout under `.ddx-exec-wt`, where
+`crates/fjord-log` was deleted outside this execution worktree. The release
+workflow checks out `telepathdata/fjord` fresh, and upstream still contains
+`crates/fjord-log/Cargo.toml`, so the `v0.2.2` tag workflow remains the
+clean-checkout proof for this rerun.

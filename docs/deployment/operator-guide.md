@@ -44,7 +44,7 @@ Download and verify them before running `helm install`:
 ```sh
 OWNER=<github-owner>
 REPO=pqueue
-TAG=v0.2.1
+TAG=v0.2.2
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 

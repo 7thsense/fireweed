@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+
+# Release image assembled from binaries already built and packaged by the
+# release workflow. The normal Dockerfile remains the source-build path used by
+# local kind proofs; this file avoids recompiling the Rust workspace during
+# release asset publication.
+
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --user-group --no-create-home pqueue
+
+COPY pqueue-service /usr/local/bin/pqueue-service
+COPY pqueue-verify-ledger /usr/local/bin/pqueue-verify-ledger
+
+RUN chmod 0755 /usr/local/bin/pqueue-service /usr/local/bin/pqueue-verify-ledger
+
+USER pqueue
+
+ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
+    PQUEUE_BACKEND_PROFILE=postgres_native
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/pqueue-service"]

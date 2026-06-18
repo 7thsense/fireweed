@@ -1062,6 +1062,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 name = "fjord-coordinator"
 version = "0.1.0"
 dependencies = [
+ "object-log",
  "parking_lot",
 ]
 
@@ -1972,13 +1973,12 @@ dependencies = [
 [[package]]
 name = "object-log"
 version = "0.1.0"
-source = "git+https://github.com/easel/object-log?rev=e859c8c#e859c8c8ccc40053d8f7de1c2d5ced452001f9c9"
+source = "git+https://github.com/easel/object-log?rev=973d839#973d8397b26012fac26ecf4b1551e93d0856779c"
 dependencies = [
  "async-trait",
  "bytes",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "thiserror",
  "tokio",
 ]
@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "pqueue-core",
  "serde",
@@ -2195,14 +2195,14 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "pqueue-kafka"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "fjord-coordinator",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "pqueue-core",
  "pqueue-storage",
@@ -2248,7 +2248,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-service"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "pqueue-client",
@@ -2267,7 +2267,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "pqueue-core",
  "pqueue-storage",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "parking_lot",

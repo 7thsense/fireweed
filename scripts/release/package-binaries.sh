@@ -22,18 +22,20 @@ ARCHIVE="${DIST_DIR}/pqueue-${VERSION}-${TARGET_TRIPLE}.tar.gz"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" "$DIST_DIR"
 
-cargo +1.92.0 build --release --bin pqueue-verify-ledger
+cargo +1.92.0 build --release --bin pqueue-service --bin pqueue-verify-ledger
 
+cp "target/release/pqueue-service" "$STAGE_DIR/"
 cp "target/release/pqueue-verify-ledger" "$STAGE_DIR/"
 cat > "$STAGE_DIR/MANIFEST.txt" <<EOF
 pqueue ${VERSION}
 target=${TARGET_TRIPLE}
 
 Binaries:
+- pqueue-service: production API-001 HTTP service and container entrypoint.
 - pqueue-verify-ledger: validates pqueue verification ledger JSONL files.
 
 Build command:
-cargo +1.92.0 build --release --bin pqueue-verify-ledger
+cargo +1.92.0 build --release --bin pqueue-service --bin pqueue-verify-ledger
 EOF
 
 tar -C "$(dirname "$STAGE_DIR")" -czf "$ARCHIVE" "$(basename "$STAGE_DIR")"
