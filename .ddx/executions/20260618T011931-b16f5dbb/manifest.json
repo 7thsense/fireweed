@@ -1,0 +1,62 @@
+{
+  "attempt_id": "20260618T011931-b16f5dbb",
+  "bead_id": "pqueue-90b11cab",
+  "base_rev": "243c1f3d6da49d2e7ac10f060368c4cf85edcf3e",
+  "created_at": "2026-06-18T01:19:31.301584754Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-90b11cab",
+    "title": "Cut deployment-ready pqueue release",
+    "description": "Perform the final deployment-ready release. This bead should only run after the deployment gate, CI matrix, docs/microsite, Helm chart, and both backend kind proofs are complete.\n\nTarget version: use v0.2.0 unless a later bead or repo versioning evidence requires a different deployment-ready version. Preserve existing release assets and add deployment artifacts.\n\nIn-scope files:\n- version metadata changed by the release process\n- release notes/docs/proof ledger\n- .github/workflows/** only for final fixes discovered by release dry-run\nOut-of-scope:\n- New feature work beyond release blockers.",
+    "acceptance": "1. `bash scripts/ci/deployment-release-gate.sh` passes from a clean checkout.\n2. The release tag exists on GitHub and `gh release view v0.2.0 --repo telepathdata/7thsense-pqueue` or the selected target version shows binary archives, SHA256SUMS, Helm chart artifact/coordinates, and image digest/coordinates.\n3. GitHub Actions for the release tag succeed.\n4. `ddx bead status --no-update-check` shows this epic's release-readiness children closed or explicitly superseded with documented evidence.",
+    "parent": "pqueue-3546063c",
+    "labels": [
+      "area:release",
+      "kind:release",
+      "phase:deployment-readiness",
+      "plan-2026-06-17",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"`bash scripts/ci/deployment-release-gate.sh` passes from a clean checkout.\",\"kind\":\"build-gate\",\"verifiable\":true},{\"ac\":2,\"text\":\"The release tag exists on GitHub and `gh release view v0.2.0 --repo telepathdata/7thsense-pqueue` or the selected target version shows binary archives, SHA256SUMS, Helm chart artifact/coordinates, and image digest/coordinates.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"GitHub Actions for the release tag succeed.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":4,\"text\":\"`ddx bead status --no-update-check` shows this epic's release-readiness children closed or explicitly superseded with documented evidence.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-06-18T01:14:30.345200939Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.25 threshold=0.50 verifiable=1/4"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness check timed out after 5m0s (pqueue-90b11cab)\",\"fingerprint\":\"ebc10e17c6557944f61cd6e5dbd753571530a21ab493516678aaf782a5f68ade\",\"policy_mode\":\"warn-only\",\"reason\":\"timeout\",\"rule_id\":\"pre_claim_intake.timeout\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"ebc10e17c6557944f61cd6e5dbd753571530a21ab493516678aaf782a5f68ade\"}",
+          "created_at": "2026-06-18T01:19:30.351451418Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "timeout"
+        }
+      ],
+      "spec-id": "build-implementation-plan"
+    }
+  },
+  "governing": [
+    {
+      "id": "build-implementation-plan",
+      "path": "docs/helix/04-build/BUILD-001-implementation-plan.md",
+      "title": "Build Plan: BUILD-001 Implementation Sequence"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260618T011931-b16f5dbb",
+    "prompt": ".ddx/executions/20260618T011931-b16f5dbb/prompt.md",
+    "manifest": ".ddx/executions/20260618T011931-b16f5dbb/manifest.json",
+    "result": ".ddx/executions/20260618T011931-b16f5dbb/result.json",
+    "checks": ".ddx/executions/20260618T011931-b16f5dbb/checks.json",
+    "usage": ".ddx/executions/20260618T011931-b16f5dbb/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb"
+  },
+  "prompt_sha": "e961ec9d284ea3012335372f97de716fc6f452c1f2e331423b54e6c2b390a3f1"
+}
