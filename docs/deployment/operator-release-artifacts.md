@@ -1,7 +1,7 @@
 # Operator Release Artifacts
 
 This is the operator-facing location for obtaining and verifying pqueue release
-artifacts. Replace `OWNER`, `REPO`, and `v0.1.0` with the release repository and
+artifacts. Replace `OWNER`, `REPO`, and `v0.2.0` with the release repository and
 tag you are installing from.
 
 The current release workflow publishes:
@@ -15,9 +15,9 @@ The current release workflow publishes:
 | Binary archives | GitHub Release assets `pqueue-<version>-<target-triple>.tar.gz` |
 | Checksums | GitHub Release asset `SHA256SUMS` |
 
-For example, release tag `v0.1.0` uses version `0.1.0`, so the chart package is
-`pqueue-0.1.0.tgz` and binary archives are named like
-`pqueue-0.1.0-x86_64-linux.tar.gz`. The `v0.1.0` workflow publishes the Helm
+For example, release tag `v0.2.0` uses version `0.2.0`, so the chart package is
+`pqueue-0.2.0.tgz` and binary archives are named like
+`pqueue-0.2.0-x86_64-linux.tar.gz`. The `v0.2.0` workflow publishes the Helm
 chart as a GitHub Release package asset; it does not publish an OCI chart.
 
 ## Download
@@ -27,7 +27,7 @@ With the GitHub CLI:
 ```sh
 OWNER=<github-owner>
 REPO=pqueue
-TAG=v0.1.0
+TAG=v0.2.0
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 
@@ -45,7 +45,7 @@ gh release download "$TAG" \
 Without `gh`, download the same assets from:
 
 ```text
-https://github.com/OWNER/REPO/releases/tag/v0.1.0
+https://github.com/OWNER/REPO/releases/tag/v0.2.0
 ```
 
 ## Verify Checksums

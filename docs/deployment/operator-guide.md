@@ -20,10 +20,10 @@ The microsite is static HTML and has no generated build output.
 | Backend profile                | Status                                                                                                                                                | What is proven                                                                                                                                                                                                                           | What is not proven                                                                                                                                                                                                                                                                                             |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `postgres_native`              | Production-readiness target for BUILD-001 once the Helm and kind gates pass for the release artifact being installed.                                 | Helm render/lint, `kind` install/upgrade/uninstall smoke, PostgreSQL readiness probe, release artifact checksum and image digest verification.                                                                                           | Environment-specific capacity planning, backup/restore policy, managed Postgres hardening, and P1 operator workflows unless a release explicitly includes them.                                                                                                                                                |
-| `object_log_sqlite_projection` | Blocked for full production-readiness until the MinIO-backed `kind` proof lands. Static Helm rendering and local object-log/runtime validation exist. | Helm renders S3-compatible object-log settings, Postgres control-plane Secret references, object-store Secret references, and a PVC-backed SQLite projection path. Local tests cover object-log semantics and runtime config validation. | No cloud S3 certification. The current boundary does not claim AWS S3, GCS S3 interop, IAM policy, provider TLS/certificates, or provider-specific conditional-write behavior. The required `kind` proof must exercise MinIO, bucket setup, object-log writes, restart/replay, and SQLite projection recovery. |
+| `object_log_sqlite_projection` | Production-readiness target for BUILD-001 once the release artifact gate and MinIO-backed `kind` proof pass for the release artifact being installed. | Helm renders S3-compatible object-log settings, Postgres control-plane Secret references, object-store Secret references, and a PVC-backed SQLite projection path. The local proof exercises MinIO bucket setup, object-log writes, restart/replay, and SQLite projection recovery. | No cloud S3 certification. The current boundary does not claim AWS S3, GCS S3 interop, IAM policy, provider TLS/certificates, or provider-specific conditional-write behavior. |
 
-Do not cite `object_log_sqlite_projection` as production-deployable until the
-release evidence includes the completed MinIO S3-compatible `kind` proof. See
+Do not cite `object_log_sqlite_projection` as cloud-provider S3 certified. The
+BUILD-001 production boundary is MinIO S3-compatible `kind` proof only. See
 [Production Deployment Readiness Contract](../helix/04-build/DEPLOYMENT-READINESS.md)
 for the formal gate.
 
@@ -44,7 +44,7 @@ Download and verify them before running `helm install`:
 ```sh
 OWNER=<github-owner>
 REPO=pqueue
-TAG=v0.1.0
+TAG=v0.2.0
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 

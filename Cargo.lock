@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pqueue-core",
  "serde",
@@ -2195,14 +2195,14 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "pqueue-kafka"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "fjord-coordinator",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pqueue-core",
  "pqueue-storage",
@@ -2248,7 +2248,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "pqueue-client",
@@ -2267,7 +2267,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pqueue-core",
  "pqueue-storage",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "parking_lot",

@@ -1,0 +1,136 @@
+{
+  "backend_profiles": [
+    {
+      "profile": "postgres_native",
+      "reason": "local kind Kubernetes API did not become reachable",
+      "status": "skipped_local_environment"
+    },
+    {
+      "profile": "object_log_sqlite_projection",
+      "reason": "local kind Kubernetes API did not become reachable",
+      "status": "skipped_local_environment"
+    }
+  ],
+  "chart": {
+    "evidence": "target/deployment-release-gate/release-dist/pqueue-helm-chart.txt",
+    "name": "pqueue",
+    "package": "target/deployment-release-gate/release-dist/pqueue-0.2.0.tgz",
+    "package_exists": true,
+    "version": "0.2.0"
+  },
+  "commands": [
+    {
+      "argv": [
+        "bash",
+        "scripts/ci/release-gate.sh"
+      ],
+      "display": "bash scripts/ci/release-gate.sh",
+      "exit_status": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/ci/helm-gate.sh"
+      ],
+      "display": "bash scripts/ci/helm-gate.sh",
+      "exit_status": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/release/package-helm-chart.sh",
+        "--version",
+        "0.2.0",
+        "--destination",
+        "/Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist",
+        "--chart-dir",
+        "charts/pqueue"
+      ],
+      "display": "bash scripts/release/package-helm-chart.sh --version 0.2.0 --destination /Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist --chart-dir charts/pqueue",
+      "exit_status": 0
+    },
+    {
+      "argv": [
+        "validate docs/microsite"
+      ],
+      "display": "validate docs/microsite",
+      "exit_status": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/ci/kind-helm-test.sh",
+        "--backend",
+        "postgres_native"
+      ],
+      "display": "bash scripts/ci/kind-helm-test.sh --backend postgres_native",
+      "exit_status": 1
+    }
+  ],
+  "commit_sha": "243c1f3d6da49d2e7ac10f060368c4cf85edcf3e",
+  "exit_status": 0,
+  "image": {
+    "coordinate": "unavailable",
+    "digest": "unavailable",
+    "source": "unavailable",
+    "tag": "unavailable",
+    "unavailable_reason": "no PQUEUE_IMAGE_* environment values or pqueue-service-image.txt release artifact were available"
+  },
+  "local_environment_skip": {
+    "ci_matrix_proof": false,
+    "reasons": [
+      "local kind Kubernetes API did not become reachable"
+    ],
+    "scope": "kind backend matrix only"
+  },
+  "release_notes": {
+    "artifact_paths": [
+      "target/deployment-release-gate/package-helm-chart.out",
+      "target/deployment-release-gate/release-dist/pqueue-0.2.0.tgz",
+      "target/deployment-release-gate/release-dist/pqueue-helm-chart.txt",
+      "target/deployment-release-gate/release-dist/SHA256SUMS",
+      "target/deployment-release-gate/kind-postgres_native.out"
+    ],
+    "backend_profile_matrix": [
+      "postgres_native:skipped_local_environment",
+      "object_log_sqlite_projection:skipped_local_environment"
+    ],
+    "command_list": [
+      "bash scripts/ci/release-gate.sh",
+      "bash scripts/ci/helm-gate.sh",
+      "bash scripts/release/package-helm-chart.sh --version 0.2.0 --destination /Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist --chart-dir charts/pqueue",
+      "validate docs/microsite",
+      "bash scripts/ci/kind-helm-test.sh --backend postgres_native"
+    ],
+    "summary": "Deployment release gate passed_with_local_environment_skip for commit 243c1f3d6da49d2e7ac10f060368c4cf85edcf3e and chart 0.2.0."
+  },
+  "schema": "pqueue.deployment_proof.v1",
+  "status": "passed_with_local_environment_skip",
+  "supporting_artifacts": [
+    {
+      "description": "chart packaging command output",
+      "exists": true,
+      "path": "target/deployment-release-gate/package-helm-chart.out"
+    },
+    {
+      "description": "Helm chart package",
+      "exists": true,
+      "path": "target/deployment-release-gate/release-dist/pqueue-0.2.0.tgz"
+    },
+    {
+      "description": "Helm chart evidence",
+      "exists": true,
+      "path": "target/deployment-release-gate/release-dist/pqueue-helm-chart.txt"
+    },
+    {
+      "description": "release distribution checksums",
+      "exists": true,
+      "path": "target/deployment-release-gate/release-dist/SHA256SUMS"
+    },
+    {
+      "description": "kind Helm test output for postgres_native",
+      "exists": true,
+      "path": "target/deployment-release-gate/kind-postgres_native.out"
+    }
+  ]
+}

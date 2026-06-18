@@ -184,9 +184,7 @@ Provider-specific S3 readiness requires a later bead with:
 - a live acceptance run or explicitly approved emulator boundary;
 - release evidence separate from the fjord/local fixture proof.
 
-Current deployment gap: the chart and runtime can render and validate the
-`object_log_sqlite_projection` object-log configuration, but the kind proof is
-not complete until `pqueue-b9f75588` lands. The missing proof surface is:
+The completed `object_log_sqlite_projection` kind proof must demonstrate:
 
 - `scripts/ci/kind-helm-test.sh` and `scripts/ci/kind/**` must deploy MinIO or
   an equivalent S3-compatible service, create/configure the
@@ -197,8 +195,7 @@ not complete until `pqueue-b9f75588` lands. The missing proof surface is:
 - The proof must restart or roll out the pqueue pod and verify state can be
   recovered from object-log segments/snapshots plus the SQLite projection path.
 
-Until that bead closes, the local production-readiness proof for
-`object_log_sqlite_projection` remains blocked. The target command is:
+The target command is:
 
 ```sh
 bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection
