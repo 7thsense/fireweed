@@ -1,6 +1,7 @@
 package pqueue_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,6 +255,143 @@ func TestDeploymentReleaseGateRunsBothBackendsWhenToolsExist(t *testing.T) {
 	}
 }
 
+func TestDeploymentProofLedgerSchema(t *testing.T) {
+	result := runDeploymentReleaseGateWithStubs(t, stubOptions{
+		dockerInfoSucceeds: false,
+		env: map[string]string{
+			"PQUEUE_IMAGE_EVIDENCE_FILE": filepath.Join(t.TempDir(), "missing-image-evidence.txt"),
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("deployment release gate failed: %v\n%s", result.err, result.output)
+	}
+
+	proof := result.proof
+	assertStringField(t, proof, "schema", "pqueue.deployment_proof.v1")
+	assertStringField(t, proof, "status", "passed_with_local_environment_skip")
+	if stringField(t, proof, "commit_sha") == "" {
+		t.Fatalf("proof missing commit SHA: %#v", proof)
+	}
+
+	chart := objectField(t, proof, "chart")
+	if stringField(t, chart, "version") == "" || stringField(t, chart, "version") == "unavailable" {
+		t.Fatalf("proof missing chart version: %#v", chart)
+	}
+
+	commands := arrayField(t, proof, "commands")
+	for _, want := range []string{
+		"bash scripts/ci/release-gate.sh",
+		"bash scripts/ci/helm-gate.sh",
+		"bash scripts/release/package-helm-chart.sh --version",
+		"validate docs/microsite",
+	} {
+		if !proofContainsCommand(proof, want, 0) {
+			t.Fatalf("proof missing successful command containing %q:\n%s", want, mustRead(t, result.proofPath))
+		}
+	}
+	if len(commands) < 4 {
+		t.Fatalf("proof command list too short: %#v", commands)
+	}
+
+	backends := arrayField(t, proof, "backend_profiles")
+	if len(backends) != 2 {
+		t.Fatalf("proof should record both backend profiles, got %#v", backends)
+	}
+	for _, entry := range backends {
+		profile := entry.(map[string]any)
+		assertStringField(t, profile, "status", "skipped_local_environment")
+	}
+
+	localSkip := objectField(t, proof, "local_environment_skip")
+	assertStringField(t, localSkip, "scope", "kind backend matrix only")
+	if boolField(t, localSkip, "ci_matrix_proof") {
+		t.Fatalf("local Docker/kind skip must not be marked as CI matrix proof: %#v", localSkip)
+	}
+	if len(arrayField(t, localSkip, "reasons")) == 0 {
+		t.Fatalf("proof missing local skip reason: %#v", localSkip)
+	}
+}
+
+func TestDeploymentProofImageEvidenceOptional(t *testing.T) {
+	withImage := runDeploymentReleaseGateWithStubs(t, stubOptions{
+		dockerInfoSucceeds: true,
+		env: map[string]string{
+			"PQUEUE_IMAGE_TAG":        "ghcr.io/example/pqueue-service:0.2.0",
+			"PQUEUE_IMAGE_DIGEST":     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			"PQUEUE_IMAGE_COORDINATE": "ghcr.io/example/pqueue-service@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	})
+	if withImage.err != nil {
+		t.Fatalf("deployment release gate with image env failed: %v\n%s", withImage.err, withImage.output)
+	}
+	image := objectField(t, withImage.proof, "image")
+	assertStringField(t, image, "tag", "ghcr.io/example/pqueue-service:0.2.0")
+	assertStringField(t, image, "digest", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	assertStringField(t, image, "coordinate", "ghcr.io/example/pqueue-service@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	withoutImage := runDeploymentReleaseGateWithStubs(t, stubOptions{
+		dockerInfoSucceeds: false,
+		env: map[string]string{
+			"PQUEUE_IMAGE_EVIDENCE_FILE": filepath.Join(t.TempDir(), "missing-image-evidence.txt"),
+		},
+	})
+	if withoutImage.err != nil {
+		t.Fatalf("deployment release gate without image env failed: %v\n%s", withoutImage.err, withoutImage.output)
+	}
+	image = objectField(t, withoutImage.proof, "image")
+	assertStringField(t, image, "tag", "unavailable")
+	assertStringField(t, image, "digest", "unavailable")
+	if stringField(t, image, "unavailable_reason") == "" {
+		t.Fatalf("missing image unavailable reason: %#v", image)
+	}
+}
+
+func TestDeploymentProofReleaseNotesReady(t *testing.T) {
+	result := runDeploymentReleaseGateWithStubs(t, stubOptions{dockerInfoSucceeds: true})
+	if result.err != nil {
+		t.Fatalf("deployment release gate failed: %v\n%s", result.err, result.output)
+	}
+
+	notes := objectField(t, result.proof, "release_notes")
+	for _, field := range []string{"command_list", "backend_profile_matrix", "artifact_paths"} {
+		if len(arrayField(t, notes, field)) == 0 {
+			t.Fatalf("release notes proof missing %s:\n%s", field, mustRead(t, result.proofPath))
+		}
+	}
+	if !proofContainsCommand(result.proof, "bash scripts/ci/kind-helm-test.sh --backend postgres_native", 0) {
+		t.Fatalf("proof missing postgres_native kind command:\n%s", mustRead(t, result.proofPath))
+	}
+	if !proofContainsCommand(result.proof, "bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection", 0) {
+		t.Fatalf("proof missing object_log_sqlite_projection kind command:\n%s", mustRead(t, result.proofPath))
+	}
+	if !stringSliceContains(arrayField(t, notes, "backend_profile_matrix"), "postgres_native:tested") {
+		t.Fatalf("release notes matrix missing postgres_native tested: %#v", notes)
+	}
+}
+
+func TestDeploymentProofDoesNotMaskFailures(t *testing.T) {
+	for _, failCommand := range []string{
+		"scripts/ci/release-gate.sh",
+		"scripts/ci/helm-gate.sh",
+		"scripts/release/package-helm-chart.sh",
+		"scripts/ci/kind-helm-test.sh",
+	} {
+		t.Run(failCommand, func(t *testing.T) {
+			result := runDeploymentReleaseGateWithStubs(t, stubOptions{
+				dockerInfoSucceeds: true,
+				failCommand:        failCommand,
+			})
+			if result.err == nil {
+				t.Fatalf("deployment release gate unexpectedly passed with failing %s\n%s", failCommand, result.output)
+			}
+			assertStringField(t, result.proof, "status", "failed")
+			if !proofContainsCommand(result.proof, failCommand, 23) {
+				t.Fatalf("proof missing failed command %s:\n%s", failCommand, mustRead(t, result.proofPath))
+			}
+		})
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	content, err := os.ReadFile(path)
@@ -303,12 +441,16 @@ func writeReleaseChecksums(t *testing.T, dist string) {
 
 type stubOptions struct {
 	dockerInfoSucceeds bool
+	failCommand        string
+	env                map[string]string
 }
 
 type gateResult struct {
-	output string
-	log    string
-	err    error
+	output    string
+	log       string
+	err       error
+	proofPath string
+	proof     map[string]any
 }
 
 func runDeploymentReleaseGateWithStubs(t *testing.T, opts stubOptions) gateResult {
@@ -324,11 +466,22 @@ func runDeploymentReleaseGateWithStubs(t *testing.T, opts stubOptions) gateResul
 
 	bin := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "commands.log")
+	proofDir := filepath.Join("target", "deployment-release-gate", "go-test-"+strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()))
+	if err := os.RemoveAll(proofDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(proofDir) })
+
+	failCase := ""
+	if opts.failCommand != "" {
+		failCase = "  " + opts.failCommand + ") exit 23 ;;\n"
+	}
 	writeExecutable(t, bin, "bash", "#!/bin/sh\n"+
 		"printf 'bash' >> \"$PQUEUE_GATE_TEST_LOG\"\n"+
 		"for arg in \"$@\"; do printf '\\t%s' \"$arg\" >> \"$PQUEUE_GATE_TEST_LOG\"; done\n"+
 		"printf '\\n' >> \"$PQUEUE_GATE_TEST_LOG\"\n"+
 		"case \"$1\" in\n"+
+		failCase+
 		"  scripts/ci/release-gate.sh|scripts/ci/helm-gate.sh|scripts/release/package-helm-chart.sh|scripts/ci/kind-helm-test.sh) exit 0 ;;\n"+
 		"  *) exec "+realBash+" \"$@\" ;;\n"+
 		"esac\n")
@@ -348,13 +501,26 @@ func runDeploymentReleaseGateWithStubs(t *testing.T, opts stubOptions) gateResul
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"PQUEUE_GATE_TEST_LOG="+logPath,
+		"PQUEUE_DEPLOYMENT_PROOF_DIR="+proofDir,
 	)
+	for key, value := range opts.env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	out, runErr := cmd.CombinedOutput()
 	log := ""
 	if content, err := os.ReadFile(logPath); err == nil {
 		log = string(content)
 	}
-	return gateResult{output: string(out), log: log, err: runErr}
+	proofPath := filepath.Join(proofDir, "deployment-proof.json")
+	proof := map[string]any{}
+	if content, err := os.ReadFile(proofPath); err == nil {
+		if err := json.Unmarshal(content, &proof); err != nil {
+			t.Fatalf("deployment proof is not valid JSON: %v\n%s", err, content)
+		}
+	} else {
+		t.Fatalf("deployment proof was not written at %s\nerr: %v\noutput:\n%s", proofPath, err, out)
+	}
+	return gateResult{output: string(out), log: log, err: runErr, proofPath: proofPath, proof: proof}
 }
 
 func writeExecutable(t *testing.T, dir, name, content string) {
@@ -378,4 +544,77 @@ func assertOutputOrder(t *testing.T, output string, needles ...string) {
 		}
 		previous = current
 	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
+func objectField(t *testing.T, object map[string]any, key string) map[string]any {
+	t.Helper()
+	value, ok := object[key].(map[string]any)
+	if !ok {
+		t.Fatalf("field %s is not an object: %#v", key, object[key])
+	}
+	return value
+}
+
+func arrayField(t *testing.T, object map[string]any, key string) []any {
+	t.Helper()
+	value, ok := object[key].([]any)
+	if !ok {
+		t.Fatalf("field %s is not an array: %#v", key, object[key])
+	}
+	return value
+}
+
+func stringField(t *testing.T, object map[string]any, key string) string {
+	t.Helper()
+	value, ok := object[key].(string)
+	if !ok {
+		t.Fatalf("field %s is not a string: %#v", key, object[key])
+	}
+	return value
+}
+
+func boolField(t *testing.T, object map[string]any, key string) bool {
+	t.Helper()
+	value, ok := object[key].(bool)
+	if !ok {
+		t.Fatalf("field %s is not a bool: %#v", key, object[key])
+	}
+	return value
+}
+
+func assertStringField(t *testing.T, object map[string]any, key, want string) {
+	t.Helper()
+	if got := stringField(t, object, key); got != want {
+		t.Fatalf("field %s = %q, want %q", key, got, want)
+	}
+}
+
+func proofContainsCommand(proof map[string]any, needle string, exitStatus int) bool {
+	for _, entry := range proof["commands"].([]any) {
+		command := entry.(map[string]any)
+		display := command["display"].(string)
+		status := int(command["exit_status"].(float64))
+		if strings.Contains(display, needle) && status == exitStatus {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceContains(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

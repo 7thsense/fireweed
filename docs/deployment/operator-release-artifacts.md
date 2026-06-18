@@ -98,6 +98,34 @@ ghcr.io/<lowercase-owner>/pqueue-service@sha256:<digest>
 `pqueue-service-image.txt` also records `version_coordinate`, `sha_coordinate`,
 and `digest_coordinate` for audit trails.
 
+## Deployment Release Proof
+
+Source checkouts can generate release-note-ready deployment proof after the
+release artifacts are present:
+
+```sh
+bash scripts/ci/deployment-release-gate.sh
+```
+
+The gate writes:
+
+- `target/deployment-release-gate/deployment-proof.json`
+- `target/deployment-release-gate/deployment-proof.md`
+- `target/deployment-release-gate/release-dist/`
+
+The JSON proof records the commit SHA, Helm chart version and package path,
+container image tag/digest when supplied by `PQUEUE_IMAGE_TAG`,
+`PQUEUE_IMAGE_DIGEST`, `PQUEUE_IMAGE_COORDINATE`, or
+`PQUEUE_IMAGE_EVIDENCE_FILE`, every command and exit status, the backend profile
+matrix, local Docker/kind skips, and supporting artifact paths. If image
+coordinates are unavailable in a local non-release run, the image fields are
+recorded as `unavailable` and the gate can still pass non-cluster checks.
+
+Release notes should cite the JSON `release_notes` block or the Markdown summary
+for the exact command list, chart package/version, backend profile matrix, and
+supporting artifact paths. A local Docker/kind skip is scoped to the disposable
+kind backend matrix only and is not CI matrix proof.
+
 ## Backend Support Boundary
 
 The release artifact set is valid for the BUILD-001 supported backend profiles:
