@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260618T010937-4889fb81",
+  "bead_id": "pqueue-7bba2f95",
+  "base_rev": "3126b98478bc9c502f9e4115f26ef22bc19fd783",
+  "created_at": "2026-06-18T01:09:38.233918309Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-7bba2f95",
+    "title": "Add GitHub Actions deployment backend matrix",
+    "description": "PROBLEM: GitHub Actions currently runs Helm static validation, but it does not run a deployment matrix that proves both supported Helm backend profiles through kind on capable runners.\n\nROOT CAUSE: `.github/workflows/ci.yml:56` defines a Helm job that only runs `bash scripts/ci/helm-gate.sh`, `.github/workflows/nightly.yml:40` only runs the existing nightly gate, and `.github/workflows/release.yml:55` only runs `bash scripts/ci/release-gate.sh` before packaging and publishing release artifacts.\n\nPROPOSED FIX: Update `.github/workflows/ci.yml`, `.github/workflows/nightly.yml`, and/or `.github/workflows/release.yml` so GitHub Actions has an explicit deployment matrix for `postgres_native` and `object_log_sqlite_projection`. The matrix must run Helm static validation and `bash scripts/ci/kind-helm-test.sh --backend \u003cprofile\u003e` on Ubuntu runners with Docker/kind/kubectl/helm available, and it must not rely on the local skip path to satisfy CI proof.\n\nGOVERNING ARTIFACTS: Parent bead `pqueue-4d588c37`; epic `pqueue-3546063c`; `docs/helix/04-build/BUILD-001-implementation-plan.md`; `docs/helix/04-build/DEPLOYMENT-READINESS.md`; `docs/deployment/kind-helm-integration.md`.\n\nDEPENDENCY IDS: `pqueue-728222f1`, `pqueue-0f1e8ba6`.\n\nNON-SCOPE: Cutting the release tag.",
+    "acceptance": "1. TestActionsDeploymentMatrixProfiles: GitHub Actions defines a deployment matrix containing exactly `postgres_native` and `object_log_sqlite_projection` for kind Helm integration proof.\n2. TestActionsHelmStaticValidationIncluded: the workflow runs `bash scripts/ci/helm-gate.sh` as part of the deployment proof surface before or alongside the backend matrix.\n3. TestActionsKindMatrixIsNotSkipped: the GitHub Actions matrix runs `bash scripts/ci/kind-helm-test.sh --backend postgres_native` and `bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection` on capable Ubuntu runners without accepting local Docker/kind skip output as success.\n4. TestActionsReleaseGateComposition: release-oriented workflow coverage preserves `bash scripts/ci/release-gate.sh` behavior and either invokes `bash scripts/ci/deployment-release-gate.sh` or runs equivalent release gate, Helm, docs, and kind proof commands explicitly.\n5. TestQualityGates: `go test ./...` and `lefthook run pre-commit` pass from the repository root after workflow changes.",
+    "parent": "pqueue-4d588c37",
+    "labels": [
+      "area:ci",
+      "kind:release",
+      "phase:deployment-readiness",
+      "plan-2026-06-17"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness check timed out after 5m0s (pqueue-7bba2f95)\",\"fingerprint\":\"10976d03cb97dd2ccc778c19de6a138bd6fa8419907001784d845f7e1616cbe0\",\"policy_mode\":\"warn-only\",\"reason\":\"timeout\",\"rule_id\":\"pre_claim_intake.timeout\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"10976d03cb97dd2ccc778c19de6a138bd6fa8419907001784d845f7e1616cbe0\"}",
+          "created_at": "2026-06-18T01:09:37.063674786Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "timeout"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260618T010937-4889fb81",
+    "prompt": ".ddx/executions/20260618T010937-4889fb81/prompt.md",
+    "manifest": ".ddx/executions/20260618T010937-4889fb81/manifest.json",
+    "result": ".ddx/executions/20260618T010937-4889fb81/result.json",
+    "checks": ".ddx/executions/20260618T010937-4889fb81/checks.json",
+    "usage": ".ddx/executions/20260618T010937-4889fb81/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-7bba2f95-20260618T010937-4889fb81"
+  },
+  "prompt_sha": "2b837bb78ba3a27f8c02224a12278780397f6ca292688adf503b8a7feb61bb89"
+}
