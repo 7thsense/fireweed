@@ -28,8 +28,8 @@ bash scripts/ci/deployment-release-gate.sh
 - The generated proof records status `passed` or
   `passed_with_local_environment_skip`.
 - Any local skip is limited to the disposable kind backend matrix because a
-  required local Docker/kind tool is unavailable.
-- The proof references the 0.2.0 chart package and both supported backend
+  required local Docker/kind capability is unavailable.
+- The proof references the 0.2.1 chart package and both supported backend
   profiles.
 
 ## Rerun Note
@@ -58,3 +58,17 @@ installation because the local kind Kubernetes API did not become reachable.
 The command fingerprint changed after making `deployment-release-gate.sh`
 classify that local-only failure as the existing disposable kind matrix skip
 when `CI` is not `true`; CI/release tag runs remain strict.
+
+The first GitHub tag run for `v0.2.0` failed in the strict CI deployment gate.
+`postgres_native` passed, but `object_log_sqlite_projection` timed out during
+`helm upgrade --wait` because the kind harness rendered the production
+object-log endpoint (`http://minio:9000`) without provisioning an in-cluster
+S3-compatible fixture. The command fingerprint changed after adding
+`scripts/ci/kind/object-log.yaml` and wiring `kind-helm-test.sh` to apply and
+wait for that fixture before installing pqueue for the object-log profile.
+
+Because the `v0.2.0` tag had already been pushed to the failed commit, the
+deployment-ready target moved to `v0.2.1` rather than rewriting the tag. The
+fifth local run used the `0.2.1` release metadata and passed with the same
+documented local kind API skip; the strict CI proof is expected from the
+`v0.2.1` tag workflow.

@@ -14,9 +14,9 @@
   "chart": {
     "evidence": "target/deployment-release-gate/release-dist/pqueue-helm-chart.txt",
     "name": "pqueue",
-    "package": "target/deployment-release-gate/release-dist/pqueue-0.2.0.tgz",
+    "package": "target/deployment-release-gate/release-dist/pqueue-0.2.1.tgz",
     "package_exists": true,
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "commands": [
     {
@@ -40,13 +40,13 @@
         "bash",
         "scripts/release/package-helm-chart.sh",
         "--version",
-        "0.2.0",
+        "0.2.1",
         "--destination",
         "/Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist",
         "--chart-dir",
         "charts/pqueue"
       ],
-      "display": "bash scripts/release/package-helm-chart.sh --version 0.2.0 --destination /Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist --chart-dir charts/pqueue",
+      "display": "bash scripts/release/package-helm-chart.sh --version 0.2.1 --destination /Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist --chart-dir charts/pqueue",
       "exit_status": 0
     },
     {
@@ -67,7 +67,7 @@
       "exit_status": 1
     }
   ],
-  "commit_sha": "243c1f3d6da49d2e7ac10f060368c4cf85edcf3e",
+  "commit_sha": "d8498c8186625f9302ded75a42b3cfdb2d681792",
   "exit_status": 0,
   "image": {
     "coordinate": "unavailable",
@@ -86,7 +86,7 @@
   "release_notes": {
     "artifact_paths": [
       "target/deployment-release-gate/package-helm-chart.out",
-      "target/deployment-release-gate/release-dist/pqueue-0.2.0.tgz",
+      "target/deployment-release-gate/release-dist/pqueue-0.2.1.tgz",
       "target/deployment-release-gate/release-dist/pqueue-helm-chart.txt",
       "target/deployment-release-gate/release-dist/SHA256SUMS",
       "target/deployment-release-gate/kind-postgres_native.out"
@@ -98,11 +98,11 @@
     "command_list": [
       "bash scripts/ci/release-gate.sh",
       "bash scripts/ci/helm-gate.sh",
-      "bash scripts/release/package-helm-chart.sh --version 0.2.0 --destination /Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist --chart-dir charts/pqueue",
+      "bash scripts/release/package-helm-chart.sh --version 0.2.1 --destination /Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-90b11cab-20260618T011931-b16f5dbb/target/deployment-release-gate/release-dist --chart-dir charts/pqueue",
       "validate docs/microsite",
       "bash scripts/ci/kind-helm-test.sh --backend postgres_native"
     ],
-    "summary": "Deployment release gate passed_with_local_environment_skip for commit 243c1f3d6da49d2e7ac10f060368c4cf85edcf3e and chart 0.2.0."
+    "summary": "Deployment release gate passed_with_local_environment_skip for commit d8498c8186625f9302ded75a42b3cfdb2d681792 and chart 0.2.1."
   },
   "schema": "pqueue.deployment_proof.v1",
   "status": "passed_with_local_environment_skip",
@@ -115,7 +115,7 @@
     {
       "description": "Helm chart package",
       "exists": true,
-      "path": "target/deployment-release-gate/release-dist/pqueue-0.2.0.tgz"
+      "path": "target/deployment-release-gate/release-dist/pqueue-0.2.1.tgz"
     },
     {
       "description": "Helm chart evidence",
