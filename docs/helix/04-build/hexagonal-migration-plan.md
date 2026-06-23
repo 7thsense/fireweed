@@ -1,196 +1,217 @@
-# Hexagonal Migration Plan v2 — unified engine, two interfaces
+# pqueue Re-Architecture — Comprehensive Implementation Plan (v4, master)
 
-Status: DRAFT, post-review-round-1. Pre-release software — **clean cutover**, no compatibility
-shims. "Done" includes deletions. v2 folds the adversarial-review findings and the container-object
-resolution of the RESP surface.
+Status: DRAFT, post-review-round-2. **Pre-launch clean cutover.** Single authoritative plan;
+consolidates ADR-007 (architecture), TD-006 (RESP surface — refolded), TD-007 (durability +
+reclaim + upsert — to author in Phase 0).
 
-## 0. Goal & invariants
+## 0. Goal & non-negotiables
 
-- **One engine, one path.** CQRS: a **priority-ordered projection** (speed/efficiency) over a
-  **log store** (cost-optimized durability). The old "split vs fused" distinction is demoted to a
-  backend's durability class (see §2), never visible at the surface.
-- **Exactly two interfaces:** a **RESP wire adapter** and a **Rust library API**.
-  - **Data plane** (produce/claim/renew/ack/reclaim) is **faithful Redis Streams** — stock
-    `redis-cli`/`redis-py` work. pqueue's per-message semantics ride as **reserved entry fields**
-    (the "container object", §2.1) plus **server-side policy**; they are not command-grammar changes.
-  - **Control plane** (gates, operator repair, queue/group config) is a **thin pqueue-specific
-    command vocabulary** over RESP, mirrored by the library. Not Redis-compatible by design — it
-    never was a data-plane concern.
-  - Documented divergence from Redis: claim delivery is **priority-ordered, not stream-ID order**
-    (invisible to a normal consumer-group client; it processes whatever batch it receives).
-- **Hexagonal:** the domain core defines ports; adapters depend inward; the domain depends on
-  nothing outward. Enforced by crate dependency direction.
-- **Clean cutover:** end state deletes `pqueue-service`, `pqueue-client`, `pqueue-kafka`; supersedes
-  legacy docs; re-scopes in-flight beads. No legacy path survives.
+- **One engine.** CQRS: priority-ordered projection (speed) over a log store (cost durability).
+- **Two interfaces, asymmetric by design.** RESP (pqueue-flavored Redis; limited but contract-faithful)
+  + Rust library (full power). The library is strictly more capable; recorded, not accidental (§3).
+- **Hexagonal, modular encapsulation.** Domain defines ports; adapters depend inward; enforced by a
+  dependency-direction test.
+- **Clean cutover at ALL touchpoints.** No stubs, no legacy fallbacks, no compatibility shims. Done =
+  `pqueue-service`/`-client`/`-kafka` deleted, docs superseded, beads re-scoped.
+- **Launch scope = single-shard.** Multi-shard *coordination* (owner assignment + loop + cross-shard
+  guards) is **post-launch**, recorded as an intentional subset (§2.5). The ports admit it (shard_id
+  in keys, `ControlPlaneStore` for assignments); the launch build implements one shard completely —
+  *not* a multi-shard stub.
+- **Verified completeness.** Every phase: implement → review → test. Phase 7 reviews the finished
+  system against this plan, item by item.
 
-## 1. Target crate topology
+## 1. Target architecture
 
-| Crate | Role | Derived from | I/O |
+| Crate | Role | Outward deps | I/O |
 |---|---|---|---|
-| `pqueue-core` | **Domain** — types & rules | keep (pure) | none |
-| `pqueue-engine` | **Domain** — execution layer, port defs, **shard coordination**, migrated service logic | NEW: absorbs `pqueue-storage` trait defs + `pqueue-service` domain logic | none |
-| `pqueue-memory` | **Driven adapter** — InMemory log+projection (reference) | NEW: extracted reference impl | none |
-| `pqueue-sqlite` | **Driven adapter** — sqlite log+projection (+ ControlPlane) | refactor onto new ports | rusqlite |
-| `pqueue-postgres` | **Driven adapter** — postgres log+projection+ControlPlane, **atomic claim** | refactor onto new ports | tokio-postgres |
-| `pqueue-objectlog` | **Driven adapter** — object-log LogStore (eventual-apply class) | refactor onto new ports | object-log/S3 |
-| `pqueue-resp` | **Driving adapter** — RESP server (Streams data-plane + pqueue control-plane) | NEW | tokio net |
-| `pqueue` | **Driving adapter** — Rust library facade (re-exports a builder; composition stays in root) | NEW thin umbrella | none |
-| `pqueue-server` | **Composition root** — bin; DI + operational surface (health/readiness/deploy-probe) | NEW: DI from `runtime.rs`, HTTP stripped | net |
-| ~~`pqueue-service`~~ | **DELETE** after §3a migration | — | axum |
-| ~~`pqueue-client`~~ | **DELETE** | — | — |
-| ~~`pqueue-kafka`~~ | **DELETE** | — | rdkafka |
+| `pqueue-core` | Domain — types & rules | — | none |
+| `pqueue-engine` | Domain — execution, ports, migrated service logic, **ReclaimDriver** (§2.4) | core | none |
+| `pqueue-memory` | Driven adapter — InMemory log+projection (reference) | engine, core | none |
+| `pqueue-sqlite` | Driven adapter — sqlite log+projection+control-plane | engine, core | rusqlite |
+| `pqueue-postgres` | Driven adapter — postgres, atomic claim via `ClaimPort` | engine, core | tokio-postgres |
+| `pqueue-objectlog` | Driven adapter — object-log (eventual-apply class) | engine, core | S3 |
+| `pqueue-resp` | Driving adapter — RESP server (§3) | engine | tokio net |
+| `pqueue` | Driving adapter — Rust library facade | engine + adapters | none |
+| `pqueue-server` | Composition root — bin; DI; runs the ReclaimDriver task; ops probe (§ M2) | all | net |
+| ~~service / client / kafka~~ | **DELETE** | — | — |
 
-Dependency rule: no arrow from `pqueue-engine`/`pqueue-core` outward to an adapter; adapters never
-call each other; the composition root is the only place that names concrete adapter types.
-
-**Ports (defined in `pqueue-engine`, none silently dropped):** `LogWriter`/`LogRead`,
-`ProjectionWriter`/`ProjectionRead`, **`ControlPlaneStore`** (queue defs + shard assignments +
-**epoch source of truth** for fencing — kept, was dropped in v1), **`SnapshotStore`** (replay
-acceleration — kept; if retired, object-log recovery is full-replay-only, stated in TD-007),
-`ClaimPort` (see §2.2), `Clock`, `IdGen`. **Shard coordination** (TD-003: owner assignment +
-coordination loop) is homed in `pqueue-engine` and is **net-new build** (the rendezvous/HRW
-assignment fn and the runtime loop do not exist yet — not a migration).
+Dependency-direction test asserts no engine/core → adapter edge. The CLI is a **library consumer**,
+not a third interface.
 
 ## 2. Engine model
 
-### 2.1 The container-object entry contract
-A Streams entry is field/value pairs. pqueue reserves a fixed set of field names (the existing
-`PushItem` shape) and treats the rest as opaque payload:
+**2.1 Ports (`pqueue-engine`):** `LogWriter`/`LogRead`, `ProjectionWriter`/`ProjectionRead`
+(`select_eligible` priority order, `peek`, `pending`, `metrics`), `Backend` (atomic `write(|log,proj|)`
+UoW), **`ClaimPort`** (backend may claim atomically), **`UpsertPort`** (`replace_if_pending`, §3 Inv 2 —
+runs in the *same unit of work / item lock* as claim), `ControlPlaneStore` (queue defs + epoch source),
+`SnapshotStore`, **`ReclaimDriver`** (§2.4), `Clock`, `IdGen`. None silently dropped. **Every port
+method has a conformance test that fails if the impl returns a default/no-op** (§6).
 
-| Reserved field | Meaning | Default if absent |
-|---|---|---|
-| `priority` | ordering key (per queue's priority model) | queue default → FIFO by ID |
-| `group_key` | co-residency / per-group ordering | none |
-| `cohort_id` | atomic cohort claim/finalize unit | none |
-| `not_before` | delayed eligibility | now |
-| `max_attempts` | retry bound | queue default |
-| `payload` (+ any non-reserved fields) | opaque | — |
+**2.2 Two-class durability (TD-007):**
+- **Atomic** (memory lock / sqlite / postgres one txn): append+apply commit together; post-commit
+  projection globally consistent. **Invariant 1 & 2 strong guarantees hold only here.**
+- **Eventual-apply** (objectlog): ack after log commit, apply within a bounded window; guarantee is
+  self-read-after-write only. Priority order is "over applied state, eventual"; **upsert is forbidden**
+  (re-`XADD` on an existing key returns `-ERR pqueue unavailable`) because the upsert↔claim race is
+  unclosable when the claim reads a lagging projection (§3 flavor-difference 5).
 
-`XADD tenant:queue * priority 5 group_key g1 payload <bytes>` is a stock call; the engine reads the
-fields and applies server-side ordering/placement. **No client-visible command change.**
+**2.3 Single *logical* claim path.** Engine is the single logical claim authority; a backend MAY
+implement claim atomically behind `ClaimPort` (postgres keeps `FOR UPDATE SKIP LOCKED`). Upsert and
+claim **mutually exclude** on the same item (same lock / row) on the atomic class.
 
-### 2.2 Two-class durability contract (replaces v1's single UoW seam)
-The single `Backend::write(|log, proj|)` claim was false — object-log is eventual-apply, postgres is
-async, and two trait objects can't share one transaction. Model **two declared durability classes**:
+**2.4 ReclaimDriver (new component — closes the orphaning gap).** Redis evaluates lease idle-time
+lazily inside `XCLAIM`/`XAUTOCLAIM`, so a quiet stream needs no timer. pqueue models reclaim,
+cohort-`completion_bound_ms`, `not_before`/recurrence promotion, and `progress_bound_ms` enforcement
+as **state transitions that something must fire** — otherwise an item on a queue with no claim traffic
+orphans forever. The `ReclaimDriver` is engine-owned policy driven by the composition root:
+`pqueue-server` (and an async library embedding) spawns a periodic task; a **synchronous** library
+embedding with no async runtime drives it deterministically via an explicit `engine.tick(now)` entry
+point. The reclaim *logic* is domain; the *clock* is the composition root's. DoD: an item is
+reclaimed/expired with **zero** intervening client commands on its queue (§6).
 
-- **Atomic** (`pqueue-memory` via a lock, `pqueue-sqlite`/`pqueue-postgres` via one txn): append+apply
-  commit together; post-commit projection state is globally consistent.
-- **Eventual-apply** (`pqueue-objectlog`): ack after log/manifest commit; projection applies later
-  within a bounded window. Guarantee is **self-read-after-write**, not global consistency.
+**2.5 Sharding.** Launch = single shard; `command_position`, idempotency, and `client_item_key`
+uniqueness are naturally shard-local. Multi-shard owner-assignment + coordination loop + cross-shard
+guards are **post-launch** (recorded subset; ports already carry `shard_id`).
 
-The engine may rely only on the **weakest** guarantee (self-RAW + bounded eventual apply) unless a
-backend *declares* the atomic capability. Port methods are **async** (dictated by tokio-postgres);
-the seam carries a transaction/unit-of-work handle, not two independent objects. TD-007 owns this
-and must exist before the ports freeze (Phase 1).
+## 3. RESP surface — "pqueue-flavored Redis" (semantic-contract fidelity)
 
-### 2.3 Single *logical* claim path (not single physical)
-"The engine is the single claim path" means single **logical** authority — but a backend MAY
-implement claim atomically in one transaction behind `ClaimPort` (postgres keeps its
-`FOR UPDATE SKIP LOCKED` CTE; the engine orchestrates, the adapter executes). This preserves
-postgres's exactly-once-ordered guarantee instead of unwinding 3.7k LOC of claim SQL.
+**Bar:** a stock Redis client gets correct, non-surprising results — the *semantic contract* of each
+command holds even where pqueue's flavor differs. Two implementation invariants:
 
-### 2.4 Driving API (Streams-shaped)
-`add`(XADD+fields), `claim`(XREADGROUP `>`, priority order), `reclaim`(XCLAIM/XAUTOCLAIM),
-`ack`(XACK), finalize dispositions (complete=XACK; retry/release=PEL/reclaim; rearm=re-XADD;
-fail=XACK+DLQ; **at most one custom disposition verb** if conventions are insufficient — pin in
-TD-006), `renew`, `pending`(XPENDING), `peek`, `metrics`, group admin. Control-plane verbs
-(gates, operator repair, queue config) are pqueue-specific (§0).
+- **Invariant 1 — per-item delivery tracking, no single `last-delivered-id` cursor.** `XREADGROUP >`
+  returns highest-priority *undelivered* items, tracked per item; never orphans a low-priority small-id
+  item; transactional advancement (claimed → PEL). **On the atomic class this is strict; on
+  eventual-apply it is "priority over applied state, eventual."**
+- **Invariant 2 — upsert = atomic `XDEL old` + `XADD new`, pending-only, atomic-class-only.** Re-`XADD`
+  colliding with a **pending** item (via `UpsertPort`, same UoW as claim) returns a new monotonic id;
+  old id reads deleted; `XLEN` nets unchanged. Collision with **claimed/terminal** → reject. Absent
+  `client_item_key` ⇒ always append. On eventual-apply ⇒ `-ERR pqueue unavailable` (§2.2). A later
+  `XACK`/`XCLAIM` of a **superseded** old id returns **`-ERR pqueue superseded`** (never a silent
+  `nil` — preserves at-least-once "no silent drop").
 
-## 3. Legacy touchpoint teardown
+**Stock surface (faithful per contract):**
+- `XADD` — upsert-on-key (Inv 2).
+- `XREADGROUP >` — priority-ordered *delivery* (Inv 1); cursorless.
+- `XACK` — complete; **operator-fenced lease → `-ERR pqueue stale_lease`** (NOT `0` — a `0` would read
+  as success and defeat the fence).
+- `XCLAIM`/`XAUTOCLAIM` — **reclaim is entry-id-ordered (cursor-faithful)**; priority governs delivery,
+  not reclaim. **Same-consumer `XCLAIM`/`XCLAIM JUSTID` = renew and charges no attempt; cross-consumer
+  = reclaim and charges one** (lets a stock worker renew safely with no `PQ*` command). The
+  `ReclaimDriver` (§2.4) handles timed reclaim independently, so quiet queues don't depend on a client
+  running `XAUTOCLAIM`.
+- `XPENDING`/`XLEN`/`XINFO`/`XDEL` — faithful.
 
-### 3a. Domain logic to migrate out of `pqueue-service` — CLOSED INVENTORY
-Derived from `QueueAdminState` + `AppState`/`QueueCatalog`, cross-checked against the 11 API-001 and
-the API-002 operation sets. Every item maps to an engine command/projection or is dropped with
-rationale. Several are **in-memory only today** (design debt) → become **log-backed**.
+**Documented flavor differences (visible, explainable):**
+1. `XINFO GROUPS last-delivered-id` is not a meaningful high-water mark (priority ≠ id order).
+2. `XAUTOCLAIM` reclaims in **entry-id order, not priority order** (it is cursor-based). Client-driven
+   reclaim is FIFO-over-PEL; priority reclaim is the `ReclaimDriver`'s job. Across a completed PEL
+   sweep every entry is covered.
+3. Low-priority starvation is possible, **bounded by `progress_bound_ms`** (enforced by ReclaimDriver).
+4. At-least-once delivery (crash → reclaim); consumer-side idempotency is the app's job, as on Redis.
+5. On **eventual-apply** backends, priority order and no-double-claim are "over applied state, eventual,"
+   and upsert is unavailable (§2.2).
+6. `XREADGROUP` replies carry pqueue reserved fields (`item_version`, `lease_expires_at`, …) as extra
+   entry fields — benign; stock clients ignore unknown fields.
+7. Same-consumer `XCLAIM` is a no-charge **renew** (Redis would bump the delivery count); strictly more
+   forgiving — a client relying on self-`XCLAIM` to advance retry count for poison detection sees it
+   not advance. Use the library for explicit attempt control.
 
-| Logic | Today | Target | Durability |
-|---|---|---|---|
-| AuthContext, authorize_tenant, authorize_operator_repair | lib.rs:67–110 | engine rule; principal from adapter (RESP `HELLO`/ACL or lib context) | decision in engine |
-| Request-id idempotency + operator replay→409 fingerprint | lib.rs:957,1068–1118,1407 | engine | **durable** (TD-007: schema, retention/compaction, replay, **cross-shard** key) |
-| **Operator-operation store + get/cancel_operation** (API-002 async-op model) | lib.rs:149,1027–1066 | engine | **durable** (was MISSED in v1) |
-| Lease fencing (fence/is_fenced) + **un-fence + compaction** | lib.rs:187–203,605 | engine lease SM | **durable** |
-| Queue pause/resume + **un-pause** | lib.rs:170–209,762 | engine eligibility gate | **durable** |
-| **`command_position` monotonic counter** (item_version source) | lib.rs:152,205 | engine | **durable** (was MISSED in v1; must not reset on cutover) |
-| **QueueCatalog: capabilities, metrics, active-scopes + roll_up** (`GetQueueMetrics`, `DiscoverActiveScopes`) | lib.rs:223–280,1547 | engine projection reads | (was MISSED in v1) |
-| Claim-compatibility / finalize / rearm / purge validation | lib.rs:1294–1505 | engine (semantics) + adapter (field shape) | unchanged |
-| hash_lease_token / RedactedLeaseToken | lib.rs:32–64 | engine | unchanged |
+Canonical error replies (asserted verbatim by e2e/conformance): `-ERR pqueue stale_lease`,
+`-ERR pqueue superseded`, `-ERR pqueue unavailable`, `-ERR pqueue terminal`, `-ERR pqueue invalid`.
 
-Deletes-with-REST: `ApiProblem`, axum routes/router, stub `QueueCatalog` HTTP wiring, `runtime.rs`
-HTTP/health specifics (the health/readiness/deploy-probe **operational surface** is re-homed to
-`pqueue-server` — see M1).
+**RESP capability = {RESP-stock, library}.** Zero required `PQ*`. Filtered claims, gates, cohorts,
+rich finalize dispositions, mutable-priority, create/config, scopes, operator/inspect are
+**library-only — explicitly marked** in the capability matrix (§6). "No *silent* library-only cells";
+marked ones are intentional. Optional single `PQFIN` for atomic rich finalize is a post-launch decision.
 
-### 3b. Crates
-`pqueue-core` KEEP. `pqueue-storage` SPLIT (traits→engine, reference impl→`pqueue-memory`) then
-dissolve. `pqueue-sqlite`/`-postgres`/`-objectlog` REFACTOR onto new ports (KEEP). `pqueue-service`/
-`-client`/`-kafka` DELETE after §3a.
+**e2e (off-the-shelf Redis client — pinned `redis-py` + one of `go-redis`/`redis-rs`):**
+- **Inv 1 — drain-and-reconcile:** produce N mixed-priority, drain via `XREADGROUP >` to empty,
+  assert delivered-set == produced-set, each once, no hang (proves no orphaning *through the command
+  surface*).
+- **Inv 2 — effects + collision:** re-`XADD` pending key → new id, old id `XRANGE`→nil, `XLEN`
+  unchanged; re-`XADD` claimed key → rejected; `XACK` superseded id → `-ERR pqueue superseded`.
+  (Atomicity itself is proven by **engine-level** tests — the stock client cannot observe it.)
+- **Cursor:** `XAUTOCLAIM 0-0`→…→`0-0` pagination loop terminates and covers the whole PEL.
+- **Race:** upsert concurrent with claim on the same key (engine-level + a best-effort e2e).
+- **Crash recovery:** kill a consumer mid-PEL, reclaim via `XAUTOCLAIM`, no lost/double work.
+- **Fence:** operator stale → staled worker's `XACK` returns `-ERR pqueue stale_lease`.
+- **Intra-group exclusion:** two consumers, concurrent `XREADGROUP >`, never the same item.
 
-### 3c. Docs
-- **SUPERSEDE:** ADR-005 (Kafka).
-- **REWRITE as transport-neutral + binding annex:** API-001 (operations survive; author a neutral
-  contract + a RESP binding, not an edit pass); TP-001 (service/HTTP test layer → RESP+lib+conformance).
-- **ADD (must exist before deletions/port-freeze):**
-  - **TD-006** — RESP surface: command-by-command mapping table (engine op → RESP command, marked
-    `[stock-Streams | custom-control | library-only]`), the §2.1 field contract, finalize
-    dispositions, and the **tenant+principal+operator-scope presentation** over RESP.
-  - **TD-007** — unified engine: the §2.2 two-class durability contract + the durable-state design
-    (idempotency/fence/pause: command schema, projection rep, retention/compaction, replay,
-    cross-shard semantics).
-  - **ADR-007** — hexagonal architecture + two-interface decision (incl. the priority-order
-    divergence from Redis and the data-plane/control-plane split).
-- **KEEP (update port signatures + API-002 async-op model home):** ADR-001/002/003/004/006,
-  TD-001/002/003/004/005, TP-002/003.
+## 4. Legacy teardown — ALL touchpoints (no stubs/fallbacks)
 
-### 3d. Beads — re-scope, no blanket halt
-Retarget `pqueue-f6fbde17`/`-9c77d5e7`/`-922eaf00` from "API-001 REST claimed-item shape" →
-"engine claim-response shape" (transport-neutral). Re-point Lakebase deploy beads
-(`-2f57fbe4` helm, `-ea625701` acceptance) from the HTTP service image to the `pqueue-server` image
-**and re-specify the health-probe contract** (RESP `PING` or a side health port — M1).
+**4a. Domain logic → `pqueue-engine`, durable (closed inventory):** AuthContext + authorize_*;
+request-id idempotency + operator replay→409; **operator-operation store + get/cancel/list**; lease
+fencing (+un-fence+compaction); pause/resume (+un-pause); **`command_position`**; **QueueCatalog**
+(capabilities, metrics, active-scopes+roll-up); claim/finalize/rearm/purge validation; lease-token
+hashing. Transport (ApiProblem, axum routes/router, runtime HTTP/health) deletes with REST.
 
-### 3e. Tests
-DELETE ~3 Kafka + ~20 HTTP-route tests. **RE-HOME (do not delete — real invariants):** service
-product-workflow, operator, invariant-stress, seventh-sense tests → rewritten against the **engine
-API**. MIGRATE ~56 core/storage/backend tests to the engine + one backend-conformance suite
-(logic unchanged). Conformance must include a **concurrent-claim-race** stress for the `ClaimPort`
-backends.
+**4b. Crates:** keep core; split storage→engine+memory then dissolve; refactor sqlite/postgres/
+objectlog; delete service/client/kafka.
 
-## 4. Phased cutover — test-first, invariant-by-invariant, compiles at every step
+**4c. Docs:** SUPERSEDE ADR-005. REWRITE API-001 (neutral + RESP binding), TP-001. ADD ADR-007;
+KEEP TD-006 aligned with §3 — it records the launch `{RESP-stock, library}` matrix, excludes required
+`PQ*` commands, specifies `-ERR pqueue stale_lease`, and documents the `XAUTOCLAIM` cursor caveat.
+AUTHOR **TD-007** (two-class durability, ReclaimDriver, UpsertPort,
+durable-state schema/retention/compaction/replay). KEEP+update ADR-001/2/3/4/6, TD-001/2/3/4/5,
+TP-002/3.
 
-1. **Ports + reference engine.** Freeze ports (after TD-007); extract `pqueue-memory`; implement
-   claim/ack/lease/eligibility + the §2.1 fields + §2.2 durability classes over memory. Conformance
-   green on memory.
-2. **Migrate domain logic — one invariant at a time, test-first.** For each §3a item: write the
-   engine test, move the logic, make `pqueue-service` **delegate to the engine via an internal call**
-   (not a compatibility shim) so the crate keeps compiling. Old HTTP test deleted only after the
-   engine test is green for that invariant. (This is a per-invariant gate, not a phase aspiration.)
-3. **Refactor driven adapters** onto the ports (memory+sqlite first, then postgres via `ClaimPort`,
-   then objectlog as eventual-apply). Conformance green on each, incl. concurrent-claim races.
-4. **RESP adapter** (own phase, gated on TD-006): implement the stock-Streams data-plane + the
-   custom control-plane + the auth presentation. E2E with `redis-cli`/`redis-py` for the data-plane
-   subset and a pqueue client for control-plane.
-5. **Library facade + composition root**; full capability matrix (§5) green on both interfaces.
-6. **Delete legacy:** remove `pqueue-service`/`-client`/`-kafka` + their tests; dissolve
-   `pqueue-storage`; supersede/rewrite docs; re-scope beads.
+**4d. Tests:** delete ~3 kafka + ~20 HTTP-route; **re-home** service invariant tests to the engine;
+migrate ~56 to conformance. (Test churn is ~20k LOC — see § scope.)
 
-## 5. Definition of Done (clean-cutover gates)
+**4e. Beads:** re-scope (claimed-item shape → transport-neutral; Lakebase deploy → `pqueue-server`
+image + health probe); none halted.
 
-- `rg` finds zero refs to `pqueue-service`/`-client`/`-kafka`, `NativeRoute`, `axum`, `/v1`,
-  problem+json.
-- Exactly two driving adapters (`pqueue-resp`, `pqueue`) + one composition root.
-- **Capability conformance matrix** signed off: every API-001/API-002 operation × {RESP-stock,
-  RESP-custom, library} marked pass / intentional-subset / n-a. A "subset" cell is a *recorded
-  decision*, not a silent gap. (This — not the grep — is the gate that actually prevents a half-built
-  second interface hiding behind clean names.)
-- Every driven adapter implements the same ports; one conformance suite passes on memory+sqlite
-  (+postgres+objectlog), including concurrent-claim races and each durability class's declared
-  guarantee.
-- Every migrated invariant (auth, idempotency, **operator-op model**, fencing, pause, recurrence,
-  cohort/group, purge, **command_position monotonicity**) has an engine-level test.
-- Durable-state debt closed: idempotency cache, fences, pause, `command_position` reconstructable
-  from the log (TD-007), not in-process `Mutex` state. ControlPlaneStore epoch-fencing intact.
-- Docs carry no surviving REST/Kafka normative claims; ADR-007/TD-006/TD-007 recorded.
+## 5. Implementation phases (each: implement → review → test; nothing stubbed)
 
-## Open design work that must land BEFORE any deletion (reviewers' top condition)
-1. **TD-006** (RESP mapping + field contract + auth presentation) — proves the RESP surface on paper.
-2. **TD-007** (two-class durability + durable-state semantics) — proves the engine contract before
-   the ports freeze.
-Until both exist, Phases 1–6 do not start. Everything else in this plan is mechanical once they do.
+- **Phase 0 — gating docs (own review gate).** ADR-007; validate TD-006 against the launch
+  `{RESP-stock, library}` matrix; author TD-007 (durability classes, **ReclaimDriver**,
+  **UpsertPort**, eventual-apply upsert ban, superseded reply, cross-shard deferred). Converge all
+  three before any code. Resolve `PQFIN`-optional.
+- **Phase 1 — ports + reference engine + early RESP smoke.** Define ports; extract `pqueue-memory`;
+  implement priority claim/lease/ack + Invariants 1 & 2 + ReclaimDriver over memory; conformance green.
+  Stand up a throwaway in-memory RESP front and run the §3 **drain-and-reconcile** stock-client e2e
+  against memory — validates the semantic model *before* backend work.
+- **Phase 2 — migrate domain logic (move-and-delete, test-first).** Drop `pqueue-service` from
+  `default-members`. For each 4a unit: write the engine test, move the logic durable, **delete the
+  service code path in the same step** (the service crate shrinks to nothing by phase end — no
+  delegation, no shim).
+- **Phase 3 — driven adapters.** sqlite, postgres (`ClaimPort`), objectlog (eventual-apply, upsert
+  banned). Conformance green on each — incl. concurrent-claim races, intra-group exclusion, and each
+  durability class's *declared* guarantee (strong on atomic; weaker on eventual-apply).
+- **Phase 4 — full RESP adapter + e2e.** `pqueue-resp`; the complete §3 e2e suite (all backends,
+  cursor loop, crash recovery, fence, race) is the headline acceptance gate.
+- **Phase 5 — library + composition root.** `pqueue` facade + `pqueue-server` (DI, ReclaimDriver task,
+  ops probe).
+- **Phase 6 — delete legacy.** Remove service/client/kafka + tests; dissolve storage; supersede/rewrite
+  docs; re-scope beads.
+- **Phase 7 — final gap review against this plan.** Every §1–§6 item → {implemented+tested | descoped
+  with reason}; written reconciliation report.
+
+## 6. Definition of Done (gates that actually catch half-done work)
+
+- `rg` finds **zero** refs to service/client/kafka, `NativeRoute`, `axum`, `/v1`, problem+json.
+- **No-stub = behavioral, not grep.** The single conformance suite runs **every adapter × every port
+  method × every RESP command**, and **every port method has ≥1 test that fails if it returns a
+  default/no-op** (a no-op `route_stub`-style impl must fail a real assertion). Grep for
+  `todo!/unimplemented!/// TODO/// legacy` is a *secondary* check, not the proof.
+- **Capability matrix {RESP-stock, library}** signed: every API-001/API-002 op marked
+  RESP-stock-pass / library-only-intentional / n-a. No *unmarked* library-only cells.
+- Every migrated invariant (auth, idempotency, operator-op model, fencing, pause, recurrence,
+  cohort/group, purge, `command_position` monotonicity) has an engine-level test.
+- **ReclaimDriver test:** item reclaimed/expired with zero intervening client commands on its queue.
+- e2e RESP suite green with pinned off-the-shelf client(s): drain-reconcile, cursor loop, crash
+  recovery, fence=`-ERR pqueue stale_lease`, upsert effects+collision+superseded, intra-group exclusion.
+- One conformance suite green on memory+sqlite+postgres+objectlog; eventual-apply asserts the *weaker*
+  guarantee; upsert-on-eventual-apply returns `-ERR pqueue unavailable`.
+- Two driving adapters + one composition root; **dependency-direction test passes**.
+- Durable-state debt closed (idempotency/fences/pause/`command_position` reconstructable from the log).
+- Docs consistent; ADR-007/TD-006(refolded)/TD-007 recorded; capability asymmetry recorded.
+- **Single-shard launch scope recorded**; multi-shard coordination listed as post-launch subset.
+- **Phase 7 reconciliation report** shows no dropped item.
+
+## Scope (honest)
+Source ≈17.3k LOC + tests ≈19.7k LOC ≈ **37k LOC touched**. Net-new: `pqueue-resp` protocol server,
+`ReclaimDriver`, `UpsertPort`, durable-state re-architecture. The likely stall points are the
+durable-state design (Phase 0/TD-007) and re-homing the seventh-sense/invariant-stress test suites
+onto the engine API (non-mechanical). Health/readiness probe transport on `pqueue-server` is a small
+non-`axum` endpoint (decide in Phase 5), distinct from the two client interfaces.
