@@ -6,10 +6,19 @@ use std::path::PathBuf;
 
 use pqueue_service::verification_ledger::{JsonValue, validate_ledger_file};
 
+mod support;
+use support::scale_evidence::measure_scale_out;
+
 const SINGLE_DEPLOYMENT_CEILING_ITEMS_PER_HOUR: u64 = 10_000_000;
 const EIGHT_SHARD_MIN_ITEMS_PER_HOUR: u64 = SINGLE_DEPLOYMENT_CEILING_ITEMS_PER_HOUR * 4;
 const SHARD_COUNTS: [u64; 3] = [2, 4, 8];
-const ITEMS_PER_HOUR_BY_SHARD_COUNT: [u64; 3] = [20_000_000, 30_000_000, 42_000_000];
+
+fn per_shard_resident() -> u64 {
+    std::env::var("PQUEUE_BENCH_RESIDENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000)
+}
 
 #[test]
 #[ignore = "release-scale E2 multi-shard scale-out evidence is opt-in"]
@@ -76,6 +85,23 @@ fn write_ledger_row(cfg: &BenchConfig) -> PathBuf {
         fs::remove_file(&path).expect("previous scale-out ledger should be removable");
     }
 
+    // Measure REAL aggregate throughput at each shard count across independent
+    // storage units, then gate on the measured series.
+    let measured = measure_scale_out(per_shard_resident(), &SHARD_COUNTS, 256);
+    assert_eq!(measured.len(), SHARD_COUNTS.len());
+    assert!(
+        measured.windows(2).all(|w| w[1] >= w[0]),
+        "measured scale-out throughput must be monotonic non-decreasing: {measured:?}"
+    );
+    let eight_shard = *measured.last().unwrap();
+    assert!(
+        eight_shard >= EIGHT_SHARD_MIN_ITEMS_PER_HOUR,
+        "measured 8-shard throughput {eight_shard} below 4x floor bar {EIGHT_SHARD_MIN_ITEMS_PER_HOUR}"
+    );
+    let scale_out_multiple_x100 = eight_shard * 100 / SINGLE_DEPLOYMENT_CEILING_ITEMS_PER_HOUR;
+    let efficiency_pct =
+        eight_shard * 100 / (measured[0] / SHARD_COUNTS[0] * SHARD_COUNTS[2]).max(1);
+
     let row = serde_json::json!({
         "ac_ids": ["AC-E2E-6", "AC-LAT-3"],
         "inv_ids": ["INV-4"],
@@ -104,11 +130,12 @@ fn write_ledger_row(cfg: &BenchConfig) -> PathBuf {
             "operation_mix": "single-hot-queue-ingest-claim-finalize",
             "batch_size": 1000,
             "resident_items": 10000000,
-            "items_per_hour": ITEMS_PER_HOUR_BY_SHARD_COUNT[2],
-            "items_per_hour_by_shard_count": ITEMS_PER_HOUR_BY_SHARD_COUNT,
+            "items_per_hour": eight_shard,
+            "items_per_hour_by_shard_count": measured,
             "single_deployment_ceiling_items_per_hour": SINGLE_DEPLOYMENT_CEILING_ITEMS_PER_HOUR,
-            "scale_out_multiple_at_8_shards_x100": 420,
-            "per_shard_scaling_efficiency_at_8_shards_pct": 52,
+            "scale_out_multiple_at_8_shards_x100": scale_out_multiple_x100,
+            "per_shard_scaling_efficiency_at_8_shards_pct": efficiency_pct,
+            "measured_per_shard_resident": per_shard_resident(),
             "shard_counts": SHARD_COUNTS,
             "independent_storage_units": true,
             "queue_global_progress_checked": true,

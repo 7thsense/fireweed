@@ -9,6 +9,8 @@ license.workspace = true
 pqueue-core = { path = "../pqueue-core" }
 parking_lot = "0.12"
 bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
 default = []

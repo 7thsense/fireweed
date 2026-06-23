@@ -5,6 +5,9 @@ use pqueue_core::{
     QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 
+type CreateQueueMutation = fn(&mut CreateQueue);
+type InvalidRequestCase = (&'static str, CreateQueueErrorKind, CreateQueueMutation);
+
 fn valid_create_queue() -> CreateQueue {
     CreateQueue {
         tenant_id: TenantId::new("tenant_acme").unwrap(),
@@ -232,7 +235,7 @@ fn core_domain_tests_create_queue_success_response_preserves_fields() {
 
 #[test]
 fn core_domain_tests_rejects_scalar_zero_limits() {
-    let cases: Vec<(&str, fn(&mut CreateQueue))> = vec![
+    let cases: Vec<(&str, CreateQueueMutation)> = vec![
         ("progress_bound_ms", |request| request.progress_bound_ms = 0),
         ("request_id_retention_ms", |request| {
             request.request_id_retention_ms = 0
@@ -269,7 +272,7 @@ fn core_domain_tests_rejects_scalar_zero_limits() {
 
 #[test]
 fn core_domain_tests_rejects_all_invalid_cohort_shapes() {
-    let cases: Vec<(&str, CreateQueueErrorKind, fn(&mut CreateQueue))> = vec![
+    let cases: Vec<InvalidRequestCase> = vec![
         (
             "completion_bound_ms is required",
             CreateQueueErrorKind::InvalidRequest,
@@ -371,7 +374,7 @@ fn core_domain_tests_rejects_all_invalid_cohort_shapes() {
 
 #[test]
 fn core_domain_tests_rejects_invalid_recurrence_group_and_gate_shapes() {
-    let cases: Vec<(&str, CreateQueueErrorKind, fn(&mut CreateQueue))> = vec![
+    let cases: Vec<InvalidRequestCase> = vec![
         (
             "recurrence.until is valid only",
             CreateQueueErrorKind::InvalidRequest,

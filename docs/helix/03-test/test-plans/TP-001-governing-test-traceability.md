@@ -5,6 +5,7 @@ ddx:
     - prd
     - api-native-client-interface
     - api-operator-repair-contract
+    - api-workload-integration-profiles
     - adr-cqrs-log-projection-storage-model
     - adr-auth-tenancy-and-storage-isolation
     - adr-rust-workspace-and-toolchain-policy
@@ -15,21 +16,22 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
   review:
-    self_hash: 1df6ca1830db0b53ee8aaeca8fa73fab6fbbd578a4718757616815c985ae06ae
+    self_hash: f8f62ced47ebb892960d6e710a78b27fe64a1f9b796fb0089963708eecab8a96
     deps:
       adr-auth-tenancy-and-storage-isolation: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
       adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
       adr-granularity-mapping-and-claim-domain: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
       adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
-      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
       api-operator-repair-contract: 65ec2e36500a6c404ae53af1a65da26fcdcc0a07e0ef1578bae30ec94f2be6e6
+      api-workload-integration-profiles: dc9e97f201ac546ad838d120811aa790826aee707b6870c4396c2f97d1ba81a8
       prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
       td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
-      td-s3-object-log-sqlite-projection-mode: ad13dfdb71f453157fc867e42582d9abfa99718beeb07c88c65e42cda2907ecf
+      td-s3-object-log-sqlite-projection-mode: d346e72f23f5859de62807f41e81b34409b43814faf95db8de237ff1ede895b7
       td-sharding-and-shard-ownership: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
       td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
       tp-scale-substantiation: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
-    reviewed_at: "2026-06-16T17:42:59Z"
+    reviewed_at: "2026-06-23T01:44:34Z"
 ---
 
 # Test Plan: TP-001 Governing Test Traceability
@@ -107,12 +109,15 @@ complementary and non-overlapping.
 | `pqueue_group_summary` (single projection) | TD-001 / TD-002 / TD-004 | Exactly one shard-scoped per-group summary projection `(tenant_id, queue_id, shard_id, group_key)`; `oldest_eligible_at` exact-on-read through the gate predicate; counts MAY lag; the former `pqueue_active_scope_summary` does not exist. |
 | API-001 idempotency | API-001 | Request replay, request conflict, claim replay while leases are active, and request-expired after leases end. |
 | API-001 auth | API-001 / ADR-002 | Principal authorized for tenant A cannot access tenant B routes or storage-backed data. |
+| API-001 claimed-item response shape | API-001 | Every `BatchClaim` result returns the documented field set (`item_id`, `client_item_key`, `item_version`, `lease_token`, `lease_expires_at`, `priority`); conditional fields (`not_before`, `group_key`, `payload`, `metadata`, `gate_keys`) are present/omitted per the rules; `gate_keys` appear only on `gate_keys=dynamic` queues; `whole_cohort` results omit the per-item `lease_token`. |
+| API-003 workload integration profile | API-003 / API-001 / API-002 | The scheduled-batch-delivery profile maps producer/worker/finalize obligations onto native primitives; finalize maps only to the five outcomes (`complete`/`fail`/`retry`/`release`/`rearm`); the downstream-rate non-goal is preserved (caller-driven pacing only); archive/retention defers to API-002. Anchored by `product_workflow_scheduled_action_delivery_e2e`. |
 | TD-001 durability | TD-001 | Kill process after acknowledged append; replay or committed Postgres rows preserve the command and projection state. |
 | TD-001 backend conformance | TD-001 | Every backend passes shared conformance before it is selectable by backend profile. |
 | TD-002 Postgres fencing | TD-002 | Stale `assignment_epoch` appends are rejected; current epoch appends succeed. |
 | TD-002 Postgres locking | TD-002 | `FOR UPDATE SKIP LOCKED` claim tests prove single active lease under concurrent workers. |
 | TD-003 shard ownership | TD-003 | Deterministic assignment (target vs active owner), durable epoch fence at acquire, stale-epoch append reject, graceful drain without loss/duplication, interrupted-drain single-writer safety, reassignment recovery from snapshot + log tail, cross-shard queue-global progress aggregation, and stalled/unowned-shard visibility. |
 | TD-004 object-log backend | TD-004 / ADR-001 | Group-commit ack boundary (no command acked before its manifest commit), manifest-CAS fencing against the current control-plane epoch (and the Postgres-pointer fallback on no-CAS stores), in-flight claim reservation, replay-response idempotency, SQLite snapshot + bounded log-tail recovery, and parity on the shared TD-001 backend conformance suite (incl. group co-residency, cohort, gates, multi-shard rows). Cost/ack/recovery magnitude → TP-002 E3. |
+| TD-005 standalone sqlite backend | TD-005 / ADR-006 | Single-file durable backend: atomic single-transaction append+apply (strict read-after-write, one WAL fsync ack boundary), epoch bootstrap (log/control-plane lockstep) and bump-on-open fencing, single-writer ownership (second opener rejected), reopen recovery preserves committed state (no log-tail replay needed), parity with the in-memory reference on the item-lifecycle conformance dimensions (`shared_conformance`), and the embedder delivery-adapter conformance (`embedder_delivery_conformance`) mapping to 7snx `assert_delivery_queue_adapter_conformance`. NOTE: `client_item_key` convergence is the embedder adapter's responsibility (pqueue converges by `item_id`); see bead pqueue-9ff01321. |
 | Queue density / bounded per-node resources | ADR-002 / ADR-003 / TD-001 / TD-002 / TD-003 / TD-004 | Per-queue and per-`(queue,shard)` background work (lease-expiry sweeps, cross-shard progress aggregation, summary recompute, recurring rearm, idempotency/retention GC) is multiplexed onto bounded shared per-node pools — never one task/loop/connection per queue or shard; per-shard projection handles are LRU-bounded. Density magnitude (≥1000 active queues/node) → TP-002 E2 `queue_density_single_node_tests`. |
 | ADR-003 Rust policy | ADR-003 | `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, dependency checks, unsafe denial, and the bounded-per-node-background-work rule run/verified in CI. |
 
@@ -145,6 +150,9 @@ Implementation beads should create or extend these suites:
 - `cross_shard_progress_tests`
 - `object_log_commit_recovery_tests`
 - `sqlite_projection_tests`
+- `sqlite_backend_tests`
+- `shared_conformance`
+- `embedder_delivery_conformance`
 - `service_auth_tenant_tests`
 - `service_api_error_semantics_tests`
 - `service_gate_tests`

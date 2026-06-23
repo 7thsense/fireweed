@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod codec;
 pub mod commands;
 pub mod concurrency_registry;
 pub mod fault_injection;

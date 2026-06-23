@@ -194,67 +194,66 @@ pub fn handle(api_version: i16, body: &[u8]) -> (ProduceResponse, Vec<ProducePus
 
             let mut items: Vec<PushItem> = vec![];
 
-            if let Some(records_bytes) = partition_data.records {
-                if !records_bytes.is_empty() {
-                    // Try to decode individual records to extract key/value bytes.
-                    // Falls back to counting from the batch header when decode_records()
-                    // returns None (compressed or unrecognised format).
-                    let decoded = decode_records(&records_bytes);
-                    match decoded {
-                        Some(kvs) => {
-                            for (i, (key_bytes, value_bytes)) in kvs.into_iter().enumerate() {
+            if let Some(records_bytes) = partition_data.records
+                && !records_bytes.is_empty()
+            {
+                // Try to decode individual records to extract key/value bytes.
+                // Falls back to counting from the batch header when decode_records()
+                // returns None (compressed or unrecognised format).
+                match decode_records(&records_bytes) {
+                    Some(kvs) => {
+                        for (i, (key_bytes, value_bytes)) in kvs.into_iter().enumerate() {
+                            let item_id =
+                                ItemId::new(format!("{}-{}-{}", topic_name, partition, i))
+                                    .unwrap_or_else(|_| ItemId::new("fallback").unwrap());
+                            // Use the record key as client_item_key if it's valid UTF-8.
+                            let client_key = key_bytes
+                                .as_ref()
+                                .and_then(|k| std::str::from_utf8(k).ok())
+                                .and_then(|s| ClientItemKey::new(s).ok())
+                                .unwrap_or_else(|| {
+                                    ClientItemKey::new(format!("{}-key-{}", topic_name, i))
+                                        .unwrap_or_else(|_| {
+                                            ClientItemKey::new("fallback-key").unwrap()
+                                        })
+                                });
+                            items.push(PushItem {
+                                item_id,
+                                client_item_key: client_key,
+                                priority: None,
+                                not_before: None,
+                                max_attempts: 1,
+                                payload: value_bytes,
+                            });
+                        }
+                    }
+                    None => {
+                        // Compressed or unknown format: count from header, no payload.
+                        if records_bytes.len() >= 61 {
+                            let count = i32::from_be_bytes([
+                                records_bytes[57],
+                                records_bytes[58],
+                                records_bytes[59],
+                                records_bytes[60],
+                            ])
+                            .max(0) as usize;
+                            for i in 0..count {
                                 let item_id =
                                     ItemId::new(format!("{}-{}-{}", topic_name, partition, i))
                                         .unwrap_or_else(|_| ItemId::new("fallback").unwrap());
-                                // Use the record key as client_item_key if it's valid UTF-8.
-                                let client_key = key_bytes
-                                    .as_ref()
-                                    .and_then(|k| std::str::from_utf8(k).ok())
-                                    .and_then(|s| ClientItemKey::new(s).ok())
-                                    .unwrap_or_else(|| {
-                                        ClientItemKey::new(format!("{}-key-{}", topic_name, i))
-                                            .unwrap_or_else(|_| {
-                                                ClientItemKey::new("fallback-key").unwrap()
-                                            })
-                                    });
+                                let client_key =
+                                    ClientItemKey::new(format!("{}-key-{}", topic_name, i))
+                                        .unwrap_or_else(|_| {
+                                            ClientItemKey::new("fallback-key").unwrap()
+                                        });
                                 items.push(PushItem {
                                     item_id,
                                     client_item_key: client_key,
                                     priority: None,
                                     not_before: None,
                                     max_attempts: 1,
-                                    payload: value_bytes,
+                                    payload: None,
                                 });
-                            }
-                        }
-                        None => {
-                            // Compressed or unknown format: count from header, no payload.
-                            if records_bytes.len() >= 61 {
-                                let count = i32::from_be_bytes([
-                                    records_bytes[57],
-                                    records_bytes[58],
-                                    records_bytes[59],
-                                    records_bytes[60],
-                                ])
-                                .max(0) as usize;
-                                for i in 0..count {
-                                    let item_id =
-                                        ItemId::new(format!("{}-{}-{}", topic_name, partition, i))
-                                            .unwrap_or_else(|_| ItemId::new("fallback").unwrap());
-                                    let client_key =
-                                        ClientItemKey::new(format!("{}-key-{}", topic_name, i))
-                                            .unwrap_or_else(|_| {
-                                                ClientItemKey::new("fallback-key").unwrap()
-                                            });
-                                    items.push(PushItem {
-                                        item_id,
-                                        client_item_key: client_key,
-                                        priority: None,
-                                        not_before: None,
-                                        max_attempts: 1,
-                                        payload: None,
-                                    });
-                                }
                             }
                         }
                     }

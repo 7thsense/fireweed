@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod append;
+pub mod connect;
 pub mod control_plane;
 pub mod retention;
 pub mod schema;

@@ -200,7 +200,7 @@ async fn wire_produce_conformance_produced_records_claimable_as_pqueue_items() {
         .batch_claim(ClaimRequest {
             shard_key: shard_key.clone(),
             max_items: 10,
-            now: now.clone(),
+            now,
             lease_token: "worker-1".to_string(),
             lease_expires_at: expires,
         })

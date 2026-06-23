@@ -39,12 +39,12 @@ impl LocalPostgresProfile {
     pub async fn connect(&self) -> LocalPostgresConnection {
         assert_eq!(self.backend_profile, "postgres_native");
         let mut database_urls = vec![self.database_url.clone()];
-        if let Some(container_name) = &self.docker_container_name {
-            if let Some(container_ip) = docker_container_ip(container_name) {
-                database_urls.push(format!(
-                    "host={container_ip} port=5432 user=pqueue password=pqueue dbname=pqueue"
-                ));
-            }
+        if let Some(container_name) = &self.docker_container_name
+            && let Some(container_ip) = docker_container_ip(container_name)
+        {
+            database_urls.push(format!(
+                "host={container_ip} port=5432 user=pqueue password=pqueue dbname=pqueue"
+            ));
         }
         let (client, connection) = connect_with_retry(&database_urls).await;
         let connection_task = tokio::spawn(async move {

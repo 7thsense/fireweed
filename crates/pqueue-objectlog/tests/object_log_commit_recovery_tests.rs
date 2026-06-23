@@ -2,8 +2,8 @@
 
 use pqueue_core::{ClientItemKey, ItemId, QueueId, RequestId, TenantId, UtcTimestamp};
 use pqueue_objectlog::{
-    ConfigError, DeploymentProfile, FjordObjectLogStore, ManifestMode, MemoryBlobStore,
-    MemoryCoordinator, PqueueObjectLogConfig, S3CompatibleConfigError, S3CompatibleCredentials,
+    ConfigError, DeploymentProfile, ManifestMode, MemoryBlobStore, PqueueObjectLogConfig,
+    PqueueObjectLogStore, S3CompatibleConfigError, S3CompatibleCredentials,
     S3CompatibleObjectLogConfig,
 };
 use pqueue_storage::commands::{
@@ -105,8 +105,8 @@ fn valid_s3_compatible_config() -> S3CompatibleObjectLogConfig {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_group_commit_uses_fjord_blob_once() {
-    let (store, blob) = FjordObjectLogStore::new_memory();
+async fn object_log_commit_recovery_tests_group_commit_uses_object_log_blob_once() {
+    let (store, blob) = PqueueObjectLogStore::new_memory();
     let t = tenant();
     let q = qid("object-log-group");
     let shard = shard(t.clone(), q.clone(), 0);
@@ -127,8 +127,8 @@ async fn object_log_commit_recovery_tests_group_commit_uses_fjord_blob_once() {
     assert_eq!(result.last_position.sequence, 2);
     assert_eq!(
         blob.object_count(),
-        1,
-        "object-log groups one flush into one object"
+        2,
+        "group commit writes one data object plus one durable manifest object"
     );
     let page = store.read_from(&shard, None, 10).await.unwrap();
     assert_eq!(page.commands.len(), 3);
@@ -141,12 +141,10 @@ async fn object_log_commit_recovery_tests_group_commit_uses_fjord_blob_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_reopens_from_fjord_coordinator_and_blob() {
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
+async fn object_log_commit_recovery_tests_reopens_from_object_log_blob() {
     let blob = Arc::new(MemoryBlobStore::new());
     let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
+    let first = PqueueObjectLogStore::new(Arc::clone(&blob_dyn));
     let t = tenant();
     let q = qid("object-log-recovery");
     let shard = shard(t.clone(), q.clone(), 0);
@@ -161,7 +159,7 @@ async fn object_log_commit_recovery_tests_reopens_from_fjord_coordinator_and_blo
         .unwrap();
     drop(first);
 
-    let reopened = FjordObjectLogStore::new(coordinator, blob_dyn);
+    let reopened = PqueueObjectLogStore::new(blob_dyn);
     let page = reopened.read_from(&shard, None, 10).await.unwrap();
     assert_eq!(
         page.commands
@@ -170,12 +168,12 @@ async fn object_log_commit_recovery_tests_reopens_from_fjord_coordinator_and_blo
             .collect::<Vec<_>>(),
         vec!["cmd-push-0", "cmd-push-1"]
     );
-    assert_eq!(blob.object_count(), 1);
+    assert_eq!(blob.object_count(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn object_log_commit_recovery_tests_current_epoch_fences_stale_writers() {
-    let (store, _blob) = FjordObjectLogStore::new_memory();
+    let (store, _blob) = PqueueObjectLogStore::new_memory();
     let t = tenant();
     let q = qid("object-log-epoch");
     let shard = shard(t.clone(), q.clone(), 0);
@@ -207,18 +205,16 @@ async fn object_log_commit_recovery_tests_current_epoch_fences_stale_writers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn object_log_commit_recovery_tests_epoch_fence_survives_reopen_before_data_commit() {
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
     let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
+    let first = PqueueObjectLogStore::new(Arc::clone(&blob_dyn));
     let t = tenant();
     let q = qid("object-log-reopen-fence");
     let shard = shard(t.clone(), q.clone(), 0);
 
     first.commit_epoch_fence(&shard, 1).unwrap();
     drop(first);
-    let reopened = FjordObjectLogStore::new(coordinator, blob_dyn);
+    let reopened = PqueueObjectLogStore::new(blob_dyn);
     let object_count_after_fence = blob.object_count();
 
     let stale = reopened
@@ -247,11 +243,9 @@ async fn object_log_commit_recovery_tests_epoch_fence_survives_reopen_before_dat
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn object_log_commit_recovery_tests_request_id_replay_finds_committed_command_after_reopen() {
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
     let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let first = FjordObjectLogStore::new(Arc::clone(&coordinator), Arc::clone(&blob_dyn));
+    let first = PqueueObjectLogStore::new(Arc::clone(&blob_dyn));
     let t = tenant();
     let q = qid("object-log-request-replay");
     let shard = shard(t.clone(), q.clone(), 0);
@@ -262,7 +256,7 @@ async fn object_log_commit_recovery_tests_request_id_replay_finds_committed_comm
         .unwrap();
     drop(first);
 
-    let reopened = FjordObjectLogStore::new(coordinator, blob_dyn);
+    let reopened = PqueueObjectLogStore::new(blob_dyn);
     let request_id = RequestId::new("req-claim-7").unwrap();
     let replayed = reopened
         .find_by_request_id(&shard, &request_id)
@@ -287,9 +281,7 @@ fn test_s3_compatible_constructor_config_accepts_minio_object_store_cas_config()
     assert_eq!(config.manifest_mode, ManifestMode::ObjectStoreCas);
     assert_eq!(config.max_commands_per_segment, 1024);
 
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
-    let store = FjordObjectLogStore::new_s3_compatible(coordinator, config).unwrap();
+    let store = PqueueObjectLogStore::new_s3_compatible(config).unwrap();
     assert_eq!(store.config().manifest_mode, ManifestMode::ObjectStoreCas);
     assert_eq!(store.config().max_commands_per_segment, 1024);
 }
@@ -303,9 +295,7 @@ fn test_s3_compatible_constructor_config_accepts_postgres_manifest_pointer_fallb
     config.max_commands_per_segment = 4096;
 
     config.validate().unwrap();
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
-    let store = FjordObjectLogStore::new_s3_compatible(coordinator, config).unwrap();
+    let store = PqueueObjectLogStore::new_s3_compatible(config).unwrap();
     assert_eq!(
         store.config().manifest_mode,
         ManifestMode::PostgresManifestPointerFallback
@@ -452,8 +442,6 @@ fn object_log_commit_recovery_tests_rejects_missing_cas_without_fallback() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_keeps_epoch_fence() {
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
     let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let config = PqueueObjectLogConfig {
@@ -462,7 +450,7 @@ async fn object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_kee
         max_commands_per_segment: 16,
         dev_unsafe_one_command_segments: false,
     };
-    let store = FjordObjectLogStore::new_with_config(coordinator, blob_dyn, config).unwrap();
+    let store = PqueueObjectLogStore::new_with_config(blob_dyn, config).unwrap();
     let t = tenant();
     let q = qid("object-log-fallback");
     let shard = shard(t.clone(), q.clone(), 0);
@@ -524,8 +512,6 @@ struct E3Evidence {
 }
 
 async fn run_e3_segment_scenario(segment_size_commands: u64) -> E3Evidence {
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
     let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let config = PqueueObjectLogConfig {
@@ -534,9 +520,7 @@ async fn run_e3_segment_scenario(segment_size_commands: u64) -> E3Evidence {
         max_commands_per_segment: segment_size_commands as usize,
         dev_unsafe_one_command_segments: false,
     };
-    let store =
-        FjordObjectLogStore::new_with_config(Arc::clone(&coordinator), blob_dyn.clone(), config)
-            .unwrap();
+    let store = PqueueObjectLogStore::new_with_config(blob_dyn.clone(), config).unwrap();
     let t = tenant();
     let q = qid(&format!("object-log-e3-{segment_size_commands}"));
     let shard = shard(t.clone(), q.clone(), 0);
@@ -550,7 +534,7 @@ async fn run_e3_segment_scenario(segment_size_commands: u64) -> E3Evidence {
     assert_eq!(append.last_position.sequence, segment_size_commands - 1);
 
     drop(store);
-    let reopened = FjordObjectLogStore::new(coordinator, blob_dyn);
+    let reopened = PqueueObjectLogStore::new(blob_dyn);
     let recovery_started = Instant::now();
     let recovered = reopened
         .read_from(&shard, None, segment_size_commands as usize)
@@ -574,7 +558,7 @@ async fn run_e3_segment_scenario(segment_size_commands: u64) -> E3Evidence {
 }
 
 async fn count_manifest_fence_rejection(
-    store: &FjordObjectLogStore,
+    store: &PqueueObjectLogStore,
     shard: &ShardKey,
     tenant: &TenantId,
     queue: &QueueId,
@@ -599,8 +583,6 @@ async fn count_manifest_fence_rejection(
 }
 
 async fn count_fallback_fence_rejection() -> u64 {
-    let coordinator: Arc<dyn fjord_coordinator::CoordinatorStore> =
-        Arc::new(MemoryCoordinator::new());
     let blob = Arc::new(MemoryBlobStore::new());
     let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
     let config = PqueueObjectLogConfig {
@@ -609,7 +591,7 @@ async fn count_fallback_fence_rejection() -> u64 {
         max_commands_per_segment: 1024,
         dev_unsafe_one_command_segments: false,
     };
-    let store = FjordObjectLogStore::new_with_config(coordinator, blob_dyn, config).unwrap();
+    let store = PqueueObjectLogStore::new_with_config(blob_dyn, config).unwrap();
     let t = tenant();
     let q = qid("object-log-e3-fallback");
     let shard = shard(t.clone(), q.clone(), 0);
@@ -680,7 +662,7 @@ fn append_e3_ledger_row(path: &PathBuf, evidence: &E3Evidence) {
             "acked_commands": evidence.acked_commands,
             "observed_local_append_ms": evidence.observed_append_ms,
             "observed_local_recovery_ms": evidence.observed_recovery_ms,
-            "fjord_object_count": evidence.object_count,
+            "object_log_object_count": evidence.object_count,
             "manifest_fence_rejections": evidence.manifest_fence_rejections,
             "fallback_fence_rejections": evidence.fallback_fence_rejections
         },

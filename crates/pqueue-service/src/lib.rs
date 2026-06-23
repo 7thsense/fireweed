@@ -849,11 +849,10 @@ async fn repair_items(
                     | RepairAction::ForceFail
                     | RepairAction::ForceComplete
                     | RepairAction::Reschedule
-            ) {
-                if let Some(lease_token) = item.lease_token.as_deref() {
-                    admin.fence_lease(&tenant_id, &queue_id, &item.item_id, lease_token);
-                    fenced_any = true;
-                }
+            ) && let Some(lease_token) = item.lease_token.as_deref()
+            {
+                admin.fence_lease(&tenant_id, &queue_id, &item.item_id, lease_token);
+                fenced_any = true;
             }
             let mut result = item_result(
                 Some(item.item_id.clone()),

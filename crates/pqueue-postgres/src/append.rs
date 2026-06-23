@@ -835,6 +835,7 @@ async fn refresh_group_summaries(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upsert_cohort_member(
     tx: &tokio_postgres::Transaction<'_>,
     tenant_id: &str,
@@ -1069,8 +1070,7 @@ impl PostgresAppendStore {
             .map(|_| push_request_fingerprint(&req));
         if let (Some(request_id), Some(fingerprint)) =
             (req.request_id.as_ref(), request_fingerprint.as_ref())
-        {
-            if let Some(row) = tx
+            && let Some(row) = tx
                 .query_opt(
                     "SELECT request_fingerprint, response_payload
                      FROM pqueue_request_idempotency
@@ -1089,14 +1089,13 @@ impl PostgresAppendStore {
                 )
                 .await
                 .map_err(to_append_err)?
-            {
-                let stored_fingerprint: Vec<u8> = row.get("request_fingerprint");
-                if stored_fingerprint != *fingerprint {
-                    return Err(AppendError::RequestConflict);
-                }
-                let response_payload: Value = row.get("response_payload");
-                return json_to_push_result(&response_payload);
+        {
+            let stored_fingerprint: Vec<u8> = row.get("request_fingerprint");
+            if stored_fingerprint != *fingerprint {
+                return Err(AppendError::RequestConflict);
             }
+            let response_payload: Value = row.get("response_payload");
+            return json_to_push_result(&response_payload);
         }
 
         // Step 2: lock shard, validate epoch, read sequence
@@ -1506,18 +1505,18 @@ impl PostgresAppendStore {
             }
 
             let current_version = row.get::<_, i64>("item_version") as u64;
-            if let Some(expected) = item.expected_item_version {
-                if current_version != expected {
-                    item_results.push(PgUpdateItemResult {
-                        item_id: item.item_id.clone(),
-                        outcome: PgUpdateOutcome::Conflict {
-                            message: format!(
-                                "expected item_version {expected}, found {current_version}"
-                            ),
-                        },
-                    });
-                    continue;
-                }
+            if let Some(expected) = item.expected_item_version
+                && current_version != expected
+            {
+                item_results.push(PgUpdateItemResult {
+                    item_id: item.item_id.clone(),
+                    outcome: PgUpdateOutcome::Conflict {
+                        message: format!(
+                            "expected item_version {expected}, found {current_version}"
+                        ),
+                    },
+                });
+                continue;
             }
 
             let lease_expires_at: Option<OffsetDateTime> = row.get("lease_expires_at");
@@ -3105,8 +3104,7 @@ impl PostgresAppendStore {
             .map(|_| purge_request_fingerprint(&req));
         if let (Some(request_id), Some(fingerprint)) =
             (req.request_id.as_ref(), request_fingerprint.as_ref())
-        {
-            if let Some(row) = tx
+            && let Some(row) = tx
                 .query_opt(
                     "SELECT request_fingerprint, response_payload
                      FROM pqueue_request_idempotency
@@ -3120,14 +3118,13 @@ impl PostgresAppendStore {
                 )
                 .await
                 .map_err(to_append_err)?
-            {
-                let stored_fingerprint: Vec<u8> = row.get("request_fingerprint");
-                if stored_fingerprint != *fingerprint {
-                    return Err(AppendError::RequestConflict);
-                }
-                let response_payload: Value = row.get("response_payload");
-                return json_to_purge_result(&response_payload);
+        {
+            let stored_fingerprint: Vec<u8> = row.get("request_fingerprint");
+            if stored_fingerprint != *fingerprint {
+                return Err(AppendError::RequestConflict);
             }
+            let response_payload: Value = row.get("response_payload");
+            return json_to_purge_result(&response_payload);
         }
 
         let (current_epoch, sequence) = lock_shard_sequence(

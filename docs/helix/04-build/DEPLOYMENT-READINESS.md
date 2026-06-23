@@ -9,15 +9,15 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 51ad89e2467c77d2c7c1a28642055b745dfed06b22b5c0e9118535256db27bde
+    self_hash: d280ca50b2019dce5e9ee346744307d88ab09cbb7f674ba11df07f6582a800da
     deps:
-      build-implementation-plan: c58f64862d102898e239c7382cd6c762e52e0d1a1250b78af543ad2b5c26e578
+      build-implementation-plan: 903a5d1277524c550297beafbbef6a88f3e161b0bf319ab703713733f9b28ad9
       td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
-      td-s3-object-log-sqlite-projection-mode: ad13dfdb71f453157fc867e42582d9abfa99718beeb07c88c65e42cda2907ecf
+      td-s3-object-log-sqlite-projection-mode: d346e72f23f5859de62807f41e81b34409b43814faf95db8de237ff1ede895b7
       td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
       tp-scale-substantiation: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
       tp-verification-acceptance-criteria: 15f28d510bdac36217eeba3ea37849174111de98af410d6a5c59dd296125e6bf
-    reviewed_at: "2026-06-17T20:52:27Z"
+    reviewed_at: "2026-06-23T01:45:57Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -60,6 +60,20 @@ Only these backend profiles are in the BUILD-001 production-readiness scope:
 - `object_log_sqlite_projection`: the fjord object-log plus SQLite projection
   mode, with Postgres as control plane and S3-compatible object storage as the
   durable log/snapshot substrate.
+- `sqlite`: the standalone single-file durable SQLite backend (TD-005) — the
+  embedded-durable option for hosts that need durability without an object store
+  or Postgres. Command log and projection live in one file and commit
+  atomically (single transaction, WAL fsync ack boundary); it is single-writer
+  (one process owns the file). Selected with `PQUEUE_BACKEND_PROFILE=sqlite` and
+  `PQUEUE_SQLITE_DB_PATH`. It is NOT part of the horizontal-scale headline
+  evidence (that remains `object_log_sqlite_projection`).
+
+`postgres_native` MAY target either a self-managed Postgres or a **managed
+Postgres endpoint** (e.g. Databricks Lakebase). The managed-endpoint case is the
+same backend and the same SQL (it is Postgres-wire compatible and supports
+`FOR UPDATE SKIP LOCKED` / `ON CONFLICT`); it is a *deployment* variant, not a
+new backend profile. Its connection requirements are defined in "Managed
+Postgres / Lakebase Endpoint" below.
 
 Other profiles named by TD-001, including Kafka/Redpanda and DynamoDB-shaped
 profiles, are design targets only. They are not production-supported by this
@@ -78,6 +92,10 @@ readiness contract.
   `object_log_sqlite_projection`.
 - Do not block P0/core production readiness on P1 operator APIs unless a release
   explicitly claims the operator-enabled surface.
+- Do not claim provider-specific managed-Postgres (Lakebase) certification from
+  the connection layer alone. The TLS connector and credential-provider seam are
+  implemented and unit-tested, but a credentialed live-Lakebase acceptance run is
+  a later bead (see "Managed Postgres / Lakebase Endpoint").
 
 ## Required Artifacts
 
@@ -135,6 +153,43 @@ A production-readiness release must record:
 - TP-003 P0/core release gate output and `product_validation_tests` ledger;
 - any declared exclusions, such as P1 operator APIs not included in a P0/core
   release.
+
+## Managed Postgres / Lakebase Endpoint
+
+`postgres_native` can run against a managed Postgres endpoint such as Databricks
+Lakebase. Lakebase is Postgres-wire compatible (Postgres 16/17 on the Neon
+architecture); pqueue's data-plane SQL is unchanged. Only the connection setup
+differs, and the connection layer (`pqueue-postgres::connect`) owns it:
+
+- **TLS is required.** Lakebase mandates `sslmode=require`. The connector reads
+  `sslmode` from the connection string and selects rustls vs `NoTls`
+  automatically; the binary MUST be built with the `tls` feature
+  (`cargo build -p pqueue-service --features tls`). Without it, a
+  `sslmode=require` connection fails fast with a clear "built without `tls`"
+  error rather than silently downgrading.
+- **Two auth modes**, both supported by the connection layer:
+  - *Native password via the pooler* — a static password through Lakebase's
+    PgBouncer endpoint (transaction pooling, up to 10k client connections). The
+    simplest mode; `StaticPassword` credential provider. pqueue uses no
+    pooler-incompatible features (no `LISTEN`/`NOTIFY`, no advisory locks), so
+    `FOR UPDATE SKIP LOCKED` / `ON CONFLICT` work through transaction pooling.
+  - *OAuth on the direct endpoint* — a short-lived (~60 min) Databricks database
+    credential as the password, via the `RefreshingCredentialProvider`. The
+    provider re-mints the token before expiry and a fresh token is used per new
+    connection (Lakebase enforces expiry only at login, so live connections
+    survive). The Databricks-specific minting (CLI/SDK/REST
+    `generate-database-credential`) is supplied as the provider's fetcher.
+- **Connection string.** Use the `key=value` DSN form for OAuth (the username is
+  an email containing `@`, which the URL form parses ambiguously); dbname is
+  `databricks_postgres`, port `5432`.
+
+Validation boundary (deferred, mirroring the S3 boundary below): the connector
+and credential seam are implemented and unit-tested, but a **credentialed live
+acceptance run against a real Lakebase instance** (TLS handshake, token rotation,
+`SKIP LOCKED` concurrency, and the claim throughput/latency envelope re-measured
+on Lakebase's disaggregated storage) is a later bead. Until that runs, releases
+MUST NOT claim Lakebase production certification — only that `postgres_native`
+*can* target a managed Postgres endpoint.
 
 ## S3 / Object-Log Boundary
 

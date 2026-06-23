@@ -13,19 +13,19 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: ad13dfdb71f453157fc867e42582d9abfa99718beeb07c88c65e42cda2907ecf
+    self_hash: d346e72f23f5859de62807f41e81b34409b43814faf95db8de237ff1ede895b7
     deps:
       adr-auth-tenancy-and-storage-isolation: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
       adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
       adr-granularity-mapping-and-claim-domain: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
       adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
-      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
       concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
       prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
       td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
       td-sharding-and-shard-ownership: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
       td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-    reviewed_at: "2026-06-16T17:42:59Z"
+    reviewed_at: "2026-06-20T19:01:18Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -375,7 +375,11 @@ is committed and applied, and progress age accrues from eligibility, FR-10).
 
 As of 2026-06-16, the v1 `object_log_sqlite_projection` implementation is
 complete for the committed pqueue backend profile and is validated against the
-fjord object-log abstraction plus SQLite projection. The validation boundary is:
+freestanding object-log abstraction plus SQLite projection. The durable
+offset→location index is provided by object-log's own `ManifestSequencer`
+(blob-persisted, rebuilt on reopen); `pqueue-objectlog` depends only on the
+freestanding `object-log` crate and no longer on fjord's internal coordinator.
+The validation boundary is:
 
 - `cargo +1.92.0 test -p pqueue-service local_object_log_deployment_smoke_tests -- --ignored --nocapture`
   passes the local object-log deployment profile.
@@ -389,12 +393,13 @@ fjord object-log abstraction plus SQLite projection. The validation boundary is:
   passes from source-backed DDx evidence and regenerates the aggregate
   `product_validation_tests` ledger.
 
-This proves the backend contract at the fjord/object-log layer used by pqueue.
+This proves the backend contract at the object-log layer used by pqueue.
 Provider-specific hardening against a live cloud S3 endpoint remains a deployment
 certification activity unless a future bead adds a concrete S3 adapter and
 credentials-backed acceptance run. That future activity must not be cited as a
 blocker for the current v1 profile unless the release claims provider-specific
-S3 support rather than S3-compatible object-log semantics through fjord.
+S3 support rather than S3-compatible semantics through the freestanding
+object-log.
 
 The following cases define the required evidence surface:
 
@@ -474,7 +479,7 @@ The following cases define the required evidence surface:
 
 - [x] TD-001 traits map to object-log segments + SQLite projection + snapshot/replay + Postgres control plane (`pqueue-objectlog`, `pqueue-sqlite`, `local_object_log_deployment_smoke_tests`).
 - [x] API-001 operations are preserved once a response returns; self read-after-write and bounded apply behavior are covered by product workflows and apply-before-return object-log tests.
-- [x] Ack occurs only after durable manifest commit (replay-response); operation's own effect is applied before return (`object_log_commit_recovery_tests_reopens_from_fjord_coordinator_and_blob`, request-id replay tests).
+- [x] Ack occurs only after durable manifest commit (replay-response); operation's own effect is applied before return (`object_log_commit_recovery_tests_reopens_from_object_log_blob`, request-id replay tests).
 - [x] In-flight claim reservation prevents duplicate local claims; rollback/crash behavior is covered by object-log recovery and product crash-recovery workflows.
 - [x] Manifest commit validates the current control-plane epoch, not only manifest-recorded epoch (`object_log_commit_recovery_tests_current_epoch_fences_stale_writers` and reopen-before-data-commit coverage).
 - [x] Object-store conditional write is required; unsupported stores reject or use the Postgres manifest-pointer fallback (`object_log_commit_recovery_tests_rejects_missing_cas_without_fallback`, `object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_keeps_epoch_fence`).

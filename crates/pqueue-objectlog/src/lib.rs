@@ -1,16 +1,15 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use fjord_coordinator::{CoordinatorSequencer, CoordinatorStore, ProducerMeta, partition_key};
 use futures_util::future::join_all;
 use object_log::{
     AppendOutcome, BlobStore, Durability as ObjectLogDurability, FetchedBatch, FlushConfig,
-    LogEngine,
+    LogEngine, ManifestSequencer, PartitionKey, Sequencer,
 };
 use parking_lot::Mutex;
 use pqueue_core::{
@@ -25,9 +24,20 @@ use pqueue_storage::traits::{
     AppendBatchResult, CommandPage, DurabilityProfile, LogStore, LogStoreError,
 };
 use pqueue_storage::types::{CommandChecksum, CommandPosition, ShardKey};
+use tokio::sync::OnceCell;
 
-pub use fjord_coordinator::memory::MemoryCoordinator;
 pub use object_log::{MemoryBlobStore, S3BlobStore};
+
+/// Object-store key prefix for the log's data objects.
+const DATA_PREFIX: &str = "pqueue/";
+/// Object-store key prefix for the `ManifestSequencer`'s durable offset index.
+/// Kept disjoint from `DATA_PREFIX` so manifests and data objects never collide.
+const MANIFEST_PREFIX: &str = "pqueue-manifest/";
+
+/// Map a shard topic to the object-log partition key (pqueue uses partition 0).
+fn partition_key(topic: &str) -> PartitionKey {
+    PartitionKey(format!("{topic}/0"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentProfile {
@@ -262,43 +272,41 @@ pub fn probe_s3_compatible_object_path(
     }
 }
 
-pub struct FjordObjectLogStore {
-    coordinator: Arc<dyn CoordinatorStore>,
-    engine: LogEngine<CoordinatorSequencer>,
-    config: PqueueObjectLogConfig,
-    epochs: Mutex<HashMap<ShardKey, u64>>,
-    topics: Mutex<HashSet<String>>,
+/// Lazily-initialised object-log engine + its durable sequencer.
+struct EngineInner {
+    sequencer: Arc<ManifestSequencer>,
+    engine: LogEngine<ManifestSequencer>,
 }
 
-impl FjordObjectLogStore {
-    pub fn new(coordinator: Arc<dyn CoordinatorStore>, blob: Arc<dyn BlobStore>) -> Self {
-        Self::new_with_config(coordinator, blob, PqueueObjectLogConfig::default())
+pub struct PqueueObjectLogStore {
+    blob: Arc<dyn BlobStore>,
+    config: PqueueObjectLogConfig,
+    /// Opened on first use so construction stays I/O-free (S3 config can be
+    /// validated without contacting the object store).
+    inner: OnceCell<EngineInner>,
+    epochs: Mutex<HashMap<ShardKey, u64>>,
+}
+
+impl PqueueObjectLogStore {
+    pub fn new(blob: Arc<dyn BlobStore>) -> Self {
+        Self::new_with_config(blob, PqueueObjectLogConfig::default())
             .expect("default pqueue object-log config is valid")
     }
 
     pub fn new_with_config(
-        coordinator: Arc<dyn CoordinatorStore>,
         blob: Arc<dyn BlobStore>,
         config: PqueueObjectLogConfig,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
-        let flush = FlushConfig {
-            max_batches: config.max_commands_per_segment,
-            linger: Duration::from_millis(1),
-            ..FlushConfig::default()
-        };
-        let sequencer = Arc::new(CoordinatorSequencer::new(Arc::clone(&coordinator)));
         Ok(Self {
-            engine: LogEngine::new(blob, sequencer, flush, "pqueue/"),
-            coordinator,
+            blob,
             config,
+            inner: OnceCell::new(),
             epochs: Mutex::new(HashMap::new()),
-            topics: Mutex::new(HashSet::new()),
         })
     }
 
     pub fn new_s3_compatible(
-        coordinator: Arc<dyn CoordinatorStore>,
         config: S3CompatibleObjectLogConfig,
     ) -> Result<Self, S3CompatibleConfigError> {
         config.validate()?;
@@ -310,18 +318,53 @@ impl FjordObjectLogStore {
             config.credentials.access_key_id.trim(),
             config.credentials.secret_access_key.trim(),
         ));
-        Self::new_with_config(coordinator, blob, pqueue_config).map_err(Into::into)
+        Self::new_with_config(blob, pqueue_config).map_err(Into::into)
     }
 
     pub fn new_memory() -> (Self, Arc<MemoryBlobStore>) {
-        let coordinator: Arc<dyn CoordinatorStore> = Arc::new(MemoryCoordinator::new());
         let blob = Arc::new(MemoryBlobStore::new());
         let blob_dyn: Arc<dyn BlobStore> = blob.clone();
-        (Self::new(coordinator, blob_dyn), blob)
+        (Self::new(blob_dyn), blob)
     }
 
     pub fn config(&self) -> &PqueueObjectLogConfig {
         &self.config
+    }
+
+    /// Open (or recover) the object-log engine on first use. `ManifestSequencer`
+    /// rebuilds its offset index from the blob store, so a fresh store over the
+    /// same blob recovers the durable log.
+    async fn inner(&self) -> Result<&EngineInner, LogStoreError> {
+        self.inner
+            .get_or_try_init(|| async {
+                let flush = FlushConfig {
+                    max_batches: self.config.max_commands_per_segment,
+                    linger: Duration::from_millis(1),
+                    ..FlushConfig::default()
+                };
+                let sequencer = Arc::new(
+                    ManifestSequencer::open(Arc::clone(&self.blob), MANIFEST_PREFIX)
+                        .await
+                        .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?,
+                );
+                let engine = LogEngine::new(
+                    Arc::clone(&self.blob),
+                    Arc::clone(&sequencer),
+                    flush,
+                    DATA_PREFIX,
+                );
+                Ok::<EngineInner, LogStoreError>(EngineInner { sequencer, engine })
+            })
+            .await
+    }
+
+    /// A shard "exists" once at least one batch has been sequenced for its topic.
+    fn shard_exists(inner: &EngineInner, topic: &str) -> Result<bool, LogStoreError> {
+        let high_watermark = inner
+            .sequencer
+            .high_watermark(&partition_key(topic))
+            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
+        Ok(high_watermark > 0)
     }
 
     pub fn advance_epoch(&self, shard: &ShardKey, epoch: u64) {
@@ -339,13 +382,14 @@ impl FjordObjectLogStore {
         epoch: u64,
     ) -> Result<(), LogStoreError> {
         let topic = epoch_topic_for_shard(shard);
-        self.ensure_topic(&topic)?;
-        self.engine
+        let inner = self.inner().await?;
+        inner
+            .engine
             .produce(
-                partition_key(&topic, 0),
+                partition_key(&topic),
                 Bytes::copy_from_slice(&epoch.to_be_bytes()),
                 1,
-                ProducerMeta::non_idempotent(),
+                (),
                 ObjectLogDurability::Sequenced,
             )
             .await
@@ -371,18 +415,14 @@ impl FjordObjectLogStore {
             return Ok(epoch);
         }
         let topic = epoch_topic_for_shard(shard);
-        if self
-            .coordinator
-            .topic_partitions(&topic)
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?
-            .is_none()
-        {
+        let inner = self.inner().await?;
+        if !Self::shard_exists(inner, &topic)? {
             self.epochs.lock().insert(shard.clone(), 0);
             return Ok(0);
         }
-        let fetched = self
+        let fetched = inner
             .engine
-            .fetch(&partition_key(&topic, 0), 0, usize::MAX)
+            .fetch(&partition_key(&topic), 0, usize::MAX)
             .await
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         let epoch = fetched
@@ -394,39 +434,19 @@ impl FjordObjectLogStore {
         Ok(epoch)
     }
 
-    fn ensure_topic(&self, topic: &str) -> Result<(), LogStoreError> {
-        if self.topics.lock().contains(topic) {
-            return Ok(());
-        }
-        match self.coordinator.topic_partitions(topic) {
-            Ok(Some(_)) => {}
-            Ok(None) => self
-                .coordinator
-                .create_topic(topic, 1)
-                .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?,
-            Err(err) => return Err(LogStoreError::StorageFailure(err.to_string())),
-        }
-        self.topics.lock().insert(topic.to_string());
-        Ok(())
-    }
-
     fn read_all(&self, shard: &ShardKey) -> Result<CommandPage, LogStoreError> {
         block_on_object_log(self.read_all_async(shard))
     }
 
     async fn read_all_async(&self, shard: &ShardKey) -> Result<CommandPage, LogStoreError> {
         let topic = topic_for_shard(shard);
-        if self
-            .coordinator
-            .topic_partitions(&topic)
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?
-            .is_none()
-        {
+        let inner = self.inner().await?;
+        if !Self::shard_exists(inner, &topic)? {
             return Err(LogStoreError::ShardNotFound);
         }
-        let fetched = self
+        let fetched = inner
             .engine
-            .fetch(&partition_key(&topic, 0), 0, usize::MAX)
+            .fetch(&partition_key(&topic), 0, usize::MAX)
             .await
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         decode_page(shard, fetched, usize::MAX)
@@ -505,7 +525,7 @@ fn validate_credentials(
     Ok(())
 }
 
-impl LogStore for FjordObjectLogStore {
+impl LogStore for PqueueObjectLogStore {
     async fn append_batch(
         &self,
         shard: &ShardKey,
@@ -520,19 +540,19 @@ impl LogStore for FjordObjectLogStore {
             });
         }
         let topic = topic_for_shard(shard);
-        self.ensure_topic(&topic)?;
+        let inner = self.inner().await?;
 
         let batches = commands
             .iter()
             .map(|command| encode_record(current_epoch, command).map(Bytes::from))
             .collect::<Result<Vec<_>, _>>()?;
-        let partition = partition_key(&topic, 0);
+        let partition = partition_key(&topic);
         let outcomes = join_all(batches.into_iter().map(|payload| {
-            self.engine.produce(
+            inner.engine.produce(
                 partition.clone(),
                 payload,
                 1,
-                ProducerMeta::non_idempotent(),
+                (),
                 ObjectLogDurability::Sequenced,
             )
         }))
@@ -562,12 +582,8 @@ impl LogStore for FjordObjectLogStore {
         limit: usize,
     ) -> Result<CommandPage, LogStoreError> {
         let topic = topic_for_shard(shard);
-        if self
-            .coordinator
-            .topic_partitions(&topic)
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?
-            .is_none()
-        {
+        let inner = self.inner().await?;
+        if !Self::shard_exists(inner, &topic)? {
             return Err(LogStoreError::ShardNotFound);
         }
         if limit == 0 {
@@ -578,9 +594,9 @@ impl LogStore for FjordObjectLogStore {
         }
 
         let fetch_offset = position.map(|pos| pos.sequence as i64 + 1).unwrap_or(0);
-        let fetched = self
+        let fetched = inner
             .engine
-            .fetch(&partition_key(&topic, 0), fetch_offset, usize::MAX)
+            .fetch(&partition_key(&topic), fetch_offset, usize::MAX)
             .await
             .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
         decode_page(shard, fetched, limit)

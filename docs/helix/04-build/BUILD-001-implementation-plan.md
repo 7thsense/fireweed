@@ -17,23 +17,23 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: c58f64862d102898e239c7382cd6c762e52e0d1a1250b78af543ad2b5c26e578
+    self_hash: 903a5d1277524c550297beafbbef6a88f3e161b0bf319ab703713733f9b28ad9
     deps:
       adr-auth-tenancy-and-storage-isolation: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
       adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
       adr-granularity-mapping-and-claim-domain: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
       adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
-      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
       api-operator-repair-contract: 65ec2e36500a6c404ae53af1a65da26fcdcc0a07e0ef1578bae30ec94f2be6e6
       prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
       td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
-      td-s3-object-log-sqlite-projection-mode: ad13dfdb71f453157fc867e42582d9abfa99718beeb07c88c65e42cda2907ecf
+      td-s3-object-log-sqlite-projection-mode: d346e72f23f5859de62807f41e81b34409b43814faf95db8de237ff1ede895b7
       td-sharding-and-shard-ownership: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
       td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-      tp-governing-test-traceability: 1df6ca1830db0b53ee8aaeca8fa73fab6fbbd578a4718757616815c985ae06ae
+      tp-governing-test-traceability: f8f62ced47ebb892960d6e710a78b27fe64a1f9b796fb0089963708eecab8a96
       tp-scale-substantiation: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
       tp-verification-acceptance-criteria: 15f28d510bdac36217eeba3ea37849174111de98af410d6a5c59dd296125e6bf
-    reviewed_at: "2026-06-16T17:42:59Z"
+    reviewed_at: "2026-06-23T01:45:57Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence
@@ -133,6 +133,7 @@ scope.
 | B-080 | Object-log durable log and SQLite projection | TD-004, TD-001, TP-003 §4 | B-072 | `cargo test -p pqueue-objectlog object_log_commit_recovery_tests`; `cargo test -p pqueue-sqlite sqlite_projection_tests` | Adds `pqueue-objectlog` and `pqueue-sqlite` workspace crates per TD-001 step 6. Implements group commit, manifest CAS/current epoch fence, Postgres manifest-pointer fallback for no-CAS stores, production rejection of one-object-per-command, config rejection/fallback for stores without required conditional-write behavior, apply-before-return, replay response, SQLite projection, and cross-shard command convergence visibility gates. |
 | B-081 | Object-log conformance parity, metrics, product smoke, and recovery | TD-004, TP-002 E3, TP-003 AC-OBS-1 object-log profile | B-080, B-062, B-061 | `cargo test -p pqueue-storage storage_conformance_multi_shard_tests --features object-log`; `cargo test -p pqueue-objectlog object_log_commit_recovery_tests`; `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows -- --ignored`; release: E3 benchmark | Snapshot + log-tail recovery, bounded apply lag, object-log cost/ack/recovery evidence, fallback-fence E3 row, multi-shard command convergence, object-log metrics ground truth, product-E2E smoke matrix extension, and parity with the shared TD-001 conformance suite. |
 | B-090 | P0 product workflow release gates | PRD, TP-003 AC-E2E-1..6, AC-E2E-8..9, INV-1..10 | B-061, B-062, B-071, B-080, B-081 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows -- --ignored`; `cargo test -p pqueue-service seventh_sense_validation_tests invariant_stress_matrix_tests -- --ignored`; release: TP-002 E0-E3, `performance_multi_shard_scale_out_tests`, `recurrence_scale_both_profiles_tests` | Scheduled action, group batching, cohort, recurring, crash recovery, noisy neighbor, generic priority, downstream pacing, Seventh-Sense-shaped subset, recurrence under scale on both backend profiles, and INV-1..10 under the TP-003 §2 stress matrix. |
+| B-110 | Standalone durable sqlite backend (TD-005) | TD-005, ADR-006, TP-001 TD-005 row | B-080 | `cargo test -p pqueue-sqlite`; `cargo test -p pqueue-sqlite --test shared_conformance --test embedder_delivery_conformance --test sqlite_backend_tests`; `cargo test -p pqueue-service --lib runtime` | Unified single-transaction `SqliteBackend` (atomic append+apply on one connection, one WAL fsync ack boundary, strict read-after-write), atomic `claim` (single `attempts` increment; `batch_claim` omitted from the surface), epoch bootstrap + bump-on-open fencing, single-writer ownership (second opener rejected), no-replay reopen recovery, the `sqlite` `BackendProfile` wired into the service config/readiness (config-plumbing; the service does not yet construct/serve the backend), shared conformance parity with the in-memory reference, and the embedder delivery-adapter conformance suite. `client_item_key` convergence is the embedder adapter's responsibility (pqueue converges by `item_id`). The 7snx host switch off the in-memory backend (bead pqueue-a4846118) is a deferred cross-repo follow-up (requires publishing pqueue + bumping the git rev). |
 | B-100 | API-002 operator surface | API-002, ADR-002, TP-003 AC-OP-1..9, AC-CLAIM-6 operator-fenced renewal, INV-11 | B-060, B-050..B-053, B-021 | `cargo test -p pqueue-service operator_repair_tests operator_redrive_tests operator_purge_tests operator_async_operation_tests operator_auth_denied_path_tests` | P1 operator support: pause/resume, repair, redrive, bulk purge/archive, async ops, inspection/auth, and rejection of stale/fenced lease renewals after operator mutation. |
 | B-101 | Operator product workflow gate | API-002, TP-003 AC-E2E-7 | B-100, B-061 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows operator_repair_redrive_e2e -- --ignored` | Required before claiming operator-enabled product surface verified. |
 

@@ -28,12 +28,12 @@ impl FrameHandler for PqueueFrameHandler {
             (route(&frame, &st), store)
         };
         let (response, batches) = route_result.map_err(|e| FrameError::Protocol(e.to_string()))?;
-        if !batches.is_empty() {
-            if let Some(s) = &store {
-                s.persist(batches)
-                    .await
-                    .map_err(|e: RouterError| FrameError::Storage(e.to_string()))?;
-            }
+        if !batches.is_empty()
+            && let Some(s) = &store
+        {
+            s.persist(batches)
+                .await
+                .map_err(|e: RouterError| FrameError::Storage(e.to_string()))?;
         }
         Ok(response)
     }

@@ -6,12 +6,12 @@ ddx:
     - concerns
     - adr-cqrs-log-projection-storage-model
   review:
-    self_hash: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+    self_hash: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
     deps:
       adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
       concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
       prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-    reviewed_at: "2026-06-16T17:42:59Z"
+    reviewed_at: "2026-06-20T19:00:41Z"
 ---
 
 # Contract
@@ -332,6 +332,34 @@ required domains.
 A `BatchClaim` resolves to exactly one claim unit: item-level (default),
 `whole_group` (`compatibility.group_batching`), or `whole_cohort`
 (`compatibility.whole_cohort`).
+
+#### Claimed Item Response Shape
+
+Every item in `BatchClaim.response.items[]` MUST be returned with the fields
+below, so an adapter author can map a claim to a downstream unit of work without
+any out-of-band knowledge. Unless marked conditional, each field MUST be present
+on every item-level and `whole_group` result. Field semantics are defined once in
+**Common Types**; this table is the authoritative enumeration of what a claim
+returns.
+
+| Field | Required | Source / Rule |
+|-------|----------|----------------|
+| `item_id` | yes | Server-assigned stable item id. |
+| `client_item_key` | yes | The caller's logical key from push; the durable secondary key for correlation and dedup. |
+| `item_version` | yes | Monotonic version as of this claim (the claim bumps it). |
+| `lease_token` | conditional | Present on item-level and `whole_group` results; **absent** on `whole_cohort` results, where the shared top-level `cohort_lease_token` replaces it. |
+| `lease_expires_at` | yes | When the lease expires if not renewed or finalized (server time). |
+| `priority` | yes when the queue is orderable | The item's priority in the queue's declared priority model. |
+| `not_before` | conditional | Present when the item carries a `not_before`; absent otherwise. |
+| `group_key` | conditional | Present when the queue is `group_co_residency=true` (where it is required on every item) or when the item was pushed with a `group_key`; absent otherwise. |
+| `payload` | conditional | Present when the item was pushed with a payload; returned verbatim and uninterpreted. |
+| `metadata` | conditional | Present when the item carries caller metadata; returned verbatim. |
+| `gate_keys` | conditional | Present **only** on queues created with `eligibility_policy.gate_keys = dynamic` and only when the item declared one or more gate keys; **absent** on `gate_keys = none` queues. |
+
+pqueue MUST NOT add, drop, or reinterpret any field of a claimed item; the shape
+above is the complete claimed-item contract. The JSON example below shows an
+item-level result whose source item carries no `not_before` and no `gate_keys`,
+so those conditional fields are correctly omitted.
 
 When `compatibility.group_batching` is present, the server MUST select up to
 `max_groups` distinct **wholly-available** eligible `group_key` values and return

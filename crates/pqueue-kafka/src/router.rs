@@ -164,11 +164,7 @@ fn parse_varint(data: &[u8]) -> Option<(u64, usize)> {
 ///
 /// On entry, `frame` is the full frame bytes; `header_end` is the offset after
 /// the fixed fields (api_key + api_version + correlation_id = 8 bytes).
-fn body_slice<'a>(
-    frame: &'a [u8],
-    header_end: usize,
-    flexible: bool,
-) -> Result<&'a [u8], RouterError> {
+fn body_slice(frame: &[u8], header_end: usize, flexible: bool) -> Result<&[u8], RouterError> {
     if frame.len() < header_end {
         return Err(RouterError::RequestTooShort);
     }

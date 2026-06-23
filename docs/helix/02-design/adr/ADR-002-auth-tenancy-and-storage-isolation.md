@@ -8,10 +8,10 @@ ddx:
   review:
     self_hash: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
     deps:
-      api-native-client-interface: f90b0c65a65c4b088b9b04cb28ca0d5b0d174acf7cdfc326bcd859d79c7d1762
+      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
       concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
       prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-    reviewed_at: "2026-06-16T17:42:59Z"
+    reviewed_at: "2026-06-20T19:01:18Z"
 ---
 
 # ADR-002: Auth, Tenancy, and Storage Isolation

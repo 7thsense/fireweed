@@ -4,11 +4,20 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-use pqueue_core::{GroupKey, QueueId, TenantId};
+use std::sync::Arc;
+use std::time::Instant;
+
+use pqueue_core::{ClientItemKey, GroupKey, ItemId, QueueId, TenantId, UtcTimestamp};
+use pqueue_storage::commands::{
+    BatchFinalizeCommand, BatchPushCommand, FinalizeKind, FinalizeOutcome, PushItem,
+};
+use pqueue_storage::memory::MemoryProjectionStore;
 use pqueue_storage::multi_shard::{
     ShardActiveScopeRead, ShardActiveScopeSummary, aggregate_cross_shard_active_scopes,
 };
-use pqueue_storage::types::{ShardId, ShardKey};
+use pqueue_storage::traits::{ClaimRequest, ProjectionStore};
+use pqueue_storage::types::{CommandChecksum, CommandPosition, QueueKey, ShardId, ShardKey};
+use pqueue_storage::{CommandEnvelope, CommandId, QueueCommand};
 
 const ACTIVE_QUEUE_COUNT: usize = 1_000;
 const SHARDS_PER_QUEUE: usize = 4;
@@ -159,16 +168,143 @@ fn queue_density_single_node_tests() {
         "density-q-0999"
     );
 
-    let ledger = write_density_ledger(&resources);
+    // Measure a real hot-queue throughput to substantiate the E0 floor rather
+    // than asserting it as a constant.
+    let hot_items_per_hour = measure_hot_queue_items_per_hour();
+    assert!(
+        hot_items_per_hour >= HOT_QUEUE_ITEMS_PER_HOUR,
+        "measured hot-queue throughput {hot_items_per_hour} items/hr is below the E0 floor {HOT_QUEUE_ITEMS_PER_HOUR}"
+    );
+
+    let ledger = write_density_ledger(&resources, hot_items_per_hour);
     let text = fs::read_to_string(&ledger).expect("density ledger should be readable");
     assert!(text.contains("\"tp002_evidence_ids\":[\"E0\",\"E2\"]"));
     assert!(text.contains("\"active_queues\":1000"));
     assert!(text.contains("\"per_queue_tasks\":0"));
     assert!(text.contains("\"per_shard_tasks\":0"));
-    eprintln!("queue density ledger={}", ledger.display());
+    eprintln!(
+        "queue density ledger={} measured_hot_queue_items_per_hour={}",
+        ledger.display(),
+        hot_items_per_hour
+    );
 }
 
-fn write_density_ledger(resources: &SingleNodeResourceModel) -> PathBuf {
+/// Drive one hot queue through a real push -> claim -> finalize lifecycle and
+/// return the measured end-to-end throughput in items/hour.
+fn measure_hot_queue_items_per_hour() -> u64 {
+    let resident: u64 = std::env::var("PQUEUE_DENSITY_HOT_RESIDENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50_000);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let t = TenantId::new("density-hot-tenant").unwrap();
+        let q = QueueId::new("density-hot-queue").unwrap();
+        let sk = ShardKey {
+            tenant_id: t.clone(),
+            queue_id: q.clone(),
+            shard_id: ShardId::new(0),
+        };
+        let proj = Arc::new(MemoryProjectionStore::new());
+
+        let started = Instant::now();
+        let mut idx = 0u64;
+        let batch = 1_000u64;
+        while idx < resident {
+            let end = (idx + batch).min(resident);
+            let items: Vec<PushItem> = (idx..end)
+                .map(|i| PushItem {
+                    client_item_key: ClientItemKey::new(format!("cik-{i:012}")).unwrap(),
+                    item_id: ItemId::new(format!("itm-{i:012}")).unwrap(),
+                    priority: None,
+                    not_before: None,
+                    max_attempts: 3,
+                    payload: None,
+                })
+                .collect();
+            let ids: Vec<ItemId> = items.iter().map(|i| i.item_id.clone()).collect();
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("push-{idx}")),
+                request_id: None,
+                tenant_id: t.clone(),
+                queue_id: q.clone(),
+                shard_id: ShardId::new(0),
+                item_ids: ids,
+                command: QueueCommand::BatchPush(BatchPushCommand { items }),
+                checksum: CommandChecksum(0),
+                created_at: UtcTimestamp::new(0, 0).unwrap(),
+            };
+            let pos = CommandPosition {
+                shard_key: sk.clone(),
+                sequence: idx,
+                backend_epoch: 0,
+            };
+            proj.apply_committed(pos, std::slice::from_ref(&env))
+                .await
+                .unwrap();
+            idx = end;
+        }
+
+        let mut fin = 0u64;
+        loop {
+            let req = ClaimRequest {
+                shard_key: sk.clone(),
+                max_items: 256,
+                now: UtcTimestamp::new(1_000, 0).unwrap(),
+                lease_token: format!("density-{fin}"),
+                lease_expires_at: UtcTimestamp::new(61_000, 0).unwrap(),
+            };
+            let claimed = proj.batch_claim(req).await.unwrap().claimed_item_ids;
+            if claimed.is_empty() {
+                break;
+            }
+            let outcomes: Vec<FinalizeOutcome> = claimed
+                .iter()
+                .map(|id| FinalizeOutcome {
+                    item_id: id.clone(),
+                    kind: FinalizeKind::Complete,
+                })
+                .collect();
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("fin-{fin}")),
+                request_id: None,
+                tenant_id: t.clone(),
+                queue_id: q.clone(),
+                shard_id: ShardId::new(0),
+                item_ids: claimed.clone(),
+                command: QueueCommand::BatchFinalize(BatchFinalizeCommand { outcomes }),
+                checksum: CommandChecksum(0),
+                created_at: UtcTimestamp::new(0, 0).unwrap(),
+            };
+            let pos = CommandPosition {
+                shard_key: sk.clone(),
+                sequence: 1_000_000 + fin,
+                backend_epoch: 0,
+            };
+            proj.apply_committed(pos, std::slice::from_ref(&env))
+                .await
+                .unwrap();
+            fin += 1;
+        }
+
+        let qk = QueueKey {
+            tenant_id: t,
+            queue_id: q,
+        };
+        let m = proj.metrics(&qk).await.unwrap();
+        assert_eq!(
+            m.completed_count, resident,
+            "hot-queue bench must complete every item"
+        );
+        let secs = started.elapsed().as_secs_f64().max(1e-6);
+        (resident as f64 / secs * 3600.0) as u64
+    })
+}
+
+fn write_density_ledger(resources: &SingleNodeResourceModel, hot_items_per_hour: u64) -> PathBuf {
     let path = ledger_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("ledger directory should be created");
@@ -198,7 +334,7 @@ fn write_density_ledger(resources: &SingleNodeResourceModel) -> PathBuf {
             "active_queues": resources.active_queues,
             "shards_per_queue": resources.shards_per_queue,
             "owned_shards": resources.owned_shards(),
-            "hot_queue_items_per_hour": HOT_QUEUE_ITEMS_PER_HOUR,
+            "hot_queue_items_per_hour": hot_items_per_hour,
             "progress_bound_violations": 0,
             "noisy_neighbor_degradation": 0,
             "per_queue_tasks": resources.per_queue_tasks,

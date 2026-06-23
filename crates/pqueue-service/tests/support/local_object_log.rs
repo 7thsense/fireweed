@@ -4,8 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use pqueue_core::QueueDefinition;
 use pqueue_objectlog::{
-    DeploymentProfile, FjordObjectLogStore, ManifestMode, MemoryBlobStore, MemoryCoordinator,
-    PqueueObjectLogConfig,
+    DeploymentProfile, ManifestMode, MemoryBlobStore, PqueueObjectLogConfig, PqueueObjectLogStore,
 };
 use pqueue_sqlite::SqliteProjection;
 use pqueue_storage::types::ShardKey;
@@ -16,12 +15,11 @@ pub struct LocalObjectLogProfile {
     pub object_log_root: PathBuf,
     pub sqlite_projection_root: PathBuf,
     pub segment_max_commands: usize,
-    coordinator: Arc<MemoryCoordinator>,
     blob: Arc<MemoryBlobStore>,
 }
 
 pub struct LocalObjectLogConnection {
-    pub store: FjordObjectLogStore,
+    pub store: PqueueObjectLogStore,
     pub object_log_root: PathBuf,
     pub sqlite_projection_root: PathBuf,
 }
@@ -44,7 +42,6 @@ impl LocalObjectLogProfile {
             object_log_root,
             sqlite_projection_root,
             segment_max_commands,
-            coordinator: Arc::new(MemoryCoordinator::new()),
             blob: Arc::new(MemoryBlobStore::new()),
         }
     }
@@ -57,12 +54,7 @@ impl LocalObjectLogProfile {
             max_commands_per_segment: self.segment_max_commands,
             dev_unsafe_one_command_segments: false,
         };
-        let store = FjordObjectLogStore::new_with_config(
-            self.coordinator.clone(),
-            self.blob.clone(),
-            config,
-        )
-        .unwrap();
+        let store = PqueueObjectLogStore::new_with_config(self.blob.clone(), config).unwrap();
         LocalObjectLogConnection {
             store,
             object_log_root: self.object_log_root.clone(),

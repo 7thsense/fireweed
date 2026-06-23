@@ -25,7 +25,6 @@ use axum::{
     routing::{get, post},
 };
 use serde::Serialize;
-use tokio_postgres::NoTls;
 
 use crate::{AppState, AuthContext, app_with_state};
 
@@ -41,7 +40,7 @@ pub const READINESS_PATH: &str = "/readyz";
 
 /// Backend storage profile selected at deploy time.
 ///
-/// Only the two profiles in the BUILD-001 production-readiness scope are
+/// Only the three durable profiles in the production-readiness scope are
 /// accepted; see `docs/helix/04-build/DEPLOYMENT-READINESS.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendProfile {
@@ -49,6 +48,9 @@ pub enum BackendProfile {
     PostgresNative,
     /// fjord object-log plus SQLite projection backend.
     ObjectLogSqliteProjection,
+    /// Standalone single-file durable SQLite backend (TD-005) — the embedded
+    /// durable option (no object store, no Postgres).
+    Sqlite,
 }
 
 impl BackendProfile {
@@ -57,6 +59,7 @@ impl BackendProfile {
         match self {
             Self::PostgresNative => "postgres_native",
             Self::ObjectLogSqliteProjection => "object_log_sqlite_projection",
+            Self::Sqlite => "sqlite",
         }
     }
 
@@ -65,6 +68,7 @@ impl BackendProfile {
         match value {
             "postgres_native" => Ok(Self::PostgresNative),
             "object_log_sqlite_projection" => Ok(Self::ObjectLogSqliteProjection),
+            "sqlite" => Ok(Self::Sqlite),
             other => Err(ConfigError::UnsupportedBackendProfile(other.to_string())),
         }
     }
@@ -186,6 +190,10 @@ pub enum ConfigError {
     InvalidObjectLogSegmentMaxCommands { value: String, source: String },
     /// S3-compatible object-log configuration failed validation.
     InvalidObjectLogConfig(String),
+    /// `PQUEUE_SQLITE_DB_PATH` is required for the `sqlite` profile.
+    MissingSqliteDbPath,
+    /// `PQUEUE_SQLITE_SYNCHRONOUS` is not one of `full` | `normal`.
+    InvalidSqliteSynchronous(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -198,7 +206,7 @@ impl std::fmt::Display for ConfigError {
             Self::UnsupportedBackendProfile(value) => write!(
                 f,
                 "PQUEUE_BACKEND_PROFILE `{value}` is not supported; expected \
-                 `postgres_native` or `object_log_sqlite_projection`"
+                 `postgres_native`, `object_log_sqlite_projection`, or `sqlite`"
             ),
             Self::MissingObjectLogRuntimeEnv(key) => {
                 write!(f, "`{key}` is required for `object_log_sqlite_projection`")
@@ -210,6 +218,13 @@ impl std::fmt::Display for ConfigError {
             Self::InvalidObjectLogConfig(source) => {
                 write!(f, "object-log runtime configuration is invalid: {source}")
             }
+            Self::MissingSqliteDbPath => {
+                write!(f, "`PQUEUE_SQLITE_DB_PATH` is required for `sqlite`")
+            }
+            Self::InvalidSqliteSynchronous(value) => write!(
+                f,
+                "PQUEUE_SQLITE_SYNCHRONOUS `{value}` is not valid; expected `full` or `normal`"
+            ),
         }
     }
 }
@@ -231,6 +246,48 @@ pub struct RuntimeConfig {
     pub postgres_database_url: Option<String>,
     /// Object-log runtime dependencies used by object-log readiness checks.
     pub object_log: Option<ObjectLogRuntimeConfig>,
+    /// Standalone sqlite backend configuration used by `sqlite` readiness.
+    pub sqlite: Option<SqliteRuntimeConfig>,
+}
+
+/// WAL `synchronous` strictness for the standalone `sqlite` backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteSynchronous {
+    /// fsync on every commit (default; the durable ack boundary, TD-005).
+    Full,
+    /// fsync at checkpoint only — a throughput opt-in with a power-loss window.
+    Normal,
+}
+
+/// Runtime configuration required by the standalone `sqlite` profile (TD-005).
+/// A single database file path plus the `synchronous` strictness knob — no
+/// object store, no Postgres.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteRuntimeConfig {
+    /// Path to the single SQLite database file.
+    pub db_path: PathBuf,
+    /// WAL `synchronous` strictness (default `Full`).
+    pub synchronous: SqliteSynchronous,
+}
+
+impl SqliteRuntimeConfig {
+    fn from_getter(getter: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let db_path = non_empty(getter("PQUEUE_SQLITE_DB_PATH"))
+            .map(PathBuf::from)
+            .ok_or(ConfigError::MissingSqliteDbPath)?;
+        let synchronous = match non_empty(getter("PQUEUE_SQLITE_SYNCHRONOUS")) {
+            None => SqliteSynchronous::Full,
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "full" => SqliteSynchronous::Full,
+                "normal" => SqliteSynchronous::Normal,
+                _ => return Err(ConfigError::InvalidSqliteSynchronous(value)),
+            },
+        };
+        Ok(Self {
+            db_path,
+            synchronous,
+        })
+    }
 }
 
 /// Runtime dependencies required by the `object_log_sqlite_projection` profile.
@@ -284,11 +341,15 @@ impl RuntimeConfig {
             .unwrap_or_default();
         let postgres_database_url = non_empty(getter("PQUEUE_POSTGRES_DATABASE_URL"));
         let object_log = match backend_profile {
-            BackendProfile::PostgresNative => None,
             BackendProfile::ObjectLogSqliteProjection => Some(ObjectLogRuntimeConfig::from_getter(
                 &getter,
                 postgres_database_url.clone(),
             )?),
+            BackendProfile::PostgresNative | BackendProfile::Sqlite => None,
+        };
+        let sqlite = match backend_profile {
+            BackendProfile::Sqlite => Some(SqliteRuntimeConfig::from_getter(&getter)?),
+            BackendProfile::PostgresNative | BackendProfile::ObjectLogSqliteProjection => None,
         };
 
         Ok(Self {
@@ -298,6 +359,7 @@ impl RuntimeConfig {
             tenants,
             postgres_database_url,
             object_log,
+            sqlite,
         })
     }
 
@@ -327,6 +389,11 @@ impl RuntimeConfig {
                         "object-log runtime configuration is missing".to_string(),
                     )
                 }),
+            BackendProfile::Sqlite => self
+                .sqlite
+                .clone()
+                .map(ReadinessCheck::Sqlite)
+                .unwrap_or(ReadinessCheck::MissingSqliteDbPath),
         }
     }
 }
@@ -491,6 +558,10 @@ pub enum ReadinessCheck {
     ObjectLogConfigurationError(String),
     /// `object_log_sqlite_projection` dependencies must be usable.
     ObjectLogSqliteProjection(ObjectLogRuntimeConfig),
+    /// `sqlite` requires a configured database file path.
+    MissingSqliteDbPath,
+    /// `sqlite` is ready only when the database file path is usable.
+    Sqlite(SqliteRuntimeConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -521,7 +592,27 @@ async fn checked_readiness(State(state): State<HealthState>) -> Response {
         ReadinessCheck::ObjectLogSqliteProjection(config) => {
             object_log_sqlite_readiness(config).await
         }
+        ReadinessCheck::MissingSqliteDbPath => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sqlite database path is not configured",
+        )
+            .into_response(),
+        ReadinessCheck::Sqlite(config) => sqlite_readiness(config),
     }
+}
+
+/// `sqlite` is ready when the database file's directory is writable (the single
+/// file is the whole backend; no object store or Postgres dependency).
+fn sqlite_readiness(config: SqliteRuntimeConfig) -> Response {
+    let dir = config.db_path.parent().unwrap_or_else(|| Path::new("."));
+    if ensure_sqlite_projection_dir(dir).is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sqlite database directory is not usable",
+        )
+            .into_response();
+    }
+    (StatusCode::OK, "ready").into_response()
 }
 
 async fn object_log_sqlite_readiness(config: ObjectLogRuntimeConfig) -> Response {
@@ -860,7 +951,21 @@ enum S3CompatibleProbeError {
 }
 
 async fn postgres_readiness(database_url: &str) -> Response {
-    let connect = tokio_postgres::connect(database_url, NoTls);
+    // Parse the operator connection string (URL or key=value DSN) and let the
+    // connect helper pick NoTls vs rustls from its `sslmode`. Managed endpoints
+    // such as Databricks Lakebase set `sslmode=require`; the `tls` feature must
+    // be built in for those (otherwise a clear ConnectError::TlsNotCompiled).
+    let config: tokio_postgres::Config = match database_url.parse() {
+        Ok(config) => config,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "postgres connection string invalid",
+            )
+                .into_response();
+        }
+    };
+    let connect = pqueue_postgres::connect::connect_config(&config);
     let Ok(connect_result) = tokio::time::timeout(Duration::from_secs(2), connect).await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -868,7 +973,7 @@ async fn postgres_readiness(database_url: &str) -> Response {
         )
             .into_response();
     };
-    let Ok((client, connection)) = connect_result else {
+    let Ok((client, connection_task)) = connect_result else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "postgres connection failed",
@@ -876,9 +981,6 @@ async fn postgres_readiness(database_url: &str) -> Response {
             .into_response();
     };
 
-    let connection_task = tokio::spawn(async move {
-        let _ = connection.await;
-    });
     let query = tokio::time::timeout(Duration::from_secs(2), client.simple_query("SELECT 1")).await;
     drop(client);
     connection_task.abort();
@@ -909,7 +1011,7 @@ pub fn help_text() -> String {
          ENVIRONMENT:\n\
          \x20\x20PQUEUE_LISTEN_ADDR       host:port to bind (default {default_addr})\n\
          \x20\x20PQUEUE_BACKEND_PROFILE   postgres_native (default) |\n\
-         \x20\x20                         object_log_sqlite_projection\n\
+         \x20\x20                         object_log_sqlite_projection | sqlite\n\
          \x20\x20PQUEUE_PRINCIPAL_ID      bootstrap principal id (default {default_principal})\n\
          \x20\x20PQUEUE_TENANTS           comma-separated tenant allowlist (default empty)\n\
          \x20\x20PQUEUE_POSTGRES_DATABASE_URL  required by postgres_native readiness\n\
@@ -920,6 +1022,8 @@ pub fn help_text() -> String {
          \x20\x20PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY  required by object_log_sqlite_projection\n\
          \x20\x20PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS  required by object_log_sqlite_projection\n\
          \x20\x20PQUEUE_SQLITE_PROJECTION_DIR   required by object_log_sqlite_projection\n\
+         \x20\x20PQUEUE_SQLITE_DB_PATH     required by sqlite (single database file)\n\
+         \x20\x20PQUEUE_SQLITE_SYNCHRONOUS full (default) | normal, for sqlite\n\
          \n\
          HEALTH:\n\
          \x20\x20GET {liveness}   liveness probe (200 ok)\n\
@@ -1013,6 +1117,57 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_profile_parses_with_db_path_and_default_synchronous() {
+        let config = RuntimeConfig::from_getter(|key| match key {
+            "PQUEUE_BACKEND_PROFILE" => Some("sqlite".to_string()),
+            "PQUEUE_SQLITE_DB_PATH" => Some("/var/lib/pqueue/pqueue.db".to_string()),
+            _ => None,
+        })
+        .expect("sqlite profile parses");
+        assert_eq!(config.backend_profile, BackendProfile::Sqlite);
+        assert!(config.object_log.is_none());
+        let sqlite = config.sqlite.expect("sqlite config should parse");
+        assert_eq!(sqlite.db_path, PathBuf::from("/var/lib/pqueue/pqueue.db"));
+        assert_eq!(sqlite.synchronous, SqliteSynchronous::Full);
+    }
+
+    #[test]
+    fn sqlite_profile_requires_db_path() {
+        let error = RuntimeConfig::from_getter(|key| {
+            (key == "PQUEUE_BACKEND_PROFILE").then(|| "sqlite".to_string())
+        })
+        .expect_err("sqlite without a db path must be rejected");
+        assert_eq!(error, ConfigError::MissingSqliteDbPath);
+    }
+
+    #[test]
+    fn sqlite_synchronous_knob_parses_normal_and_rejects_garbage() {
+        let normal = RuntimeConfig::from_getter(|key| match key {
+            "PQUEUE_BACKEND_PROFILE" => Some("sqlite".to_string()),
+            "PQUEUE_SQLITE_DB_PATH" => Some("/tmp/pqueue.db".to_string()),
+            "PQUEUE_SQLITE_SYNCHRONOUS" => Some("NORMAL".to_string()),
+            _ => None,
+        })
+        .expect("normal synchronous parses (case-insensitive)");
+        assert_eq!(
+            normal.sqlite.unwrap().synchronous,
+            SqliteSynchronous::Normal
+        );
+
+        let error = RuntimeConfig::from_getter(|key| match key {
+            "PQUEUE_BACKEND_PROFILE" => Some("sqlite".to_string()),
+            "PQUEUE_SQLITE_DB_PATH" => Some("/tmp/pqueue.db".to_string()),
+            "PQUEUE_SQLITE_SYNCHRONOUS" => Some("loose".to_string()),
+            _ => None,
+        })
+        .expect_err("garbage synchronous must be rejected");
+        assert_eq!(
+            error,
+            ConfigError::InvalidSqliteSynchronous("loose".to_string())
+        );
+    }
+
+    #[test]
     fn invalid_listen_addr_is_rejected() {
         let error = RuntimeConfig::from_getter(|key| {
             (key == "PQUEUE_LISTEN_ADDR").then(|| "not-an-address".to_string())
@@ -1036,6 +1191,8 @@ mod tests {
         assert!(help.contains("PQUEUE_SQLITE_PROJECTION_DIR"));
         assert!(help.contains("postgres_native"));
         assert!(help.contains("object_log_sqlite_projection"));
+        assert!(help.contains("sqlite"));
+        assert!(help.contains("PQUEUE_SQLITE_DB_PATH"));
         assert!(help.contains(LIVENESS_PATH));
         assert!(help.contains(READINESS_PATH));
     }

@@ -1,5 +1,12 @@
 #![forbid(unsafe_code)]
 
+pub mod backend;
+pub mod control_plane;
+pub mod log;
+pub mod projection;
+
+pub use backend::{SqliteBackend, SqliteBackendError, SqliteSynchronous};
+
 use std::collections::VecDeque;
 
 use pqueue_storage::types::ShardKey;

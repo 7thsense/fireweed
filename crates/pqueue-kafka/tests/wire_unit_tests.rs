@@ -286,7 +286,7 @@ fn build_minimal_record_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
 
     // RecordBatch header (49 bytes before records):
     let records_bytes = record.freeze();
-    let batch_length = (49 - 8 - 4) as i32 + records_bytes.len() as i32; // (header - base_offset - batch_length) + records
+    let batch_length = (49 - 8 - 4) + records_bytes.len() as i32; // (header - base_offset - batch_length) + records
     // Actually: batch_length = size of (partition_leader_epoch through end of batch)
     // = 4 + 1 + 4 + 2 + 4 + 8 + 8 + 8 + 2 + 4 + 4 + records.len()
     // = 49 + records.len()

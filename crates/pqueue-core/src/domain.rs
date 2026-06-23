@@ -60,6 +60,21 @@ macro_rules! identifier_type {
                 value.0
             }
         }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(&self.0)
+            }
+        }
+
+        // Deserialize through the validating constructor so a persisted id can
+        // never be reconstituted in an invalid (e.g. empty) state.
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
     };
 }
 
@@ -72,7 +87,9 @@ identifier_type!(LeaseToken);
 identifier_type!(GroupKey);
 identifier_type!(WorkerId);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct UtcTimestamp {
     pub seconds: i64,
     pub nanoseconds: u32,
@@ -114,7 +131,7 @@ impl fmt::Display for TimestampError {
 
 impl Error for TimestampError {}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DecimalValue {
     pub mantissa: i128,
     pub scale: u32,
@@ -128,7 +145,7 @@ pub enum PriorityValue {
     Text(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PriorityModelKind {
     Timestamp,
     Int64,
@@ -136,20 +153,20 @@ pub enum PriorityModelKind {
     Text,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PriorityDirection {
     Ascending,
     Descending,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PriorityTieBreaker {
     CreatedSequence,
     ClientItemKey,
     ItemId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PriorityModel {
     pub kind: PriorityModelKind,
     pub direction: PriorityDirection,
@@ -166,13 +183,13 @@ impl PriorityModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OrderingMode {
     Strict,
     BoundedRelaxed,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MetadataValue {
     Null,
     Bool(bool),
@@ -183,7 +200,7 @@ pub enum MetadataValue {
     Object(Metadata),
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Metadata {
     entries: BTreeMap<String, MetadataValue>,
 }
@@ -218,13 +235,13 @@ impl Metadata {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GateKeyPolicy {
     None,
     Dynamic,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EligibilityPolicy {
     pub metadata_blockers: BTreeMap<String, Vec<MetadataValue>>,
     pub gate_keys: GateKeyPolicy,
@@ -243,12 +260,12 @@ impl Default for EligibilityPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CohortOnIncomplete {
     ExpireCohort,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CohortPolicy {
     pub enabled: bool,
     pub completion_bound_ms: Option<u64>,
@@ -267,13 +284,13 @@ impl CohortPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecurrenceMode {
     Oneshot,
     Recurring,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecurrencePolicy {
     pub mode: RecurrenceMode,
     pub until: Option<UtcTimestamp>,
@@ -288,7 +305,7 @@ impl Default for RecurrencePolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
 }
@@ -439,7 +456,7 @@ pub struct CreateQueue {
     pub shard_count: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QueueDefinition {
     pub tenant_id: TenantId,
     pub queue_id: QueueId,

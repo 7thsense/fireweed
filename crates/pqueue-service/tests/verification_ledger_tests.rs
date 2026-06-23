@@ -3,6 +3,9 @@ use pqueue_service::verification_ledger::{
 };
 use std::path::PathBuf;
 
+type LedgerMutation = Box<dyn Fn(&mut serde_json::Value)>;
+type LedgerMutationCase = (&'static str, LedgerMutation);
+
 #[test]
 fn verification_ledger_tests() {
     let fixtures = fixture_paths();
@@ -377,7 +380,7 @@ fn verification_ledger_tests_cover_required_field_shape_errors() {
 
 #[test]
 fn verification_ledger_tests_cover_product_validation_release_matrix() {
-    let mutations: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+    let mutations: Vec<LedgerMutationCase> = vec![
         (
             "measurements.build_exit_criteria",
             Box::new(|row| {
@@ -442,7 +445,7 @@ fn verification_ledger_tests_cover_product_validation_release_matrix() {
 
 #[test]
 fn verification_ledger_tests_cover_invariant_stress_matrix_errors() {
-    let mutations: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+    let mutations: Vec<LedgerMutationCase> = vec![
         (
             "inv_ids",
             Box::new(|row| row["inv_ids"] = serde_json::json!(["INV-1"])),
@@ -501,7 +504,7 @@ fn verification_ledger_tests_cover_invariant_stress_matrix_errors() {
 
 #[test]
 fn verification_ledger_tests_cover_noisy_neighbor_release_errors() {
-    let mutations: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+    let mutations: Vec<LedgerMutationCase> = vec![
         (
             "ac_ids",
             Box::new(|row| row["ac_ids"] = serde_json::json!(["AC-E2E-6"])),
@@ -557,7 +560,7 @@ fn verification_ledger_tests_cover_noisy_neighbor_release_errors() {
 
 #[test]
 fn verification_ledger_tests_cover_scale_and_object_log_release_errors() {
-    let scale_mutations: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+    let scale_mutations: Vec<LedgerMutationCase> = vec![
         (
             "backend_profile",
             Box::new(|row| row["backend_profile"] = serde_json::json!("postgres_native")),
@@ -630,7 +633,7 @@ fn verification_ledger_tests_cover_scale_and_object_log_release_errors() {
         assert_ledger_field_error(row, field);
     }
 
-    let e3_mutations: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+    let e3_mutations: Vec<LedgerMutationCase> = vec![
         (
             "backend_profile",
             Box::new(|row| row["backend_profile"] = serde_json::json!("postgres_native")),

@@ -96,6 +96,14 @@ impl LogStore for MemoryLogStore {
         let log = shards.get(shard).ok_or(LogStoreError::ShardNotFound)?;
 
         let start = position.map(|p| p.sequence as usize + 1).unwrap_or(0);
+        // Reading at/past the tail (or with a zero limit) is an empty page, not a
+        // slice-index panic. `start - 1` for `next_position` is also guarded.
+        if start >= log.entries.len() || limit == 0 {
+            return Ok(CommandPage {
+                commands: Vec::new(),
+                next_position: None,
+            });
+        }
         let end = (start + limit).min(log.entries.len());
 
         let commands = log.entries[start..end].to_vec();
@@ -202,7 +210,7 @@ impl ProjectionStore for MemoryProjectionStore {
                             ItemRecord {
                                 item_id: item.item_id.clone(),
                                 state: ItemState::Pending,
-                                not_before: item.not_before.clone(),
+                                not_before: item.not_before,
                                 retry_backoff_until: None,
                                 max_attempts: item.max_attempts,
                                 attempts: 0,
@@ -215,13 +223,13 @@ impl ProjectionStore for MemoryProjectionStore {
                 }
                 QueueCommand::BatchClaim(cmd) => {
                     for id in &cmd.item_ids {
-                        if let Some(rec) = proj.items.get_mut(id) {
-                            if let Ok(next) = apply_transition(rec.state, ItemEvent::Claim) {
-                                rec.state = next;
-                                rec.attempts += 1;
-                                rec.lease_token = Some(cmd.lease_token.clone());
-                                rec.lease_expires_at = Some(cmd.lease_expires_at.clone());
-                            }
+                        if let Some(rec) = proj.items.get_mut(id)
+                            && let Ok(next) = apply_transition(rec.state, ItemEvent::Claim)
+                        {
+                            rec.state = next;
+                            rec.attempts += 1;
+                            rec.lease_token = Some(cmd.lease_token.clone());
+                            rec.lease_expires_at = Some(cmd.lease_expires_at);
                         }
                     }
                 }
@@ -240,18 +248,18 @@ impl ProjectionStore for MemoryProjectionStore {
                 QueueCommand::BatchRenewLeases(cmd) => {
                     for id in &cmd.item_ids {
                         if let Some(rec) = proj.items.get_mut(id) {
-                            rec.lease_expires_at = Some(cmd.lease_expires_at.clone());
+                            rec.lease_expires_at = Some(cmd.lease_expires_at);
                         }
                     }
                 }
                 QueueCommand::LeaseExpired(cmd) => {
                     for id in &cmd.item_ids {
-                        if let Some(rec) = proj.items.get_mut(id) {
-                            if let Ok(next) = apply_transition(rec.state, ItemEvent::LeaseExpired) {
-                                rec.state = next;
-                                rec.lease_token = None;
-                                rec.lease_expires_at = None;
-                            }
+                        if let Some(rec) = proj.items.get_mut(id)
+                            && let Ok(next) = apply_transition(rec.state, ItemEvent::LeaseExpired)
+                        {
+                            rec.state = next;
+                            rec.lease_token = None;
+                            rec.lease_expires_at = None;
                         }
                     }
                 }
@@ -280,8 +288,8 @@ impl ProjectionStore for MemoryProjectionStore {
             .filter_map(|rec| {
                 let snapshot = EligibilitySnapshot {
                     state: rec.state,
-                    not_before: rec.not_before.clone(),
-                    retry_backoff_until: rec.retry_backoff_until.clone(),
+                    not_before: rec.not_before,
+                    retry_backoff_until: rec.retry_backoff_until,
                     metadata: Metadata::default(),
                     gate_keys: vec![],
                 };
@@ -299,7 +307,7 @@ impl ProjectionStore for MemoryProjectionStore {
                 rec.state = ItemState::Leased;
                 rec.attempts += 1;
                 rec.lease_token = Some(request.lease_token.clone());
-                rec.lease_expires_at = Some(request.lease_expires_at.clone());
+                rec.lease_expires_at = Some(request.lease_expires_at);
             }
         }
 

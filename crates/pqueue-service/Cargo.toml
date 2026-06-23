@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Build TLS-capable Postgres connections (required for managed endpoints such as
+# Databricks Lakebase, sslmode=require). Forwarded to pqueue-postgres.
+tls = ["pqueue-postgres/tls"]
+
 [dependencies]
 axum = "0.8"
 pqueue-client = { path = "../pqueue-client" }

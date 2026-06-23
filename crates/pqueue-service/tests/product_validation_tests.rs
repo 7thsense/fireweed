@@ -6,6 +6,9 @@ use std::path::PathBuf;
 
 use pqueue_service::verification_ledger::validate_ledger_file;
 
+mod load_support;
+use load_support::{StressConfig, run_invariant_stress};
+
 const WORKFLOW_AC_IDS: [&str; 8] = [
     "AC-E2E-1", "AC-E2E-2", "AC-E2E-3", "AC-E2E-4", "AC-E2E-5", "AC-E2E-6", "AC-E2E-8", "AC-E2E-9",
 ];
@@ -16,12 +19,22 @@ const BUILD_EXIT_CRITERIA: [&str; 3] = [
     "TP-003-P0-release-gates-green",
 ];
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "P0/core product validation aggregate is a release gate"]
-fn product_validation_tests() {
+async fn product_validation_tests() {
+    // Substantiate the headline P0 gate with a REAL invariant-stress run rather
+    // than a hard-coded zero. The aggregate fails if any invariant is violated.
+    let stress = run_invariant_stress(&StressConfig::from_env()).await;
+    let invariant_stress_matrix_violations = stress.total_violations();
+    assert_eq!(
+        invariant_stress_matrix_violations, 0,
+        "P0 aggregate requires zero measured invariant violations: {:?}",
+        stress.inv_violations
+    );
+
     let path = ledger_path();
     reset_ledger(&path);
-    append_ledger_row(&path);
+    append_ledger_row(&path, invariant_stress_matrix_violations);
 
     let ledger = validate_ledger_file(&path).expect("product validation ledger must validate");
     assert_eq!(ledger.rows.len(), 1);
@@ -32,7 +45,7 @@ fn product_validation_tests() {
     eprintln!("product validation ledger={}", path.display());
 }
 
-fn append_ledger_row(path: &PathBuf) {
+fn append_ledger_row(path: &PathBuf, invariant_stress_matrix_violations: u64) {
     let row = serde_json::json!({
         "ac_ids": WORKFLOW_AC_IDS,
         "inv_ids": ["INV-1", "INV-2", "INV-3", "INV-4", "INV-5", "INV-6", "INV-7", "INV-8", "INV-9", "INV-10"],
@@ -55,7 +68,7 @@ fn append_ledger_row(path: &PathBuf) {
             "object_log_sqlite_projection_conformance_pct": 100,
             "product_workflow_release_rows": WORKFLOW_AC_IDS.len(),
             "invariant_stress_matrix_profiles": 2,
-            "invariant_stress_matrix_violations": 0
+            "invariant_stress_matrix_violations": invariant_stress_matrix_violations
         },
         "pass_bar": {
             "comparison": "within-bar",

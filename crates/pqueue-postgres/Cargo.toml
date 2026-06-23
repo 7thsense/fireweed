@@ -5,6 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# TLS-capable Postgres connections for managed cloud endpoints (e.g. Databricks
+# Lakebase, which requires sslmode=require). Off by default so the plain
+# NoTls/testcontainers path needs no rustls toolchain.
+tls = ["dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots"]
+# Lakebase OAuth credential provider that shells out to the authenticated
+# Databricks CLI (`database generate-database-credential`). Implies TLS.
+lakebase = ["tls", "tokio/process"]
+
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 pqueue-storage = { path = "../pqueue-storage" }
@@ -13,6 +23,10 @@ serde_json = "1.0"
 sha2 = "0.11"
 time = "0.3"
 tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "sync"] }
+async-trait = "0.1"
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "logging", "tls12"] }
+webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.44", features = ["full"] }
@@ -75,3 +89,7 @@ path = "tests/postgres_discovery_tests.rs"
 [[test]]
 name = "postgres_shard_lease_tests"
 path = "tests/postgres_shard_lease_tests.rs"
+
+[[test]]
+name = "lakebase_live_tests"
+path = "tests/lakebase_live_tests.rs"

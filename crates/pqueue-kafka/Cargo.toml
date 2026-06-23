@@ -8,7 +8,11 @@ license.workspace = true
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 pqueue-storage = { path = "../pqueue-storage" }
-heimq-wire = { path = "../../../heimq/crates/heimq-wire" }
+# Pinned to a stable heimq rev rather than a path into the sibling repo, so pqueue
+# builds reproducibly and does not absorb heimq's working tree. heimq-wire is
+# heimq's governed WIRE-001 scaffolding; tracking it by rev keeps pqueue on the
+# hardened copy. See the heimq bead: refactor heimq's own server.rs onto heimq-wire.
+heimq-wire = { git = "https://github.com/easel/heimq", rev = "da4b87fcbedd321bcd49b5f0c38a4af579785533" }
 
 # Kafka wire protocol
 kafka-protocol = "0.15"
