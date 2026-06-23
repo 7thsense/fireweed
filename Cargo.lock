@@ -1973,7 +1973,7 @@ dependencies = [
 [[package]]
 name = "object-log"
 version = "0.2.0"
-source = "git+https://github.com/easel/object-log?rev=0adc8b0#0adc8b0f39925db4be9bf487de770bcfef91681d"
+source = "git+https://github.com/easel/object-log?rev=bb5dd2e741910c5bdf44d985de8c75cb92186f11#bb5dd2e741910c5bdf44d985de8c75cb92186f11"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
