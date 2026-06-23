@@ -1,0 +1,21 @@
+[package]
+name = "pqueue-resp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Driving adapter: RESP/Redis-Streams wire front. Depends on the domain (engine) only; a concrete
+# backend is injected by the composition root / tests (hexagonal).
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "macros"] }
+
+[dev-dependencies]
+pqueue-memory = { path = "../pqueue-memory" }
+redis = { version = "1", features = ["tokio-comp"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

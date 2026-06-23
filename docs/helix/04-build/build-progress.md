@@ -4,15 +4,14 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
-- **Now:** Phase 1d — stand up a minimal `pqueue-resp` RESP/TCP front over `MemoryBackend`
-  (XADD→upsert/push, XREADGROUP `>`→claim, XACK→finalize-complete, XAUTOCLAIM→reclaim) and run the
-  §3 **drain-and-reconcile** e2e with an **off-the-shelf redis client** (the `redis` crate): produce
-  N mixed-priority, drain via XREADGROUP to empty, assert delivered-set == produced-set, priority
-  order, no hang. **Phase 1c DONE**: ClaimPort (atomic select+lease, priority, rich ClaimedItem),
-  UpsertPort (pending→replace / claimed→Invalid / terminal→Terminal / insert; widened to carry
-  group_key+not_before), ReclaimDriver::tick (lease-expiry reclaim with zero client traffic,
-  idempotent, half-open boundary); 12 behavioral tests + clippy green; all 4 review conditions applied.
-- **After 1d:** Phase 2 (migrate domain logic from pqueue-service, move-and-delete).
+- **Now:** Phase 2 — migrate domain logic from `pqueue-service` into `pqueue-engine`, move-and-delete
+  one unit at a time. **Phase 1d DONE**: minimal `pqueue-resp` RESP/TCP front over `MemoryBackend`
+  implements the first stock Redis Streams worker path (`XADD`→upsert/push, `XREADGROUP >`→claim,
+  `XACK`→finalize-complete) and passes a §3 drain-and-reconcile e2e with the off-the-shelf `redis`
+  crate: produce mixed-priority rows, drain via `XREADGROUP` to empty, assert delivered set equals
+  produced set, priority order, and no hang. Unsupported commands return `-ERR`; `XAUTOCLAIM`/pending
+  replay remains deferred to the full RESP phase.
+- **After this unit:** continue Phase 2 durable-state migration, then driven adapters.
 
 ## Checklist
 
@@ -29,7 +28,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - [x] 1c: `ClaimPort` + `UpsertPort` + `ReclaimDriver` on `MemoryBackend` (Inv 1&2 + timed reclaim) — 12 tests, reviewed
 - [x] Engine priority claim/lease/ack + Inv 1&2 + ReclaimDriver realized over memory (via backend ports)
 - [x] Backend-conformance (behavioral no-op-fails) green on memory — 12 tests
-- [ ] 1d: `pqueue-resp` minimal front + drain-and-reconcile e2e with off-the-shelf redis client
+- [x] 1d: `pqueue-resp` minimal front + drain-and-reconcile e2e with off-the-shelf redis client — XADD/XREADGROUP/XACK smoke path
 
 ### Phase 2 — migrate domain logic (move-and-delete, test-first)
 - [ ] Drop `pqueue-service` from default-members
@@ -55,6 +54,20 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
+- 2026-06-23 Phase 1d (minimal RESP smoke front): implemented `pqueue-resp` as a driving adapter over
+  engine ports with no concrete backend dependency. The e2e uses the off-the-shelf `redis` crate over
+  real TCP to `XADD` 10 mixed-priority items, drain them via `XREADGROUP GROUP ... STREAMS ... >`,
+  `XACK` each batch, and reconcile exact delivered set plus ascending priority order. Confirmed no
+  silent stubs for unsupported commands (`-ERR`). Deferred by design: auth, idempotency, pending
+  history/replay, `XAUTOCLAIM`, full Redis flavor matrix, and composition-root server packaging.
+  `cargo test -p pqueue-resp`; `cargo clippy -p pqueue-resp --all-targets -- -D warnings`; and
+  `cargo test -p pqueue-engine -p pqueue-memory -p pqueue-resp` green after formatting.
+  Fresh-eyes review: GO-with-conditions, NO blocking; codec binary-safe, error encoding single-dash
+  canonical, hexagonal dep direction confirmed. Conditions applied — marked the 3 silent deferrals
+  (XACK lease/PEL validation + requested-not-acked count; stub clock; XGROUP/HELLO no-op OKs), dropped
+  dead `prefix` param, and HARDENED the e2e: duplicate-priority tie-break assert + per-round
+  non-overlapping-band assert (within-batch-only sorting would now fail). **PHASE 1 COMPLETE** —
+  16 tests green, clippy clean, hexagonal direction respected.
 - 2026-06-23 Phase 1c (claim/upsert/reclaim): fresh-eyes review GO-with-conditions. Confirmed sound:
   single-Mutex atomicity (no TOCTOU, no double-claim), Invariant 1 (priority claim, exactly-leased,
   single version+attempt bump, rich shape, no orphan), Invariant 2 (pending→Replaced /Leased→Invalid
