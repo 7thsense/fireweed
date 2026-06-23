@@ -88,8 +88,9 @@ Rules:
 - If `client_item_key` collides with a pending item on an atomic backend, pqueue performs atomic
   pending-item replacement: old id is superseded, a new monotonic id is returned, and `XLEN` nets
   unchanged.
-- If the key collides with claimed or terminal work, the call returns `-ERR pqueue terminal` or
-  `-ERR pqueue invalid` depending on state.
+- If the key collides with **claimed (leased, non-terminal)** work, the call returns
+  `-ERR pqueue invalid` (no lifecycle transition on in-flight work). If it collides with **terminal**
+  work, the call returns `-ERR pqueue terminal`. (Mapping pinned in TD-007 §2.3.)
 - On eventual-apply backends, replacement is unavailable and returns `-ERR pqueue unavailable`.
 
 ### `XREADGROUP ... STREAMS <queue> >`

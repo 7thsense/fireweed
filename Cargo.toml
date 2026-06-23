@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/pqueue-core",
+    "crates/pqueue-engine",
+    "crates/pqueue-memory",
     "crates/pqueue-storage",
     "crates/pqueue-postgres",
     "crates/pqueue-service",

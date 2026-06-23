@@ -1,0 +1,19 @@
+[package]
+name = "pqueue-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Driven adapter: in-memory reference backend (atomic durability class). Depends on the
+# domain (engine + core) only — the correct hexagonal direction.
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+bytes = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

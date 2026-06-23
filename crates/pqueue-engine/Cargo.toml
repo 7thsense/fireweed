@@ -1,0 +1,15 @@
+[package]
+name = "pqueue-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Domain crate: ports + execution. Depends ONLY on pqueue-core (hexagonal: domain
+# depends on nothing outward). No I/O dependencies.
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+bytes = "1"

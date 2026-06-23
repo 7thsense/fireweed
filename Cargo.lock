@@ -2204,6 +2204,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqueue-engine"
+version = "0.2.4"
+dependencies = [
+ "bytes",
+ "pqueue-core",
+]
+
+[[package]]
 name = "pqueue-kafka"
 version = "0.2.4"
 dependencies = [
@@ -2217,6 +2225,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pqueue-memory"
+version = "0.2.4"
+dependencies = [
+ "bytes",
+ "pqueue-core",
+ "pqueue-engine",
+ "tokio",
 ]
 
 [[package]]
