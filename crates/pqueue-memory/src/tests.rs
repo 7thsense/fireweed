@@ -498,3 +498,29 @@ async fn tick_reclaims_expired_lease_with_no_client_traffic() {
         vec!["a"]
     );
 }
+
+#[tokio::test]
+async fn tick_lease_boundary_is_half_open() {
+    // Convention: a lease is valid THROUGH `lease_expires_at`; reclaim fires only at now > exp (B1).
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    b.claim(claim_req(10, 100, 10)).await.unwrap(); // lease_expires_at = ts(100)
+
+    // At exactly the expiry instant: lease still held, nothing reclaimed.
+    assert_eq!(b.tick(ts(100)).await.unwrap().leases_reclaimed, 0);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
+
+    // One unit past expiry: reclaimed.
+    assert_eq!(b.tick(ts(101)).await.unwrap().leases_reclaimed, 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 0);
+}

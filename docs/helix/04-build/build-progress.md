@@ -4,16 +4,15 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
-- **Now:** Phase 1c — implement the orchestration ports on `MemoryBackend`: `ClaimPort` (atomic
-  select_eligible→Claim command→append+apply, priority order, Invariant 1), `UpsertPort`
-  (`replace_if_pending`, Invariant 2: pending→replace / claimed→`Invalid` / terminal→`Terminal`),
-  and `ReclaimDriver::tick` (lease expiry → LeaseExpired; cohort/not_before/progress-bound metering).
-  **Phase 1b DONE**: `pqueue-memory` reference backend — Backend UoW (disjoint log/proj), full
-  projection apply (lifecycle state machine), priority eligibility index (O(1) lookup), LogRead,
-  ProjectionRead, ControlPlaneStore, SnapshotStore (monotonic high-water), ManualClock/SeqIdGen;
-  5 behavioral tests + clippy green; all 3 review conditions applied.
-- **After 1c:** 1d in-memory RESP smoke (drain-and-reconcile e2e with an off-the-shelf redis client).
-  Then Phase 2.
+- **Now:** Phase 1d — stand up a minimal `pqueue-resp` RESP/TCP front over `MemoryBackend`
+  (XADD→upsert/push, XREADGROUP `>`→claim, XACK→finalize-complete, XAUTOCLAIM→reclaim) and run the
+  §3 **drain-and-reconcile** e2e with an **off-the-shelf redis client** (the `redis` crate): produce
+  N mixed-priority, drain via XREADGROUP to empty, assert delivered-set == produced-set, priority
+  order, no hang. **Phase 1c DONE**: ClaimPort (atomic select+lease, priority, rich ClaimedItem),
+  UpsertPort (pending→replace / claimed→Invalid / terminal→Terminal / insert; widened to carry
+  group_key+not_before), ReclaimDriver::tick (lease-expiry reclaim with zero client traffic,
+  idempotent, half-open boundary); 12 behavioral tests + clippy green; all 4 review conditions applied.
+- **After 1d:** Phase 2 (migrate domain logic from pqueue-service, move-and-delete).
 
 ## Checklist
 
@@ -27,10 +26,10 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 ### Phase 1 — ports + reference engine + early RESP smoke
 - [x] Define ports in `pqueue-engine` (LogWriter/Read, ProjectionWriter/Read, Backend, ClaimPort, UpsertPort, ControlPlaneStore, SnapshotStore, ReclaimDriver, Clock, IdGen) — green, reviewed
 - [x] Extract `pqueue-memory` reference impl (atomic class) — storage/projection core + 5 behavioral tests, reviewed
-- [ ] 1c: `ClaimPort` + `UpsertPort` + `ReclaimDriver` on `MemoryBackend` (Inv 1&2 + timed reclaim)
-- [ ] Engine: priority claim/lease/ack + Invariants 1&2 + ReclaimDriver + tick(now)
-- [ ] Backend-conformance suite green on memory (incl. no-op-fails guard)
-- [ ] Throwaway in-memory RESP front + drain-and-reconcile e2e with off-the-shelf client → validates semantic model
+- [x] 1c: `ClaimPort` + `UpsertPort` + `ReclaimDriver` on `MemoryBackend` (Inv 1&2 + timed reclaim) — 12 tests, reviewed
+- [x] Engine priority claim/lease/ack + Inv 1&2 + ReclaimDriver realized over memory (via backend ports)
+- [x] Backend-conformance (behavioral no-op-fails) green on memory — 12 tests
+- [ ] 1d: `pqueue-resp` minimal front + drain-and-reconcile e2e with off-the-shelf redis client
 
 ### Phase 2 — migrate domain logic (move-and-delete, test-first)
 - [ ] Drop `pqueue-service` from default-members
@@ -56,6 +55,16 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
+- 2026-06-23 Phase 1c (claim/upsert/reclaim): fresh-eyes review GO-with-conditions. Confirmed sound:
+  single-Mutex atomicity (no TOCTOU, no double-claim), Invariant 1 (priority claim, exactly-leased,
+  single version+attempt bump, rich shape, no orphan), Invariant 2 (pending→Replaced /Leased→Invalid
+  /terminal→Terminal/insert, superseded guarded), reclaim (idempotent, zero-traffic, attempt charged).
+  Fixes applied — (B1) added exp==now half-open boundary test; (I2) widened `replace_if_pending` with
+  group_key+not_before (avoids later breaking change; co-resident upsert no longer strips group);
+  (I3) store max_attempts in ItemRecord (ready for retry-exhaustion, not dropped); (M1) debug_assert
+  every leased candidate renders. Deferred (tracked): cohort-timeout + progress-bound tick metering
+  (need cohort-deadline/eligible_since state — land with those features); retry-exhaustion wiring.
+  12 tests + clippy green.
 - 2026-06-23 Phase 1b (pqueue-memory): fresh-eyes review GO-with-conditions. Confirmed correct:
   priority ordering (both directions), transition() eligibility re-add on retry (Invariant 1, no
   orphan/dup), version/attempt semantics, disjoint-borrow UoW. Fixes applied — (1) transition()
