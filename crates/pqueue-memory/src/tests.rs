@@ -2,6 +2,7 @@
 //! a default/no-op — the behavioral no-stub proof (plan §6) for this backend.
 
 use super::*;
+use bytes::Bytes;
 use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModelKind, PriorityTieBreaker,
     RecurrencePolicy, RetryPolicy, WorkerId,
@@ -312,6 +313,8 @@ async fn upsert_inserts_then_replaces_pending() {
             ItemId::new("i1").unwrap(),
             Some(PriorityValue::Int64(5)),
             None,
+            None,
+            None,
             ts(1),
         )
         .await
@@ -329,6 +332,8 @@ async fn upsert_inserts_then_replaces_pending() {
             &key,
             ItemId::new("i2").unwrap(),
             Some(PriorityValue::Int64(5)),
+            None,
+            None,
             None,
             ts(2),
         )
@@ -360,6 +365,8 @@ async fn upsert_rejects_claimed_and_terminal() {
         ItemId::new("i1").unwrap(),
         Some(PriorityValue::Int64(5)),
         None,
+        None,
+        None,
         ts(1),
     )
     .await
@@ -372,6 +379,8 @@ async fn upsert_rejects_claimed_and_terminal() {
             &shard(),
             &key,
             ItemId::new("i2").unwrap(),
+            None,
+            None,
             None,
             None,
             ts(20),
@@ -401,11 +410,51 @@ async fn upsert_rejects_claimed_and_terminal() {
             ItemId::new("i3").unwrap(),
             None,
             None,
+            None,
+            None,
             ts(30),
         )
         .await
         .unwrap_err();
     assert_eq!(err, EngineError::Terminal);
+}
+
+#[tokio::test]
+async fn upsert_preserves_group_delay_and_payload_in_claim_shape() {
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    let key = ClientItemKey::new("grouped").unwrap();
+    let group = GroupKey::new("group-a").unwrap();
+
+    b.replace_if_pending(
+        &shard(),
+        &key,
+        ItemId::new("i1").unwrap(),
+        Some(PriorityValue::Int64(5)),
+        Some(group.clone()),
+        Some(ts(250)),
+        Some(Bytes::from_static(b"payload")),
+        ts(1),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        b.claim(claim_req(10, 500, 100))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "not_before must keep the upserted item out of early claims"
+    );
+
+    let claimed = b.claim(claim_req(10, 500, 300)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    let item = &claimed.items[0];
+    assert_eq!(item.item_id.as_str(), "i1");
+    assert_eq!(item.group_key.as_ref(), Some(&group));
+    assert_eq!(item.not_before, Some(ts(250)));
+    assert_eq!(item.payload.as_deref(), Some(&b"payload"[..]));
 }
 
 #[tokio::test]

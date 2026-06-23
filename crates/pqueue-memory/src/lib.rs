@@ -42,6 +42,9 @@ struct ItemRecord {
     state: ItemState,
     item_version: u64,
     attempt_count: u32,
+    /// Retry bound; read when retry-exhaustion is wired (Finalize-Retry beyond this → terminal).
+    #[allow(dead_code)]
+    max_attempts: u32,
     created_seq: u64,
     lease_token: Option<LeaseToken>,
     lease_expires_at: Option<UtcTimestamp>,
@@ -121,6 +124,7 @@ impl ProjectionData {
             state: ItemState::Pending,
             item_version: 1,
             attempt_count: 0,
+            max_attempts: item.max_attempts,
             created_seq: seq,
             lease_token: None,
             lease_expires_at: None,
@@ -473,11 +477,17 @@ impl ClaimPort for MemoryBackend {
             Self::commit_locked(&mut g, &req.shard, env)?;
             // Render the now-leased records into the rich claimed-item shape.
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
-            let items = candidates
+            let items: Vec<ClaimedItem> = candidates
                 .iter()
                 .filter_map(|id| proj.items.get(id))
                 .filter_map(Self::to_claimed)
                 .collect();
+            // Every just-leased candidate must render (lease fields are Some under this lock).
+            debug_assert_eq!(
+                items.len(),
+                candidates.len(),
+                "leased candidate failed to render"
+            );
             Ok(Claimed { items })
         })();
         std::future::ready(result)
@@ -491,6 +501,8 @@ impl UpsertPort for MemoryBackend {
         client_item_key: &ClientItemKey,
         new_item_id: ItemId,
         priority: Option<PriorityValue>,
+        group_key: Option<GroupKey>,
+        not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -509,8 +521,8 @@ impl UpsertPort for MemoryBackend {
                 client_item_key: client_item_key.clone(),
                 item_id,
                 priority: priority.clone(),
-                not_before: None,
-                group_key: None,
+                not_before,
+                group_key: group_key.clone(),
                 max_attempts,
                 payload: payload.clone(),
             };

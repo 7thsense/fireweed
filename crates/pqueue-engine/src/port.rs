@@ -197,12 +197,15 @@ pub enum UpsertOutcome {
 /// one item mutually exclude (TD-007 §2.3). Atomic class only; on eventual-apply the engine returns
 /// `EngineError::Unavailable` without calling this port.
 pub trait UpsertPort: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
         shard: &ShardKey,
         client_item_key: &ClientItemKey,
         new_item_id: ItemId,
         priority: Option<PriorityValue>,
+        group_key: Option<GroupKey>,
+        not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
