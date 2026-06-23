@@ -13,3 +13,4 @@ path = "src/lib.rs"
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 bytes = "1"
+sha2 = "0.11"

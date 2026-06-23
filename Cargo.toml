@@ -12,6 +12,22 @@ members = [
     "crates/pqueue-objectlog",
     "crates/pqueue-sqlite",
 ]
+# Phase 2 (move-and-delete): pqueue-service is being demolished — its domain logic migrates into
+# pqueue-engine and its REST handlers are deleted. It is excluded from the default build/test set so
+# the workspace stays green while it shrinks to nothing (deleted entirely in Phase 6). Build it
+# explicitly with `-p pqueue-service` if needed.
+default-members = [
+    "crates/pqueue-core",
+    "crates/pqueue-engine",
+    "crates/pqueue-memory",
+    "crates/pqueue-resp",
+    "crates/pqueue-storage",
+    "crates/pqueue-postgres",
+    "crates/pqueue-client",
+    "crates/pqueue-kafka",
+    "crates/pqueue-objectlog",
+    "crates/pqueue-sqlite",
+]
 resolver = "3"
 
 [workspace.package]

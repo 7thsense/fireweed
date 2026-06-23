@@ -22,6 +22,9 @@ pub enum EngineError {
     Unavailable,
     /// An optimistic-concurrency or cohort conflict. → `-ERR pqueue conflict`.
     Conflict,
+    /// The principal is not authorized (cross-tenant or missing operator privilege). The RESP
+    /// adapter maps this to `-NOPERM` (TD-006 §2); not an `-ERR pqueue …` reply.
+    Forbidden(&'static str),
     /// Underlying storage failure (adapter-level).
     Storage(String),
 }
@@ -37,8 +40,10 @@ impl EngineError {
             EngineError::Superseded => Some("-ERR pqueue superseded"),
             EngineError::Unavailable => Some("-ERR pqueue unavailable"),
             EngineError::Conflict => Some("-ERR pqueue conflict"),
+            // Forbidden → `-NOPERM`, NotFound → nil: non-`-ERR pqueue` mappings handled by the adapter.
             EngineError::NotFound
             | EngineError::QueueDefinitionConflict
+            | EngineError::Forbidden(_)
             | EngineError::Storage(_) => None,
         }
     }
@@ -55,6 +60,7 @@ impl std::fmt::Display for EngineError {
             EngineError::Superseded => write!(f, "superseded"),
             EngineError::Unavailable => write!(f, "unavailable"),
             EngineError::Conflict => write!(f, "conflict"),
+            EngineError::Forbidden(why) => write!(f, "forbidden: {why}"),
             EngineError::Storage(msg) => write!(f, "storage: {msg}"),
         }
     }

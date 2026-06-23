@@ -411,8 +411,36 @@ async fn xack<B: RespBackend>(
 }
 
 fn err_reply(e: &EngineError) -> Resp {
-    match e.resp_token() {
-        Some(tok) => Resp::Error(tok.trim_start_matches('-').to_string()),
-        None => Resp::Error("ERR pqueue error".into()),
+    // `-ERR pqueue …` tokens map straight through; the non-`-ERR` errors get their idiomatic Redis
+    // reply (TD-006 §2/§7): Forbidden → `-NOPERM`, not-found → `-ERR no such queue`.
+    if let Some(tok) = e.resp_token() {
+        return Resp::Error(tok.trim_start_matches('-').to_string());
+    }
+    match e {
+        EngineError::Forbidden(why) => Resp::Error(format!("NOPERM {why}")),
+        EngineError::NotFound => Resp::Error("ERR no such queue".into()),
+        _ => Resp::Error("ERR pqueue internal".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err_text(e: &EngineError) -> String {
+        match err_reply(e) {
+            Resp::Error(s) => s,
+            _ => panic!("expected error reply"),
+        }
+    }
+
+    #[test]
+    fn forbidden_maps_to_noperm_not_generic_err() {
+        // TD-006 §2: cross-tenant / operator denial → -NOPERM (NOT a fake -ERR pqueue token).
+        assert!(err_text(&EngineError::Forbidden("nope")).starts_with("NOPERM"));
+        // `-ERR pqueue …` tokened errors pass through verbatim.
+        assert_eq!(err_text(&EngineError::StaleLease), "ERR pqueue stale_lease");
+        assert_eq!(err_text(&EngineError::Superseded), "ERR pqueue superseded");
+        assert_eq!(err_text(&EngineError::NotFound), "ERR no such queue");
     }
 }

@@ -55,6 +55,12 @@ macro_rules! identifier_type {
             }
         }
 
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
         impl From<$name> for String {
             fn from(value: $name) -> Self {
                 value.0

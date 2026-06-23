@@ -5,10 +5,13 @@
 //! execution layer. Depends only on `pqueue-core`; no I/O. See `docs/helix/04-build/
 //! hexagonal-migration-plan.md` (v4) and TD-007.
 
+mod auth;
 mod command;
 mod error;
 mod port;
 mod types;
+
+pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 
 pub use command::{
     ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
@@ -56,8 +59,9 @@ mod tests {
             EngineError::Conflict.resp_token(),
             Some("-ERR pqueue conflict")
         );
-        // NotFound has a non-`-ERR` mapping (adapter emits nil); no token here.
+        // NotFound (→ nil) and Forbidden (→ -NOPERM) have non-`-ERR` mappings; no token here.
         assert_eq!(EngineError::NotFound.resp_token(), None);
+        assert_eq!(EngineError::Forbidden("x").resp_token(), None);
     }
 
     #[test]

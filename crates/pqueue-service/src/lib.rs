@@ -22,92 +22,15 @@ use pqueue_client::{
     QueueMetrics, RenewLeasesRequest, RenewLeasesResponse, RepairAction, RepairItemsRequest,
     RepairItemsResponse, RetryCountMode, SetGatesRequest, SetGatesResponse,
 };
+pub use pqueue_engine::{AuthContext, RedactedLeaseToken, hash_lease_token};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 
 pub mod runtime;
 pub mod verification_ledger;
 
-#[derive(Clone, Copy)]
-pub struct RedactedLeaseToken<'a> {
-    token: &'a str,
-}
-
-impl<'a> RedactedLeaseToken<'a> {
-    pub fn new(token: &'a str) -> Self {
-        Self { token }
-    }
-
-    pub fn hash(self) -> [u8; 32] {
-        hash_lease_token(self.token)
-    }
-}
-
-impl std::fmt::Debug for RedactedLeaseToken<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("LeaseToken([redacted])")
-    }
-}
-
-impl std::fmt::Display for RedactedLeaseToken<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[redacted]")
-    }
-}
-
-pub fn hash_lease_token(token: &str) -> [u8; 32] {
-    let digest = Sha256::digest(token.as_bytes());
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&digest);
-    hash
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthContext {
-    principal_id: String,
-    tenants: BTreeSet<String>,
-}
-
-impl AuthContext {
-    pub fn new(
-        principal_id: impl Into<String>,
-        tenants: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        Self {
-            principal_id: principal_id.into(),
-            tenants: tenants.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    pub fn principal_id(&self) -> &str {
-        &self.principal_id
-    }
-
-    pub fn authorize_tenant(&self, tenant_id: &str) -> Result<(), ApiProblem> {
-        if self.tenants.contains(tenant_id) {
-            Ok(())
-        } else {
-            Err(ApiProblem::new(
-                StatusCode::FORBIDDEN,
-                ApiErrorCode::QueueForbidden,
-                "principal is not authorized for the requested tenant",
-            ))
-        }
-    }
-
-    pub fn authorize_operator_repair(&self) -> Result<(), ApiProblem> {
-        if self.principal_id.starts_with("operator-") {
-            Ok(())
-        } else {
-            Err(ApiProblem::new(
-                StatusCode::FORBIDDEN,
-                ApiErrorCode::OperatorForbidden,
-                "principal lacks operator repair privileges",
-            ))
-        }
-    }
-}
+// AuthContext, hash_lease_token, and RedactedLeaseToken live in pqueue-engine.
+// This crate re-exports them while the HTTP service is being demolished.
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -341,6 +264,28 @@ impl ApiProblem {
 
     pub fn problem(&self) -> &ProblemDetails {
         &self.problem
+    }
+}
+
+impl From<pqueue_engine::EngineError> for ApiProblem {
+    fn from(error: pqueue_engine::EngineError) -> Self {
+        match error {
+            pqueue_engine::EngineError::Forbidden(reason) if reason.contains("operator") => {
+                ApiProblem::new(
+                    StatusCode::FORBIDDEN,
+                    ApiErrorCode::OperatorForbidden,
+                    reason,
+                )
+            }
+            pqueue_engine::EngineError::Forbidden(reason) => {
+                ApiProblem::new(StatusCode::FORBIDDEN, ApiErrorCode::QueueForbidden, reason)
+            }
+            other => ApiProblem::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorCode::InvalidRequest,
+                other.to_string(),
+            ),
+        }
     }
 }
 
@@ -783,7 +728,7 @@ async fn queue_admin_transition(
     pause: bool,
 ) -> Result<Json<QueueAdminStateResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
-    state.auth.authorize_operator_repair()?;
+    state.auth.authorize_operator()?;
     let body: QueueAdminRequest = parse_json(req).await?;
     validate_request_id(&body.request_id)?;
     let mut admin = state
@@ -813,7 +758,7 @@ async fn repair_items(
     req: Request<Body>,
 ) -> Result<Json<RepairItemsResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
-    state.auth.authorize_operator_repair()?;
+    state.auth.authorize_operator()?;
     let body: RepairItemsRequest = parse_json(req).await?;
     validate_request_id(&body.request_id)?;
     if body.items.is_empty() {
@@ -951,7 +896,7 @@ async fn operator_items_response(
     kind: OperatorRouteKind,
 ) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
-    state.auth.authorize_operator_repair()?;
+    state.auth.authorize_operator()?;
     let body: OperatorItemsRequest = parse_json(req).await?;
     validate_operator_items_request(&body, kind)?;
     let request_fingerprint = serde_json::to_string(&body).expect("operator request serializes");
@@ -1030,7 +975,7 @@ async fn get_operation(
     _req: Request<Body>,
 ) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
-    state.auth.authorize_operator_repair()?;
+    state.auth.authorize_operator()?;
     let operation = state
         .queue_admin
         .lock()
@@ -1050,7 +995,7 @@ async fn cancel_operation(
     _req: Request<Body>,
 ) -> Result<Json<OperatorItemsResponse>, ApiProblem> {
     state.auth.authorize_tenant(&tenant_id)?;
-    state.auth.authorize_operator_repair()?;
+    state.auth.authorize_operator()?;
     let mut admin = state
         .queue_admin
         .lock()
