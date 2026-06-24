@@ -29,8 +29,8 @@ use pqueue_engine::{
     EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, ItemView,
     LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
     ProjectionWriter, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey,
-    QueueMetrics, ReclaimDriver, ReplacePendingCommand, ShardId, ShardKey, SnapshotRef,
-    SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    QueueMetrics, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ShardId,
+    ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
 };
 use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, params};
@@ -508,6 +508,32 @@ impl FinalizePort for SqliteBackend {
             }
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
+            let env = g.make_envelope(cmd, item_ids, now);
+            g.commit_locked(shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl RenewLeasePort for SqliteBackend {
+    fn renew(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.renew_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::RenewLease(RenewLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_expires_at: new_lease_expires_at,
+            });
             let env = g.make_envelope(cmd, item_ids, now);
             g.commit_locked(shard, env)?;
             Ok(())

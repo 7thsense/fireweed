@@ -25,7 +25,7 @@ use pqueue_engine::{
     ReplacePendingCommand, ShardId, ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome,
     UpsertPort,
 };
-use pqueue_engine::{PushPort, PushSpec, build_push_items};
+use pqueue_engine::{PushPort, PushSpec, RenewLeaseCommand, RenewLeasePort, build_push_items};
 use pqueue_projection::{LogData, ProjectionData, commit};
 
 // ---------------------------------------------------------------------------
@@ -304,6 +304,32 @@ impl FinalizePort for MemoryBackend {
             }
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
+            let env = self.make_envelope(cmd, item_ids, now);
+            Self::commit_locked(&mut g, shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl RenewLeasePort for MemoryBackend {
+    fn renew(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.renew_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::RenewLease(RenewLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_expires_at: new_lease_expires_at,
+            });
             let env = self.make_envelope(cmd, item_ids, now);
             Self::commit_locked(&mut g, shard, env)?;
             Ok(())

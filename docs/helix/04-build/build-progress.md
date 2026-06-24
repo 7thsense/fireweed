@@ -292,6 +292,22 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   **39 suites green, 0 failures, clippy 0.** **MIGRATION COMPLETE.**
 
 ## Decisions log (append as resolved)
+- 2026-06-24 OWED-RESOLUTION LOOP (branch `hexagonal-migration`, plan `OWED-resolution-plan.md`) — closing
+  the 6 owed items + retry-exhaustion (B'). **Chunk 1 (commit f6bda1c):** `attempt_count = delivery count`
+  — removed the reclaim's `attempt_count += 1` (only `Claim` charges); TD-006:74/128-129 reworded; owed-B
+  RESOLVED. **Chunk 2 (commit 0e3619c):** backend-assigned upsert ids — `UpsertPort::replace_if_pending`
+  dropped the caller-supplied id, backend mints from `cmd_seq`; RESP `xadd` routes no-key→`PushPort`,
+  with-key→`UpsertPort`; e2e `two_servers_on_one_backend_assign_distinct_xadd_ids`; owed-C RESOLVED.
+  **Chunk 3 (this commit):** `RenewLeasePort` — `renew(shard, ids, new_lease_expires_at, now)` on
+  memory/sqlite/objectlog, each pre-validating via a shared `ProjectionData::validate_leased` helper
+  (`renew_validate` MIRRORS `finalize_validate`: NotFound/fenced→StaleLease/terminal→Terminal/
+  superseded→Superseded/not-Leased→Invalid) BEFORE any append, then committing a `RenewLease` command via
+  `commit_locked`. Fresh-eyes review (no BLOCKING) → hardened the unguarded apply arm with a `debug_assert`
+  (loud on divergent replay; apply stays infallible) and extended the conformance scenario to pin the
+  Invalid(not-leased) reject. `renew_extends_lease_and_rejects` runs on all 3 backends. Owed-F port-portion
+  RESOLVED; facade `renew`/`rearm` verbs + doc hygiene remain Chunk 7. Full workspace green, clippy 0.
+  Remaining: Chunk 4 postgres, 5 graceful drain, 6a/b/c RESP polish, 7 facade verbs+docs, 8 (B')
+  retry-exhaustion.
 - 2026-06-23 PUSHPORT (append must be a validated port, not raw Backend::write): added `PushPort` +
   `PushSpec` to the engine, implemented by memory/sqlite/objectlog. The backend assigns item ids from its
   OWN command sequence (`cmd_seq`, restored past the max on rebuild_all) so ids are unique across handles

@@ -238,6 +238,20 @@ pub trait PushPort: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
 }
 
+/// Extends the lease on in-flight items, atomically pre-validating exactly like [`FinalizePort`]: a
+/// fenced lease → `StaleLease`, a superseded id → `Superseded`, terminal → `Terminal`, non-leased →
+/// `Invalid`, and the `RenewLease` command is NOT appended on rejection (no divergence). Lets a long-
+/// running worker extend its lease without surrendering the claim.
+pub trait RenewLeasePort: Send + Sync {
+    fn renew(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
+}
+
 /// Finalizes claimed items (complete/fail/retry/release/rearm), atomically validating the lease
 /// before committing: an **operator-fenced** lease is rejected with `EngineError::StaleLease` and the
 /// Finalize command is NOT appended (no log/projection divergence; the fencing check is pre-commit).

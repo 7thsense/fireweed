@@ -33,7 +33,7 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
     ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PushItem, QueueCommand, QueueKey,
-    ReclaimDriver, ShardId, ShardKey, SnapshotStore, UpsertPort,
+    ReclaimDriver, RenewLeasePort, ShardId, ShardKey, SnapshotStore, UpsertPort,
 };
 
 pub mod scenarios;
@@ -47,6 +47,7 @@ pub trait ConformanceBackend:
     + ClaimPort
     + UpsertPort
     + FinalizePort
+    + RenewLeasePort
     + ReclaimDriver
     + SnapshotStore
     + LogRead
@@ -60,6 +61,7 @@ impl<T> ConformanceBackend for T where
         + ClaimPort
         + UpsertPort
         + FinalizePort
+        + RenewLeasePort
         + ReclaimDriver
         + SnapshotStore
         + LogRead
@@ -178,6 +180,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::tick_lease_boundary_is_half_open(&make).await;
     scenarios::paused_queue_yields_no_claims(&make).await;
     scenarios::fenced_lease_finalize_is_stale(&make).await;
+    scenarios::renew_extends_lease_and_rejects(&make).await;
     scenarios::finalize_of_nonleased_item_is_rejected_without_appending(&make).await;
     scenarios::pause_and_fence_reconstruct_from_log(&make).await;
     scenarios::high_water_advances_on_each_commit(&make).await;
@@ -205,6 +208,7 @@ macro_rules! conformance_suite {
             tick_lease_boundary_is_half_open,
             paused_queue_yields_no_claims,
             fenced_lease_finalize_is_stale,
+            renew_extends_lease_and_rejects,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,
@@ -243,6 +247,7 @@ macro_rules! eventual_apply_suite {
             tick_lease_boundary_is_half_open,
             paused_queue_yields_no_claims,
             fenced_lease_finalize_is_stale,
+            renew_extends_lease_and_rejects,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,

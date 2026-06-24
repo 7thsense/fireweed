@@ -320,6 +320,17 @@ impl ProjectionData {
             QueueCommand::RenewLease(c) => {
                 for id in &c.item_ids {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
+                    // Unlike the `transition()`-routed arms, renew bare-mutates the deadline, so it
+                    // relies entirely on every caller pre-validating via `renew_validate`. Assert the
+                    // pre-condition so a divergent replay is LOUD in debug/test rather than silently
+                    // extending a non-leased lease (apply stays infallible in release).
+                    debug_assert!(
+                        rec.state == ItemState::Leased
+                            && !rec.fenced
+                            && !rec.superseded
+                            && !rec.state.is_terminal(),
+                        "RenewLease applied to a non-renewable item; renew_validate was bypassed"
+                    );
                     rec.lease_expires_at = Some(c.lease_expires_at);
                     rec.item_version += 1;
                 }
@@ -545,8 +556,20 @@ impl ProjectionData {
     /// must be present, not fenced, and currently `Leased`. Returns the structured rejection otherwise,
     /// WITHOUT mutating anything.
     pub fn finalize_validate(&self, outcomes: &[FinalizeOutcome]) -> EngineResult<()> {
-        for o in outcomes {
-            match self.items.get(&o.item_id) {
+        self.validate_leased(outcomes.iter().map(|o| &o.item_id))
+    }
+
+    /// Pre-commit validation for a lease RENEW batch — IDENTICAL rejection semantics to
+    /// [`finalize_validate`] (a renew of a fenced/superseded/terminal/non-leased item rejects with the
+    /// same structured error, appending nothing), so renew and finalize never diverge.
+    pub fn renew_validate(&self, ids: &[ItemId]) -> EngineResult<()> {
+        self.validate_leased(ids.iter())
+    }
+
+    /// Shared "every id is present + Leased + not fenced + not superseded" check used by finalize/renew.
+    fn validate_leased<'a>(&self, ids: impl Iterator<Item = &'a ItemId>) -> EngineResult<()> {
+        for id in ids {
+            match self.items.get(id) {
                 None => return Err(EngineError::NotFound),
                 Some(rec) if rec.fenced => return Err(EngineError::StaleLease),
                 Some(rec) if rec.state.is_terminal() => return Err(EngineError::Terminal),

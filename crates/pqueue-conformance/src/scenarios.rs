@@ -547,6 +547,93 @@ pub async fn fenced_lease_finalize_is_stale<B: ConformanceBackend>(make: impl Fn
     assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }
 
+pub async fn renew_extends_lease_and_rejects<B: ConformanceBackend>(make: impl Fn() -> B) {
+    // renew_validate MIRRORS finalize_validate: only a live, non-fenced, non-terminal, non-superseded
+    // leased item may be renewed; a renew extends the lease WITHOUT charging an attempt (TD-006:129).
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "a" leased, expires at ts(500)
+    let id = ItemId::new("a").unwrap();
+
+    // Unknown id -> NotFound, and NOTHING appended (reject before commit, B1).
+    let before = b.read_from(&shard(), None, 1000).await.unwrap().entries.len();
+    assert_eq!(
+        b.renew(&shard(), vec![ItemId::new("nope").unwrap()], ts(2000), ts(20))
+            .await,
+        Err(EngineError::NotFound)
+    );
+    let after = b.read_from(&shard(), None, 1000).await.unwrap().entries.len();
+    assert_eq!(before, after, "rejected renew must NOT append a command");
+
+    // Happy path: extend the lease to ts(2000). Ticking PAST the old expiry (500) reclaims nothing,
+    // and the attempt_count is unchanged (renew does not charge a delivery).
+    b.renew(&shard(), vec![id.clone()], ts(2000), ts(20))
+        .await
+        .unwrap();
+    assert_eq!(
+        b.tick(ts(600)).await.unwrap().leases_reclaimed,
+        0,
+        "extended lease must not be reclaimed past the OLD expiry"
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
+    let lease = b
+        .pending(&shard())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|v| v.item_id == id)
+        .expect("item still in-flight");
+    assert_eq!(lease.attempt_count, 1, "renew does not charge a delivery");
+    assert_eq!(
+        lease.lease_expires_at,
+        ts(2000),
+        "renew extended the lease deadline"
+    );
+
+    // A never-leased (Pending) item -> Invalid, same as finalize_validate's catch-all.
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("p", "kp", 9)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    assert_eq!(
+        b.renew(&shard(), vec![ItemId::new("p").unwrap()], ts(2000), ts(21))
+            .await,
+        Err(EngineError::Invalid("item is not leased"))
+    );
+
+    // Fenced lease -> StaleLease, exactly as finalize_validate rejects it.
+    commit(
+        &b,
+        envelope(
+            QueueCommand::FenceLease(FenceLeaseCommand {
+                item_ids: vec![id.clone()],
+            }),
+            vec![id.clone()],
+        ),
+    )
+    .await;
+    assert_eq!(
+        b.renew(&shard(), vec![id], ts(3000), ts(30)).await,
+        Err(EngineError::StaleLease)
+    );
+}
+
 pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: ConformanceBackend>(
     make: impl Fn() -> B,
 ) {

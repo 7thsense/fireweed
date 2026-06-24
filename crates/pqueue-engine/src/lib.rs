@@ -42,7 +42,7 @@ pub use port::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
     CreateQueueOutcome, FinalizePort, IdGen, ItemView, LeaseView, LogRead, LogWriter,
     ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushPort, PushSpec, QueueMetrics,
-    ReclaimDriver, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    ReclaimDriver, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey, ShardId, ShardKey};
 

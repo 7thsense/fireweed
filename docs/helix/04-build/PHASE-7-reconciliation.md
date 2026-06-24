@@ -170,10 +170,17 @@ diverge from TD-006 (Owed Item B).
 - **E. RESP polish.** `XCLAIM` (specific-id, incl. same-consumer no-charge renew per §3 flavor #7),
   `XLEN`/`XINFO`/`XDEL`, paginated `XAUTOCLAIM` cursor coverage, intra-group-exclusion + upsert/claim-race
   e2e. None on the worker hot path; deferred.
-- **F. Library verbs + doc hygiene.** `renew` (extend lease) and `rearm` (recurrence) need a
-  `RenewLeasePort` (their `apply` is fallible — a naive `Backend::write` would risk divergence), so they
-  are deferred rather than added unsafely. Plus: a final capability-matrix completeness audit and an
-  API-001/TP-001 HTTP-era-phrasing scrub.
+- **F. Library verbs + doc hygiene — port landed (owed-resolution Chunk 3); facade verbs owed (Chunk 7).**
+  The `RenewLeasePort` now exists: `renew(shard, ids, new_lease_expires_at, now)` is implemented on
+  memory/sqlite/objectlog, each pre-validating via `ProjectionData::renew_validate` (a shared
+  `validate_leased` helper that MIRRORS `finalize_validate` exactly — NotFound / fenced→StaleLease /
+  terminal→Terminal / superseded→Superseded / not-Leased→Invalid) BEFORE any log append, then committing a
+  `RenewLease` command through `commit_locked` (append stays infallible; the apply arm carries a
+  `debug_assert` so a divergent replay is loud). Conformance scenario `renew_extends_lease_and_rejects`
+  runs on all three backends (extends the deadline without charging an attempt; rejects NotFound /
+  Invalid(not-leased) / StaleLease). STILL OWED in Chunk 7: the ergonomic facade `renew`/`rearm` verbs
+  over this port, plus a final capability-matrix completeness audit and an API-001/TP-001 HTTP-era-phrasing
+  scrub.
 
 ---
 
