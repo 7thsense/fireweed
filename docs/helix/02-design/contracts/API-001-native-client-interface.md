@@ -17,10 +17,19 @@ ddx:
 # Contract
 
 **Contract ID**: API-001
-**Type**: library / HTTP API / SDK
+**Type**: native command contract (transport-neutral)
 **Version**: v1
 **Status**: complete
-**Related**: PRD, ADR-001
+**Related**: PRD, ADR-001, ADR-007 (hexagonal architecture & the two realized interfaces)
+
+> **Realized surfaces (ADR-007).** The hexagonal build realizes this transport-neutral contract through
+> **two** first-class faces: the **Rust library** (`pqueue` crate — full surface) and the **RESP/Redis-
+> Streams wire front** (`pqueue-resp` — the stock worker hot path, with the richer operations marked
+> `library-only` in TD-006 §3). The **HTTP/JSON service** surface described below is retained as a valid
+> transport-neutral binding of the same command model, but was **not** built in this architecture (the
+> legacy HTTP `pqueue-service` crate was deleted); the `/v1` route table is therefore an illustrative
+> mapping, not a current implementation surface. Capability classification per face lives in the TD-006 §3
+> matrix.
 
 ## Purpose
 

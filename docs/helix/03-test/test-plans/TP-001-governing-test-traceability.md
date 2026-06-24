@@ -64,12 +64,13 @@ complementary and non-overlapping.
 
 | Layer | Location | Purpose |
 |-------|----------|---------|
-| Core unit | `crates/pqueue-core/src/**` | Pure validation, priority encoding, lifecycle, retry, idempotency, and version rules. |
-| Storage conformance | `crates/pqueue-storage/tests/**` | Backend-independent durability, replay, lease, idempotency, and progress scenarios. |
-| Postgres integration | `crates/pqueue-postgres/tests/**` | TD-002 schema, transaction, locking, retention, and fencing behavior against real Postgres. |
-| Service/API integration | `crates/pqueue-service/tests/**` | HTTP route, auth, tenant, error shape, and API-001 response behavior. |
-| Performance | `benches/**` or `crates/*/benches/**` | Batch throughput, claim latency, 10M-item projection/query fixtures, telemetry overhead. |
-| Security | service and backend integration tests | Denied paths, tenant isolation, lease-token handling, and payload/log safety. |
+| Core unit | `crates/pqueue-core/src/**`, `crates/pqueue-engine/**` | Pure validation, priority encoding, lifecycle, retry, idempotency, version rules, and the engine's decision helpers + dependency-direction guard. |
+| Backend conformance | `crates/pqueue-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executed against every backend: memory/sqlite (atomic) + objectlog (eventual-apply) + postgres (live). Backend-independent durability, replay, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. |
+| Postgres integration | `crates/pqueue-postgres/tests/**` | The durable-log postgres adapter (TD-004 template) against a real DB, env-gated on `PQUEUE_PG_TEST_URL`: the full conformance suite + a reconnect/durability replay test. |
+| Wire (RESP) integration | `crates/pqueue-resp/tests/**` | End-to-end over real TCP with an off-the-shelf `redis` client: XADD/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM/XLEN/XDEL/XINFO, error tokens, and Invariant-1/2 reconcile (ADR-007 RESP face). |
+| Library (facade) integration | `crates/pqueue/tests/**` | The ergonomic Rust library face: every verb (push/claim/ack/nack/fail/renew/reassign/rearm/purge/peek/claimed/metrics) over real backends. |
+| Composition root | `crates/pqueue-server/tests/**` | The wired server: backend selection, background reclaim driver, graceful drain, and end-to-end drivability by a stock client. |
+| Security | engine + wire + backend integration tests | Denied paths, tenant isolation, lease-token handling, and payload/log safety. |
 
 ## Requirement Coverage Matrix
 

@@ -207,3 +207,98 @@ async fn fail_dead_letters_a_claimed_item() {
     let m = pq.metrics(&q).await.unwrap();
     assert_eq!((m.failed, m.leased), (1, 0), "fail moves the item to terminal failed");
 }
+
+#[tokio::test]
+async fn renew_extends_lease_without_charging_a_delivery() {
+    let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(0));
+    let pq = Pqueue::new(backend, clock);
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    pq.push(&q, at(5)).await.unwrap();
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap(); // lease_expires_at = 30s, attempt 1
+    let id = claimed[0].item_id.clone();
+    assert_eq!(claimed[0].attempt_count, 1);
+
+    // Renew to 60s from now: the lease deadline extends, the delivery count does NOT change.
+    pq.renew(&q, [id.clone()], 60_000).await.unwrap();
+    let view = pq.claimed(&q, std::slice::from_ref(&id)).await.unwrap();
+    assert_eq!(view.len(), 1);
+    assert_eq!(view[0].attempt_count, 1, "renew does not charge a delivery");
+    assert_eq!(
+        view[0].lease_expires_at,
+        pqueue_core::UtcTimestamp::new(60, 0).unwrap(),
+        "renew extended the lease deadline"
+    );
+}
+
+#[tokio::test]
+async fn reassign_transfers_and_charges_one_delivery() {
+    let backend = Arc::new(MemoryBackend::new());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    pq.push(&q, at(5)).await.unwrap();
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap(); // attempt 1
+    let id = claimed[0].item_id.clone();
+
+    pq.reassign(&q, [id.clone()], 30_000).await.unwrap();
+    let view = pq.claimed(&q, std::slice::from_ref(&id)).await.unwrap();
+    assert_eq!(view[0].attempt_count, 2, "reassign is a re-delivery (claim 1 + reassign 1)");
+    assert_eq!(pq.metrics(&q).await.unwrap().leased, 1, "still leased under the new owner");
+}
+
+#[tokio::test]
+async fn rearm_resets_attempt_and_requeues_the_item() {
+    let backend = Arc::new(MemoryBackend::new());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    pq.push(&q, at(5)).await.unwrap();
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed[0].attempt_count, 1);
+
+    // Re-arm: the item returns to pending with attempt_count reset to 0.
+    pq.rearm(&q, claimed.iter().map(|c| c.item_id.clone())).await.unwrap();
+    let m = pq.metrics(&q).await.unwrap();
+    assert_eq!((m.pending, m.leased), (1, 0), "rearm re-queues the item");
+    let again = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(again[0].attempt_count, 1, "the fresh delivery starts at 1 (attempt was reset)");
+}
+
+#[tokio::test]
+async fn purge_force_removes_a_leased_item_and_gates_without_force() {
+    let backend = Arc::new(MemoryBackend::new());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    pq.push(&q, at(5)).await.unwrap();
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    let id = claimed[0].item_id.clone();
+
+    // Without force, purging a leased item is a structured Conflict (nothing removed).
+    assert_eq!(
+        pq.purge(&q, [id.clone()], false).await.unwrap_err(),
+        EngineError::Conflict
+    );
+    assert_eq!(pq.metrics(&q).await.unwrap().leased, 1);
+    // With force, it is removed; the count reflects one removal.
+    assert_eq!(pq.purge(&q, [id], true).await.unwrap(), 1);
+    assert_eq!(pq.metrics(&q).await.unwrap().leased, 0, "force-purged");
+}
+
+#[tokio::test]
+async fn claimed_renders_only_leased_items() {
+    let backend = Arc::new(MemoryBackend::new());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let lo = pq.push(&q, at(5)).await.unwrap(); // top priority
+    let hi = pq.push(&q, at(9)).await.unwrap(); // stays pending
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed[0].item_id, lo);
+
+    let view = pq.claimed(&q, &[lo.clone(), hi]).await.unwrap();
+    assert_eq!(view.len(), 1, "only the leased item renders; the pending one is omitted");
+    assert_eq!(view[0].item_id, lo);
+}

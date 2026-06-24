@@ -36,10 +36,11 @@ All target crates exist with the prescribed roles and outward deps **except post
 - `pqueue-projection` + `pqueue-conformance` — net-new shared crates not named in the original table but
   in its spirit: the projection state machine (shared by all backends, no per-adapter re-implementation)
   and the backend-conformance harness. **DONE.**
-- `pqueue-postgres` — **OWED (deferred).** The old-architecture crate was deleted (Phase 6); the adapter
-  will be rebuilt **fresh to the engine ports** via the durable-adapter template (durable log + projection
-  rebuilt-from-log; same as sqlite) when a live PostgreSQL is provisioned. Atomic-class near-clone of
-  sqlite; no new architectural risk. Conformance + an env-gated live test land with it.
+- `pqueue-postgres` — **DONE** (owed-resolution Chunk 4). Rebuilt **fresh to the engine ports** via the
+  durable-adapter template (durable log + projection rebuilt-from-log; same as sqlite) over the sync
+  `postgres` client; the full conformance suite + a reconnect/durability test run green against a live DB
+  (env-gated on `PQUEUE_PG_TEST_URL`, loud-skip otherwise). The blocking-executor caveat (the sync client
+  must not be driven from a tokio runtime) is recorded in the crate docs; not yet server-wired.
 
 ---
 
@@ -214,26 +215,47 @@ nicety — `STREAM`/`GROUPS` are implemented).
 - **E. RESP polish.** `XCLAIM` specific-id is resolved by `ReassignLeasePort`, `claimed_view`, shared
   conformance, and RESP e2e. Still owed: `XLEN`/`XINFO`/`XDEL`, paginated `XAUTOCLAIM` cursor coverage,
   intra-group-exclusion e2e, and upsert/claim-race e2e.
-- **F. Library verbs + doc hygiene — port landed (owed-resolution Chunk 3); facade verbs owed (Chunk 7).**
-  The `RenewLeasePort` now exists: `renew(shard, ids, new_lease_expires_at, now)` is implemented on
-  memory/sqlite/objectlog, each pre-validating via `ProjectionData::renew_validate` (a shared
-  `validate_leased` helper that MIRRORS `finalize_validate` exactly — NotFound / fenced→StaleLease /
-  terminal→Terminal / superseded→Superseded / not-Leased→Invalid) BEFORE any log append, then committing a
-  `RenewLease` command through `commit_locked` (append stays infallible; the apply arm carries a
-  `debug_assert` so a divergent replay is loud). Conformance scenario `renew_extends_lease_and_rejects`
-  runs on all three backends (extends the deadline without charging an attempt; rejects NotFound /
-  Invalid(not-leased) / StaleLease). STILL OWED in Chunk 7: the ergonomic facade `renew`/`rearm` verbs
-  over this port, plus a final capability-matrix completeness audit and an API-001/TP-001 HTTP-era-phrasing
-  scrub.
+- **F. Library verbs + doc hygiene — RESOLVED** (port in Chunk 3; facade verbs + audit + doc scrub in
+  Chunk 7). The `RenewLeasePort`/`ReassignLeasePort`/`PurgePort` exist and pre-validate via the shared
+  `validate_leased` helper (mirrors `finalize_validate`: NotFound / fenced→StaleLease / terminal→Terminal /
+  superseded→Superseded / not-Leased→Invalid) BEFORE any log append.
+  - **F.2a facade verbs** — the `pqueue` facade now exposes the full surface: `renew` (RenewLeasePort, no
+    attempt charge), `reassign` (ReassignLeasePort, +1 delivery + fresh token), `rearm` (`Finalize{Rearm}`
+    → re-queue + reset attempt_count), `purge` (PurgePort, force gate + count), and `claimed`
+    (`ProjectionRead::claimed_view`). Five facade tests added (every new verb exercised over a real
+    backend); the DEFERRED-verbs note + the raw-backend escape hatch are gone.
+  - **F.2b capability matrix** — audited TD-006 §3: every API-001/002 op is classified `RESP-stock` /
+    `library-only-intentional` / `n/a` with no unmarked library-only cell (claim variants, renew, fail/
+    retry/release/rearm, reclaim via XCLAIM/XAUTOCLAIM, rich metrics, XDEL, force-purge all marked).
+  - **F.2c doc hygiene** — API-001 now carries a "Realized surfaces (ADR-007)" note: the contract is
+    realized through the **two** built faces (Rust library + RESP); the HTTP/JSON `/v1` route table is kept
+    as a transport-neutral illustration but marked NOT-built (the legacy `pqueue-service` was deleted).
+    TP-001's Test-Layers table was rewritten off the deleted `pqueue-storage`/`pqueue-service` crates onto
+    the real locations (conformance/postgres/resp-e2e/facade/server).
+  - **F.2d beads** — re-scoping recorded here (the tracker's `close` asserts full acceptance, which these
+    do not all meet): the claimed-item-shape beads (`pqueue-9c77d5e7`, `pqueue-922eaf00`, acceptance keyed
+    to the deleted `pqueue-client`/`pqueue-storage` suites) are **superseded** by the transport-neutral
+    `pqueue_engine::ClaimedItem` — the claim path returns the full shape across all backends and conformance
+    (`claim_returns_priority_ordered_rich_items`, `claimed_view_renders_leased_items`) + the facade
+    `claimed` verb cover it; `metadata`/`gate_keys`/whole-cohort remain intentionally deferred to the
+    API-003 epic (`pqueue-f6fbde17`). The Lakebase/connect-helper/profile beads (`pqueue-692471c5`,
+    `pqueue-607be5bf`, `pqueue-2f57fbe4`, `pqueue-ea625701`, `pqueue-9cdafdaa`) now target the rebuilt
+    `pqueue-postgres` + `pqueue-server` + RESP/library faces rather than the deleted `pqueue-service`; the
+    rebuilt postgres adapter is `NoTls`-only, so the Lakebase TLS seam is genuine remaining product work.
 
 ---
 
 ## Verdict
 
 The hexagonal re-architecture is **functionally complete for launch scope**: one CQRS engine, the shared
-projection state machine, three driven adapters spanning both durability classes, two driving interfaces
-(RESP worker surface + Rust library facade) behind a composition root with a background reclaim driver,
-and the legacy HTTP-service/Kafka/storage-trait architecture fully deleted — all verified by a green
-full default workspace (0 failures, clippy 0) and a dependency-direction test. **No plan item is silently
-dropped**; the six owed items above are recorded with rationale, the largest (postgres) being an
-infrastructure dependency, not a design gap.
+projection state machine, **four** driven adapters spanning both durability classes (memory/sqlite/
+postgres atomic + objectlog eventual-apply), two driving interfaces (RESP worker surface + full Rust
+library facade) behind a composition root with a background reclaim driver and a graceful drain, and the
+legacy HTTP-service/Kafka/storage-trait architecture fully deleted — all verified by a green full default
+workspace (0 failures, clippy 0), a dependency-direction test, and live postgres conformance.
+
+**Owed-item status (owed-resolution loop).** All six original owed items **A–F are RESOLVED** (A postgres
+adapter, B attempt-count, C server-side ids, D graceful drain, E RESP polish — XCLAIM/XLEN/XDEL/XINFO/
+paginated-XAUTOCLAIM/race+exclusion, F library verbs + doc hygiene). The one remaining tracked item is
+**B′ retry-exhaustion** (`max_attempts → terminal` is not yet wired — Chunk 8). **No plan item is silently
+dropped.**

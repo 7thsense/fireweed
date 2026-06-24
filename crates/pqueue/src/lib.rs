@@ -3,8 +3,10 @@
 //!
 //! The ergonomic Rust **library interface** to the engine — one of the two faces of pqueue (the other
 //! is the RESP/Redis-Streams wire front). It is a thin composition over the engine ports: a concrete
-//! backend (memory / sqlite / objectlog) and a [`Clock`] are injected; this crate adds singular,
-//! ergonomic verbs over them — `push` / `upsert` / `claim` / `ack` / `nack` / `peek` / `metrics`.
+//! backend (memory / sqlite / objectlog / postgres) and a [`Clock`] are injected; this crate adds
+//! singular, ergonomic verbs over them: `create_queue` / `push` / `push_batch` / `upsert` / `claim` /
+//! `ack` / `nack` / `fail` / `renew` / `reassign` / `rearm` / `purge` / `peek` / `claimed` / `metrics` —
+//! the full worker + operator surface, each composing a single pre-validating engine port.
 //!
 //! Dependency direction is hexagonal: this depends only on the domain (`pqueue-engine` + `pqueue-core`),
 //! never on a concrete backend (a backend is passed in). Errors are the engine's structured
@@ -20,7 +22,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
-    ProjectionRead, PushPort, PushSpec, QueueKey, ShardId, ShardKey, UpsertPort,
+    ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, RenewLeasePort,
+    ShardId, ShardKey, UpsertPort,
 };
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
@@ -34,6 +37,9 @@ pub trait LibBackend:
     + ClaimPort
     + UpsertPort
     + FinalizePort
+    + RenewLeasePort
+    + ReassignLeasePort
+    + PurgePort
     + ProjectionRead
     + ControlPlaneStore
     + Send
@@ -45,6 +51,9 @@ impl<T> LibBackend for T where
         + ClaimPort
         + UpsertPort
         + FinalizePort
+        + RenewLeasePort
+        + ReassignLeasePort
+        + PurgePort
         + ProjectionRead
         + ControlPlaneStore
         + Send
@@ -224,10 +233,68 @@ impl<B: LibBackend> Pqueue<B> {
     pub async fn metrics(&self, queue: &QueueKey) -> EngineResult<QueueMetrics> {
         self.backend.metrics(queue).await
     }
-}
 
-// DEFERRED VERBS (tracked): `renew` (extend a lease) and `rearm` (recurrence re-arm) are NOT exposed
-// yet — they map to `RenewLease`/`Finalize{Rearm}` commands whose apply is fallible (item must exist /
-// be leased), so they need a pre-validating port (a `RenewLeasePort`, mirroring `FinalizePort`) before
-// the facade can offer them divergence-safely. The escape hatch to call the raw backend was removed so
-// the facade's encapsulation can't be bypassed; add the port + verbs when long-lease renewal is wired.
+    /// Extend the lease on the given in-flight items to `lease_ms` from now — a long-running worker keeps
+    /// its claim WITHOUT a re-delivery (`attempt_count` unchanged). Pre-validated: a fenced/superseded/
+    /// terminal/non-leased id rejects the batch with the structured error, committing nothing.
+    pub async fn renew(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        lease_ms: u64,
+    ) -> EngineResult<()> {
+        let now = self.clock.now();
+        let ids: Vec<ItemId> = ids.into_iter().collect();
+        self.backend
+            .renew(&shard_of(queue), ids, add_millis(now, lease_ms), now)
+            .await
+    }
+
+    /// Transfer the given in-flight items to a FRESH lease (a re-delivery to a new worker — charges one
+    /// attempt, per the delivery-count invariant), leasing them for `lease_ms` from now. Mints a new
+    /// lease token. Pre-validated like [`Pqueue::renew`].
+    pub async fn reassign(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        lease_ms: u64,
+    ) -> EngineResult<()> {
+        let now = self.clock.now();
+        let n = self.next();
+        let token = LeaseToken::new(format!("libL{n}")).expect("lease");
+        let ids: Vec<ItemId> = ids.into_iter().collect();
+        self.backend
+            .reassign(&shard_of(queue), ids, token, add_millis(now, lease_ms), now)
+            .await
+    }
+
+    /// Re-arm a recurring item: complete this delivery and re-arm it for its next occurrence, RESETTING
+    /// `attempt_count` to 0. Maps to `Finalize{Rearm}`.
+    pub async fn rearm(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+    ) -> EngineResult<()> {
+        self.finalize(queue, ids, FinalizeKind::Rearm).await
+    }
+
+    /// Hard-delete the given items (operator purge / dead-letter cleanup). A **leased** item requires
+    /// `force` (else `Conflict`); absent ids are no-ops. Returns the count actually removed.
+    pub async fn purge(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        force: bool,
+    ) -> EngineResult<u64> {
+        let ids: Vec<ItemId> = ids.into_iter().collect();
+        self.backend
+            .purge(&shard_of(queue), ids, force, self.clock.now())
+            .await
+    }
+
+    /// Rich view of specific in-flight (leased) items in the claimed-item shape (the read behind RESP
+    /// `XCLAIM`'s reply). Ids that are absent or not currently leased are omitted.
+    pub async fn claimed(&self, queue: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
+        self.backend.claimed_view(&shard_of(queue), ids).await
+    }
+}
