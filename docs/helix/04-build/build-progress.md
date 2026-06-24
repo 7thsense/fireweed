@@ -4,19 +4,22 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
-- **Now:** Phase 2 — LAST §4a sub-unit: **QueueCatalog active-scope rollup** (sub B of the operator/
-  library plane). Operator-op store (sub A) DONE + reviewed. This sub-chunk migrates the
-  `DiscoverActiveScopes` aggregation logic as a PURE engine fn: `roll_up_queue_scopes(Vec<ActiveScope>)`
-  + `sum_optional` (group→queue rollup: max(oldest_eligible_age_ms), sum(eligible_count),
-  sum(progress_bound_risk_count)), over an engine-owned `ActiveScope` value type
-  (`queue_id, group_key: Option, oldest_eligible_age_ms, eligible_count: Option<u64>,
-  progress_bound_risk_count: Option<u64>`). Read original from `git show HEAD:crates/pqueue-service/
-  src/lib.rs` (`roll_up_queue_scopes`/`sum_optional` ~line 1516, and the granularity Queue-vs-Group +
-  filter/sort/truncate logic in `discover_active_scopes` ~line 630). The filter/sort/truncate + the
-  read over `ProjectionRead` are adapter/composition concerns; migrate the PURE rollup + (optionally) a
-  small `select_active_scopes` helper for the Queue-vs-Group granularity decision. Keep it a coherent
-  small sub-chunk; tests for rollup math + granularity. After this, §4a is COMPLETE.
-- **After §4a:** Phase 3 driven adapters (sqlite, postgres via ClaimPort, objectlog eventual-apply).
+- **Now:** **Phase 3 — driven adapters (START).** §4a (all Phase 2 domain migration) is COMPLETE: the
+  engine now owns auth, idempotency, finalize/pause-fence, command_position, claim-compat validation,
+  finalize/rearm/purge validation, the operator-op store, and active-scope rollup — all reviewed/green.
+  First Phase 3 chunk = **the enabling refactor: extract the backend-conformance suite into a shared,
+  backend-parameterized harness.** Today the no-stub behavioral conformance (12 tests) lives inline in
+  `crates/pqueue-memory/src/tests.rs` against `MemoryBackend`. To run the SAME suite against sqlite /
+  postgres / objectlog (Phase 3 DoD: "conformance green on each"), lift it into a reusable harness
+  parameterized over a backend factory (e.g. a `pqueue-conformance` crate or a shared `tests/` module
+  exposing `fn run_conformance<B: Backend>(make: impl Fn() -> B)`), then re-point memory's tests at it
+  (must stay green — proves the extraction is behavior-preserving). NOTE: the existing `pqueue-sqlite`/
+  `pqueue-postgres`/`pqueue-objectlog` crates implement the OLD storage traits (backend/control_plane/
+  log modules) — Phase 3 rewrites them to implement the ENGINE ports (or adds new adapter crates);
+  decide rewrite-in-place vs new-crate when standing up the first durable adapter.
+- **After the harness:** first durable adapter — **sqlite** (atomic class: LogWriter/Read +
+  ProjectionWriter/Read + Backend + ClaimPort + UpsertPort), conformance green; then postgres
+  (ClaimPort, concurrent-claim races), then objectlog (eventual-apply, upsert banned).
 
 ## Checklist
 
@@ -68,8 +71,11 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   DEVIATION: does NOT reuse QueueIdempotencyCache — owns a permanent `request_id→operation_id` index
   (B1: the expiry-windowed cache would re-execute a destructive op after retention). CORRECTED cancel
   (terminal states left intact vs service's unconditional flip).
-- [ ] §4a unit (sub B): **QueueCatalog active-scope rollup** (`roll_up_queue_scopes`/`sum_optional` →
-  pure engine fn over an engine ActiveScope; granularity Queue vs Group) — last §4a unit before Phase 3
+- [x] §4a unit (sub B): **active-scope rollup** → `pqueue-engine::active_scope` (`ActiveScope`,
+  `DiscoveryGranularity`, `default_for`/`resolve_granularity`, `validate_discovery_request`,
+  `project_scopes`, `roll_up_queue_scopes`/`sum_optional`). 7 engine tests, documented self-review
+  (pure parity). Faithfully reproduces the service's two-presence-notion quirk (empty queue_id defaults
+  to Group then rejected); `sum_optional` uses `saturating_add` (safety refinement). **§4a COMPLETE.**
 - [ ] Final: delete pqueue-service entirely (Phase 6)
 
 ### Phase 3 — driven adapters
@@ -132,6 +138,14 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
+- 2026-06-23 Phase 2 §4a active-scope rollup (sub B): documented self-review (small pure module; rollup
+  arithmetic + branching directly diffable against the service original). Parity confirmed line-by-line:
+  `roll_up_queue_scopes` identical; `sum_optional` identical except `saturating_add` (overflow→saturate,
+  a documented safety refinement, no realistic behavior change); granularity default/validation
+  reproduces the service's split presence test (default keys off `Some(_)`, validation off non-empty) so
+  empty queue_id nets to Invalid — now explicitly tested. Took `Option<&str>` (not a bool) to encapsulate
+  both presence notions honestly. Out of scope (adapter): filter/sort/truncate/as_of/tenant stamping.
+  Engine 41 tests + clippy green. §4a COMPLETE.
 - 2026-06-23 Phase 2 §4a operator-operation store (sub A): fresh-eyes review returned GO-with-conditions
   with ONE BLOCKING (B1): the first cut reused QueueIdempotencyCache, importing its retention-windowed
   `Expired→new-operation` semantics — after `request_id_retention_ms` a retried destructive operator op

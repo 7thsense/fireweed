@@ -5,6 +5,7 @@
 //! execution layer. Depends only on `pqueue-core`; no I/O. See `docs/helix/04-build/
 //! hexagonal-migration-plan.md` (v4) and TD-007.
 
+mod active_scope;
 mod auth;
 mod claim_validation;
 mod command;
@@ -15,6 +16,10 @@ mod operator;
 mod port;
 mod types;
 
+pub use active_scope::{
+    ActiveScope, DiscoveryGranularity, project_scopes, resolve_granularity, roll_up_queue_scopes,
+    validate_discovery_request,
+};
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, validate_claim_compatibility,
