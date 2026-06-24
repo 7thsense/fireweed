@@ -211,6 +211,31 @@ pub trait UpsertPort: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
 }
 
+/// A new-item spec for [`PushPort`]. The backend assigns the `item_id` (unique + restart-safe via its
+/// own command sequence — NOT a caller-side counter, so two handles / a restart can't collide); the
+/// dedup `client_item_key` defaults to that id (a unique append) when `None`.
+#[derive(Debug, Clone, Default)]
+pub struct PushSpec {
+    pub client_item_key: Option<ClientItemKey>,
+    pub priority: Option<PriorityValue>,
+    pub not_before: Option<UtcTimestamp>,
+    pub group_key: Option<GroupKey>,
+    pub payload: Option<Bytes>,
+}
+
+/// Appends new items (server-assigned ids). The backend builds the envelope from its own command
+/// sequence and commits through its atomic append+apply UoW after confirming the shard exists, so a
+/// Push can never leave the log ahead of the projection (divergence-safe) and ids are unique across
+/// handles + restart. The library facade's `push` routes here rather than reaching for `Backend::write`.
+pub trait PushPort: Send + Sync {
+    fn push(
+        &self,
+        shard: &ShardKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+}
+
 /// Finalizes claimed items (complete/fail/retry/release/rearm), atomically validating the lease
 /// before committing: an **operator-fenced** lease is rejected with `EngineError::StaleLease` and the
 /// Finalize command is NOT appended (no log/projection divergence; the fencing check is pre-commit).

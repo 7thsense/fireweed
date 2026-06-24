@@ -1,359 +1,844 @@
 #![forbid(unsafe_code)]
+//! # pqueue-sqlite
+//!
+//! Driven adapter (atomic durability class): the command **LOG is durable in sqlite**, and the
+//! priority-ordered **projection is the shared [`pqueue_projection::ProjectionData`] materialization,
+//! rebuilt from the log**. The log rows are the source of truth (CQRS); the in-memory projection is a
+//! derived view that any restart reconstructs via [`pqueue_projection::ProjectionData::apply_command`].
+//!
+//! All apply/eligibility/lease/metrics logic is shared with every other backend (no re-implementation);
+//! this crate owns only persistence: serialize each [`CommandEnvelope`] to a `log_entries` row, keep a
+//! persisted `high_water`, and replay the log to (re)build the projection.
+//!
+//! INVARIANT (commit has no rollback): every orchestration port pre-validates (via the projection's
+//! decision helpers) BEFORE the durable write, so the in-memory `apply_command` that follows a committed
+//! log row is infallible — the log and projection cannot diverge. Write ordering is **durable-first**:
+//! the sqlite transaction (log row + high_water) commits first; only then is the projection updated.
 
-pub mod backend;
-pub mod control_plane;
-pub mod log;
-pub mod projection;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
-pub use backend::{SqliteBackend, SqliteBackendError, SqliteSynchronous};
+use bytes::Bytes;
+use pqueue_core::{
+    ClientItemKey, GroupKey, ItemId, ItemState, PriorityValue, QueueDefinition, QueueId, TenantId,
+    UtcTimestamp,
+};
+use pqueue_engine::{
+    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
+    CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, ItemView,
+    LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
+    ProjectionWriter, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey,
+    QueueMetrics, ReclaimDriver, ReplacePendingCommand, ShardId, ShardKey, SnapshotRef,
+    SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+};
+use pqueue_projection::ProjectionData;
+use rusqlite::{Connection, params};
 
-use std::collections::VecDeque;
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS queues (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
+CREATE TABLE IF NOT EXISTS log_entries (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
+    envelope TEXT NOT NULL,
+    PRIMARY KEY (tenant, queue, epoch, seq)
+);
+CREATE TABLE IF NOT EXISTS high_water (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
+CREATE TABLE IF NOT EXISTS snapshots (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, ref_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL, seq INTEGER NOT NULL, payload BLOB NOT NULL,
+    PRIMARY KEY (tenant, queue, ref_id)
+);
+"#;
 
-use pqueue_storage::types::ShardKey;
-use rusqlite::{Connection, OptionalExtension, params};
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GroupSummary {
-    pub group_key: Option<String>,
-    pub oldest_eligible_at_ms: i64,
-    pub eligible_count: u64,
+/// Map a rusqlite error to the engine's adapter-level storage error.
+fn st<T>(r: rusqlite::Result<T>) -> EngineResult<T> {
+    r.map_err(|e| EngineError::Storage(e.to_string()))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CohortRow {
-    pub group_key: String,
-    pub member_count: u64,
-    pub state: String,
+/// A single-row query that may legitimately return no rows: `Ok(None)` for "row absent", a real
+/// `Storage` error otherwise (so corruption/I/O is never silently swallowed as "absent").
+fn opt<T>(r: rusqlite::Result<T>) -> EngineResult<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(EngineError::Storage(e.to_string())),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApplyLagStatus {
-    pub committed_sequence: u64,
-    pub applied_sequence: u64,
-    pub lag_sequences: u64,
-    pub within_bound: bool,
+/// Serialize an envelope/definition to JSON, mapping a (practically impossible) failure to a structured
+/// storage error rather than panicking inside the durable write path.
+fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
+    serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
 }
 
-pub struct SqliteProjection {
+fn parts(shard: &ShardKey) -> (String, String) {
+    (
+        shard.tenant_id.as_str().to_string(),
+        shard.queue_id.as_str().to_string(),
+    )
+}
+
+struct Inner {
     conn: Connection,
-    shard_key: ShardKey,
+    projections: HashMap<ShardKey, ProjectionData>,
+    queues: HashMap<QueueKey, QueueDefinition>,
+    cmd_seq: u64,
 }
 
-impl SqliteProjection {
-    pub fn new_in_memory(shard_key: ShardKey) -> rusqlite::Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        initialize_schema(&conn)?;
-        Ok(Self { conn, shard_key })
-    }
-
-    pub fn shard_key(&self) -> &ShardKey {
-        &self.shard_key
-    }
-
-    pub fn insert_item(
-        &self,
-        item_id: &str,
-        group_key: Option<&str>,
-        gate_key: Option<&str>,
-        eligible_since_ms: i64,
-    ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT INTO pqueue_items (
-                item_id, group_key, gate_key, lifecycle_state, eligible_since_ms
-             ) VALUES (?1, ?2, ?3, 'pending', ?4)",
-            params![item_id, group_key, gate_key, eligible_since_ms],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_gate(&self, gate_key: &str, blocked: bool) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT INTO pqueue_gate_state (gate_key, blocked)
-             VALUES (?1, ?2)
-             ON CONFLICT(gate_key) DO UPDATE SET blocked = excluded.blocked",
-            params![gate_key, i64::from(blocked)],
-        )?;
-        Ok(())
-    }
-
-    pub fn insert_cohort(
-        &self,
-        group_key: &str,
-        member_count: u64,
-        state: &str,
-    ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT INTO pqueue_cohorts (group_key, member_count, state)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(group_key) DO UPDATE
-             SET member_count = excluded.member_count, state = excluded.state",
-            params![group_key, member_count as i64, state],
-        )?;
-        Ok(())
-    }
-
-    pub fn recompute_group_summary(&self) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM pqueue_group_summary", [])?;
-        self.conn.execute(
-            "INSERT INTO pqueue_group_summary (
-                tenant_id, queue_id, shard_id, group_key, oldest_eligible_at_ms, eligible_count
-             )
-             SELECT ?1, ?2, ?3, i.group_key, MIN(i.eligible_since_ms), COUNT(*)
-             FROM pqueue_items i
-             LEFT JOIN pqueue_gate_state g ON g.gate_key = i.gate_key
-             WHERE i.lifecycle_state = 'pending'
-               AND COALESCE(g.blocked, 0) = 0
-             GROUP BY i.group_key",
-            params![
-                self.shard_key.tenant_id.as_str(),
-                self.shard_key.queue_id.as_str(),
-                self.shard_key.shard_id.as_u32() as i64
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn group_summary(&self, group_key: Option<&str>) -> rusqlite::Result<Option<GroupSummary>> {
-        self.conn
-            .query_row(
-                "SELECT group_key, oldest_eligible_at_ms, eligible_count
-                 FROM pqueue_group_summary
-                 WHERE (group_key IS ?1 OR group_key = ?1)",
-                params![group_key],
-                |row| {
-                    Ok(GroupSummary {
-                        group_key: row.get(0)?,
-                        oldest_eligible_at_ms: row.get(1)?,
-                        eligible_count: row.get::<_, i64>(2)? as u64,
-                    })
-                },
-            )
-            .optional()
-    }
-
-    pub fn cohort(&self, group_key: &str) -> rusqlite::Result<Option<CohortRow>> {
-        self.conn
-            .query_row(
-                "SELECT group_key, member_count, state
-                 FROM pqueue_cohorts
-                 WHERE group_key = ?1",
-                params![group_key],
-                |row| {
-                    Ok(CohortRow {
-                        group_key: row.get(0)?,
-                        member_count: row.get::<_, i64>(1)? as u64,
-                        state: row.get(2)?,
-                    })
-                },
-            )
-            .optional()
-    }
-
-    pub fn set_applied_sequence(&self, sequence: u64) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE pqueue_applied_position SET sequence = ?1 WHERE id = 1",
-            params![sequence as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn applied_sequence(&self) -> rusqlite::Result<u64> {
-        self.conn
-            .query_row(
-                "SELECT sequence FROM pqueue_applied_position WHERE id = 1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|value| value as u64)
-    }
-
-    pub fn apply_tail_sequences(&self, sequences: &[u64]) -> rusqlite::Result<Vec<u64>> {
-        let applied = self.applied_sequence()?;
-        let mut applied_tail = Vec::new();
-        for sequence in sequences
-            .iter()
-            .copied()
-            .filter(|sequence| *sequence > applied)
-        {
-            self.set_applied_sequence(sequence)?;
-            applied_tail.push(sequence);
+impl Inner {
+    fn make_envelope(
+        &mut self,
+        command: QueueCommand,
+        item_ids: Vec<ItemId>,
+        created_at: UtcTimestamp,
+    ) -> CommandEnvelope {
+        let n = self.cmd_seq;
+        self.cmd_seq += 1;
+        CommandEnvelope {
+            command_id: CommandId::new(format!("sql-{n}")),
+            request_id: None,
+            shard_id: ShardId::ZERO,
+            item_ids,
+            command,
+            checksum: CommandChecksum(0),
+            created_at,
         }
-        Ok(applied_tail)
     }
 
-    pub fn apply_before_return(&self, committed_sequence: u64) -> rusqlite::Result<u64> {
-        let applied = self.applied_sequence()?;
-        if committed_sequence > applied {
-            self.set_applied_sequence(committed_sequence)?;
+    /// Durably append `env` to the shard's log + advance the persisted high-water in ONE transaction.
+    /// Returns the committed position. Does NOT touch the projection (caller applies after, infallibly).
+    fn append_durable(
+        &mut self,
+        shard: &ShardKey,
+        env: &CommandEnvelope,
+    ) -> EngineResult<CommandPosition> {
+        let (t, q) = parts(shard);
+        let json = to_json(env)?;
+        let tx = st(self.conn.transaction())?;
+        // Next sequence is MAX(seq)+1, NOT COUNT(*): it must survive log compaction/retention so a
+        // persisted position never collides or regresses (TD-007 §4). Empty log → -1+1 = 0.
+        let seq: i64 = st(tx.query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        ))?;
+        st(tx.execute(
+            "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,0,?3,?4)",
+            params![t, q, seq, json],
+        ))?;
+        st(tx.execute(
+            "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,0,?3) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
+            params![t, q, seq],
+        ))?;
+        st(tx.commit())?;
+        Ok(CommandPosition::new(shard.clone(), 0, seq as u64))
+    }
+
+    /// Durable append + in-memory apply (the atomic unit the orchestration ports rely on). The caller
+    /// MUST have pre-validated so `apply_command` is infallible (commit has no rollback).
+    ///
+    /// `append_durable` can fail cleanly (the sqlite txn rolls back — nothing committed). But ONCE the
+    /// log row is durably committed, the in-memory apply MUST succeed: the caller pre-validated it. If
+    /// it doesn't, the durable log has advanced past the live projection — a silent in-process
+    /// divergence. We refuse to return that as an ordinary `Err` (indistinguishable from a clean
+    /// pre-commit rejection); we panic, which is the correct "rebuild the projection" signal (B2).
+    fn commit_locked(&mut self, shard: &ShardKey, env: CommandEnvelope) -> EngineResult<()> {
+        self.append_durable(shard, &env)?;
+        self.projections
+            .get_mut(shard)
+            .expect("projection exists for a shard that just accepted a durable commit")
+            .apply_command(&env.command)
+            .expect(
+                "post-commit apply must be infallible after a durable append (caller pre-validates); \
+                 a failure here means the durable log advanced past the in-memory projection",
+            );
+        Ok(())
+    }
+
+    /// Reconstruct every queue's projection from durable state (queues + their replayed logs). Proves
+    /// the log is the source of truth: a restart loses no committed state (TD-007 §4 replay).
+    fn rebuild_all(&mut self) -> EngineResult<()> {
+        let rows: Vec<(String, String, String)> = {
+            let mut stmt = st(self.conn.prepare("SELECT tenant, queue, definition FROM queues"))?;
+            let mapped =
+                st(stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))))?;
+            let mut out = Vec::new();
+            for r in mapped {
+                out.push(st(r)?);
+            }
+            out
+        };
+        // Track the highest `sql-N` command id already in the durable log so the regenerated counter
+        // does not re-mint an id that already exists after restart (B1: command_id must stay unique).
+        let mut max_cmd_seq: Option<u64> = None;
+        for (t, q, def_json) in rows {
+            let definition: QueueDefinition =
+                serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let shard = SqliteBackend::launch_shard(&key);
+            let mut proj = ProjectionData::new(definition.priority_model);
+            for env in self.read_log_envelopes(&t, &q)? {
+                if let Some(n) = env
+                    .command_id
+                    .0
+                    .strip_prefix("sql-")
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    max_cmd_seq = Some(max_cmd_seq.map_or(n, |m| m.max(n)));
+                }
+                proj.apply_command(&env.command)?;
+            }
+            self.projections.insert(shard, proj);
+            self.queues.insert(key, definition);
         }
-        self.applied_sequence()
+        if let Some(m) = max_cmd_seq {
+            self.cmd_seq = m + 1;
+        }
+        Ok(())
     }
 
-    pub fn apply_lag_status(
-        &self,
-        committed_sequence: u64,
-        max_lag_sequences: u64,
-    ) -> rusqlite::Result<ApplyLagStatus> {
-        let applied_sequence = self.applied_sequence()?;
-        let lag_sequences = committed_sequence.saturating_sub(applied_sequence);
-        Ok(ApplyLagStatus {
-            committed_sequence,
-            applied_sequence,
-            lag_sequences,
-            within_bound: lag_sequences <= max_lag_sequences,
+    /// Every log envelope for a shard, ordered by sequence (replay order).
+    fn read_log_envelopes(&self, tenant: &str, queue: &str) -> EngineResult<Vec<CommandEnvelope>> {
+        let mut stmt = st(self.conn.prepare(
+            "SELECT envelope FROM log_entries WHERE tenant=?1 AND queue=?2 ORDER BY epoch, seq",
+        ))?;
+        let mapped = st(stmt.query_map(params![tenant, queue], |row| row.get::<_, String>(0)))?;
+        let mut out = Vec::new();
+        for r in mapped {
+            let json = st(r)?;
+            out.push(serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?);
+        }
+        Ok(out)
+    }
+}
+
+/// Sqlite-backed atomic-class backend.
+pub struct SqliteBackend {
+    inner: Mutex<Inner>,
+}
+
+impl SqliteBackend {
+    /// Open (or create) a sqlite database at `path`, ensure the schema, and rebuild the in-memory
+    /// projection of every known queue by replaying its durable log.
+    pub fn open(path: &str) -> EngineResult<Self> {
+        Self::from_conn(st(Connection::open(path))?)
+    }
+
+    /// An ephemeral `:memory:` backend (still a real durable log within the process).
+    pub fn in_memory() -> EngineResult<Self> {
+        Self::from_conn(st(Connection::open_in_memory())?)
+    }
+
+    fn from_conn(conn: Connection) -> EngineResult<Self> {
+        st(conn.execute_batch(SCHEMA))?;
+        let mut inner = Inner {
+            conn,
+            projections: HashMap::new(),
+            queues: HashMap::new(),
+            cmd_seq: 0,
+        };
+        inner.rebuild_all()?;
+        Ok(Self {
+            inner: Mutex::new(inner),
         })
     }
 
-    pub fn snapshot_bytes(&self) -> rusqlite::Result<Vec<u8>> {
-        let snapshot = ProjectionSnapshot {
-            applied_sequence: self.applied_sequence()?,
-            groups: self.all_group_summaries()?,
-            cohorts: self.all_cohorts()?,
+    fn launch_shard(key: &QueueKey) -> ShardKey {
+        ShardKey::new(key.tenant_id.clone(), key.queue_id.clone(), ShardId::ZERO)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UoW writer views (Backend::write) — disjoint borrows of conn / projections
+// ---------------------------------------------------------------------------
+
+struct SqlLogWriter<'a> {
+    conn: &'a mut Connection,
+}
+
+impl LogWriter for SqlLogWriter<'_> {
+    fn append(
+        &mut self,
+        shard: &ShardKey,
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let (t, q) = parts(shard);
+        let mut positions = Vec::with_capacity(commands.len());
+        let tx = st(self.conn.transaction())?;
+        for env in commands {
+            let json = to_json(env)?;
+            let seq: i64 = st(tx.query_row(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get(0),
+            ))?;
+            st(tx.execute(
+                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,0,?3,?4)",
+                params![t, q, seq, json],
+            ))?;
+            st(tx.execute(
+                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,0,?3) \
+                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
+                params![t, q, seq],
+            ))?;
+            positions.push(CommandPosition::new(shard.clone(), 0, seq as u64));
+        }
+        st(tx.commit())?;
+        Ok(positions)
+    }
+}
+
+struct SqlProjectionWriter<'a> {
+    projections: &'a mut HashMap<ShardKey, ProjectionData>,
+}
+
+impl ProjectionWriter for SqlProjectionWriter<'_> {
+    fn apply(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        for (pos, cmd) in positions.iter().zip(commands) {
+            self.projections
+                .get_mut(&pos.shard_key)
+                .ok_or(EngineError::NotFound)?
+                .apply_command(&cmd.command)?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ports
+// ---------------------------------------------------------------------------
+
+impl Backend for SqliteBackend {
+    fn durability_class(&self) -> DurabilityClass {
+        DurabilityClass::Atomic
+    }
+
+    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
+    where
+        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
+        R: Send,
+    {
+        let result = {
+            let mut guard = self.inner.lock().expect("sqlite backend poisoned");
+            let Inner {
+                conn, projections, ..
+            } = &mut *guard;
+            let mut lw = SqlLogWriter { conn };
+            let mut pw = SqlProjectionWriter { projections };
+            f(&mut lw, &mut pw)
         };
-        serde_json::to_vec(&snapshot)
-            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))
+        std::future::ready(result)
+    }
+}
+
+impl ClaimPort for SqliteBackend {
+    fn claim(
+        &self,
+        req: ClaimRequest,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let candidates: Vec<ItemId> = {
+                let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
+                proj.eligible_candidates(req.now, req.max_items)
+            };
+            if candidates.is_empty() {
+                return Ok(Claimed::default());
+            }
+            let cmd = QueueCommand::Claim(ClaimCommand {
+                item_ids: candidates.clone(),
+                lease_token: req.lease_token.clone(),
+                lease_expires_at: req.lease_expires_at,
+            });
+            let env = g.make_envelope(cmd, candidates.clone(), req.now);
+            g.commit_locked(&req.shard, env)?;
+            let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
+            Ok(Claimed {
+                items: proj.render_claimed(&candidates),
+            })
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl UpsertPort for SqliteBackend {
+    #[allow(clippy::too_many_arguments)]
+    fn replace_if_pending(
+        &self,
+        shard: &ShardKey,
+        client_item_key: &ClientItemKey,
+        new_item_id: ItemId,
+        priority: Option<PriorityValue>,
+        group_key: Option<GroupKey>,
+        not_before: Option<UtcTimestamp>,
+        payload: Option<Bytes>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let existing = {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.lookup_by_key(client_item_key)
+            };
+            let max_attempts = g
+                .queues
+                .get(&shard.queue_key())
+                .map(|d| d.retry_policy.max_attempts)
+                .unwrap_or(1);
+            let build_item = |item_id: ItemId| PushItem {
+                client_item_key: client_item_key.clone(),
+                item_id,
+                priority: priority.clone(),
+                not_before,
+                group_key: group_key.clone(),
+                max_attempts,
+                payload: payload.clone(),
+            };
+            match existing {
+                None => {
+                    let cmd = QueueCommand::Push(PushCommand {
+                        items: vec![build_item(new_item_id.clone())],
+                    });
+                    let env = g.make_envelope(cmd, vec![new_item_id.clone()], now);
+                    g.commit_locked(shard, env)?;
+                    Ok(UpsertOutcome::Inserted {
+                        item_id: new_item_id,
+                    })
+                }
+                Some(existing_id) => {
+                    let state = {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.item_state(&existing_id).ok_or(EngineError::NotFound)?
+                    };
+                    match state {
+                        ItemState::Pending => {
+                            let cmd = QueueCommand::ReplacePending(ReplacePendingCommand {
+                                client_item_key: client_item_key.clone(),
+                                superseded_item_id: existing_id.clone(),
+                                replacement: build_item(new_item_id.clone()),
+                            });
+                            let env = g.make_envelope(cmd, vec![new_item_id.clone()], now);
+                            g.commit_locked(shard, env)?;
+                            Ok(UpsertOutcome::Replaced {
+                                new_item_id,
+                                superseded_item_id: existing_id,
+                            })
+                        }
+                        ItemState::Leased => {
+                            Err(EngineError::Invalid("collision with claimed item"))
+                        }
+                        ItemState::Complete | ItemState::Failed => Err(EngineError::Terminal),
+                    }
+                }
+            }
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl PushPort for SqliteBackend {
+    fn push(
+        &self,
+        shard: &ShardKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            // Pre-validate the shard exists BEFORE any durable write (commit_locked expects it), so a
+            // Push never leaves a durable log row without a projection apply (divergence-safe).
+            if !g.projections.contains_key(shard) {
+                return Err(EngineError::NotFound);
+            }
+            let max_attempts = g
+                .queues
+                .get(&shard.queue_key())
+                .map(|d| d.retry_policy.max_attempts)
+                .unwrap_or(1);
+            let n = g.cmd_seq;
+            g.cmd_seq += 1;
+            let (push_items, ids) = build_push_items(items, n, "sql", max_attempts);
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("sql-{n}")),
+                request_id: None,
+                shard_id: ShardId::ZERO,
+                item_ids: ids.clone(),
+                command: QueueCommand::Push(PushCommand { items: push_items }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            };
+            g.commit_locked(shard, env)?;
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl FinalizePort for SqliteBackend {
+    fn finalize(
+        &self,
+        shard: &ShardKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.finalize_validate(&outcomes)?;
+            }
+            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
+            let env = g.make_envelope(cmd, item_ids, now);
+            g.commit_locked(shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReclaimDriver for SqliteBackend {
+    fn tick(
+        &self,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let expired: Vec<(ShardKey, Vec<ItemId>)> = g
+                .projections
+                .iter()
+                .filter_map(|(shard, proj)| {
+                    let ids = proj.expired_leases(now);
+                    (!ids.is_empty()).then(|| (shard.clone(), ids))
+                })
+                .collect();
+            let mut report = TickReport::default();
+            for (shard, ids) in expired {
+                let cmd = QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                    item_ids: ids.clone(),
+                });
+                let env = g.make_envelope(cmd, ids.clone(), now);
+                g.commit_locked(&shard, env)?;
+                report.leases_reclaimed += ids.len() as u64;
+            }
+            Ok(report)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ControlPlaneStore for SqliteBackend {
+    fn create_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            if let Some(existing) = g.queues.get(&key) {
+                if existing.group_co_residency != definition.group_co_residency
+                    || existing.shard_count != definition.shard_count
+                {
+                    return Err(EngineError::QueueDefinitionConflict);
+                }
+                return Ok(CreateQueueOutcome {
+                    created: false,
+                    definition: existing.clone(),
+                });
+            }
+            let (t, q) = (key.tenant_id.as_str(), key.queue_id.as_str());
+            let def_json = to_json(&definition)?;
+            st(g.conn.execute(
+                "INSERT INTO queues(tenant,queue,definition) VALUES(?1,?2,?3)",
+                params![t, q, def_json],
+            ))?;
+            let shard = SqliteBackend::launch_shard(&key);
+            g.projections
+                .insert(shard, ProjectionData::new(definition.priority_model));
+            g.queues.insert(key, definition.clone());
+            Ok(CreateQueueOutcome {
+                created: true,
+                definition,
+            })
+        })();
+        std::future::ready(result)
     }
 
-    pub fn restore_from_snapshot(shard_key: ShardKey, snapshot: &[u8]) -> rusqlite::Result<Self> {
-        let restored: ProjectionSnapshot = serde_json::from_slice(snapshot)
-            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
-        let projection = Self::new_in_memory(shard_key)?;
-        projection.set_applied_sequence(restored.applied_sequence)?;
-        for group in restored.groups {
-            projection.conn.execute(
-                "INSERT INTO pqueue_group_summary (
-                    tenant_id, queue_id, shard_id, group_key, oldest_eligible_at_ms, eligible_count
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    fn queue_definition(
+        &self,
+        key: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .queues
+            .get(key)
+            .cloned()
+            .ok_or(EngineError::NotFound);
+        std::future::ready(result)
+    }
+
+    fn list_queues(
+        &self,
+        tenant: &TenantId,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
+        let result: Vec<QueueId> = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .queues
+            .keys()
+            .filter(|k| k.tenant_id.as_str() == tenant.as_str())
+            .map(|k| k.queue_id.clone())
+            .collect();
+        std::future::ready(Ok(result))
+    }
+
+    fn current_epoch(
+        &self,
+        _shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        // Single-node, single-epoch for launch (plan §2.5); epoch fencing is post-launch.
+        std::future::ready(Ok(0))
+    }
+}
+
+impl LogRead for SqliteBackend {
+    fn read_from(
+        &self,
+        shard: &ShardKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let start = match &from {
+                Some(p) => p.sequence + 1,
+                None => 0,
+            };
+            let g = self.inner.lock().expect("poisoned");
+            let total: i64 = st(g.conn.query_row(
+                "SELECT COUNT(*) FROM log_entries WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get(0),
+            ))?;
+            let mut stmt = st(g.conn.prepare(
+                "SELECT seq, envelope FROM log_entries \
+                 WHERE tenant=?1 AND queue=?2 AND seq>=?3 ORDER BY seq LIMIT ?4",
+            ))?;
+            let mapped = st(stmt.query_map(params![t, q, start as i64, limit as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            }))?;
+            let mut entries = Vec::new();
+            for r in mapped {
+                let (seq, json) = st(r)?;
+                let env: CommandEnvelope =
+                    serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?;
+                entries.push((CommandPosition::new(shard.clone(), 0, seq as u64), env));
+            }
+            let consumed = start + entries.len() as u64;
+            let next =
+                (consumed < total as u64).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            Ok(CommandPage { entries, next })
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ProjectionRead for SqliteBackend {
+    fn select_eligible(
+        &self,
+        shard: &ShardKey,
+        now: UtcTimestamp,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.select_eligible(now, limit))
+        })();
+        std::future::ready(result)
+    }
+
+    fn peek(
+        &self,
+        shard: &ShardKey,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.peek(limit))
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending(
+        &self,
+        shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn metrics(
+        &self,
+        queue: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let shard = SqliteBackend::launch_shard(queue);
+            let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.metrics())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl SnapshotStore for SqliteBackend {
+    fn write_snapshot(
+        &self,
+        shard: &ShardKey,
+        position: CommandPosition,
+        snapshot: ProjectionSnapshot,
+    ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let g = self.inner.lock().expect("poisoned");
+            let n: i64 = st(g.conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get(0),
+            ))?;
+            let ref_id = format!("snap-{n}");
+            st(g.conn.execute(
+                "INSERT INTO snapshots(tenant,queue,ref_id,epoch,seq,payload) \
+                 VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
-                    projection.shard_key.tenant_id.as_str(),
-                    projection.shard_key.queue_id.as_str(),
-                    projection.shard_key.shard_id.as_u32() as i64,
-                    group.group_key,
-                    group.oldest_eligible_at_ms,
-                    group.eligible_count as i64
+                    t,
+                    q,
+                    ref_id,
+                    position.backend_epoch as i64,
+                    position.sequence as i64,
+                    snapshot.payload
                 ],
-            )?;
-        }
-        for cohort in restored.cohorts {
-            projection.insert_cohort(&cohort.group_key, cohort.member_count, &cohort.state)?;
-        }
-        Ok(projection)
-    }
-
-    fn all_group_summaries(&self) -> rusqlite::Result<Vec<GroupSummary>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT group_key, oldest_eligible_at_ms, eligible_count
-             FROM pqueue_group_summary
-             ORDER BY group_key",
-        )?;
-        stmt.query_map([], |row| {
-            Ok(GroupSummary {
-                group_key: row.get(0)?,
-                oldest_eligible_at_ms: row.get(1)?,
-                eligible_count: row.get::<_, i64>(2)? as u64,
+            ))?;
+            Ok(SnapshotRef {
+                shard_key: shard.clone(),
+                position,
+                ref_id,
             })
-        })?
-        .collect()
+        })();
+        std::future::ready(result)
     }
 
-    fn all_cohorts(&self) -> rusqlite::Result<Vec<CohortRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT group_key, member_count, state
-             FROM pqueue_cohorts
-             ORDER BY group_key",
-        )?;
-        stmt.query_map([], |row| {
-            Ok(CohortRow {
-                group_key: row.get(0)?,
-                member_count: row.get::<_, i64>(1)? as u64,
-                state: row.get(2)?,
-            })
-        })?
-        .collect()
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ProjectionSnapshot {
-    applied_sequence: u64,
-    groups: Vec<GroupSummary>,
-    cohorts: Vec<CohortRow>,
-}
-
-pub struct ProjectionHandleCache {
-    capacity: usize,
-    handles: VecDeque<ShardKey>,
-}
-
-impl ProjectionHandleCache {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            handles: VecDeque::new(),
-        }
+    fn latest_snapshot(
+        &self,
+        shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let g = self.inner.lock().expect("poisoned");
+            let row = opt(g.conn.query_row(
+                "SELECT ref_id, epoch, seq FROM snapshots \
+                 WHERE tenant=?1 AND queue=?2 ORDER BY rowid DESC LIMIT 1",
+                params![t, q],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            ))?;
+            Ok(row.map(|(ref_id, epoch, seq)| SnapshotRef {
+                shard_key: shard.clone(),
+                position: CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
+                ref_id,
+            }))
+        })();
+        std::future::ready(result)
     }
 
-    pub fn touch(&mut self, shard_key: ShardKey) {
-        if self.capacity == 0 {
-            return;
-        }
-        if let Some(index) = self
-            .handles
-            .iter()
-            .position(|existing| existing == &shard_key)
-        {
-            self.handles.remove(index);
-        }
-        self.handles.push_front(shard_key);
-        while self.handles.len() > self.capacity {
-            self.handles.pop_back();
-        }
+    fn read_snapshot(
+        &self,
+        snapshot_ref: &SnapshotRef,
+    ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+        let result = (|| {
+            let (t, q) = parts(&snapshot_ref.shard_key);
+            let g = self.inner.lock().expect("poisoned");
+            let payload: Option<Vec<u8>> = opt(g.conn.query_row(
+                "SELECT payload FROM snapshots WHERE tenant=?1 AND queue=?2 AND ref_id=?3",
+                params![t, q, snapshot_ref.ref_id],
+                |row| row.get(0),
+            ))?;
+            payload
+                .map(|payload| ProjectionSnapshot { payload })
+                .ok_or(EngineError::NotFound)
+        })();
+        std::future::ready(result)
     }
 
-    pub fn contains(&self, shard_key: &ShardKey) -> bool {
-        self.handles.iter().any(|existing| existing == shard_key)
+    fn high_water(
+        &self,
+        shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let g = self.inner.lock().expect("poisoned");
+            let row = opt(g.conn.query_row(
+                "SELECT epoch, seq FROM high_water WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            ))?;
+            Ok(row.map(|(epoch, seq)| CommandPosition::new(shard.clone(), epoch as u64, seq as u64)))
+        })();
+        std::future::ready(result)
     }
 
-    pub fn len(&self) -> usize {
-        self.handles.len()
+    fn set_high_water(
+        &self,
+        shard: &ShardKey,
+        position: CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let g = self.inner.lock().expect("poisoned");
+            // Monotonic: reject a position that does not advance the stored one (TD-007 §4).
+            let current = opt(g.conn.query_row(
+                "SELECT epoch, seq FROM high_water WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            ))?;
+            if let Some((epoch, seq)) = current {
+                let cur = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
+                if !cur.precedes(&position) && cur != position {
+                    return Err(EngineError::Invalid("high-water regression"));
+                }
+            }
+            st(g.conn.execute(
+                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
+                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
+                params![t, q, position.backend_epoch as i64, position.sequence as i64],
+            ))?;
+            Ok(())
+        })();
+        std::future::ready(result)
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.handles.is_empty()
-    }
-}
-
-fn initialize_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE pqueue_items (
-            item_id TEXT PRIMARY KEY,
-            group_key TEXT,
-            gate_key TEXT,
-            lifecycle_state TEXT NOT NULL,
-            eligible_since_ms INTEGER NOT NULL
-        );
-        CREATE TABLE pqueue_group_summary (
-            tenant_id TEXT NOT NULL,
-            queue_id TEXT NOT NULL,
-            shard_id INTEGER NOT NULL,
-            group_key TEXT,
-            oldest_eligible_at_ms INTEGER NOT NULL,
-            eligible_count INTEGER NOT NULL,
-            UNIQUE (tenant_id, queue_id, shard_id, group_key)
-        );
-        CREATE TABLE pqueue_gate_state (
-            gate_key TEXT PRIMARY KEY,
-            blocked INTEGER NOT NULL
-        );
-        CREATE TABLE pqueue_cohorts (
-            group_key TEXT PRIMARY KEY,
-            member_count INTEGER NOT NULL,
-            state TEXT NOT NULL
-        );
-        CREATE TABLE pqueue_applied_position (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            sequence INTEGER NOT NULL
-        );
-        INSERT INTO pqueue_applied_position (id, sequence) VALUES (1, 0);",
-    )
 }

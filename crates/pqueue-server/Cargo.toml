@@ -1,0 +1,27 @@
+[package]
+name = "pqueue-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Composition root: the ONE place that names concrete adapters. Wires a chosen backend
+# (memory/sqlite/objectlog) + a system clock to the RESP front (`pqueue-resp`) and runs a background
+# ReclaimDriver task so leases reclaim without client traffic (TD-007 §3). Everything else depends only
+# inward; this depends on all the adapters.
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+pqueue-resp = { path = "../pqueue-resp" }
+pqueue-memory = { path = "../pqueue-memory" }
+pqueue-sqlite = { path = "../pqueue-sqlite" }
+pqueue-objectlog = { path = "../pqueue-objectlog" }
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+
+[dev-dependencies]
+pqueue-core = { path = "../pqueue-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }
+redis = { version = "1", features = ["tokio-comp"] }

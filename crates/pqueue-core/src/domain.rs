@@ -143,7 +143,7 @@ pub struct DecimalValue {
     pub scale: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PriorityValue {
     Timestamp(UtcTimestamp),
     Int64(i64),

@@ -17,5 +17,6 @@ tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "macros"] }
 
 [dev-dependencies]
 pqueue-memory = { path = "../pqueue-memory" }
+pqueue-sqlite = { path = "../pqueue-sqlite" }
 redis = { version = "1", features = ["tokio-comp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

@@ -1,32 +1,20 @@
 [workspace]
+# The hexagonal architecture in full (plan v4): the domain (core + engine + projection), the shared
+# conformance harness, the three driven adapters (memory/sqlite/objectlog), and the two driving faces
+# (RESP front + library facade) plus the composition root. The legacy HTTP-service/Kafka/storage-trait
+# crates were deleted in Phase 6; the postgres adapter is deferred and will be (re)added fresh to the
+# engine ports when a database is provisioned. No crate is excluded, so `cargo test` covers everything.
 members = [
     "crates/pqueue-core",
     "crates/pqueue-engine",
+    "crates/pqueue-projection",
+    "crates/pqueue-conformance",
     "crates/pqueue-memory",
-    "crates/pqueue-resp",
-    "crates/pqueue-storage",
-    "crates/pqueue-postgres",
-    "crates/pqueue-service",
-    "crates/pqueue-client",
-    "crates/pqueue-kafka",
-    "crates/pqueue-objectlog",
     "crates/pqueue-sqlite",
-]
-# Phase 2 (move-and-delete): pqueue-service is being demolished — its domain logic migrates into
-# pqueue-engine and its REST handlers are deleted. It is excluded from the default build/test set so
-# the workspace stays green while it shrinks to nothing (deleted entirely in Phase 6). Build it
-# explicitly with `-p pqueue-service` if needed.
-default-members = [
-    "crates/pqueue-core",
-    "crates/pqueue-engine",
-    "crates/pqueue-memory",
-    "crates/pqueue-resp",
-    "crates/pqueue-storage",
-    "crates/pqueue-postgres",
-    "crates/pqueue-client",
-    "crates/pqueue-kafka",
     "crates/pqueue-objectlog",
-    "crates/pqueue-sqlite",
+    "crates/pqueue-resp",
+    "crates/pqueue",
+    "crates/pqueue-server",
 ]
 resolver = "3"
 

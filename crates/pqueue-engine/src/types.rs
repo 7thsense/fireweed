@@ -9,7 +9,7 @@ use pqueue_core::{QueueId, TenantId};
 /// Shard identity within a queue. `shard_id` is never client-visible (ADR-004); at launch
 /// every queue has exactly one shard (plan §2.5), but the type carries `shard_id` so the
 /// post-launch multi-shard path needs no signature change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct ShardId(pub u32);
 
 impl ShardId {

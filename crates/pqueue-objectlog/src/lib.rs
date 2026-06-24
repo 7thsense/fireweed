@@ -1,1014 +1,783 @@
 #![forbid(unsafe_code)]
+//! # pqueue-objectlog
+//!
+//! Driven adapter, **eventual-apply durability class**. The command log is a set of immutable
+//! per-command **objects** on an object store; a local filesystem stands in for S3 here (each command is
+//! one object file — no server). The priority-ordered projection is the shared
+//! [`pqueue_projection::ProjectionData`] materialization, **rebuilt from the object log** on open.
+//!
+//! Class semantics (TD-007 §2 / Invariant 2): upsert (the atomic XDEL+XADD `replace_if_pending`) is NOT
+//! offered on this class — it returns [`EngineError::Unavailable`] (`-ERR pqueue unavailable`). The
+//! durability boundary is the object write; the in-memory projection is a derived view reconstructed by
+//! replaying the objects, so a lost/late projection update is always recoverable from the durable log.
+//!
+//! Write ordering is **durable-first**: the command object is written, then the persisted high-water
+//! object, then the in-memory `apply_command` (which is infallible because the orchestration ports
+//! pre-validate — see the INVARIANT). Object names are zero-padded sequence numbers so lexical order is
+//! replay order; the next sequence is `max(existing)+1`, compaction-safe.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use bytes::Bytes;
-use futures_util::future::join_all;
-use object_log::{
-    AppendOutcome, BlobStore, Durability as ObjectLogDurability, FetchedBatch, FlushConfig,
-    LogEngine, ManifestSequencer, PartitionKey, Sequencer,
-};
-use parking_lot::Mutex;
 use pqueue_core::{
-    ClientItemKey, DecimalValue, ItemId, PriorityValue, QueueId, RequestId, TenantId, UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, PriorityValue, QueueDefinition, QueueId, TenantId, UtcTimestamp,
 };
-use pqueue_storage::commands::{
-    BatchClaimCommand, BatchFinalizeCommand, BatchPushCommand, BatchRenewLeasesCommand,
-    BatchUpdateCommand, CohortExpiredCommand, CommandEnvelope, CommandId, FinalizeKind,
-    FinalizeOutcome, LeaseExpiredCommand, PurgeItemsCommand, PushItem, QueueCommand,
+use pqueue_engine::{
+    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
+    CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, ItemView,
+    LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
+    ProjectionWriter, PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
+    ReclaimDriver, ShardId, ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome,
+    UpsertPort, build_push_items,
 };
-use pqueue_storage::traits::{
-    AppendBatchResult, CommandPage, DurabilityProfile, LogStore, LogStoreError,
-};
-use pqueue_storage::types::{CommandChecksum, CommandPosition, ShardKey};
-use tokio::sync::OnceCell;
+use pqueue_projection::ProjectionData;
 
-pub use object_log::{MemoryBlobStore, S3BlobStore};
-
-/// Object-store key prefix for the log's data objects.
-const DATA_PREFIX: &str = "pqueue/";
-/// Object-store key prefix for the `ManifestSequencer`'s durable offset index.
-/// Kept disjoint from `DATA_PREFIX` so manifests and data objects never collide.
-const MANIFEST_PREFIX: &str = "pqueue-manifest/";
-
-/// Map a shard topic to the object-log partition key (pqueue uses partition 0).
-fn partition_key(topic: &str) -> PartitionKey {
-    PartitionKey(format!("{topic}/0"))
+fn store<E: std::fmt::Display>(e: E) -> EngineError {
+    EngineError::Storage(e.to_string())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeploymentProfile {
-    Production,
-    Development,
+fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
+    serde_json::to_string(value).map_err(store)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManifestMode {
-    ObjectStoreCas,
-    PostgresManifestPointerFallback,
-    NoConditionalWrite,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PqueueObjectLogConfig {
-    pub deployment_profile: DeploymentProfile,
-    pub manifest_mode: ManifestMode,
-    pub max_commands_per_segment: usize,
-    pub dev_unsafe_one_command_segments: bool,
-}
-
-impl Default for PqueueObjectLogConfig {
-    fn default() -> Self {
-        Self {
-            deployment_profile: DeploymentProfile::Production,
-            manifest_mode: ManifestMode::ObjectStoreCas,
-            max_commands_per_segment: 1024,
-            dev_unsafe_one_command_segments: false,
-        }
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
     }
+    s
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigError {
-    EmptySegment,
-    OneCommandSegmentInProduction,
-    DevUnsafeFlagInProduction,
-    MissingConditionalWriteWithoutFallback,
+/// `{root}/{hex(tenant\0queue)}` — a path-safe, collision-free directory per shard.
+fn shard_dir(root: &Path, shard: &ShardKey) -> PathBuf {
+    let raw = format!("{}\u{0}{}", shard.tenant_id.as_str(), shard.queue_id.as_str());
+    root.join(hex(raw.as_bytes()))
 }
 
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptySegment => write!(f, "max_commands_per_segment must be greater than zero"),
-            Self::OneCommandSegmentInProduction => {
-                write!(f, "one-command object segments are rejected in production")
-            }
-            Self::DevUnsafeFlagInProduction => {
-                write!(
-                    f,
-                    "dev_unsafe_one_command_segments cannot be set in production"
-                )
-            }
-            Self::MissingConditionalWriteWithoutFallback => write!(
-                f,
-                "object store without conditional write requires Postgres manifest pointer fallback"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
-
-impl PqueueObjectLogConfig {
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.max_commands_per_segment == 0 {
-            return Err(ConfigError::EmptySegment);
-        }
-        if self.deployment_profile == DeploymentProfile::Production
-            && self.dev_unsafe_one_command_segments
-        {
-            return Err(ConfigError::DevUnsafeFlagInProduction);
-        }
-        if self.deployment_profile == DeploymentProfile::Production
-            && self.max_commands_per_segment == 1
-        {
-            return Err(ConfigError::OneCommandSegmentInProduction);
-        }
-        if self.manifest_mode == ManifestMode::NoConditionalWrite {
-            return Err(ConfigError::MissingConditionalWriteWithoutFallback);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct S3CompatibleCredentials {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct S3CompatibleObjectLogConfig {
-    pub endpoint_url: String,
-    pub bucket: String,
-    pub region: String,
-    pub credentials: S3CompatibleCredentials,
-    pub force_path_style: bool,
-    pub deployment_profile: DeploymentProfile,
-    pub manifest_mode: ManifestMode,
-    pub max_commands_per_segment: usize,
-    pub dev_unsafe_one_command_segments: bool,
-}
-
-impl S3CompatibleObjectLogConfig {
-    pub fn pqueue_config(&self) -> PqueueObjectLogConfig {
-        PqueueObjectLogConfig {
-            deployment_profile: self.deployment_profile,
-            manifest_mode: self.manifest_mode,
-            max_commands_per_segment: self.max_commands_per_segment,
-            dev_unsafe_one_command_segments: self.dev_unsafe_one_command_segments,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), S3CompatibleConfigError> {
-        validate_endpoint_url(&self.endpoint_url)?;
-        validate_bucket(&self.bucket)?;
-        validate_region(&self.region)?;
-        validate_credentials(&self.credentials)?;
-        if !self.force_path_style {
-            return Err(S3CompatibleConfigError::UnsupportedAddressingMode);
-        }
-        self.pqueue_config()
-            .validate()
-            .map_err(S3CompatibleConfigError::ObjectLog)?;
-        Ok(())
-    }
-
-    pub fn blob_store(&self) -> Result<S3BlobStore, S3CompatibleConfigError> {
-        self.validate()?;
-        Ok(S3BlobStore::new(
-            self.endpoint_url.trim(),
-            self.region.trim(),
-            self.bucket.trim(),
-            self.credentials.access_key_id.trim(),
-            self.credentials.secret_access_key.trim(),
-        ))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum S3CompatibleConfigError {
-    MissingEndpoint,
-    InvalidEndpoint,
-    MissingBucket,
-    InvalidBucket,
-    MissingRegion,
-    MissingCredentials,
-    UnsupportedAddressingMode,
-    ObjectLog(ConfigError),
-}
-
-impl std::fmt::Display for S3CompatibleConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingEndpoint => write!(f, "S3-compatible endpoint URL is required"),
-            Self::InvalidEndpoint => write!(
-                f,
-                "S3-compatible endpoint URL must be http(s) with a non-empty host"
-            ),
-            Self::MissingBucket => write!(f, "S3-compatible bucket is required"),
-            Self::InvalidBucket => write!(f, "S3-compatible bucket name is invalid"),
-            Self::MissingRegion => write!(f, "S3-compatible region is required"),
-            Self::MissingCredentials => {
-                write!(f, "S3-compatible access key and secret key are required")
-            }
-            Self::UnsupportedAddressingMode => write!(
-                f,
-                "pqueue-objectlog S3-compatible runtime currently requires path-style addressing"
-            ),
-            Self::ObjectLog(err) => write!(f, "{err}"),
-        }
-    }
-}
-
-impl std::error::Error for S3CompatibleConfigError {}
-
-impl From<ConfigError> for S3CompatibleConfigError {
-    fn from(value: ConfigError) -> Self {
-        Self::ObjectLog(value)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum S3CompatibleProbeError {
-    Config(S3CompatibleConfigError),
-    Put(String),
-    Get(String),
-    MissingProbeObject,
-    ProbePayloadMismatch,
-}
-
-impl std::fmt::Display for S3CompatibleProbeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Config(err) => write!(f, "{err}"),
-            Self::Put(err) => write!(f, "S3-compatible object-log PUT probe failed: {err}"),
-            Self::Get(err) => write!(f, "S3-compatible object-log GET probe failed: {err}"),
-            Self::MissingProbeObject => {
-                write!(f, "S3-compatible object-log probe object is missing")
-            }
-            Self::ProbePayloadMismatch => {
-                write!(f, "S3-compatible object-log probe payload mismatch")
+/// The next durable sequence for a shard: `max(existing object index) + 1` (compaction-safe). Empty
+/// log → 0.
+fn next_seq(log_dir: &Path) -> EngineResult<u64> {
+    let mut max: Option<u64> = None;
+    if log_dir.exists() {
+        for entry in fs::read_dir(log_dir).map_err(store)? {
+            let entry = entry.map_err(store)?;
+            if let Some(n) = entry
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                max = Some(max.map_or(n, |m| m.max(n)));
             }
         }
     }
+    Ok(max.map_or(0, |m| m + 1))
 }
 
-impl std::error::Error for S3CompatibleProbeError {}
-
-impl From<S3CompatibleConfigError> for S3CompatibleProbeError {
-    fn from(value: S3CompatibleConfigError) -> Self {
-        Self::Config(value)
+/// Durably write `env` as the next object + advance the persisted high-water object. Returns the
+/// committed sequence. Touches only the filesystem under `root` (not the in-memory projection).
+///
+/// Enforces the eventual-apply class ban on the atomic XDEL+XADD upsert (Invariant 2) at the SINGLE
+/// durable chokepoint both write paths funnel through (`commit_locked` and `Backend::write` →
+/// `ObjLogWriter`): a `ReplacePending` command is refused with `Unavailable` BEFORE any object is
+/// written, so the ban holds at the write path, not just the `replace_if_pending` port.
+fn append_object(root: &Path, shard: &ShardKey, env: &CommandEnvelope) -> EngineResult<u64> {
+    if matches!(env.command, QueueCommand::ReplacePending(_)) {
+        return Err(EngineError::Unavailable);
     }
-}
-
-pub fn probe_s3_compatible_object_path(
-    config: &S3CompatibleObjectLogConfig,
-    key: &str,
-    payload: &[u8],
-) -> Result<(), S3CompatibleProbeError> {
-    let blob = config.blob_store()?;
-    block_on_object_log(blob.put(key, Bytes::copy_from_slice(payload)))
-        .map_err(|err| S3CompatibleProbeError::Put(err.to_string()))?;
-    let fetched = block_on_object_log(blob.get(key))
-        .map_err(|err| S3CompatibleProbeError::Get(err.to_string()))?;
-    match fetched {
-        Some(bytes) if bytes.as_ref() == payload => Ok(()),
-        Some(_) => Err(S3CompatibleProbeError::ProbePayloadMismatch),
-        None => Err(S3CompatibleProbeError::MissingProbeObject),
-    }
-}
-
-/// Lazily-initialised object-log engine + its durable sequencer.
-struct EngineInner {
-    sequencer: Arc<ManifestSequencer>,
-    engine: LogEngine<ManifestSequencer>,
-}
-
-pub struct PqueueObjectLogStore {
-    blob: Arc<dyn BlobStore>,
-    config: PqueueObjectLogConfig,
-    /// Opened on first use so construction stays I/O-free (S3 config can be
-    /// validated without contacting the object store).
-    inner: OnceCell<EngineInner>,
-    epochs: Mutex<HashMap<ShardKey, u64>>,
-}
-
-impl PqueueObjectLogStore {
-    pub fn new(blob: Arc<dyn BlobStore>) -> Self {
-        Self::new_with_config(blob, PqueueObjectLogConfig::default())
-            .expect("default pqueue object-log config is valid")
-    }
-
-    pub fn new_with_config(
-        blob: Arc<dyn BlobStore>,
-        config: PqueueObjectLogConfig,
-    ) -> Result<Self, ConfigError> {
-        config.validate()?;
-        Ok(Self {
-            blob,
-            config,
-            inner: OnceCell::new(),
-            epochs: Mutex::new(HashMap::new()),
-        })
-    }
-
-    pub fn new_s3_compatible(
-        config: S3CompatibleObjectLogConfig,
-    ) -> Result<Self, S3CompatibleConfigError> {
-        config.validate()?;
-        let pqueue_config = config.pqueue_config();
-        let blob: Arc<dyn BlobStore> = Arc::new(S3BlobStore::new(
-            config.endpoint_url.trim(),
-            config.region.trim(),
-            config.bucket.trim(),
-            config.credentials.access_key_id.trim(),
-            config.credentials.secret_access_key.trim(),
-        ));
-        Self::new_with_config(blob, pqueue_config).map_err(Into::into)
-    }
-
-    pub fn new_memory() -> (Self, Arc<MemoryBlobStore>) {
-        let blob = Arc::new(MemoryBlobStore::new());
-        let blob_dyn: Arc<dyn BlobStore> = blob.clone();
-        (Self::new(blob_dyn), blob)
-    }
-
-    pub fn config(&self) -> &PqueueObjectLogConfig {
-        &self.config
-    }
-
-    /// Open (or recover) the object-log engine on first use. `ManifestSequencer`
-    /// rebuilds its offset index from the blob store, so a fresh store over the
-    /// same blob recovers the durable log.
-    async fn inner(&self) -> Result<&EngineInner, LogStoreError> {
-        self.inner
-            .get_or_try_init(|| async {
-                let flush = FlushConfig {
-                    max_batches: self.config.max_commands_per_segment,
-                    linger: Duration::from_millis(1),
-                    ..FlushConfig::default()
-                };
-                let sequencer = Arc::new(
-                    ManifestSequencer::open(Arc::clone(&self.blob), MANIFEST_PREFIX)
-                        .await
-                        .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?,
-                );
-                let engine = LogEngine::new(
-                    Arc::clone(&self.blob),
-                    Arc::clone(&sequencer),
-                    flush,
-                    DATA_PREFIX,
-                );
-                Ok::<EngineInner, LogStoreError>(EngineInner { sequencer, engine })
-            })
-            .await
-    }
-
-    /// A shard "exists" once at least one batch has been sequenced for its topic.
-    fn shard_exists(inner: &EngineInner, topic: &str) -> Result<bool, LogStoreError> {
-        let high_watermark = inner
-            .sequencer
-            .high_watermark(&partition_key(topic))
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
-        Ok(high_watermark > 0)
-    }
-
-    pub fn advance_epoch(&self, shard: &ShardKey, epoch: u64) {
-        self.commit_epoch_fence(shard, epoch)
-            .expect("epoch fence commit must succeed");
-    }
-
-    pub fn commit_epoch_fence(&self, shard: &ShardKey, epoch: u64) -> Result<(), LogStoreError> {
-        block_on_object_log(self.commit_epoch_fence_async(shard, epoch))
-    }
-
-    async fn commit_epoch_fence_async(
-        &self,
-        shard: &ShardKey,
-        epoch: u64,
-    ) -> Result<(), LogStoreError> {
-        let topic = epoch_topic_for_shard(shard);
-        let inner = self.inner().await?;
-        inner
-            .engine
-            .produce(
-                partition_key(&topic),
-                Bytes::copy_from_slice(&epoch.to_be_bytes()),
-                1,
-                (),
-                ObjectLogDurability::Sequenced,
-            )
-            .await
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
-        self.epochs.lock().insert(shard.clone(), epoch);
-        Ok(())
-    }
-
-    pub fn find_by_request_id(
-        &self,
-        shard: &ShardKey,
-        request_id: &RequestId,
-    ) -> Result<Option<(CommandPosition, CommandEnvelope)>, LogStoreError> {
-        let page = self.read_all(shard)?;
-        Ok(page
-            .commands
-            .into_iter()
-            .find(|(_, envelope)| envelope.request_id.as_ref() == Some(request_id)))
-    }
-
-    async fn current_epoch_async(&self, shard: &ShardKey) -> Result<u64, LogStoreError> {
-        if let Some(epoch) = self.epochs.lock().get(shard).copied() {
-            return Ok(epoch);
-        }
-        let topic = epoch_topic_for_shard(shard);
-        let inner = self.inner().await?;
-        if !Self::shard_exists(inner, &topic)? {
-            self.epochs.lock().insert(shard.clone(), 0);
-            return Ok(0);
-        }
-        let fetched = inner
-            .engine
-            .fetch(&partition_key(&topic), 0, usize::MAX)
-            .await
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
-        let epoch = fetched
-            .last()
-            .map(|batch| decode_epoch(&batch.payload))
-            .transpose()?
-            .unwrap_or(0);
-        self.epochs.lock().insert(shard.clone(), epoch);
-        Ok(epoch)
-    }
-
-    fn read_all(&self, shard: &ShardKey) -> Result<CommandPage, LogStoreError> {
-        block_on_object_log(self.read_all_async(shard))
-    }
-
-    async fn read_all_async(&self, shard: &ShardKey) -> Result<CommandPage, LogStoreError> {
-        let topic = topic_for_shard(shard);
-        let inner = self.inner().await?;
-        if !Self::shard_exists(inner, &topic)? {
-            return Err(LogStoreError::ShardNotFound);
-        }
-        let fetched = inner
-            .engine
-            .fetch(&partition_key(&topic), 0, usize::MAX)
-            .await
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
-        decode_page(shard, fetched, usize::MAX)
-    }
-}
-
-fn block_on_object_log<F>(future: F) -> F::Output
-where
-    F: Future,
-{
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        return tokio::task::block_in_place(|| handle.block_on(future));
-    }
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("object-log runtime")
-        .block_on(future)
-}
-
-fn validate_endpoint_url(endpoint_url: &str) -> Result<(), S3CompatibleConfigError> {
-    let endpoint_url = endpoint_url.trim();
-    if endpoint_url.is_empty() {
-        return Err(S3CompatibleConfigError::MissingEndpoint);
-    }
-    if endpoint_url.chars().any(char::is_whitespace) {
-        return Err(S3CompatibleConfigError::InvalidEndpoint);
-    }
-    let without_scheme = endpoint_url
-        .strip_prefix("http://")
-        .or_else(|| endpoint_url.strip_prefix("https://"))
-        .ok_or(S3CompatibleConfigError::InvalidEndpoint)?;
-    let host = without_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    if host.is_empty() || host == ":" || host.starts_with(':') {
-        return Err(S3CompatibleConfigError::InvalidEndpoint);
-    }
-    Ok(())
-}
-
-fn validate_bucket(bucket: &str) -> Result<(), S3CompatibleConfigError> {
-    let bucket = bucket.trim();
-    if bucket.is_empty() {
-        return Err(S3CompatibleConfigError::MissingBucket);
-    }
-    if !(3..=63).contains(&bucket.len())
-        || !bucket
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '.')
-        || bucket.starts_with(['-', '.'])
-        || bucket.ends_with(['-', '.'])
-        || bucket.contains("..")
-    {
-        return Err(S3CompatibleConfigError::InvalidBucket);
-    }
-    Ok(())
-}
-
-fn validate_region(region: &str) -> Result<(), S3CompatibleConfigError> {
-    if region.trim().is_empty() {
-        return Err(S3CompatibleConfigError::MissingRegion);
-    }
-    Ok(())
-}
-
-fn validate_credentials(
-    credentials: &S3CompatibleCredentials,
-) -> Result<(), S3CompatibleConfigError> {
-    if credentials.access_key_id.trim().is_empty()
-        || credentials.secret_access_key.trim().is_empty()
-    {
-        return Err(S3CompatibleConfigError::MissingCredentials);
-    }
-    Ok(())
-}
-
-impl LogStore for PqueueObjectLogStore {
-    async fn append_batch(
-        &self,
-        shard: &ShardKey,
-        expected_epoch: Option<u64>,
-        commands: Vec<CommandEnvelope>,
-    ) -> Result<AppendBatchResult, LogStoreError> {
-        let current_epoch = self.current_epoch_async(shard).await?;
-        if expected_epoch.is_some_and(|expected| expected != current_epoch) {
-            return Err(LogStoreError::StalEpoch {
-                expected: expected_epoch.unwrap(),
-                current: current_epoch,
-            });
-        }
-        let topic = topic_for_shard(shard);
-        let inner = self.inner().await?;
-
-        let batches = commands
-            .iter()
-            .map(|command| encode_record(current_epoch, command).map(Bytes::from))
-            .collect::<Result<Vec<_>, _>>()?;
-        let partition = partition_key(&topic);
-        let outcomes = join_all(batches.into_iter().map(|payload| {
-            inner.engine.produce(
-                partition.clone(),
-                payload,
-                1,
-                (),
-                ObjectLogDurability::Sequenced,
-            )
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<AppendOutcome>, _>>()
-        .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
-        let last_sequence = outcomes
-            .last()
-            .and_then(|outcome| outcome.base_offset)
-            .map(|base_offset| base_offset as u64)
-            .unwrap_or(0);
-
-        Ok(AppendBatchResult {
-            last_position: CommandPosition {
-                shard_key: shard.clone(),
-                sequence: last_sequence,
-                backend_epoch: current_epoch,
-            },
-        })
-    }
-
-    async fn read_from(
-        &self,
-        shard: &ShardKey,
-        position: Option<CommandPosition>,
-        limit: usize,
-    ) -> Result<CommandPage, LogStoreError> {
-        let topic = topic_for_shard(shard);
-        let inner = self.inner().await?;
-        if !Self::shard_exists(inner, &topic)? {
-            return Err(LogStoreError::ShardNotFound);
-        }
-        if limit == 0 {
-            return Ok(CommandPage {
-                commands: Vec::new(),
-                next_position: None,
-            });
-        }
-
-        let fetch_offset = position.map(|pos| pos.sequence as i64 + 1).unwrap_or(0);
-        let fetched = inner
-            .engine
-            .fetch(&partition_key(&topic), fetch_offset, usize::MAX)
-            .await
-            .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
-        decode_page(shard, fetched, limit)
-    }
-
-    fn durability_profile(&self) -> DurabilityProfile {
-        DurabilityProfile::Replicated
-    }
-}
-
-fn topic_for_shard(shard: &ShardKey) -> String {
-    format!(
-        "pqueue_{}_{}_s{}",
-        sanitize(shard.tenant_id.as_str()),
-        sanitize(shard.queue_id.as_str()),
-        shard.shard_id.as_u32()
+    let dir = shard_dir(root, shard);
+    let log_dir = dir.join("log");
+    fs::create_dir_all(&log_dir).map_err(store)?;
+    let seq = next_seq(&log_dir)?;
+    // Object name: zero-padded so lexical order == sequence order.
+    fs::write(log_dir.join(format!("{seq:020}.json")), to_json(env)?).map_err(store)?;
+    fs::write(
+        dir.join("high_water.json"),
+        to_json(&HighWater { epoch: 0, seq })?,
     )
+    .map_err(store)?;
+    Ok(seq)
 }
 
-fn epoch_topic_for_shard(shard: &ShardKey) -> String {
-    format!("{}_epoch", topic_for_shard(shard))
+/// The high-water object payload (a stored field, not recomputed from a possibly-compacted log).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HighWater {
+    epoch: u64,
+    seq: u64,
 }
 
-fn sanitize(input: &str) -> String {
-    input
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
+/// A stored snapshot object: its position + opaque payload.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotObject {
+    epoch: u64,
+    seq: u64,
+    payload: Vec<u8>,
+}
+
+struct Inner {
+    root: PathBuf,
+    projections: HashMap<ShardKey, ProjectionData>,
+    queues: HashMap<QueueKey, QueueDefinition>,
+    cmd_seq: u64,
+}
+
+impl Inner {
+    fn shard_dir(&self, shard: &ShardKey) -> PathBuf {
+        shard_dir(&self.root, shard)
+    }
+
+    fn make_envelope(
+        &mut self,
+        command: QueueCommand,
+        item_ids: Vec<ItemId>,
+        created_at: UtcTimestamp,
+    ) -> CommandEnvelope {
+        let n = self.cmd_seq;
+        self.cmd_seq += 1;
+        CommandEnvelope {
+            command_id: CommandId::new(format!("obj-{n}")),
+            request_id: None,
+            shard_id: ShardId::ZERO,
+            item_ids,
+            command,
+            checksum: CommandChecksum(0),
+            created_at,
+        }
+    }
+
+    /// Durable append + infallible in-memory apply (the orchestration unit). Caller MUST pre-validate.
+    fn commit_locked(&mut self, shard: &ShardKey, env: CommandEnvelope) -> EngineResult<()> {
+        append_object(&self.root, shard, &env)?;
+        self.projections
+            .get_mut(shard)
+            .expect("projection exists for a shard that just accepted a durable commit")
+            .apply_command(&env.command)
+            .expect(
+                "post-commit apply must be infallible after a durable object write (caller \
+                 pre-validates); a failure means the durable log advanced past the projection",
+            );
+        Ok(())
+    }
+
+    /// All log envelopes for a shard in sequence order (replay order). Tolerates a torn TRAILING object
+    /// (an append interrupted by a crash): since `next_seq` is `max+1`, only the highest-seq object can
+    /// be a partial write, and it has no successor, so it is treated as uncommitted and skipped. A parse
+    /// failure on any NON-final object is genuine corruption and is propagated.
+    fn read_envelopes(&self, shard: &ShardKey) -> EngineResult<Vec<(u64, CommandEnvelope)>> {
+        let log_dir = self.shard_dir(shard).join("log");
+        if !log_dir.exists() {
+            return Ok(Vec::new());
+        }
+        // Collect (seq, path) first, sorted, so "final object" is well-defined before we parse.
+        let mut files: Vec<(u64, PathBuf)> = Vec::new();
+        for entry in fs::read_dir(&log_dir).map_err(store)? {
+            let path = entry.map_err(store)?.path();
+            if let Some(seq) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                files.push((seq, path));
             }
-        })
-        .collect()
+        }
+        files.sort_by_key(|(seq, _)| *seq);
+        let last = files.len().saturating_sub(1);
+        let mut rows: Vec<(u64, CommandEnvelope)> = Vec::with_capacity(files.len());
+        for (i, (seq, path)) in files.iter().enumerate() {
+            let json = fs::read_to_string(path).map_err(store)?;
+            match serde_json::from_str(&json) {
+                Ok(env) => rows.push((*seq, env)),
+                // Torn trailing object → uncommitted, skip. Earlier object → real corruption, fail.
+                Err(_) if i == last => continue,
+                Err(e) => return Err(store(e)),
+            }
+        }
+        Ok(rows)
+    }
+
+    fn read_high_water(&self, shard: &ShardKey) -> EngineResult<Option<CommandPosition>> {
+        let path = self.shard_dir(shard).join("high_water.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let hw: HighWater = serde_json::from_str(&fs::read_to_string(&path).map_err(store)?)
+            .map_err(store)?;
+        Ok(Some(CommandPosition::new(shard.clone(), hw.epoch, hw.seq)))
+    }
+
+    /// Reconstruct every queue's projection from the durable object log on open (TD-007 §4 replay), and
+    /// restore `cmd_seq` past the highest minted `obj-N` so a post-restart id never collides.
+    fn rebuild_all(&mut self) -> EngineResult<()> {
+        if !self.root.exists() {
+            fs::create_dir_all(&self.root).map_err(store)?;
+            return Ok(());
+        }
+        let mut max_cmd_seq: Option<u64> = None;
+        for entry in fs::read_dir(&self.root).map_err(store)? {
+            let dir = entry.map_err(store)?.path();
+            let queue_file = dir.join("queue.json");
+            if !queue_file.exists() {
+                continue;
+            }
+            let definition: QueueDefinition =
+                serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?)
+                    .map_err(store)?;
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let shard = launch_shard(&key);
+            let mut proj = ProjectionData::new(definition.priority_model);
+            for (_seq, env) in self.read_envelopes(&shard)? {
+                if let Some(n) = env
+                    .command_id
+                    .0
+                    .strip_prefix("obj-")
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    max_cmd_seq = Some(max_cmd_seq.map_or(n, |m| m.max(n)));
+                }
+                proj.apply_command(&env.command)
+                    .expect("durable log replays into a consistent projection");
+            }
+            self.projections.insert(shard, proj);
+            self.queues.insert(key, definition);
+        }
+        if let Some(m) = max_cmd_seq {
+            self.cmd_seq = m + 1;
+        }
+        Ok(())
+    }
 }
 
-fn decode_epoch(payload: &[u8]) -> Result<u64, LogStoreError> {
-    let bytes: [u8; 8] = payload
-        .try_into()
-        .map_err(|_| LogStoreError::StorageFailure("invalid epoch fence payload".to_string()))?;
-    Ok(u64::from_be_bytes(bytes))
+fn launch_shard(key: &QueueKey) -> ShardKey {
+    ShardKey::new(key.tenant_id.clone(), key.queue_id.clone(), ShardId::ZERO)
 }
 
-fn decode_page(
-    shard: &ShardKey,
-    fetched: Vec<FetchedBatch>,
-    limit: usize,
-) -> Result<CommandPage, LogStoreError> {
-    let has_more = fetched.len() > limit;
-    let mut commands = Vec::new();
-    for batch in fetched.into_iter().take(limit) {
-        let record = decode_record(&batch.payload)?;
-        let position = CommandPosition {
-            shard_key: shard.clone(),
-            sequence: batch.base_offset as u64,
-            backend_epoch: record.backend_epoch,
+/// Object-log backed, eventual-apply-class backend (filesystem object store).
+pub struct ObjectLogBackend {
+    inner: Mutex<Inner>,
+}
+
+impl ObjectLogBackend {
+    /// Open (or create) an object log rooted at `root`, rebuilding every queue's projection from its
+    /// durable objects.
+    pub fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
+        let mut inner = Inner {
+            root: root.into(),
+            projections: HashMap::new(),
+            queues: HashMap::new(),
+            cmd_seq: 0,
         };
-        commands.push((position, record.envelope));
+        inner.rebuild_all()?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
     }
-    let next_position = has_more
-        .then(|| commands.last().map(|(position, _)| position.clone()))
-        .flatten();
-    Ok(CommandPage {
-        commands,
-        next_position,
-    })
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct EnvelopeRecordDto {
-    backend_epoch: u64,
-    envelope: EnvelopeDto,
+// ---------------------------------------------------------------------------
+// UoW writer views (Backend::write)
+// ---------------------------------------------------------------------------
+
+struct ObjLogWriter {
+    root: PathBuf,
 }
 
-struct DecodedRecord {
-    backend_epoch: u64,
-    envelope: CommandEnvelope,
+impl LogWriter for ObjLogWriter {
+    fn append(
+        &mut self,
+        shard: &ShardKey,
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let mut positions = Vec::with_capacity(commands.len());
+        for env in commands {
+            let seq = append_object(&self.root, shard, env)?;
+            positions.push(CommandPosition::new(shard.clone(), 0, seq));
+        }
+        Ok(positions)
+    }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct EnvelopeDto {
-    command_id: String,
-    request_id: Option<String>,
-    tenant_id: String,
-    queue_id: String,
-    shard_id: u32,
-    item_ids: Vec<String>,
-    checksum: u32,
-    created_at: TimestampDto,
-    command: CommandDto,
+struct ObjProjectionWriter<'a> {
+    projections: &'a mut HashMap<ShardKey, ProjectionData>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", content = "body")]
-enum CommandDto {
-    BatchPush {
-        items: Vec<PushItemDto>,
-    },
-    BatchUpdate {
-        item_ids: Vec<String>,
-    },
-    BatchClaim {
-        item_ids: Vec<String>,
-        lease_token: String,
-        lease_expires_at: TimestampDto,
-    },
-    BatchRenewLeases {
-        item_ids: Vec<String>,
-        lease_expires_at: TimestampDto,
-    },
-    BatchFinalize {
-        outcomes: Vec<FinalizeOutcomeDto>,
-    },
-    LeaseExpired {
-        item_ids: Vec<String>,
-    },
-    CohortExpired {
-        group_key: String,
-    },
-    PurgeItems {
-        item_ids: Vec<String>,
-    },
+impl ProjectionWriter for ObjProjectionWriter<'_> {
+    fn apply(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        for (pos, cmd) in positions.iter().zip(commands) {
+            self.projections
+                .get_mut(&pos.shard_key)
+                .ok_or(EngineError::NotFound)?
+                .apply_command(&cmd.command)?;
+        }
+        Ok(())
+    }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct PushItemDto {
-    client_item_key: String,
-    item_id: String,
-    priority: Option<PriorityDto>,
-    not_before: Option<TimestampDto>,
-    max_attempts: u32,
-    payload: Option<Vec<u8>>,
+// ---------------------------------------------------------------------------
+// Ports
+// ---------------------------------------------------------------------------
+
+impl Backend for ObjectLogBackend {
+    fn durability_class(&self) -> DurabilityClass {
+        DurabilityClass::EventualApply
+    }
+
+    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
+    where
+        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
+        R: Send,
+    {
+        // The log-writer needs only `root` (writes objects to the filesystem); the projection-writer
+        // needs only the `projections` map. Disjoint, so the borrow checker is satisfied by destructuring
+        // — the log side gets a cheap `PathBuf` clone, the projection side a `&mut` to its map.
+        let result = {
+            let mut guard = self.inner.lock().expect("objectlog poisoned");
+            let Inner {
+                root, projections, ..
+            } = &mut *guard;
+            let mut lw = ObjLogWriter { root: root.clone() };
+            let mut pw = ObjProjectionWriter { projections };
+            f(&mut lw, &mut pw)
+        };
+        std::future::ready(result)
+    }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", content = "value")]
-enum PriorityDto {
-    Timestamp(TimestampDto),
-    Int64(i64),
-    Decimal { mantissa: i128, scale: u32 },
-    Text(String),
+impl ClaimPort for ObjectLogBackend {
+    fn claim(
+        &self,
+        req: ClaimRequest,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let candidates: Vec<ItemId> = {
+                let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
+                proj.eligible_candidates(req.now, req.max_items)
+            };
+            if candidates.is_empty() {
+                return Ok(Claimed::default());
+            }
+            let cmd = QueueCommand::Claim(ClaimCommand {
+                item_ids: candidates.clone(),
+                lease_token: req.lease_token.clone(),
+                lease_expires_at: req.lease_expires_at,
+            });
+            let env = g.make_envelope(cmd, candidates.clone(), req.now);
+            g.commit_locked(&req.shard, env)?;
+            let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
+            Ok(Claimed {
+                items: proj.render_claimed(&candidates),
+            })
+        })();
+        std::future::ready(result)
+    }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct FinalizeOutcomeDto {
-    item_id: String,
-    kind: FinalizeKindDto,
+impl UpsertPort for ObjectLogBackend {
+    #[allow(clippy::too_many_arguments)]
+    fn replace_if_pending(
+        &self,
+        _shard: &ShardKey,
+        _client_item_key: &ClientItemKey,
+        _new_item_id: ItemId,
+        _priority: Option<PriorityValue>,
+        _group_key: Option<GroupKey>,
+        _not_before: Option<UtcTimestamp>,
+        _payload: Option<Bytes>,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
+        // Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD upsert is not offered on the eventual-apply
+        // class. Refuse with the structured `Unavailable` (`-ERR pqueue unavailable`).
+        std::future::ready(Err(EngineError::Unavailable))
+    }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum FinalizeKindDto {
-    Complete,
-    Fail,
-    Retry,
-    Release,
-    Rearm,
+impl PushPort for ObjectLogBackend {
+    fn push(
+        &self,
+        shard: &ShardKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            // Pre-validate the shard exists before any durable object write (commit_locked expects it).
+            if !g.projections.contains_key(shard) {
+                return Err(EngineError::NotFound);
+            }
+            let max_attempts = g
+                .queues
+                .get(&shard.queue_key())
+                .map(|d| d.retry_policy.max_attempts)
+                .unwrap_or(1);
+            let n = g.cmd_seq;
+            g.cmd_seq += 1;
+            let (push_items, ids) = build_push_items(items, n, "obj", max_attempts);
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("obj-{n}")),
+                request_id: None,
+                shard_id: ShardId::ZERO,
+                item_ids: ids.clone(),
+                command: QueueCommand::Push(PushCommand { items: push_items }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            };
+            g.commit_locked(shard, env)?;
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct TimestampDto {
-    seconds: i64,
-    nanoseconds: u32,
+impl FinalizePort for ObjectLogBackend {
+    fn finalize(
+        &self,
+        shard: &ShardKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.finalize_validate(&outcomes)?;
+            }
+            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
+            let env = g.make_envelope(cmd, item_ids, now);
+            g.commit_locked(shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
 }
 
-fn encode_record(backend_epoch: u64, envelope: &CommandEnvelope) -> Result<Vec<u8>, LogStoreError> {
-    serde_json::to_vec(&EnvelopeRecordDto {
-        backend_epoch,
-        envelope: envelope_to_dto(envelope)?,
-    })
-    .map_err(|err| LogStoreError::StorageFailure(err.to_string()))
-}
-
-fn decode_record(payload: &[u8]) -> Result<DecodedRecord, LogStoreError> {
-    let dto: EnvelopeRecordDto = serde_json::from_slice(payload)
-        .map_err(|err| LogStoreError::StorageFailure(err.to_string()))?;
-    Ok(DecodedRecord {
-        backend_epoch: dto.backend_epoch,
-        envelope: dto_to_envelope(dto.envelope)?,
-    })
-}
-
-fn envelope_to_dto(envelope: &CommandEnvelope) -> Result<EnvelopeDto, LogStoreError> {
-    Ok(EnvelopeDto {
-        command_id: envelope.command_id.0.clone(),
-        request_id: envelope
-            .request_id
-            .as_ref()
-            .map(|id| id.as_str().to_string()),
-        tenant_id: envelope.tenant_id.as_str().to_string(),
-        queue_id: envelope.queue_id.as_str().to_string(),
-        shard_id: envelope.shard_id.as_u32(),
-        item_ids: envelope
-            .item_ids
-            .iter()
-            .map(|id| id.as_str().to_string())
-            .collect(),
-        checksum: envelope.checksum.0,
-        created_at: timestamp_to_dto(&envelope.created_at),
-        command: command_to_dto(&envelope.command)?,
-    })
-}
-
-fn command_to_dto(command: &QueueCommand) -> Result<CommandDto, LogStoreError> {
-    match command {
-        QueueCommand::CreateQueue(_) => Err(LogStoreError::StorageFailure(
-            "CreateQueue is control-plane state and is not encoded in pqueue-objectlog".to_string(),
-        )),
-        QueueCommand::BatchPush(command) => Ok(CommandDto::BatchPush {
-            items: command.items.iter().map(push_item_to_dto).collect(),
-        }),
-        QueueCommand::BatchUpdate(command) => Ok(CommandDto::BatchUpdate {
-            item_ids: ids_to_strings(&command.item_ids),
-        }),
-        QueueCommand::BatchClaim(command) => Ok(CommandDto::BatchClaim {
-            item_ids: ids_to_strings(&command.item_ids),
-            lease_token: command.lease_token.clone(),
-            lease_expires_at: timestamp_to_dto(&command.lease_expires_at),
-        }),
-        QueueCommand::BatchRenewLeases(command) => Ok(CommandDto::BatchRenewLeases {
-            item_ids: ids_to_strings(&command.item_ids),
-            lease_expires_at: timestamp_to_dto(&command.lease_expires_at),
-        }),
-        QueueCommand::BatchFinalize(command) => Ok(CommandDto::BatchFinalize {
-            outcomes: command
-                .outcomes
+impl ReclaimDriver for ObjectLogBackend {
+    fn tick(
+        &self,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let expired: Vec<(ShardKey, Vec<ItemId>)> = g
+                .projections
                 .iter()
-                .map(|outcome| FinalizeOutcomeDto {
-                    item_id: outcome.item_id.as_str().to_string(),
-                    kind: finalize_kind_to_dto(outcome.kind),
+                .filter_map(|(shard, proj)| {
+                    let ids = proj.expired_leases(now);
+                    (!ids.is_empty()).then(|| (shard.clone(), ids))
                 })
-                .collect(),
-        }),
-        QueueCommand::LeaseExpired(command) => Ok(CommandDto::LeaseExpired {
-            item_ids: ids_to_strings(&command.item_ids),
-        }),
-        QueueCommand::CohortExpired(command) => Ok(CommandDto::CohortExpired {
-            group_key: command.group_key.clone(),
-        }),
-        QueueCommand::PurgeItems(command) => Ok(CommandDto::PurgeItems {
-            item_ids: ids_to_strings(&command.item_ids),
-        }),
+                .collect();
+            let mut report = TickReport::default();
+            for (shard, ids) in expired {
+                let cmd = QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                    item_ids: ids.clone(),
+                });
+                let env = g.make_envelope(cmd, ids.clone(), now);
+                g.commit_locked(&shard, env)?;
+                report.leases_reclaimed += ids.len() as u64;
+            }
+            Ok(report)
+        })();
+        std::future::ready(result)
     }
 }
 
-fn ids_to_strings(ids: &[ItemId]) -> Vec<String> {
-    ids.iter().map(|id| id.as_str().to_string()).collect()
-}
+impl ControlPlaneStore for ObjectLogBackend {
+    fn create_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            if let Some(existing) = g.queues.get(&key) {
+                if existing.group_co_residency != definition.group_co_residency
+                    || existing.shard_count != definition.shard_count
+                {
+                    return Err(EngineError::QueueDefinitionConflict);
+                }
+                return Ok(CreateQueueOutcome {
+                    created: false,
+                    definition: existing.clone(),
+                });
+            }
+            let shard = launch_shard(&key);
+            let dir = g.shard_dir(&shard);
+            fs::create_dir_all(&dir).map_err(store)?;
+            fs::write(dir.join("queue.json"), to_json(&definition)?).map_err(store)?;
+            g.projections
+                .insert(shard, ProjectionData::new(definition.priority_model));
+            g.queues.insert(key, definition.clone());
+            Ok(CreateQueueOutcome {
+                created: true,
+                definition,
+            })
+        })();
+        std::future::ready(result)
+    }
 
-fn push_item_to_dto(item: &PushItem) -> PushItemDto {
-    PushItemDto {
-        client_item_key: item.client_item_key.as_str().to_string(),
-        item_id: item.item_id.as_str().to_string(),
-        priority: item.priority.as_ref().map(priority_to_dto),
-        not_before: item.not_before.as_ref().map(timestamp_to_dto),
-        max_attempts: item.max_attempts,
-        payload: item.payload.as_ref().map(|payload| payload.to_vec()),
+    fn queue_definition(
+        &self,
+        key: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .queues
+            .get(key)
+            .cloned()
+            .ok_or(EngineError::NotFound);
+        std::future::ready(result)
+    }
+
+    fn list_queues(
+        &self,
+        tenant: &TenantId,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
+        let result: Vec<QueueId> = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .queues
+            .keys()
+            .filter(|k| k.tenant_id.as_str() == tenant.as_str())
+            .map(|k| k.queue_id.clone())
+            .collect();
+        std::future::ready(Ok(result))
+    }
+
+    fn current_epoch(
+        &self,
+        _shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        std::future::ready(Ok(0))
     }
 }
 
-fn priority_to_dto(priority: &PriorityValue) -> PriorityDto {
-    match priority {
-        PriorityValue::Timestamp(value) => PriorityDto::Timestamp(timestamp_to_dto(value)),
-        PriorityValue::Int64(value) => PriorityDto::Int64(*value),
-        PriorityValue::Decimal(value) => PriorityDto::Decimal {
-            mantissa: value.mantissa,
-            scale: value.scale,
-        },
-        PriorityValue::Text(value) => PriorityDto::Text(value.clone()),
-    }
-}
-
-fn timestamp_to_dto(value: &UtcTimestamp) -> TimestampDto {
-    TimestampDto {
-        seconds: value.seconds,
-        nanoseconds: value.nanoseconds,
-    }
-}
-
-fn finalize_kind_to_dto(kind: FinalizeKind) -> FinalizeKindDto {
-    match kind {
-        FinalizeKind::Complete => FinalizeKindDto::Complete,
-        FinalizeKind::Fail => FinalizeKindDto::Fail,
-        FinalizeKind::Retry => FinalizeKindDto::Retry,
-        FinalizeKind::Release => FinalizeKindDto::Release,
-        FinalizeKind::Rearm => FinalizeKindDto::Rearm,
-    }
-}
-
-fn dto_to_envelope(dto: EnvelopeDto) -> Result<CommandEnvelope, LogStoreError> {
-    let command = dto_to_command(dto.command)?;
-    Ok(CommandEnvelope {
-        command_id: CommandId(dto.command_id),
-        request_id: dto
-            .request_id
-            .map(RequestId::new)
-            .transpose()
-            .map_err(id_err)?,
-        tenant_id: TenantId::new(dto.tenant_id).map_err(id_err)?,
-        queue_id: QueueId::new(dto.queue_id).map_err(id_err)?,
-        shard_id: pqueue_storage::types::ShardId::new(dto.shard_id),
-        item_ids: dto
-            .item_ids
-            .into_iter()
-            .map(ItemId::new)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(id_err)?,
-        command,
-        checksum: CommandChecksum(dto.checksum),
-        created_at: dto_to_timestamp(dto.created_at)?,
-    })
-}
-
-fn dto_to_command(dto: CommandDto) -> Result<QueueCommand, LogStoreError> {
-    match dto {
-        CommandDto::BatchPush { items } => Ok(QueueCommand::BatchPush(BatchPushCommand {
-            items: items
+impl LogRead for ObjectLogBackend {
+    fn read_from(
+        &self,
+        shard: &ShardKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
+        let result = (|| {
+            let start = match &from {
+                Some(p) => p.sequence + 1,
+                None => 0,
+            };
+            let g = self.inner.lock().expect("poisoned");
+            let all = g.read_envelopes(shard)?;
+            let total = all.len() as u64;
+            let entries: Vec<(CommandPosition, CommandEnvelope)> = all
                 .into_iter()
-                .map(dto_to_push_item)
-                .collect::<Result<Vec<_>, _>>()?,
-        })),
-        CommandDto::BatchUpdate { item_ids } => Ok(QueueCommand::BatchUpdate(BatchUpdateCommand {
-            item_ids: strings_to_ids(item_ids)?,
-        })),
-        CommandDto::BatchClaim {
-            item_ids,
-            lease_token,
-            lease_expires_at,
-        } => Ok(QueueCommand::BatchClaim(BatchClaimCommand {
-            item_ids: strings_to_ids(item_ids)?,
-            lease_token,
-            lease_expires_at: dto_to_timestamp(lease_expires_at)?,
-        })),
-        CommandDto::BatchRenewLeases {
-            item_ids,
-            lease_expires_at,
-        } => Ok(QueueCommand::BatchRenewLeases(BatchRenewLeasesCommand {
-            item_ids: strings_to_ids(item_ids)?,
-            lease_expires_at: dto_to_timestamp(lease_expires_at)?,
-        })),
-        CommandDto::BatchFinalize { outcomes } => {
-            Ok(QueueCommand::BatchFinalize(BatchFinalizeCommand {
-                outcomes: outcomes
-                    .into_iter()
-                    .map(|outcome| {
-                        Ok(FinalizeOutcome {
-                            item_id: ItemId::new(outcome.item_id).map_err(id_err)?,
-                            kind: dto_to_finalize_kind(outcome.kind),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, LogStoreError>>()?,
-            }))
-        }
-        CommandDto::LeaseExpired { item_ids } => {
-            Ok(QueueCommand::LeaseExpired(LeaseExpiredCommand {
-                item_ids: strings_to_ids(item_ids)?,
-            }))
-        }
-        CommandDto::CohortExpired { group_key } => {
-            Ok(QueueCommand::CohortExpired(CohortExpiredCommand {
-                group_key,
-            }))
-        }
-        CommandDto::PurgeItems { item_ids } => Ok(QueueCommand::PurgeItems(PurgeItemsCommand {
-            item_ids: strings_to_ids(item_ids)?,
-        })),
+                .filter(|(seq, _)| *seq >= start)
+                .take(limit)
+                .map(|(seq, env)| (CommandPosition::new(shard.clone(), 0, seq), env))
+                .collect();
+            let consumed = start + entries.len() as u64;
+            let next =
+                (consumed < total).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            Ok(CommandPage { entries, next })
+        })();
+        std::future::ready(result)
     }
 }
 
-fn dto_to_push_item(dto: PushItemDto) -> Result<PushItem, LogStoreError> {
-    Ok(PushItem {
-        client_item_key: ClientItemKey::new(dto.client_item_key).map_err(id_err)?,
-        item_id: ItemId::new(dto.item_id).map_err(id_err)?,
-        priority: dto.priority.map(dto_to_priority).transpose()?,
-        not_before: dto.not_before.map(dto_to_timestamp).transpose()?,
-        max_attempts: dto.max_attempts,
-        payload: dto.payload.map(bytes::Bytes::from),
-    })
-}
+impl ProjectionRead for ObjectLogBackend {
+    fn select_eligible(
+        &self,
+        shard: &ShardKey,
+        now: UtcTimestamp,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.select_eligible(now, limit))
+        })();
+        std::future::ready(result)
+    }
 
-fn dto_to_priority(dto: PriorityDto) -> Result<PriorityValue, LogStoreError> {
-    Ok(match dto {
-        PriorityDto::Timestamp(value) => PriorityValue::Timestamp(dto_to_timestamp(value)?),
-        PriorityDto::Int64(value) => PriorityValue::Int64(value),
-        PriorityDto::Decimal { mantissa, scale } => {
-            PriorityValue::Decimal(DecimalValue { mantissa, scale })
-        }
-        PriorityDto::Text(value) => PriorityValue::Text(value),
-    })
-}
+    fn peek(
+        &self,
+        shard: &ShardKey,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.peek(limit))
+        })();
+        std::future::ready(result)
+    }
 
-fn strings_to_ids(ids: Vec<String>) -> Result<Vec<ItemId>, LogStoreError> {
-    ids.into_iter()
-        .map(ItemId::new)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(id_err)
-}
+    fn pending(
+        &self,
+        shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
 
-fn dto_to_timestamp(dto: TimestampDto) -> Result<UtcTimestamp, LogStoreError> {
-    UtcTimestamp::new(dto.seconds, dto.nanoseconds)
-        .map_err(|err| LogStoreError::StorageFailure(err.to_string()))
-}
-
-fn dto_to_finalize_kind(dto: FinalizeKindDto) -> FinalizeKind {
-    match dto {
-        FinalizeKindDto::Complete => FinalizeKind::Complete,
-        FinalizeKindDto::Fail => FinalizeKind::Fail,
-        FinalizeKindDto::Retry => FinalizeKind::Retry,
-        FinalizeKindDto::Release => FinalizeKind::Release,
-        FinalizeKindDto::Rearm => FinalizeKind::Rearm,
+    fn metrics(
+        &self,
+        queue: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let shard = launch_shard(queue);
+            let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.metrics())
+        })();
+        std::future::ready(result)
     }
 }
 
-fn id_err(err: pqueue_core::IdentifierError) -> LogStoreError {
-    LogStoreError::StorageFailure(err.to_string())
+impl SnapshotStore for ObjectLogBackend {
+    fn write_snapshot(
+        &self,
+        shard: &ShardKey,
+        position: CommandPosition,
+        snapshot: ProjectionSnapshot,
+    ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let snap_dir = g.shard_dir(shard).join("snapshots");
+            fs::create_dir_all(&snap_dir).map_err(store)?;
+            // ref index = max(existing snap-N) + 1 (compaction-safe; never overwrites a retained ref).
+            let mut max: Option<u64> = None;
+            for entry in fs::read_dir(&snap_dir).map_err(store)? {
+                if let Some(n) = entry
+                    .map_err(store)?
+                    .path()
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_prefix("snap-"))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    max = Some(max.map_or(n, |m| m.max(n)));
+                }
+            }
+            let ref_id = format!("snap-{}", max.map_or(0, |m| m + 1));
+            fs::write(
+                snap_dir.join(format!("{ref_id}.json")),
+                to_json(&SnapshotObject {
+                    epoch: position.backend_epoch,
+                    seq: position.sequence,
+                    payload: snapshot.payload,
+                })?,
+            )
+            .map_err(store)?;
+            Ok(SnapshotRef {
+                shard_key: shard.clone(),
+                position,
+                ref_id,
+            })
+        })();
+        std::future::ready(result)
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let snap_dir = g.shard_dir(shard).join("snapshots");
+            if !snap_dir.exists() {
+                return Ok(None);
+            }
+            let mut best: Option<(usize, SnapshotObject, String)> = None;
+            for entry in fs::read_dir(&snap_dir).map_err(store)? {
+                let path = entry.map_err(store)?.path();
+                let Some(ref_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let n = ref_id.strip_prefix("snap-").and_then(|s| s.parse::<usize>().ok());
+                let obj: SnapshotObject =
+                    serde_json::from_str(&fs::read_to_string(&path).map_err(store)?)
+                        .map_err(store)?;
+                let n = n.unwrap_or(0);
+                if best.as_ref().map(|(bn, _, _)| n >= *bn).unwrap_or(true) {
+                    best = Some((n, obj, ref_id.to_string()));
+                }
+            }
+            Ok(best.map(|(_, obj, ref_id)| SnapshotRef {
+                shard_key: shard.clone(),
+                position: CommandPosition::new(shard.clone(), obj.epoch, obj.seq),
+                ref_id,
+            }))
+        })();
+        std::future::ready(result)
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: &SnapshotRef,
+    ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let path = g
+                .shard_dir(&snapshot_ref.shard_key)
+                .join("snapshots")
+                .join(format!("{}.json", snapshot_ref.ref_id));
+            if !path.exists() {
+                return Err(EngineError::NotFound);
+            }
+            let obj: SnapshotObject =
+                serde_json::from_str(&fs::read_to_string(&path).map_err(store)?).map_err(store)?;
+            Ok(ProjectionSnapshot { payload: obj.payload })
+        })();
+        std::future::ready(result)
+    }
+
+    fn high_water(
+        &self,
+        shard: &ShardKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        let g = self.inner.lock().expect("poisoned");
+        let result = g.read_high_water(shard);
+        std::future::ready(result)
+    }
+
+    fn set_high_water(
+        &self,
+        shard: &ShardKey,
+        position: CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            if let Some(cur) = g.read_high_water(shard)?
+                && !cur.precedes(&position)
+                && cur != position
+            {
+                return Err(EngineError::Invalid("high-water regression"));
+            }
+            let dir = g.shard_dir(shard);
+            fs::create_dir_all(&dir).map_err(store)?;
+            fs::write(
+                dir.join("high_water.json"),
+                to_json(&HighWater {
+                    epoch: position.backend_epoch,
+                    seq: position.sequence,
+                })?,
+            )
+            .map_err(store)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
 }

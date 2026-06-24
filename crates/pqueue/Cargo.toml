@@ -1,0 +1,22 @@
+[package]
+name = "pqueue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# The ergonomic Rust LIBRARY interface — one of the two faces of the engine (the other is RESP). A thin
+# composition over the engine ports: push/upsert/claim/ack/nack/peek/metrics. Depends on the domain
+# (engine + core) only; a concrete backend + clock are injected (hexagonal).
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+bytes = "1"
+
+[dev-dependencies]
+pqueue-memory = { path = "../pqueue-memory" }
+pqueue-objectlog = { path = "../pqueue-objectlog" }
+tokio = { version = "1", features = ["rt", "macros"] }

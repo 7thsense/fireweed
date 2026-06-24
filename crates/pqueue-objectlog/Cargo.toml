@@ -5,17 +5,29 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+# Driven adapter (EVENTUAL-APPLY durability class): the command log is a set of immutable per-command
+# objects on an object store (a local filesystem stands in for S3 here — no server). The projection is
+# the shared `pqueue-projection` materialization, rebuilt from the object log. Upsert (atomic XDEL+XADD)
+# is NOT offered on this class (Invariant 2) and returns `-ERR pqueue unavailable`.
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
-pqueue-storage = { path = "../pqueue-storage" }
-object-log = { git = "https://github.com/easel/object-log", rev = "0adc8b0", features = ["s3"] }
-bytes = "1.10"
-futures-util = "0.3"
-parking_lot = "0.12"
-serde = { version = "1", features = ["derive"] }
+pqueue-engine = { path = "../pqueue-engine" }
+pqueue-projection = { path = "../pqueue-projection" }
+serde = "1"
 serde_json = "1"
-tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync"] }
+bytes = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+pqueue-conformance = { path = "../pqueue-conformance" }
 
 [[test]]
-name = "object_log_commit_recovery_tests"
-path = "tests/object_log_commit_recovery_tests.rs"
+name = "conformance"
+path = "tests/conformance.rs"
+
+[[test]]
+name = "durability"
+path = "tests/durability.rs"

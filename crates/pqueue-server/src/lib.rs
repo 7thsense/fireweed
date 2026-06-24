@@ -1,0 +1,216 @@
+#![forbid(unsafe_code)]
+//! # pqueue-server
+//!
+//! The **composition root**: the single place that selects a concrete backend (memory / sqlite /
+//! objectlog) and wires it to the two faces of pqueue. It binds the RESP front ([`pqueue_resp::serve`])
+//! and runs a **background [`ReclaimDriver`] task** that periodically `tick`s the engine so expired
+//! leases are reclaimed on a *quiet* queue with no client traffic — closing the orphan-on-quiet-queue
+//! gap (TD-007 §3) that the client-triggered `XAUTOCLAIM` alone leaves open.
+//!
+//! Hexagonal: this is the ONLY crate that names concrete adapters; everything else depends only inward.
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use pqueue_core::QueueDefinition;
+use pqueue_engine::{Clock, EngineError, EngineResult};
+use pqueue_memory::MemoryBackend;
+use pqueue_objectlog::ObjectLogBackend;
+use pqueue_resp::{RespBackend, SystemClock, serve};
+use pqueue_sqlite::SqliteBackend;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+
+/// Which durable backend the server runs over.
+pub enum Backend {
+    /// In-memory reference backend (atomic class; non-durable).
+    Memory,
+    /// Sqlite durable log at `path` (atomic class).
+    Sqlite(PathBuf),
+    /// Object-log durable store rooted at `path` (eventual-apply class).
+    ObjectLog(PathBuf),
+}
+
+/// Server configuration.
+pub struct Config {
+    pub backend: Backend,
+    /// Listen address, e.g. `"127.0.0.1:6380"` (use `":0"` for an ephemeral port in tests).
+    pub listen: String,
+    /// How often the background reclaim task ticks the engine.
+    pub reclaim_interval: Duration,
+    /// Queues to provision at startup. The RESP front has no create-queue command, so a server started
+    /// with no queues here (and no out-of-band creation) would reject every request with `no such
+    /// queue` — provision them up front.
+    pub queues: Vec<QueueDefinition>,
+}
+
+/// Observable counters for the background reclaim loop (so a swallowed tick error is countable, not
+/// silent, and the reclaim work is surfaced for ops).
+#[derive(Default)]
+struct ReclaimCounters {
+    ticks: AtomicU64,
+    errors: AtomicU64,
+    leases_reclaimed: AtomicU64,
+}
+
+/// A point-in-time snapshot of the reclaim loop's counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimStats {
+    pub ticks: u64,
+    pub errors: u64,
+    pub leases_reclaimed: u64,
+}
+
+/// A running server: the bound address + the two background tasks (RESP accept loop + reclaim ticker).
+pub struct Server {
+    addr: SocketAddr,
+    serve_task: JoinHandle<()>,
+    reclaim_task: JoinHandle<()>,
+    reclaim: Arc<ReclaimCounters>,
+}
+
+impl Server {
+    /// The actually-bound listen address (resolves `:0` to the OS-assigned port).
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Liveness probe: neither background task has panicked/aborted/finished. NOTE: this is task
+    /// liveness, not deep readiness — it does not prove the listener accepts or that reclaim ticks
+    /// succeed. Pair with [`Server::reclaim_stats`] to detect a tick that is erroring every cycle.
+    pub fn is_running(&self) -> bool {
+        !self.serve_task.is_finished() && !self.reclaim_task.is_finished()
+    }
+
+    /// A snapshot of the background reclaim loop's counters (ticks run, tick errors, leases reclaimed).
+    pub fn reclaim_stats(&self) -> ReclaimStats {
+        ReclaimStats {
+            ticks: self.reclaim.ticks.load(Ordering::Relaxed),
+            errors: self.reclaim.errors.load(Ordering::Relaxed),
+            leases_reclaimed: self.reclaim.leases_reclaimed.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Stop serving and stop the reclaim ticker. NOTE: this aborts the accept loop + the ticker; it is
+    /// NOT a graceful drain — already-accepted connection handlers (spawned inside `serve`) are left to
+    /// finish their current command and exit on the client closing the socket, not cancelled here. A
+    /// graceful connection-drain is tracked as follow-up work.
+    pub fn shutdown(&self) {
+        self.serve_task.abort();
+        self.reclaim_task.abort();
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn io_err(e: std::io::Error) -> EngineError {
+    EngineError::Storage(e.to_string())
+}
+
+/// Construct the configured backend + a `SystemClock`, provision the config's queues, then run the
+/// server. After this returns the server is ready to serve requests against the provisioned queues.
+pub async fn start(config: Config) -> EngineResult<Server> {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    match config.backend {
+        Backend::Memory => {
+            start_with(
+                Arc::new(MemoryBackend::new()),
+                clock,
+                &config.listen,
+                config.reclaim_interval,
+                &config.queues,
+            )
+            .await
+        }
+        Backend::Sqlite(path) => {
+            let p = path.to_str().ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+            start_with(
+                Arc::new(SqliteBackend::open(p)?),
+                clock,
+                &config.listen,
+                config.reclaim_interval,
+                &config.queues,
+            )
+            .await
+        }
+        Backend::ObjectLog(path) => {
+            start_with(
+                Arc::new(ObjectLogBackend::open(path)?),
+                clock,
+                &config.listen,
+                config.reclaim_interval,
+                &config.queues,
+            )
+            .await
+        }
+    }
+}
+
+/// Run the server over an already-constructed backend + clock (the generic core; tests inject a
+/// controllable clock and keep a handle to the backend). `queues` are created before serving.
+pub async fn start_with<B: RespBackend>(
+    backend: Arc<B>,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server> {
+    // Provision queues up front (idempotent create), so the wire surface — which has no create-queue
+    // command — has something to serve. A definition conflict surfaces as a structured error.
+    for def in queues {
+        backend.create_queue(def.clone()).await?;
+    }
+    let listener = TcpListener::bind(listen).await.map_err(io_err)?;
+    let addr = listener.local_addr().map_err(io_err)?;
+    let reclaim = Arc::new(ReclaimCounters::default());
+    let serve_task = tokio::spawn(serve(listener, backend.clone(), clock.clone()));
+    let reclaim_task = tokio::spawn(reclaim_loop(
+        backend,
+        clock,
+        reclaim_interval,
+        reclaim.clone(),
+    ));
+    Ok(Server {
+        addr,
+        serve_task,
+        reclaim_task,
+        reclaim,
+    })
+}
+
+/// The background reclaim driver: every `interval`, `tick(now)` so expired leases are reclaimed without
+/// any client traffic (TD-007 §3). Best-effort + idempotent (the engine's `tick` makes no transitions at
+/// the same/earlier `now`). A tick error is COUNTED (not silently dropped) so a persistently-failing
+/// reclaim is observable via [`Server::reclaim_stats`] rather than hiding behind a green liveness probe.
+async fn reclaim_loop<B: RespBackend>(
+    backend: Arc<B>,
+    clock: Arc<dyn Clock>,
+    interval: Duration,
+    counters: Arc<ReclaimCounters>,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        counters.ticks.fetch_add(1, Ordering::Relaxed);
+        match backend.tick(clock.now()).await {
+            Ok(report) => {
+                if report.leases_reclaimed > 0 {
+                    counters
+                        .leases_reclaimed
+                        .fetch_add(report.leases_reclaimed, Ordering::Relaxed);
+                }
+            }
+            Err(_) => {
+                counters.errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}

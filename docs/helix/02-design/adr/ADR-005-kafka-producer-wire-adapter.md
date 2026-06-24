@@ -14,7 +14,15 @@ ddx:
 
 ## Status
 
-Accepted
+**SUPERSEDED by [ADR-007](ADR-007-hexagonal-architecture-and-two-interfaces.md) (hexagonal migration,
+Phase 6).** The Kafka producer wire adapter and its crate `pqueue-kafka` have been **DELETED**. The
+clean-cutover architecture exposes exactly **two** interfaces over one CQRS engine — a RESP/Redis-Streams
+wire front ([TD-006](../technical-designs/TD-006-resp-wire-adapter.md)) and a Rust library facade (the
+`pqueue` crate) — and Kafka compatibility is not among them (ADR-007 §"Interface sprawl"). This ADR is
+retained for historical context only; its decision is no longer in effect. See
+[`hexagonal-migration-plan.md`](../../04-build/hexagonal-migration-plan.md).
+
+_(Historical — as originally accepted 2026-06-16:)_ Accepted
 
 ## Context
 

@@ -1,0 +1,181 @@
+//! Composition-root integration: the background ReclaimDriver task recovers orphaned leases with no
+//! client traffic, and the wired server is drivable by an off-the-shelf Redis client.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use pqueue_core::{
+    EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy,
+    RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+};
+use pqueue_engine::{
+    ClaimPort, ClaimRequest, Clock, ProjectionRead, PushPort, PushSpec, QueueKey, ShardId, ShardKey,
+};
+use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_resp::SystemClock;
+use pqueue_server::{Backend, Config, start, start_with};
+use redis::streams::StreamReadReply;
+
+fn qkey() -> QueueKey {
+    QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
+}
+fn shard() -> ShardKey {
+    ShardKey::new(
+        TenantId::new("t1").unwrap(),
+        QueueId::new("q1").unwrap(),
+        ShardId::ZERO,
+    )
+}
+fn ts(s: i64) -> UtcTimestamp {
+    UtcTimestamp::new(s, 0).unwrap()
+}
+
+fn qdef() -> QueueDefinition {
+    QueueDefinition {
+        tenant_id: TenantId::new("t1").unwrap(),
+        queue_id: QueueId::new("q1").unwrap(),
+        priority_model: PriorityModel {
+            kind: PriorityModelKind::Int64,
+            direction: PriorityDirection::Ascending,
+            tie_breaker: PriorityTieBreaker::CreatedSequence,
+        },
+        ordering_mode: OrderingMode::Strict,
+        group_co_residency: false,
+        progress_bound_ms: 60_000,
+        eligibility_policy: EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: RecurrencePolicy::default(),
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: 60_000,
+        max_lease_duration_ms: 60_000,
+        retry_policy: RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: None,
+        shard_count: 1,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
+    let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(1_000)); // t = 1000s
+
+    // Start the server (provisions the queue) with a fast reclaim ticker + the injected manual clock.
+    let server = start_with(
+        backend.clone(),
+        clock.clone() as Arc<dyn Clock>,
+        "127.0.0.1:0",
+        Duration::from_millis(5),
+        &[qdef()],
+    )
+    .await
+    .unwrap();
+    assert!(server.is_running(), "serve + reclaim tasks are alive");
+
+    // Push + claim DIRECTLY on the backend (NO RESP client) — the item is leased until t = 1060s.
+    backend
+        .push(
+            &shard(),
+            vec![PushSpec {
+                priority: Some(PriorityValue::Int64(5)),
+                ..Default::default()
+            }],
+            clock.now(),
+        )
+        .await
+        .unwrap();
+    let claimed = backend
+        .claim(ClaimRequest {
+            shard: shard(),
+            worker_id: WorkerId::new("w").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("L1").unwrap(),
+            lease_expires_at: ts(1_060),
+            now: clock.now(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(backend.metrics(&qkey()).await.unwrap().leased, 1);
+
+    // The worker "crashes": no renew, no ack. Advance the clock past the lease — and DO NOTHING ELSE.
+    clock.set(1_061); // 1s past expiry
+    // Poll (not a fixed sleep) for the background reclaim task to recover the orphaned lease — no client
+    // traffic occurs during this wait, so the ONLY actor that can change state is the reclaim loop.
+    let mut reclaimed = false;
+    for _ in 0..200 {
+        if backend.metrics(&qkey()).await.unwrap().leased == 0 {
+            reclaimed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        reclaimed,
+        "the orphaned lease was reclaimed by the background task alone (TD-007 §3)"
+    );
+    let m = backend.metrics(&qkey()).await.unwrap();
+    assert_eq!((m.pending, m.leased), (1, 0));
+    assert!(
+        server.reclaim_stats().leases_reclaimed >= 1,
+        "the reclaim is counted/observable, not silently swallowed"
+    );
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_provisions_queues_and_serves_end_to_end() {
+    // `start()` constructs the backend internally, so the ONLY way it can serve a request is if it
+    // provisions the config's queues. Boot it, then drive it with a stock client (no out-of-band setup).
+    let server = start(Config {
+        backend: Backend::Memory,
+        listen: "127.0.0.1:0".to_string(),
+        reclaim_interval: Duration::from_secs(60),
+        queues: vec![qdef()],
+    })
+    .await
+    .unwrap();
+
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1").arg("*").arg("priority").arg(7)
+        .query_async(&mut con).await.unwrap();
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(reply.keys[0].ids.len(), 1, "provisioned queue serves a real request");
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boots_and_is_drivable_by_offtheshelf_redis_client() {
+    let backend = Arc::new(MemoryBackend::new());
+    let server = start_with(
+        backend.clone(),
+        Arc::new(SystemClock),
+        "127.0.0.1:0",
+        Duration::from_secs(60),
+        &[qdef()],
+    )
+    .await
+    .unwrap();
+
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1").arg("*").arg("priority").arg(5)
+        .query_async(&mut con).await.unwrap();
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
+        .query_async(&mut con).await.unwrap();
+    let id = reply.keys[0].ids[0].id.clone();
+    let acked: i64 = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&id)
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(acked, 1);
+    assert_eq!(backend.metrics(&qkey()).await.unwrap().complete, 1);
+    server.shutdown();
+}

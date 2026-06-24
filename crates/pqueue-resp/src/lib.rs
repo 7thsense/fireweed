@@ -15,8 +15,9 @@ use pqueue_core::{
     ClientItemKey, ItemId, LeaseToken, PriorityValue, QueueId, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, ClaimedItem, ControlPlaneStore, EngineError, FinalizeKind,
-    FinalizeOutcome, FinalizePort, ProjectionRead, ShardId, ShardKey, UpsertOutcome, UpsertPort,
+    Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
+    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, ReclaimDriver, ShardId,
+    ShardKey, UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -28,6 +29,7 @@ pub trait RespBackend:
     + ClaimPort
     + UpsertPort
     + FinalizePort
+    + ReclaimDriver
     + ControlPlaneStore
     + ProjectionRead
     + Send
@@ -40,6 +42,7 @@ impl<T> RespBackend for T where
         + ClaimPort
         + UpsertPort
         + FinalizePort
+        + ReclaimDriver
         + ControlPlaneStore
         + ProjectionRead
         + Send
@@ -50,24 +53,43 @@ impl<T> RespBackend for T where
 
 struct ServerState {
     ids: AtomicU64,
+    clock: Arc<dyn Clock>,
 }
 
 impl ServerState {
     /// Monotonic unique id: one shared pool for item ids, lease tokens, and command ids (all just
-    /// need uniqueness in the smoke front).
+    /// need uniqueness over this front).
     fn next(&self) -> u64 {
         self.ids.fetch_add(1, Ordering::SeqCst)
     }
+    fn now(&self) -> UtcTimestamp {
+        self.clock.now()
+    }
 }
 
-// DEFERRED (composition root, Phase 4/5): a fixed stub clock. Leases never expire and `not_before`
-// is always due, so reclaim/delay CANNOT be exercised over this front. The engine's `Clock` port is
-// threaded by the composition root later; do not use this front for any time-dependent behavior.
-fn now_ts() -> UtcTimestamp {
-    UtcTimestamp::new(0, 0).expect("ts")
+/// Wall-clock `Clock` for production use; tests inject a controllable clock (e.g. `ManualClock`).
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> UtcTimestamp {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid unix ts")
+    }
 }
-fn far_future() -> UtcTimestamp {
-    UtcTimestamp::new(1_000_000, 0).expect("ts")
+
+/// `ts + millis`, normalizing nanoseconds (used to derive a lease expiry from `now`).
+fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
+    let total_nanos = ts.seconds as i128 * 1_000_000_000 + ts.nanoseconds as i128
+        + millis as i128 * 1_000_000;
+    let seconds = (total_nanos.div_euclid(1_000_000_000)) as i64;
+    let nanos = (total_nanos.rem_euclid(1_000_000_000)) as u32;
+    UtcTimestamp::new(seconds, nanos).expect("valid ts")
+}
+
+fn ts_ms(ts: UtcTimestamp) -> i64 {
+    ts.seconds * 1000 + (ts.nanoseconds / 1_000_000) as i64
 }
 
 /// Parse a stream key `tenant:queue` (or bare `queue` with a default tenant) into a launch shard key.
@@ -170,9 +192,11 @@ async fn read_command<R: AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Opt
 // ---------------------------------------------------------------------------
 
 /// Serve RESP connections over `listener`, dispatching to `backend`, until the listener closes.
-pub async fn serve<B: RespBackend>(listener: TcpListener, backend: Arc<B>) {
+/// `clock` supplies wall time for lease expiry + reclaim (inject a controllable clock in tests).
+pub async fn serve<B: RespBackend>(listener: TcpListener, backend: Arc<B>, clock: Arc<dyn Clock>) {
     let state = Arc::new(ServerState {
         ids: AtomicU64::new(1),
+        clock,
     });
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -226,6 +250,8 @@ async fn dispatch<B: RespBackend>(
         "XADD" => xadd(backend, state, args).await,
         "XREADGROUP" => xreadgroup(backend, state, args).await,
         "XACK" => xack(backend, state, args).await,
+        "XPENDING" => xpending(backend, state, args).await,
+        "XAUTOCLAIM" => xautoclaim(backend, state, args).await,
         other => Resp::Error(format!("ERR unknown command '{other}'")),
     }
 }
@@ -245,21 +271,31 @@ async fn xadd<B: RespBackend>(
     };
     // Reserved container fields (TD-006 section 2). Field/value pairs start at index 3.
     let mut priority: Option<PriorityValue> = None;
-    let mut fields = args[3..].chunks_exact(2);
-    for pair in fields.by_ref() {
+    let mut client_item_key: Option<String> = None;
+    for pair in args[3..].chunks_exact(2) {
         if arg_eq(&pair[0], "priority")
             && let Ok(s) = std::str::from_utf8(&pair[1])
             && let Ok(n) = s.parse::<i64>()
         {
             priority = Some(PriorityValue::Int64(n));
+        } else if arg_eq(&pair[0], "client_item_key")
+            && let Ok(s) = std::str::from_utf8(&pair[1])
+        {
+            client_item_key = Some(s.to_string());
         }
     }
-    // Only `priority` is read in this smoke front; other reserved container fields (group_key,
-    // not_before, payload, client_item_key - TD-006 section 2) are DEFERRED to Phase 4. No
-    // client_item_key means each XADD is a unique insert (append semantics).
+    // `client_item_key` is the upsert primary key (TD-006 §2, Invariant 2): a second XADD with the same
+    // key REPLACES the pending item (XADD-on-key upsert). Absent a key, each XADD is a unique insert
+    // (append). Remaining reserved fields (group_key/not_before/payload) are DEFERRED to a later chunk.
     let n = state.next();
     let item_id = ItemId::new(format!("{n}-0")).expect("id");
-    let key = ClientItemKey::new(format!("k-{n}")).expect("key");
+    let key = match client_item_key {
+        Some(k) => match ClientItemKey::new(k) {
+            Ok(k) => k,
+            Err(_) => return Resp::Error("ERR invalid client_item_key".into()),
+        },
+        None => ClientItemKey::new(format!("k-{n}")).expect("key"),
+    };
     match backend
         .replace_if_pending(
             &shard,
@@ -269,7 +305,7 @@ async fn xadd<B: RespBackend>(
             None,
             None,
             None,
-            now_ts(),
+            state.now(),
         )
         .await
     {
@@ -322,14 +358,21 @@ async fn xreadgroup<B: RespBackend>(
         Ok(sh) => sh,
         Err(e) => return err_reply(&e),
     };
+    // Lease TTL = the queue's `max_lease_duration_ms` from `now` — leases actually expire, so a crashed
+    // worker's items are reclaimed by the ReclaimDriver / XAUTOCLAIM (TD-006 §3).
+    let now = state.now();
+    let lease_ms = match backend.queue_definition(&shard.queue_key()).await {
+        Ok(def) => def.max_lease_duration_ms,
+        Err(e) => return err_reply(&e),
+    };
     let lease = state.next();
     let req = ClaimRequest {
         shard,
         worker_id: WorkerId::new("resp").expect("w"),
         max_items: count,
         lease_token: LeaseToken::new(format!("L{lease}")).expect("lease"),
-        lease_expires_at: far_future(),
-        now: now_ts(),
+        lease_expires_at: add_millis(now, lease_ms),
+        now,
     };
     match backend.claim(req).await {
         Ok(claimed) if claimed.items.is_empty() => Resp::NullArray, // Redis returns nil when none
@@ -368,12 +411,13 @@ fn claimed_to_entry(item: &ClaimedItem) -> Resp {
 
 /// `XACK key group id [id ...]` - finalize-complete the acked entries.
 ///
-/// DEFERRED (Phase 4): no lease/PEL ownership or stale-fence validation, and the reply is the
-/// *requested* id count, not the actually-finalized count. Real XACK must surface
-/// `-ERR pqueue stale_lease`/`superseded` and count only PEL removals (TD-006 section 3).
+/// The batch is all-or-nothing (FinalizePort pre-validates): a fenced lease → `-ERR pqueue stale_lease`,
+/// a superseded id → `-ERR pqueue superseded`, a non-leased id → `-ERR pqueue invalid`, NOTHING is
+/// committed, and the reply is the acked count only on full success. (Per-id partial results +
+/// lease-token/PEL ownership are a later refinement, TD-006 §3.)
 async fn xack<B: RespBackend>(
     backend: &Arc<B>,
-    _state: &Arc<ServerState>,
+    state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
     if args.len() < 4 {
@@ -395,8 +439,182 @@ async fn xack<B: RespBackend>(
             kind: FinalizeKind::Complete,
         })
         .collect();
-    match backend.finalize(&shard, outcomes, now_ts()).await {
+    match backend.finalize(&shard, outcomes, state.now()).await {
         Ok(()) => Resp::Int(ids.len() as i64),
+        Err(e) => err_reply(&e),
+    }
+}
+
+/// Order key for a pqueue item id `"{n}-0"`: the numeric `{n}` prefix (insertion order), NOT a lexical
+/// string compare (which would mis-order `"10-0" < "2-0"` past 10 items). Non-conforming ids sort last.
+fn id_order(id: &str) -> (u64, &str) {
+    let n = id
+        .split_once('-')
+        .and_then(|(a, _)| a.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    (n, id)
+}
+
+/// `XPENDING key group [start end count [consumer]]` — the in-flight (leased, not-yet-acked) items.
+///
+/// Summary form (`XPENDING key group`): `[count, min-id, max-id, [[consumer, count]]]`, where the
+/// `consumer` axis is the **lease token** (pqueue's closest analog of a Redis consumer — who holds the
+/// lease). Extended form (`XPENDING key group start end count`): one `[id, consumer(=lease token),
+/// idle-ms, delivery-count]` per leased item, capped at the requested `count`.
+///
+/// NOTE (TD-006 §6.1 divergence): delivery is priority-ordered, so the id `min`/`max` bounds are NOT a
+/// meaningful claimable range — they reflect insertion order only. `idle-ms` is the wall-clock time since
+/// the item was last delivered (= `now - (lease_expires_at - max_lease_duration_ms)`).
+async fn xpending<B: RespBackend>(
+    backend: &Arc<B>,
+    state: &Arc<ServerState>,
+    args: &[Vec<u8>],
+) -> Resp {
+    if args.len() < 3 {
+        return Resp::Error("ERR wrong number of arguments for 'xpending'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let leases = match backend.pending(&shard).await {
+        Ok(l) => l,
+        Err(e) => return err_reply(&e),
+    };
+    let extended = args.len() > 3; // start/end/count present → per-entry form
+    if !extended {
+        // Summary form. Empty → `[0, nil, nil, nil]` (Redis convention).
+        if leases.is_empty() {
+            return Resp::Array(vec![
+                Resp::Int(0),
+                Resp::NullArray,
+                Resp::NullArray,
+                Resp::NullArray,
+            ]);
+        }
+        let mut ids: Vec<&str> = leases.iter().map(|l| l.item_id.as_str()).collect();
+        ids.sort_by_key(|id| id_order(id));
+        // Aggregate the per-consumer (lease-token) counts.
+        let mut by_consumer: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for l in &leases {
+            *by_consumer.entry(l.lease_token.as_str()).or_default() += 1;
+        }
+        let consumers: Vec<Resp> = by_consumer
+            .into_iter()
+            .map(|(token, n)| {
+                Resp::Array(vec![
+                    Resp::Bulk(token.as_bytes().to_vec()),
+                    Resp::Bulk(n.to_string().into_bytes()),
+                ])
+            })
+            .collect();
+        return Resp::Array(vec![
+            Resp::Int(leases.len() as i64),
+            Resp::Bulk(ids.first().unwrap().as_bytes().to_vec()),
+            Resp::Bulk(ids.last().unwrap().as_bytes().to_vec()),
+            Resp::Array(consumers),
+        ]);
+    }
+    // Extended form: `XPENDING key group start end count [consumer]` — `count` is args[5].
+    let limit = args
+        .get(5)
+        .and_then(|a| std::str::from_utf8(a).ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
+    let now_ms = ts_ms(state.now());
+    let lease_ms = backend
+        .queue_definition(&shard.queue_key())
+        .await
+        .map(|d| d.max_lease_duration_ms as i64)
+        .unwrap_or(0);
+    let mut entries: Vec<&LeaseView> = leases.iter().collect();
+    entries.sort_by_key(|lv| id_order(lv.item_id.as_str()));
+    let out: Vec<Resp> = entries
+        .into_iter()
+        .take(limit)
+        .map(|lv| {
+            // idle = now - claimed_at, claimed_at = lease_expires_at - lease_ms.
+            let idle = ((now_ms - ts_ms(lv.lease_expires_at)) + lease_ms).max(0);
+            Resp::Array(vec![
+                Resp::Bulk(lv.item_id.as_str().as_bytes().to_vec()),
+                Resp::Bulk(lv.lease_token.as_str().as_bytes().to_vec()),
+                Resp::Int(idle),
+                Resp::Int(lv.attempt_count as i64),
+            ])
+        })
+        .collect();
+    Resp::Array(out)
+}
+
+/// `XAUTOCLAIM key group consumer min-idle-time start [COUNT n] [JUSTID]` — reclaim expired leases and
+/// re-deliver. Maps to: `ReclaimDriver::tick(now)` (returns expired leases to pending) then a fresh
+/// priority claim of the now-eligible items. Reply: `[cursor, [entries...], [deleted-ids]]`.
+///
+/// pqueue-flavored divergences (TD-006 §3; tracked for Phase-7 reconciliation):
+/// - **`min-idle-time` is ignored** — pqueue reclaims strictly by **lease expiry** (the engine's timed
+///   transition), not a caller-supplied idle floor. A just-expired lease (TTL elapsed) is reclaimed even
+///   if `min-idle-time` is larger.
+/// - **`tick` is backend-global**, not stream-scoped: it reclaims EVERY expired lease (the background
+///   ReclaimDriver does the same). This is correct — an expired lease is always reclaimable — and the
+///   *re-delivery* (claim) is scoped to the named stream, so a caller only ever receives its own items.
+/// - **attempt accounting**: the reclaim (`LeaseExpired`) charges one attempt and the re-delivery
+///   (`Claim`) charges another, so one reclaim+redeliver bumps `attempt_count` by 2. TD-006 §"XCLAIM"
+///   specifies one; this is the projection's established attempt model (conformance `tick_reclaims`),
+///   flagged for reconciliation — NOT silently downgraded.
+/// - **cursor is always `0-0`** (single-shot full scan); paginated PEL coverage is owed work.
+async fn xautoclaim<B: RespBackend>(
+    backend: &Arc<B>,
+    state: &Arc<ServerState>,
+    args: &[Vec<u8>],
+) -> Resp {
+    if args.len() < 6 {
+        return Resp::Error("ERR wrong number of arguments for 'xautoclaim'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let mut count = 100usize;
+    let mut i = 6;
+    while i < args.len() {
+        if arg_eq(&args[i], "COUNT") && i + 1 < args.len() {
+            if let Ok(s) = std::str::from_utf8(&args[i + 1]) {
+                count = s.parse().unwrap_or(100);
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    let now = state.now();
+    // 1) Reclaim expired leases across the queue (→ pending, attempt charged).
+    if let Err(e) = backend.tick(now).await {
+        return err_reply(&e);
+    }
+    // 2) Re-deliver: claim the now-eligible items (incl. the just-reclaimed).
+    let lease_ms = match backend.queue_definition(&shard.queue_key()).await {
+        Ok(def) => def.max_lease_duration_ms,
+        Err(e) => return err_reply(&e),
+    };
+    let lease = state.next();
+    let req = ClaimRequest {
+        shard,
+        worker_id: WorkerId::new("resp").expect("w"),
+        max_items: count,
+        lease_token: LeaseToken::new(format!("L{lease}")).expect("lease"),
+        lease_expires_at: add_millis(now, lease_ms),
+        now,
+    };
+    match backend.claim(req).await {
+        Ok(claimed) => {
+            let entries: Vec<Resp> = claimed.items.iter().map(claimed_to_entry).collect();
+            Resp::Array(vec![
+                Resp::Bulk(b"0-0".to_vec()),
+                Resp::Array(entries),
+                Resp::Array(vec![]),
+            ])
+        }
         Err(e) => err_reply(&e),
     }
 }
@@ -410,6 +628,12 @@ fn err_reply(e: &EngineError) -> Resp {
     match e {
         EngineError::Forbidden(why) => Resp::Error(format!("NOPERM {why}")),
         EngineError::NotFound => Resp::Error("ERR no such queue".into()),
+        // A client-caused incompatible re-create, not an internal fault (queue-create is library-only
+        // over RESP today, so this is latent — but the token must be honest).
+        EngineError::QueueDefinitionConflict => Resp::Error("ERR pqueue queue_conflict".into()),
+        EngineError::Storage(_) => Resp::Error("ERR pqueue internal".into()),
+        // Every other variant carries a `-ERR pqueue …` token via `resp_token()` above; this arm is
+        // unreachable, but stays total.
         _ => Resp::Error("ERR pqueue internal".into()),
     }
 }

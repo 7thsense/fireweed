@@ -26,6 +26,16 @@ ddx:
 
 # Technical Design: TD-002 Postgres-Native Reference Mode
 
+> **Implementation status (hexagonal migration, Phase 6):** the original `pqueue-postgres` crate (which
+> implemented the now-removed storage traits) has been **deleted**. The postgres adapter is **deferred**
+> and will be (re)built **fresh to the engine ports** following the durable-adapter template proven by
+> sqlite (durable command log + projection rebuilt-from-log) when a database is provisioned. The
+> data-model intent below (postgres as an atomic-class backend) still holds; only the trait surface it
+> targets has changed (engine `Backend`/`ClaimPort`/`PushPort`/… instead of the old storage traits). See
+> [ADR-007](../adr/ADR-007-hexagonal-architecture-and-two-interfaces.md) and
+> [`hexagonal-migration-plan.md`](../../04-build/hexagonal-migration-plan.md).
+
+
 **Contract**: API-001 | **ADR**: ADR-001, ADR-004 | **Scope**: Postgres-native backend
 
 ## Scope
