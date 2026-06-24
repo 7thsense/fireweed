@@ -96,8 +96,15 @@ tokens asserted verbatim (`EngineError::resp_token` + e2e substring assertions).
   `reassign_swaps_token_and_charges_attempt` and `claimed_view_renders_leased_items` run across adapter
   suites; RESP e2e `xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump` proves
   self-claim renews without attempt charge and cross-consumer claim transfers ownership with +1 attempt.
-- `XLEN` / `XINFO` / `XDEL` — listed "faithful" in §3 but **NOT implemented** (only the worker hot path
-  + reclaim/pending are). Deferred.
+- `XLEN` / `XINFO` / `XDEL` — **DONE** (owed-resolution Chunk 6b). `XLEN` returns the LIVE entry count
+  (pending + in-flight) over `metrics`; `XINFO STREAM`/`GROUPS` summarize over `metrics`/`pending`
+  (CONSUMERS/FULL owed; `last-delivered-id` is `0-0` — no meaningful stream-id high-water, a documented
+  §3 divergence). `XDEL` hard-deletes via a new `PurgePort` (`force = true` like Redis), backed by the
+  infallible `PurgeItems` command + the API-001 force gate (a leased purge needs force) — implemented on
+  all four backends, ids de-duplicated so a repeated id counts once. Conformance
+  `purge_removes_present_items_and_gates_leased` (incl. mixed-batch all-or-nothing gate + de-dup) runs
+  across adapters; RESP e2e `xlen_xdel_xinfo_over_offtheshelf_client` drives all three via the stock
+  client.
 - Cursor-pagination e2e (`XAUTOCLAIM 0-0`→…→`0-0` covers whole PEL) — the adapter returns a single-shot
   `0-0` cursor (documented divergence); paginated coverage owed.
 - Intra-group exclusion e2e (two consumers, never same item) and the upsert↔claim race e2e — engine-level

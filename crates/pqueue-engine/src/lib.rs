@@ -42,9 +42,9 @@ pub use finalize_validation::{
 pub use port::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
     CreateQueueOutcome, FinalizePort, IdGen, ItemView, LeaseView, LogRead, LogWriter,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushPort, PushSpec, QueueMetrics,
-    ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport,
-    UpsertOutcome, UpsertPort,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec,
+    QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotRef, SnapshotStore,
+    TickReport, UpsertOutcome, UpsertPort,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey, ShardId, ShardKey};
 

@@ -16,8 +16,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
-    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, PushPort, PushSpec,
-    ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, UpsertOutcome, UpsertPort,
+    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, PurgePort, PushPort,
+    PushSpec, ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, UpsertOutcome,
+    UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -34,6 +35,7 @@ pub trait RespBackend:
     + FinalizePort
     + RenewLeasePort
     + ReassignLeasePort
+    + PurgePort
     + ReclaimDriver
     + ControlPlaneStore
     + ProjectionRead
@@ -50,6 +52,7 @@ impl<T> RespBackend for T where
         + FinalizePort
         + RenewLeasePort
         + ReassignLeasePort
+        + PurgePort
         + ReclaimDriver
         + ControlPlaneStore
         + ProjectionRead
@@ -316,6 +319,9 @@ async fn dispatch<B: RespBackend>(
         "XPENDING" => xpending(backend, state, args).await,
         "XAUTOCLAIM" => xautoclaim(backend, state, args).await,
         "XCLAIM" => xclaim(backend, state, args).await,
+        "XLEN" => xlen(backend, args).await,
+        "XDEL" => xdel(backend, state, args).await,
+        "XINFO" => xinfo(backend, args).await,
         other => Resp::Error(format!("ERR unknown command '{other}'")),
     }
 }
@@ -798,6 +804,99 @@ async fn xclaim<B: RespBackend>(
     match backend.claimed_view(&shard, &ids).await {
         Ok(items) => Resp::Array(items.iter().map(claimed_to_entry).collect()),
         Err(e) => err_reply(&e),
+    }
+}
+
+/// `XLEN key` — the number of LIVE entries in the stream: pending + in-flight (leased). Like Redis,
+/// terminal entries (complete/failed, the pqueue analog of acked) are NOT counted, and purged (`XDEL`)
+/// entries are gone. A pqueue-flavored read over `metrics` (TD-006 §3).
+async fn xlen<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+    if args.len() != 2 {
+        return Resp::Error("ERR wrong number of arguments for 'xlen'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    match backend.metrics(&shard.queue_key()).await {
+        Ok(m) => Resp::Int((m.pending + m.leased) as i64),
+        Err(e) => err_reply(&e),
+    }
+}
+
+/// `XDEL key id [id ...]` — hard-delete the named entries via [`PurgePort`] (`force = true`, like Redis
+/// which deletes regardless of PEL/lease state). Reply: the count actually removed (absent ids are
+/// no-ops). Distinct from `XACK` (which completes a lease); `XDEL` removes the item outright.
+async fn xdel<B: RespBackend>(backend: &Arc<B>, state: &Arc<ServerState>, args: &[Vec<u8>]) -> Resp {
+    if args.len() < 3 {
+        return Resp::Error("ERR wrong number of arguments for 'xdel'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let mut ids = Vec::with_capacity(args.len() - 2);
+    for a in &args[2..] {
+        match ItemId::new(String::from_utf8_lossy(a).to_string()) {
+            Ok(id) => ids.push(id),
+            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        }
+    }
+    match backend.purge(&shard, ids, true, state.now()).await {
+        Ok(n) => Resp::Int(n as i64),
+        Err(e) => err_reply(&e),
+    }
+}
+
+/// `XINFO STREAM key` / `XINFO GROUPS key` — summary reads over `metrics`/`pending`. Only the `STREAM`
+/// and `GROUPS` subcommands are offered (a documented divergence; `CONSUMERS`/`FULL` are owed). pqueue
+/// flavor (TD-006 §3): there is no meaningful `last-delivered-id` / stream-id high-water (delivery is
+/// priority-ordered + cursorless, not id-monotonic), so that field is reported as `0-0`.
+async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+    if args.len() < 3 {
+        return Resp::Error("ERR wrong number of arguments for 'xinfo'".into());
+    }
+    let shard = match parse_shard(&args[2]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let m = match backend.metrics(&shard.queue_key()).await {
+        Ok(m) => m,
+        Err(e) => return err_reply(&e),
+    };
+    let live = (m.pending + m.leased) as i64;
+    let sub = String::from_utf8_lossy(&args[1]).to_ascii_uppercase();
+    match sub.as_str() {
+        "STREAM" => Resp::Array(vec![
+            Resp::Bulk(b"length".to_vec()),
+            Resp::Int(live),
+            Resp::Bulk(b"groups".to_vec()),
+            Resp::Int(1), // single implicit consumer group (pqueue has no named-group state)
+            Resp::Bulk(b"last-generated-id".to_vec()),
+            Resp::Bulk(b"0-0".to_vec()),
+            Resp::Bulk(b"last-delivered-id".to_vec()),
+            Resp::Bulk(b"0-0".to_vec()),
+        ]),
+        "GROUPS" => {
+            // One implicit group; `pending` = in-flight (leased) count = the group's PEL size.
+            let pending = match backend.pending(&shard).await {
+                Ok(p) => p.len() as i64,
+                Err(e) => return err_reply(&e),
+            };
+            Resp::Array(vec![Resp::Array(vec![
+                Resp::Bulk(b"name".to_vec()),
+                Resp::Bulk(b"default".to_vec()),
+                Resp::Bulk(b"consumers".to_vec()),
+                Resp::Int(0),
+                Resp::Bulk(b"pending".to_vec()),
+                Resp::Int(pending),
+                Resp::Bulk(b"last-delivered-id".to_vec()),
+                Resp::Bulk(b"0-0".to_vec()),
+            ])])
+        }
+        other => Resp::Error(format!(
+            "ERR unsupported XINFO subcommand '{other}' (only STREAM and GROUPS)"
+        )),
     }
 }
 

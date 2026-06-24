@@ -840,3 +840,65 @@ async fn xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump(
         "a duplicated id charges exactly ONE delivery, not one per copy"
     );
 }
+
+/// XLEN / XDEL / XINFO over the stock client (owed-item E.2 / Chunk 6b). XLEN counts LIVE entries
+/// (pending + in-flight), terminal/acked entries drop out; XDEL hard-removes and returns the count;
+/// XINFO STREAM/GROUPS summarize. These are pqueue-flavored reads — divergences documented in TD-006 §3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xlen_xdel_xinfo_over_offtheshelf_client() {
+    let (mut con, _backend) = setup().await;
+
+    // Two items → XLEN 2 (both pending). Capture the server-assigned ids.
+    let mut produced: Vec<String> = Vec::new();
+    for p in [5, 9] {
+        let id: String = redis::cmd("XADD")
+            .arg("t1:q1").arg("*").arg("priority").arg(p)
+            .query_async(&mut con).await.unwrap();
+        produced.push(id);
+    }
+    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    assert_eq!(len, 2, "two live (pending) entries");
+
+    // Claim one → still 2 live (1 pending + 1 in-flight).
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
+        .query_async(&mut con).await.unwrap();
+    let claimed_id = reply.keys[0].ids[0].id.clone();
+    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    assert_eq!(len, 2, "leased entry still counts as live");
+
+    // Ack (complete) the claimed one → drops out of XLEN (terminal, like an acked+trimmed entry).
+    let _: i64 = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&claimed_id)
+        .query_async(&mut con).await.unwrap();
+    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    assert_eq!(len, 1, "completed entry is not counted");
+
+    // XINFO STREAM: length reflects the one remaining live (pending) entry.
+    let info: std::collections::HashMap<String, redis::Value> =
+        redis::cmd("XINFO").arg("STREAM").arg("t1:q1").query_async(&mut con).await.unwrap();
+    let stream_len = match &info["length"] {
+        redis::Value::Int(n) => *n,
+        other => panic!("XINFO STREAM length should be an int, got {other:?}"),
+    };
+    assert_eq!(stream_len, 1, "XINFO STREAM length == live entries");
+
+    // XINFO GROUPS: a single implicit group is reported (non-empty array).
+    let groups: redis::Value = redis::cmd("XINFO").arg("GROUPS").arg("t1:q1")
+        .query_async(&mut con).await.unwrap();
+    match groups {
+        redis::Value::Array(ref g) => assert_eq!(g.len(), 1, "one group"),
+        other => panic!("expected an array of groups, got {other:?}"),
+    }
+
+    // XDEL the remaining (still-pending) entry directly — the produced id that was not the claimed one.
+    // XDEL force-removes regardless of state, so no need to claim it first.
+    let survivor = produced.iter().find(|id| **id != claimed_id).expect("the other produced id").clone();
+    let deleted: i64 = redis::cmd("XDEL").arg("t1:q1").arg(&survivor)
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(deleted, 1, "one entry hard-deleted");
+    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    assert_eq!(len, 0, "no live entries after XDEL");
+    let deleted_again: i64 = redis::cmd("XDEL").arg("t1:q1").arg(&survivor)
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(deleted_again, 0, "deleting an absent id is a no-op");
+}

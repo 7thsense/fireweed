@@ -26,8 +26,8 @@ use pqueue_engine::{
     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
-    PushPort, PushSpec, ReassignLeaseCommand, ReassignLeasePort, RenewLeaseCommand, RenewLeasePort,
-    build_push_items,
+    PurgeItemsCommand, PurgePort, PushPort, PushSpec, ReassignLeaseCommand, ReassignLeasePort,
+    RenewLeaseCommand, RenewLeasePort, build_push_items, validate_purge_force,
 };
 use pqueue_projection::{LogData, ProjectionData, commit};
 
@@ -374,6 +374,50 @@ impl ReassignLeasePort for MemoryBackend {
             let env = self.make_envelope(cmd, item_ids, now);
             Self::commit_locked(&mut g, shard, env)?;
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl PurgePort for MemoryBackend {
+    fn purge(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        force: bool,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            // Pre-commit: enforce the force gate per id (a leased item needs force) and collect the ids
+            // actually present (absent ids are no-ops, like Redis XDEL). Validation precedes the append.
+            let present: Vec<ItemId> = {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                let mut present = Vec::new();
+                for id in &item_ids {
+                    // De-dup: a repeated id removes once and counts once (Redis XDEL semantics; the
+                    // apply arm's second `remove` would be a no-op but `present.len()` would over-count).
+                    if present.contains(id) {
+                        continue;
+                    }
+                    if let Some(state) = proj.item_state(id) {
+                        validate_purge_force(state == ItemState::Leased, force)?;
+                        present.push(id.clone());
+                    }
+                }
+                present
+            };
+            if present.is_empty() {
+                return Ok(0);
+            }
+            let count = present.len() as u64;
+            let cmd = QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: present.clone(),
+                force,
+            });
+            let env = self.make_envelope(cmd, present, now);
+            Self::commit_locked(&mut g, shard, env)?;
+            Ok(count)
         })();
         std::future::ready(result)
     }

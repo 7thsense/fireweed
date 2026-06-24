@@ -32,8 +32,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
-    ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PushItem, QueueCommand, QueueKey,
-    ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, SnapshotStore, UpsertPort,
+    ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem, QueueCommand,
+    QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, SnapshotStore,
+    UpsertPort,
 };
 
 pub mod scenarios;
@@ -49,6 +50,7 @@ pub trait ConformanceBackend:
     + FinalizePort
     + RenewLeasePort
     + ReassignLeasePort
+    + PurgePort
     + ReclaimDriver
     + SnapshotStore
     + LogRead
@@ -64,6 +66,7 @@ impl<T> ConformanceBackend for T where
         + FinalizePort
         + RenewLeasePort
         + ReassignLeasePort
+        + PurgePort
         + ReclaimDriver
         + SnapshotStore
         + LogRead
@@ -185,6 +188,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::renew_extends_lease_and_rejects(&make).await;
     scenarios::reassign_swaps_token_and_charges_attempt(&make).await;
     scenarios::claimed_view_renders_leased_items(&make).await;
+    scenarios::purge_removes_present_items_and_gates_leased(&make).await;
     scenarios::finalize_of_nonleased_item_is_rejected_without_appending(&make).await;
     scenarios::pause_and_fence_reconstruct_from_log(&make).await;
     scenarios::high_water_advances_on_each_commit(&make).await;
@@ -215,6 +219,7 @@ macro_rules! conformance_suite {
             renew_extends_lease_and_rejects,
             reassign_swaps_token_and_charges_attempt,
             claimed_view_renders_leased_items,
+            purge_removes_present_items_and_gates_leased,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,
@@ -256,6 +261,7 @@ macro_rules! eventual_apply_suite {
             renew_extends_lease_and_rejects,
             reassign_swaps_token_and_charges_attempt,
             claimed_view_renders_leased_items,
+            purge_removes_present_items_and_gates_leased,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,

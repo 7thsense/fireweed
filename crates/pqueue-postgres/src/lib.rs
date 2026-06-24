@@ -56,10 +56,11 @@ use pqueue_engine::{
     CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem, PushPort,
-    PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ShardId, ShardKey,
-    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
+    PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
+    ShardId, ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    build_push_items, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -599,6 +600,48 @@ impl ReassignLeasePort for PostgresBackend {
             let env = g.make_envelope(cmd, item_ids, now);
             g.commit_locked(shard, env)?;
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl PurgePort for PostgresBackend {
+    fn purge(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        force: bool,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let present: Vec<ItemId> = {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                let mut present = Vec::new();
+                for id in &item_ids {
+                    // De-dup: a repeated id removes once and counts once (Redis XDEL semantics; the
+                    // apply arm's second `remove` would be a no-op but `present.len()` would over-count).
+                    if present.contains(id) {
+                        continue;
+                    }
+                    if let Some(state) = proj.item_state(id) {
+                        validate_purge_force(state == ItemState::Leased, force)?;
+                        present.push(id.clone());
+                    }
+                }
+                present
+            };
+            if present.is_empty() {
+                return Ok(0);
+            }
+            let count = present.len() as u64;
+            let cmd = QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: present.clone(),
+                force,
+            });
+            let env = g.make_envelope(cmd, present, now);
+            g.commit_locked(shard, env)?;
+            Ok(count)
         })();
         std::future::ready(result)
     }

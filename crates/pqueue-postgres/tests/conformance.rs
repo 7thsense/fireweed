@@ -67,6 +67,7 @@ pg_conformance!(
     renew_extends_lease_and_rejects,
     reassign_swaps_token_and_charges_attempt,
     claimed_view_renders_leased_items,
+    purge_removes_present_items_and_gates_leased,
     finalize_of_nonleased_item_is_rejected_without_appending,
     pause_and_fence_reconstruct_from_log,
     high_water_advances_on_each_commit,

@@ -869,6 +869,70 @@ pub async fn claimed_view_renders_leased_items<B: ConformanceBackend>(make: impl
     assert_eq!(view[0].attempt_count, 1);
 }
 
+pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    // PurgePort (RESP XDEL / operator purge): removes present items, returns the count actually removed,
+    // no-ops on absent ids, and gates a LEASED purge behind `force` (API-001) — appending nothing on the
+    // gate rejection.
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5), item("b", "kb", 9)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    // Claim "a" (top priority) → leased; "b" stays pending.
+    b.claim(claim_req(1, 500, 10)).await.unwrap();
+    let a = ItemId::new("a").unwrap();
+    let b_id = ItemId::new("b").unwrap();
+
+    // Purging a LEASED item without force is gated (Conflict), appending nothing.
+    let before = b.read_from(&shard(), None, 1000).await.unwrap().entries.len();
+    assert_eq!(
+        b.purge(&shard(), vec![a.clone()], false, ts(20)).await,
+        Err(EngineError::Conflict)
+    );
+    // Mixed batch [pending, leased] without force: the gate rejects ALL-OR-NOTHING regardless of order —
+    // the pending id is NOT purged even though it precedes the leased one in the batch.
+    assert_eq!(
+        b.purge(&shard(), vec![b_id.clone(), a.clone()], false, ts(20))
+            .await,
+        Err(EngineError::Conflict)
+    );
+    let after = b.read_from(&shard(), None, 1000).await.unwrap().entries.len();
+    assert_eq!(before, after, "gated purge must NOT append a command");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "the pending id in a gate-rejected mixed batch is NOT purged"
+    );
+
+    // Purge a PENDING item, REPEATED, plus an ABSENT id: the repeat counts once (de-dup), the absent id
+    // is a no-op → count 1.
+    let removed = b
+        .purge(
+            &shard(),
+            vec![b_id.clone(), b_id.clone(), ItemId::new("nope").unwrap()],
+            false,
+            ts(21),
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed, 1, "a repeated present id removes/counts once; absent is a no-op");
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0, "b is gone");
+
+    // Force-purge the leased item "a": removed, count 1, no longer leased.
+    let removed_a = b.purge(&shard(), vec![a], true, ts(22)).await.unwrap();
+    assert_eq!(removed_a, 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 0, "a force-purged");
+}
+
 pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: ConformanceBackend>(
     make: impl Fn() -> B,
 ) {
