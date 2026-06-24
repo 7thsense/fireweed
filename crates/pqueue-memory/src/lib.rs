@@ -18,11 +18,11 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
     CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeKind, IdGen, ItemView,
-    LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PushCommand, PushItem, QueueCommand, QueueKey, QueueMetrics, ReclaimDriver,
-    ReplacePendingCommand, ShardId, ShardKey, SnapshotRef, SnapshotStore, TickReport,
-    UpsertOutcome, UpsertPort,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LogRead,
+    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem,
+    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, ShardId, ShardKey,
+    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 
 // ---------------------------------------------------------------------------
@@ -569,6 +569,45 @@ impl UpsertPort for MemoryBackend {
                     }
                 }
             }
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl FinalizePort for MemoryBackend {
+    fn finalize(
+        &self,
+        shard: &ShardKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            // Pre-commit fencing check: an operator-fenced lease's finalize is StaleLease, and the
+            // Finalize command MUST NOT be appended if it would be rejected (no log/projection
+            // divergence). Batch is all-or-nothing in this slice.
+            {
+                // Pre-commit validation so apply_command(Finalize) is infallible (B1: commit_locked
+                // appends before applying, no rollback). Each item must be Leased and not fenced,
+                // else reject WITHOUT appending.
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                for o in &outcomes {
+                    match proj.items.get(&o.item_id) {
+                        None => return Err(EngineError::NotFound),
+                        Some(rec) if rec.fenced => return Err(EngineError::StaleLease),
+                        Some(rec) if rec.state.is_terminal() => return Err(EngineError::Terminal),
+                        Some(rec) if rec.state != ItemState::Leased => {
+                            return Err(EngineError::Invalid("item is not leased"));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
+            let env = self.make_envelope(cmd, item_ids, now);
+            Self::commit_locked(&mut g, shard, env)?;
+            Ok(())
         })();
         std::future::ready(result)
     }

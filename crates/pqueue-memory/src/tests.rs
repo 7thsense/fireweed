@@ -9,8 +9,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, CommandChecksum, ControlPlaneStore,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead, PushCommand, PushItem,
-    QueueCommand, ReclaimDriver, ReplacePendingCommand, SnapshotStore, UpsertOutcome, UpsertPort,
+    FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+    ProjectionRead, PushCommand, PushItem, QueueCommand, ReclaimDriver, ReplacePendingCommand,
+    SnapshotStore, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
 };
 
 fn tenant() -> TenantId {
@@ -523,4 +524,95 @@ async fn tick_lease_boundary_is_half_open() {
     // One unit past expiry: reclaimed.
     assert_eq!(b.tick(ts(101)).await.unwrap().leases_reclaimed, 1);
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 0);
+}
+
+#[tokio::test]
+async fn paused_queue_yields_no_claims() {
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    // Pause: nothing eligible/claimable.
+    commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
+    assert!(
+        b.claim(claim_req(10, 500, 10))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        b.select_eligible(&shard(), ts(10), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Resume: claimable again.
+    commit(&b, envelope(QueueCommand::ResumeQueue, vec![])).await;
+    assert_eq!(
+        b.claim(claim_req(10, 500, 10)).await.unwrap().items.len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn fenced_lease_finalize_is_stale() {
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    b.claim(claim_req(10, 500, 10)).await.unwrap();
+    let id = ItemId::new("a").unwrap();
+
+    // Operator fences the lease.
+    commit(
+        &b,
+        envelope(
+            QueueCommand::FenceLease(FenceLeaseCommand {
+                item_ids: vec![id.clone()],
+            }),
+            vec![id.clone()],
+        ),
+    )
+    .await;
+    // The holder's finalize is rejected StaleLease, and nothing is committed (still leased).
+    let outcomes = vec![FinalizeOutcome {
+        item_id: id.clone(),
+        kind: FinalizeKind::Complete,
+    }];
+    assert_eq!(
+        b.finalize(&shard(), outcomes.clone(), ts(20)).await,
+        Err(EngineError::StaleLease)
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
+
+    // Operator unfences: finalize now succeeds.
+    commit(
+        &b,
+        envelope(
+            QueueCommand::UnfenceLease(UnfenceLeaseCommand {
+                item_ids: vec![id.clone()],
+            }),
+            vec![id.clone()],
+        ),
+    )
+    .await;
+    b.finalize(&shard(), outcomes, ts(30)).await.unwrap();
+    assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }

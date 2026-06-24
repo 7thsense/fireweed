@@ -15,9 +15,8 @@ use pqueue_core::{
     ClientItemKey, ItemId, LeaseToken, PriorityValue, QueueId, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, ClaimedItem, CommandChecksum, CommandEnvelope, CommandId,
-    ControlPlaneStore, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead,
-    QueueCommand, ShardId, ShardKey, UpsertOutcome, UpsertPort,
+    Backend, ClaimPort, ClaimRequest, ClaimedItem, ControlPlaneStore, EngineError, FinalizeKind,
+    FinalizeOutcome, FinalizePort, ProjectionRead, ShardId, ShardKey, UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -25,13 +24,22 @@ use tokio::net::{TcpListener, TcpStream};
 /// The backend capabilities the RESP front needs. A concrete backend (e.g. `MemoryBackend`) is
 /// injected by the composition root / tests; the adapter never names one (hexagonal).
 pub trait RespBackend:
-    Backend + ClaimPort + UpsertPort + ControlPlaneStore + ProjectionRead + Send + Sync + 'static
+    Backend
+    + ClaimPort
+    + UpsertPort
+    + FinalizePort
+    + ControlPlaneStore
+    + ProjectionRead
+    + Send
+    + Sync
+    + 'static
 {
 }
 impl<T> RespBackend for T where
     T: Backend
         + ClaimPort
         + UpsertPort
+        + FinalizePort
         + ControlPlaneStore
         + ProjectionRead
         + Send
@@ -365,7 +373,7 @@ fn claimed_to_entry(item: &ClaimedItem) -> Resp {
 /// `-ERR pqueue stale_lease`/`superseded` and count only PEL removals (TD-006 section 3).
 async fn xack<B: RespBackend>(
     backend: &Arc<B>,
-    state: &Arc<ServerState>,
+    _state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
     if args.len() < 4 {
@@ -387,24 +395,7 @@ async fn xack<B: RespBackend>(
             kind: FinalizeKind::Complete,
         })
         .collect();
-    let n = state.next();
-    let env = CommandEnvelope {
-        command_id: CommandId::new(format!("ack-{n}")),
-        request_id: None,
-        shard_id: ShardId::ZERO,
-        item_ids: ids.clone(),
-        command: QueueCommand::Finalize(FinalizeCommand { outcomes }),
-        checksum: CommandChecksum(0),
-        created_at: now_ts(),
-    };
-    let result = backend
-        .write(move |lw, pw| {
-            let pos = lw.append(&shard, std::slice::from_ref(&env))?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
-        .await;
-    match result {
+    match backend.finalize(&shard, outcomes, now_ts()).await {
         Ok(()) => Resp::Int(ids.len() as i64),
         Err(e) => err_reply(&e),
     }

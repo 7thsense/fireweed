@@ -12,7 +12,7 @@ use pqueue_core::{
     UtcTimestamp, WorkerId,
 };
 
-use crate::command::{CommandEnvelope, CommandId};
+use crate::command::{CommandEnvelope, CommandId, FinalizeOutcome};
 use crate::error::EngineResult;
 use crate::types::{CommandPosition, DurabilityClass, QueueKey, ShardKey};
 
@@ -209,6 +209,20 @@ pub trait UpsertPort: Send + Sync {
         payload: Option<Bytes>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
+}
+
+/// Finalizes claimed items (complete/fail/retry/release/rearm), atomically validating the lease
+/// before committing: an **operator-fenced** lease is rejected with `EngineError::StaleLease` and the
+/// Finalize command is NOT appended (no log/projection divergence; the fencing check is pre-commit).
+/// Batch is all-or-nothing in this launch slice: any fenced item fails the whole call (per-item
+/// results are a later refinement).
+pub trait FinalizePort: Send + Sync {
+    fn finalize(
+        &self,
+        shard: &ShardKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 
 // ---------------------------------------------------------------------------

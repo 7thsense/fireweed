@@ -24,9 +24,9 @@ pub use command::{
 pub use error::{EngineError, EngineResult};
 pub use port::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
-    CreateQueueOutcome, IdGen, ItemView, LeaseView, LogRead, LogWriter, ProjectionRead,
-    ProjectionSnapshot, ProjectionWriter, QueueMetrics, ReclaimDriver, SnapshotRef, SnapshotStore,
-    TickReport, UpsertOutcome, UpsertPort,
+    CreateQueueOutcome, FinalizePort, IdGen, ItemView, LeaseView, LogRead, LogWriter,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, QueueMetrics, ReclaimDriver, SnapshotRef,
+    SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey, ShardId, ShardKey};
 
