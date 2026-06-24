@@ -319,7 +319,16 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   in-session; the PHASE-7 "conformance on …+postgres" gate is **PASS (live), CI-job owed** — a CI service-
   container job exporting `PQUEUE_PG_TEST_URL` (container `postgres:16`; `cargo test -p pqueue-postgres`)
   is still owed and tracked here.
-  Remaining: Chunk 5 graceful drain, 6a/b/c RESP polish, 7 facade verbs+docs, 8 (B') retry-exhaustion.
+  **Chunk 5 (this commit):** graceful connection drain — `pqueue-resp` gained `serve_with_shutdown(…,
+  CancellationToken)` owning the per-connection handlers in a `tokio::task::JoinSet`; on cancel it stops
+  accepting and each `handle_conn` observes the token between commands (finishing any in-flight command),
+  then drains. `Server::shutdown()` stays SYNC (token + abort; Drop-safe, I4); new async
+  `shutdown_and_drain(self, timeout)` awaits the serve task and past the bound aborts it — JoinSet
+  ownership makes that a HARD bound (drop-aborts stragglers). Fresh-eyes review caught a BLOCKING bug in
+  the first cut (`TaskTracker` does NOT abort on drop → unbounded leak); fixed by switching to `JoinSet`;
+  re-review confirmed resolved. Test proves an open connection drains + the server then stops accepting.
+  Owed-D RESOLVED. Full workspace green, clippy 0.
+  Remaining: Chunk 6a/b/c RESP polish, 7 facade verbs+docs, 8 (B') retry-exhaustion.
 - 2026-06-23 PUSHPORT (append must be a validated port, not raw Backend::write): added `PushPort` +
   `PushSpec` to the engine, implemented by memory/sqlite/objectlog. The backend assigns item ids from its
   OWN command sequence (`cmd_seq`, restored past the max on rebuild_all) so ids are unique across handles

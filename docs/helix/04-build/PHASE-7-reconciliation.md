@@ -176,9 +176,17 @@ diverge from TD-006 (Owed Item B).
   -with-key through the new `UpsertPort`; the facade `upsert` drops its counter. e2e
   `two_servers_on_one_backend_assign_distinct_xadd_ids` proves two RESP servers on one backend mint
   distinct ids and both items coexist.
-- **D. Graceful connection drain on shutdown.** `Server::shutdown()` aborts the accept loop + reclaim
-  ticker but does not drain already-accepted connection handlers (they live in `serve`). Documented;
-  a `JoinSet`/TaskTracker drain is owed.
+- **D. Graceful connection drain on shutdown — RESOLVED** (owed-resolution Chunk 5). `pqueue-resp`'s new
+  `serve_with_shutdown` takes a `CancellationToken` and owns the per-connection handlers in a
+  `tokio::task::JoinSet`; on cancel it stops accepting and each handler observes the token BETWEEN commands
+  (finishing any in-flight command first), then the drain awaits them all. `Server::shutdown()` stays SYNC
+  (signals the token + aborts; safe from `Drop`, I4); a new async `shutdown_and_drain(self, timeout)`
+  awaits the serve task and, past the bound, aborts it — and because the serve loop OWNS the handlers in a
+  `JoinSet`, that abort drops the set and HARD-aborts any handler still running (a real bound, not the
+  best-effort a `TaskTracker` would give — the fresh-eyes review caught and corrected a `TaskTracker`
+  first cut). Test `shutdown_and_drain_drains_in_flight_then_stops_accepting` proves an open connection
+  drains gracefully and the server then stops accepting; the 3 sync `shutdown()`/`Drop` call sites are
+  unaffected.
 - **E. RESP polish.** `XCLAIM` (specific-id, incl. same-consumer no-charge renew per §3 flavor #7),
   `XLEN`/`XINFO`/`XDEL`, paginated `XAUTOCLAIM` cursor coverage, intra-group-exclusion + upsert/claim-race
   e2e. None on the worker hot path; deferred.
