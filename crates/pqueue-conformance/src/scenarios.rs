@@ -12,7 +12,9 @@ use pqueue_engine::{
 
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
 // traits need not be imported here.
-use crate::{ConformanceBackend, claim_req, commit, envelope, item, qdef, qkey, shard, ts};
+use crate::{
+    ConformanceBackend, claim_req, commit, envelope, item, item_max, qdef, qkey, shard, ts,
+};
 
 /// Eventual-apply backends MUST refuse upsert (Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD
 /// `replace_if_pending` is offered only on the atomic durability class). The refusal is the structured
@@ -931,6 +933,105 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>
     let removed_a = b.purge(&shard(), vec![a], true, ts(22)).await.unwrap();
     assert_eq!(removed_a, 1);
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 0, "a force-purged");
+}
+
+pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceBackend>(make: impl Fn() -> B) {
+    // Retry-exhaustion (B'): `attempt_count` = deliveries. A `Finalize{Retry}` UNDER `max_attempts` returns
+    // the item to pending (claimable again); the retry once it has used all `max_attempts` deliveries drives
+    // it TERMINAL (Failed). With max_attempts = 2: delivery 1 → retry → pending; delivery 2 → retry → failed.
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item_max("a", "ka", 5, 2)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    let id = ItemId::new("a").unwrap();
+    let retry_outcome = || {
+        vec![FinalizeOutcome {
+            item_id: ItemId::new("a").unwrap(),
+            kind: FinalizeKind::Retry,
+        }]
+    };
+
+    // Delivery 1: claim → attempt_count = 1.
+    b.claim(claim_req(1, 500, 10)).await.unwrap();
+    assert_eq!(
+        b.pending(&shard()).await.unwrap()[0].attempt_count,
+        1,
+        "first delivery"
+    );
+    // Retry UNDER the bound (1 < 2) → back to pending, still claimable.
+    b.finalize(&shard(), retry_outcome(), ts(20)).await.unwrap();
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!((m.pending, m.leased, m.failed), (1, 0, 0), "retry under max → pending");
+    assert!(
+        !b.select_eligible(&shard(), ts(30), 10).await.unwrap().is_empty(),
+        "the retried item is claimable again"
+    );
+
+    // Delivery 2: claim again → attempt_count = 2 (now AT the bound).
+    b.claim(claim_req(1, 500, 30)).await.unwrap();
+    assert_eq!(b.pending(&shard()).await.unwrap()[0].attempt_count, 2, "second delivery");
+    // Retry AT the bound (2 >= 2) → TERMINAL (Failed), NOT back to pending.
+    b.finalize(&shard(), retry_outcome(), ts(40)).await.unwrap();
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!(
+        (m.pending, m.leased, m.failed),
+        (0, 0, 1),
+        "retry at/beyond max_attempts → terminal Failed"
+    );
+    assert!(
+        b.select_eligible(&shard(), ts(50), 10).await.unwrap().is_empty(),
+        "the exhausted item is terminal — not claimable"
+    );
+    // It is now terminal: a further finalize is rejected (Terminal), not a silent re-queue.
+    assert_eq!(
+        b.finalize(
+            &shard(),
+            vec![FinalizeOutcome {
+                item_id: id,
+                kind: FinalizeKind::Complete,
+            }],
+            ts(60)
+        )
+        .await,
+        Err(EngineError::Terminal)
+    );
+
+    // Boundary: max_attempts = 1 means ONE delivery, no retries — the first retry exhausts immediately
+    // (pins `>=`, not `>`). Push a second item "b" with max_attempts = 1.
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item_max("b", "kb", 9, 1)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    b.claim(claim_req(1, 500, 70)).await.unwrap(); // delivery 1 (attempt_count = 1 == max)
+    b.finalize(
+        &shard(),
+        vec![FinalizeOutcome {
+            item_id: ItemId::new("b").unwrap(),
+            kind: FinalizeKind::Retry,
+        }],
+        ts(80),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().failed,
+        2,
+        "max_attempts=1: the very first retry exhausts → Failed (b joins the earlier a)"
+    );
 }
 
 pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: ConformanceBackend>(

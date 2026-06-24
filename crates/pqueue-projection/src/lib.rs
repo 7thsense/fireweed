@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemEvent, ItemId, ItemState, LeaseToken, PriorityModel,
-    PriorityValue, UtcTimestamp, apply_transition, priority_sort,
+    PriorityValue, UtcTimestamp, apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
@@ -47,8 +47,8 @@ struct ItemRecord {
     state: ItemState,
     item_version: u64,
     attempt_count: u32,
-    /// Retry bound; read when retry-exhaustion is wired (Finalize-Retry beyond this → terminal).
-    #[allow(dead_code)]
+    /// Retry bound (B'): a `Finalize{Retry}` once `attempt_count >= max_attempts` drives the item terminal
+    /// (Failed) instead of back to pending — see the `Finalize` apply arm.
     max_attempts: u32,
     created_seq: u64,
     lease_token: Option<LeaseToken>,
@@ -360,7 +360,22 @@ impl ProjectionData {
                     let ev = match o.kind {
                         FinalizeKind::Complete => ItemEvent::FinalizeComplete,
                         FinalizeKind::Fail => ItemEvent::FinalizeFail,
-                        FinalizeKind::Retry => ItemEvent::FinalizeRetry,
+                        FinalizeKind::Retry => {
+                            // Retry-exhaustion (B'): `attempt_count` = deliveries so far (Claim charges,
+                            // reclaim/release do not). `failure_event` (the canonical core predicate) sends
+                            // a retry that has used all `max_attempts` deliveries to TERMINAL (Failed)
+                            // instead of back to pending; a retry UNDER the bound returns it to pending
+                            // (claimable again, the next claim charging the next delivery). Only `Retry` is
+                            // bounded — `Release` (no-fault give-back) and `Rearm` (recurrence) are not.
+                            // NOTE (scope): this bounds the EXPLICIT-retry path only. The claim/reclaim path
+                            // is NOT attempt-bounded — an item whose lease repeatedly EXPIRES (LeaseExpired
+                            // → pending → re-Claim, +1 each) can exceed `max_attempts` deliveries without
+                            // terminating; bounding that poison-loop is separate, owed policy.
+                            // The decision is deterministic from the replayed projection, so apply stays
+                            // infallible (both Leased→Pending and Leased→Failed are legal transitions).
+                            let rec = self.items.get(&o.item_id).ok_or(EngineError::NotFound)?;
+                            failure_event(rec.attempt_count, rec.max_attempts)
+                        }
                         FinalizeKind::Release => ItemEvent::FinalizeRelease,
                         FinalizeKind::Rearm => ItemEvent::FinalizeRearm,
                     };

@@ -120,13 +120,18 @@ pub fn qdef() -> QueueDefinition {
 }
 
 pub fn item(id: &str, key: &str, priority: i64) -> PushItem {
+    item_max(id, key, priority, 3)
+}
+
+/// Like [`item`] but with an explicit retry bound (for the retry-exhaustion scenario).
+pub fn item_max(id: &str, key: &str, priority: i64, max_attempts: u32) -> PushItem {
     PushItem {
         client_item_key: ClientItemKey::new(key).unwrap(),
         item_id: ItemId::new(id).unwrap(),
         priority: Some(PriorityValue::Int64(priority)),
         not_before: None,
         group_key: None,
-        max_attempts: 3,
+        max_attempts,
         payload: None,
     }
 }
@@ -189,6 +194,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::reassign_swaps_token_and_charges_attempt(&make).await;
     scenarios::claimed_view_renders_leased_items(&make).await;
     scenarios::purge_removes_present_items_and_gates_leased(&make).await;
+    scenarios::retry_beyond_max_attempts_goes_terminal(&make).await;
     scenarios::finalize_of_nonleased_item_is_rejected_without_appending(&make).await;
     scenarios::pause_and_fence_reconstruct_from_log(&make).await;
     scenarios::high_water_advances_on_each_commit(&make).await;
@@ -220,6 +226,7 @@ macro_rules! conformance_suite {
             reassign_swaps_token_and_charges_attempt,
             claimed_view_renders_leased_items,
             purge_removes_present_items_and_gates_leased,
+            retry_beyond_max_attempts_goes_terminal,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,
@@ -262,6 +269,7 @@ macro_rules! eventual_apply_suite {
             reassign_swaps_token_and_charges_attempt,
             claimed_view_renders_leased_items,
             purge_removes_present_items_and_gates_leased,
+            retry_beyond_max_attempts_goes_terminal,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,

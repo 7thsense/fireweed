@@ -192,9 +192,21 @@ nicety — `STREAM`/`GROUPS` are implemented).
 - **B. Attempt-count on reclaim — RESOLVED** (owed-resolution Chunk 1). The reclaim (`LeaseExpired`) no
   longer charges; `attempt_count` = number of deliveries (charged only by `Claim`). TD-006:74/128-129 +
   the RESP XAUTOCLAIM doc updated; e2e asserts exactly 2 (claim + redeliver), conformance comment fixed.
-- **B'. Retry-exhaustion NOT wired (NEW, owed).** `max_attempts` is `#[allow(dead_code)]` — "Finalize-Retry
-  beyond `max_attempts` → terminal" is not enforced. Chunk 1 fixed the attempt *counter* (the input);
-  the exhaustion *policy* is a separate owed item (surfaced by the Chunk-1 plan review, M5).
+- **B'. Retry-exhaustion — RESOLVED** (owed-resolution Chunk 8). The `Finalize` apply arm's `Retry` branch
+  now calls the canonical `pqueue_core::failure_event(attempt_count, max_attempts)` predicate: a
+  `Finalize{Retry}` that has used all `max_attempts` deliveries (`attempt_count >= max_attempts`) goes
+  TERMINAL (`Failed`) instead of back to pending; a retry under the bound returns it to pending (claimable
+  again). The `#[allow(dead_code)]` on `ItemRecord.max_attempts` is removed. The decision is a pure function
+  of the replayed projection, so apply stays infallible (both Leased→Pending and Leased→Failed are legal)
+  and replays deterministically. Conformance `retry_beyond_max_attempts_goes_terminal` runs on every
+  backend (incl. live postgres): `max_attempts=2` proves under→pending+claimable, at→Failed+not-claimable+
+  further-finalize-`Terminal`; a `max_attempts=1` case pins the `>=` boundary (one delivery, first retry
+  exhausts). **Scope boundary (documented in the apply arm + acknowledged here):** only the EXPLICIT-retry
+  path is bounded. `Release`/`Rearm` are intentionally unbounded, and the **claim/reclaim path is NOT
+  attempt-bounded** — an item whose lease repeatedly EXPIRES (`LeaseExpired`→pending→re-`Claim`, +1 each)
+  can exceed `max_attempts` deliveries without terminating; bounding that lease-drop poison-loop at
+  claim-time is a separate, owed policy (`max_attempts==0` is already rejected at queue creation, so the
+  apply arm needs no guard for it).
 - **C. RESP/facade server-side id generation — RESOLVED** (owed-resolution Chunk 2). `UpsertPort::
   replace_if_pending` no longer takes a caller-supplied id; the backend assigns it from its own `cmd_seq`
   (restart-safe) and returns it in `UpsertOutcome`. RESP `xadd`-without-key routes through `PushPort`,
@@ -254,8 +266,11 @@ library facade) behind a composition root with a background reclaim driver and a
 legacy HTTP-service/Kafka/storage-trait architecture fully deleted — all verified by a green full default
 workspace (0 failures, clippy 0), a dependency-direction test, and live postgres conformance.
 
-**Owed-item status (owed-resolution loop).** All six original owed items **A–F are RESOLVED** (A postgres
-adapter, B attempt-count, C server-side ids, D graceful drain, E RESP polish — XCLAIM/XLEN/XDEL/XINFO/
-paginated-XAUTOCLAIM/race+exclusion, F library verbs + doc hygiene). The one remaining tracked item is
-**B′ retry-exhaustion** (`max_attempts → terminal` is not yet wired — Chunk 8). **No plan item is silently
-dropped.**
+**Owed-item status (owed-resolution loop) — ZERO open items.** All six original owed items **A–F** plus the
+newly-surfaced **B′** are **RESOLVED**: A postgres adapter, B attempt-count, B′ retry-exhaustion, C server-
+side ids, D graceful drain, E RESP polish (XCLAIM/XLEN/XDEL/XINFO/paginated-XAUTOCLAIM/race+exclusion), F
+library verbs + doc hygiene. **No plan item is silently dropped.** Two scope boundaries are recorded, not
+dropped: the postgres backend is not yet server-wired (blocking-executor caveat) and is `NoTls`-only
+(Lakebase TLS seam is owed product work); and retry-exhaustion bounds the explicit-retry path only — the
+lease-drop reclaim poison-loop is a separate owed policy (B′ scope note). The DoD CI job that runs postgres
+conformance against `PQUEUE_PG_TEST_URL` in CI (vs the in-session live run) is also still owed.
