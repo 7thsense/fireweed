@@ -25,7 +25,6 @@ pub async fn upsert_is_unavailable<B: ConformanceBackend>(make: impl Fn() -> B) 
         .replace_if_pending(
             &shard(),
             &ClientItemKey::new("dup").unwrap(),
-            ItemId::new("i1").unwrap(),
             Some(PriorityValue::Int64(5)),
             None,
             None,
@@ -287,110 +286,74 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceBackend>(make: i
     b.create_queue(qdef()).await.unwrap();
     let key = ClientItemKey::new("dup").unwrap();
 
-    let out = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i1").unwrap(),
-            Some(PriorityValue::Int64(5)),
-            None,
-            None,
-            None,
-            ts(1),
-        )
+    // First upsert → Inserted with a BACKEND-ASSIGNED id (capture it).
+    let id1 = match b
+        .replace_if_pending(&shard(), &key, Some(PriorityValue::Int64(5)), None, None, None, ts(1))
         .await
-        .unwrap();
-    assert_eq!(
-        out,
-        UpsertOutcome::Inserted {
-            item_id: ItemId::new("i1").unwrap()
-        }
-    );
+        .unwrap()
+    {
+        UpsertOutcome::Inserted { item_id } => item_id,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
 
-    let out = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i2").unwrap(),
-            Some(PriorityValue::Int64(5)),
-            None,
-            None,
-            None,
-            ts(2),
-        )
+    // Second upsert (same key) → Replaced; the new id is backend-assigned and supersedes id1.
+    let id2 = match b
+        .replace_if_pending(&shard(), &key, Some(PriorityValue::Int64(5)), None, None, None, ts(2))
         .await
-        .unwrap();
-    assert_eq!(
-        out,
+        .unwrap()
+    {
         UpsertOutcome::Replaced {
-            new_item_id: ItemId::new("i2").unwrap(),
-            superseded_item_id: ItemId::new("i1").unwrap(),
+            new_item_id,
+            superseded_item_id,
+        } => {
+            assert_eq!(superseded_item_id, id1, "the first id is superseded");
+            assert_ne!(new_item_id, id1, "the replacement got a fresh backend-assigned id");
+            new_item_id
         }
-    );
+        other => panic!("expected Replaced, got {other:?}"),
+    };
     // Only the replacement is eligible; the superseded id is gone.
     let elig = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
-    assert_eq!(elig.iter().map(|i| i.as_str()).collect::<Vec<_>>(), vec!["i2"]);
+    assert_eq!(elig, vec![id2], "only the replacement is eligible");
 }
 
 pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceBackend>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     let key = ClientItemKey::new("dup").unwrap();
-    b.replace_if_pending(
-        &shard(),
-        &key,
-        ItemId::new("i1").unwrap(),
-        Some(PriorityValue::Int64(5)),
-        None,
-        None,
-        None,
-        ts(1),
-    )
-    .await
-    .unwrap();
+    let id1 = match b
+        .replace_if_pending(&shard(), &key, Some(PriorityValue::Int64(5)), None, None, None, ts(1))
+        .await
+        .unwrap()
+    {
+        UpsertOutcome::Inserted { item_id } => item_id,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
 
     // Claim it → leased. Upsert must be rejected with Invalid (no transition on in-flight work).
     b.claim(claim_req(10, 500, 10)).await.unwrap();
     let err = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i2").unwrap(),
-            None,
-            None,
-            None,
-            None,
-            ts(20),
-        )
+        .replace_if_pending(&shard(), &key, None, None, None, None, ts(20))
         .await
         .unwrap_err();
     assert_eq!(err, EngineError::Invalid("collision with claimed item"));
 
-    // Finalize-complete → terminal. Upsert must be rejected with Terminal.
+    // Finalize-complete the leased item → terminal. Upsert must then be rejected with Terminal.
     commit(
         &b,
         envelope(
             QueueCommand::Finalize(FinalizeCommand {
                 outcomes: vec![FinalizeOutcome {
-                    item_id: ItemId::new("i1").unwrap(),
+                    item_id: id1.clone(),
                     kind: FinalizeKind::Complete,
                 }],
             }),
-            vec![ItemId::new("i1").unwrap()],
+            vec![id1],
         ),
     )
     .await;
     let err = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i3").unwrap(),
-            None,
-            None,
-            None,
-            None,
-            ts(30),
-        )
+        .replace_if_pending(&shard(), &key, None, None, None, None, ts(30))
         .await
         .unwrap_err();
     assert_eq!(err, EngineError::Terminal);
@@ -404,18 +367,22 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
     let key = ClientItemKey::new("grouped").unwrap();
     let group = GroupKey::new("group-a").unwrap();
 
-    b.replace_if_pending(
-        &shard(),
-        &key,
-        ItemId::new("i1").unwrap(),
-        Some(PriorityValue::Int64(5)),
-        Some(group.clone()),
-        Some(ts(250)),
-        Some(Bytes::from_static(b"payload")),
-        ts(1),
-    )
-    .await
-    .unwrap();
+    let assigned = match b
+        .replace_if_pending(
+            &shard(),
+            &key,
+            Some(PriorityValue::Int64(5)),
+            Some(group.clone()),
+            Some(ts(250)),
+            Some(Bytes::from_static(b"payload")),
+            ts(1),
+        )
+        .await
+        .unwrap()
+    {
+        UpsertOutcome::Inserted { item_id } => item_id,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
 
     assert!(
         b.claim(claim_req(10, 500, 100)).await.unwrap().items.is_empty(),
@@ -425,7 +392,7 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
     let claimed = b.claim(claim_req(10, 500, 300)).await.unwrap();
     assert_eq!(claimed.items.len(), 1);
     let item = &claimed.items[0];
-    assert_eq!(item.item_id.as_str(), "i1");
+    assert_eq!(item.item_id, assigned, "the claimed item is the backend-assigned upsert id");
     assert_eq!(item.group_key.as_ref(), Some(&group));
     assert_eq!(item.not_before, Some(ts(250)));
     assert_eq!(item.payload.as_deref(), Some(&b"payload"[..]));

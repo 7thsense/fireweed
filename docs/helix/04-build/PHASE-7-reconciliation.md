@@ -158,11 +158,12 @@ diverge from TD-006 (Owed Item B).
 - **B'. Retry-exhaustion NOT wired (NEW, owed).** `max_attempts` is `#[allow(dead_code)]` — "Finalize-Retry
   beyond `max_attempts` → terminal" is not enforced. Chunk 1 fixed the attempt *counter* (the input);
   the exhaustion *policy* is a separate owed item (surfaced by the Chunk-1 plan review, M5).
-- **C. RESP/facade server-side id generation.** Two RESP servers (or two facades) over ONE backend, or a
-  process restart, can collide self-generated ids. The **facade was fixed** (Phase 5: ids assigned by the
-  backend via `PushPort`, restart-safe; two-handle test proves it). The **RESP front** still generates
-  ids from its own counter — safe for single-server-per-backend (the normal deployment) but owed: route
-  XADD id assignment through `PushPort`/`IdGen` too.
+- **C. RESP/facade server-side id generation — RESOLVED** (owed-resolution Chunk 2). `UpsertPort::
+  replace_if_pending` no longer takes a caller-supplied id; the backend assigns it from its own `cmd_seq`
+  (restart-safe) and returns it in `UpsertOutcome`. RESP `xadd`-without-key routes through `PushPort`,
+  -with-key through the new `UpsertPort`; the facade `upsert` drops its counter. e2e
+  `two_servers_on_one_backend_assign_distinct_xadd_ids` proves two RESP servers on one backend mint
+  distinct ids and both items coexist.
 - **D. Graceful connection drain on shutdown.** `Server::shutdown()` aborts the accept loop + reclaim
   ticker but does not drain already-accepted connection handlers (they live in `serve`). Documented;
   a `JoinSet`/TaskTracker drain is owed.

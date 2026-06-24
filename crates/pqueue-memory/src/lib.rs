@@ -170,12 +170,10 @@ impl ClaimPort for MemoryBackend {
 }
 
 impl UpsertPort for MemoryBackend {
-    #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
         shard: &ShardKey,
         client_item_key: &ClientItemKey,
-        new_item_id: ItemId,
         priority: Option<PriorityValue>,
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
@@ -193,22 +191,31 @@ impl UpsertPort for MemoryBackend {
                 .get(&shard.queue_key())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
-            let build_item = |item_id: ItemId| PushItem {
+            // ONE command-sequence number stamps both the command id and the assigned item id
+            // (restart-safe, unique across handles — callers never supply an id).
+            let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
+            let new_item_id = ItemId::new(format!("mem-{n}-0")).expect("id");
+            let item = PushItem {
                 client_item_key: client_item_key.clone(),
-                item_id,
-                priority: priority.clone(),
+                item_id: new_item_id.clone(),
+                priority,
                 not_before,
-                group_key: group_key.clone(),
+                group_key,
                 max_attempts,
-                payload: payload.clone(),
+                payload,
+            };
+            let mk = |command: QueueCommand| CommandEnvelope {
+                command_id: CommandId::new(format!("mem-{n}")),
+                request_id: None,
+                shard_id: ShardId::ZERO,
+                item_ids: vec![new_item_id.clone()],
+                command,
+                checksum: CommandChecksum(0),
+                created_at: now,
             };
             match existing {
                 None => {
-                    // No collision: plain insert.
-                    let cmd = QueueCommand::Push(PushCommand {
-                        items: vec![build_item(new_item_id.clone())],
-                    });
-                    let env = self.make_envelope(cmd, vec![new_item_id.clone()], now);
+                    let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
                     Self::commit_locked(&mut g, shard, env)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
@@ -221,12 +228,11 @@ impl UpsertPort for MemoryBackend {
                     };
                     match state {
                         ItemState::Pending => {
-                            let cmd = QueueCommand::ReplacePending(ReplacePendingCommand {
+                            let env = mk(QueueCommand::ReplacePending(ReplacePendingCommand {
                                 client_item_key: client_item_key.clone(),
                                 superseded_item_id: existing_id.clone(),
-                                replacement: build_item(new_item_id.clone()),
-                            });
-                            let env = self.make_envelope(cmd, vec![new_item_id.clone()], now);
+                                replacement: item,
+                            }));
                             Self::commit_locked(&mut g, shard, env)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,

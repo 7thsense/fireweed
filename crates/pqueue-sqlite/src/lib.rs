@@ -373,12 +373,10 @@ impl ClaimPort for SqliteBackend {
 }
 
 impl UpsertPort for SqliteBackend {
-    #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
         shard: &ShardKey,
         client_item_key: &ClientItemKey,
-        new_item_id: ItemId,
         priority: Option<PriorityValue>,
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
@@ -396,21 +394,32 @@ impl UpsertPort for SqliteBackend {
                 .get(&shard.queue_key())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
-            let build_item = |item_id: ItemId| PushItem {
+            // ONE command-sequence number stamps both the command id and the assigned item id (the
+            // cmd_seq is restored past the max on rebuild, so no collision across restart).
+            let n = g.cmd_seq;
+            g.cmd_seq += 1;
+            let new_item_id = ItemId::new(format!("sql-{n}-0")).expect("id");
+            let item = PushItem {
                 client_item_key: client_item_key.clone(),
-                item_id,
-                priority: priority.clone(),
+                item_id: new_item_id.clone(),
+                priority,
                 not_before,
-                group_key: group_key.clone(),
+                group_key,
                 max_attempts,
-                payload: payload.clone(),
+                payload,
+            };
+            let mk = |command: QueueCommand| CommandEnvelope {
+                command_id: CommandId::new(format!("sql-{n}")),
+                request_id: None,
+                shard_id: ShardId::ZERO,
+                item_ids: vec![new_item_id.clone()],
+                command,
+                checksum: CommandChecksum(0),
+                created_at: now,
             };
             match existing {
                 None => {
-                    let cmd = QueueCommand::Push(PushCommand {
-                        items: vec![build_item(new_item_id.clone())],
-                    });
-                    let env = g.make_envelope(cmd, vec![new_item_id.clone()], now);
+                    let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
                     g.commit_locked(shard, env)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
@@ -423,12 +432,11 @@ impl UpsertPort for SqliteBackend {
                     };
                     match state {
                         ItemState::Pending => {
-                            let cmd = QueueCommand::ReplacePending(ReplacePendingCommand {
+                            let env = mk(QueueCommand::ReplacePending(ReplacePendingCommand {
                                 client_item_key: client_item_key.clone(),
                                 superseded_item_id: existing_id.clone(),
-                                replacement: build_item(new_item_id.clone()),
-                            });
-                            let env = g.make_envelope(cmd, vec![new_item_id.clone()], now);
+                                replacement: item,
+                            }));
                             g.commit_locked(shard, env)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,

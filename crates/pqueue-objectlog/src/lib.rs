@@ -386,7 +386,6 @@ impl UpsertPort for ObjectLogBackend {
         &self,
         _shard: &ShardKey,
         _client_item_key: &ClientItemKey,
-        _new_item_id: ItemId,
         _priority: Option<PriorityValue>,
         _group_key: Option<GroupKey>,
         _not_before: Option<UtcTimestamp>,

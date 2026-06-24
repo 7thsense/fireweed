@@ -142,14 +142,10 @@ impl<B: LibBackend> Pqueue<B> {
         client_item_key: ClientItemKey,
         item: NewItem,
     ) -> EngineResult<UpsertOutcome> {
-        let shard = shard_of(queue);
-        let n = self.next();
-        let item_id = ItemId::new(format!("lib-{n}-0")).expect("id");
         self.backend
             .replace_if_pending(
-                &shard,
+                &shard_of(queue),
                 &client_item_key,
-                item_id,
                 item.priority,
                 item.group_key,
                 item.not_before,

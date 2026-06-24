@@ -16,8 +16,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
-    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, ReclaimDriver, ShardId,
-    ShardKey, UpsertOutcome, UpsertPort,
+    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, PushPort, PushSpec,
+    ReclaimDriver, ShardId, ShardKey, UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -26,6 +26,7 @@ use tokio::net::{TcpListener, TcpStream};
 /// injected by the composition root / tests; the adapter never names one (hexagonal).
 pub trait RespBackend:
     Backend
+    + PushPort
     + ClaimPort
     + UpsertPort
     + FinalizePort
@@ -39,6 +40,7 @@ pub trait RespBackend:
 }
 impl<T> RespBackend for T where
     T: Backend
+        + PushPort
         + ClaimPort
         + UpsertPort
         + FinalizePort
@@ -284,37 +286,41 @@ async fn xadd<B: RespBackend>(
             client_item_key = Some(s.to_string());
         }
     }
-    // `client_item_key` is the upsert primary key (TD-006 §2, Invariant 2): a second XADD with the same
-    // key REPLACES the pending item (XADD-on-key upsert). Absent a key, each XADD is a unique insert
-    // (append). Remaining reserved fields (group_key/not_before/payload) are DEFERRED to a later chunk.
-    let n = state.next();
-    let item_id = ItemId::new(format!("{n}-0")).expect("id");
-    let key = match client_item_key {
-        Some(k) => match ClientItemKey::new(k) {
-            Ok(k) => k,
-            Err(_) => return Resp::Error("ERR invalid client_item_key".into()),
-        },
-        None => ClientItemKey::new(format!("k-{n}")).expect("key"),
-    };
-    match backend
-        .replace_if_pending(
-            &shard,
-            &key,
-            item_id.clone(),
-            priority,
-            None,
-            None,
-            None,
-            state.now(),
-        )
-        .await
-    {
-        Ok(UpsertOutcome::Inserted { item_id })
-        | Ok(UpsertOutcome::Replaced {
-            new_item_id: item_id,
-            ..
-        }) => Resp::Bulk(item_id.as_str().as_bytes().to_vec()),
-        Err(e) => err_reply(&e),
+    // The BACKEND assigns the item id in both paths (restart-safe, collision-free across servers — the
+    // RESP front never mints ids itself). `client_item_key` is the upsert key (TD-006 §2, Invariant 2):
+    // with a key, a second XADD REPLACES the pending item (via UpsertPort); absent a key, each XADD is a
+    // unique append (via PushPort). Remaining reserved fields (group_key/not_before/payload) DEFERRED.
+    match client_item_key {
+        Some(k) => {
+            let key = match ClientItemKey::new(k) {
+                Ok(k) => k,
+                Err(_) => return Resp::Error("ERR invalid client_item_key".into()),
+            };
+            match backend
+                .replace_if_pending(&shard, &key, priority, None, None, None, state.now())
+                .await
+            {
+                Ok(UpsertOutcome::Inserted { item_id })
+                | Ok(UpsertOutcome::Replaced {
+                    new_item_id: item_id,
+                    ..
+                }) => Resp::Bulk(item_id.as_str().as_bytes().to_vec()),
+                Err(e) => err_reply(&e),
+            }
+        }
+        None => {
+            let spec = PushSpec {
+                client_item_key: None,
+                priority,
+                not_before: None,
+                group_key: None,
+                payload: None,
+            };
+            match backend.push(&shard, vec![spec], state.now()).await {
+                Ok(ids) => Resp::Bulk(ids[0].as_str().as_bytes().to_vec()),
+                Err(e) => err_reply(&e),
+            }
+        }
     }
 }
 

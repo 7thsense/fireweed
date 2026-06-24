@@ -427,3 +427,25 @@ async fn xadd_collision_with_leased_then_terminal_is_an_error() {
         .query_async(&mut con).await;
     assert!(res.unwrap_err().to_string().contains("terminal"), "terminal collision → -ERR pqueue terminal");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_servers_on_one_backend_assign_distinct_xadd_ids() {
+    // C: XADD ids are BACKEND-assigned, so two RESP servers sharing one backend mint DISTINCT ids and
+    // both items coexist (a per-server counter would collide).
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let (mut con_a, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
+    let (mut con_b, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
+
+    let id_a: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(5)
+        .query_async(&mut con_a).await.unwrap();
+    let id_b: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(6)
+        .query_async(&mut con_b).await.unwrap();
+    assert_ne!(id_a, id_b, "backend-assigned ids differ across servers on one backend");
+
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP").arg("g").arg("c").arg("COUNT").arg(10)
+        .arg("STREAMS").arg("t1:q1").arg(">")
+        .query_async(&mut con_a).await.unwrap();
+    assert_eq!(reply.keys[0].ids.len(), 2, "both items coexist (no silent overwrite)");
+}

@@ -197,12 +197,14 @@ pub enum UpsertOutcome {
 /// one item mutually exclude (TD-007 §2.3). Atomic class only; on eventual-apply the engine returns
 /// `EngineError::Unavailable` without calling this port.
 pub trait UpsertPort: Send + Sync {
+    /// Upsert on `client_item_key`. The backend ASSIGNS the new item id from its own command sequence
+    /// (restart-safe, unique across handles — like [`PushPort`]) and returns it in the `UpsertOutcome`;
+    /// callers never supply an id (that would collide across two servers/handles on one backend).
     #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
         shard: &ShardKey,
         client_item_key: &ClientItemKey,
-        new_item_id: ItemId,
         priority: Option<PriorityValue>,
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
