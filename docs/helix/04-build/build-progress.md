@@ -306,8 +306,20 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   (loud on divergent replay; apply stays infallible) and extended the conformance scenario to pin the
   Invalid(not-leased) reject. `renew_extends_lease_and_rejects` runs on all 3 backends. Owed-F port-portion
   RESOLVED; facade `renew`/`rearm` verbs + doc hygiene remain Chunk 7. Full workspace green, clippy 0.
-  Remaining: Chunk 4 postgres, 5 graceful drain, 6a/b/c RESP polish, 7 facade verbs+docs, 8 (B')
-  retry-exhaustion.
+  **Chunk 4 (this commit):** postgres adapter REBUILT — `pqueue-postgres` recreated fresh to the engine
+  ports via the durable-adapter template over the SYNC `postgres` client (durable LOG in postgres tables +
+  projection rebuilt-from-log; atomic class), implementing every port incl. PushPort/UpsertPort/
+  RenewLeasePort; re-added to workspace `members` (already in the dep-direction ADAPTERS list). Conformance
+  (20) + 2 durability reopen tests GREEN against a live postgres:16 via `PQUEUE_PG_TEST_URL` (schema-
+  isolated, one connection per scenario); LOUD `eprintln!` skip when the env var is absent so the default
+  workspace stays green + visibly partial. **I1 blocking-executor caveat recorded** (the sync client PANICS
+  under an ambient tokio runtime → tests use `futures::block_on`; not yet server-wired; spawn_blocking+pool+
+  row-locking is post-launch). Fresh-eyes review: no BLOCKING; recorded the post-pooling MAX(seq)/high-water
+  serialization caveat in the crate docs. Owed-A RESOLVED. **CI note (M2 / DoD):** the live run is
+  in-session; the PHASE-7 "conformance on …+postgres" gate is **PASS (live), CI-job owed** — a CI service-
+  container job exporting `PQUEUE_PG_TEST_URL` (container `postgres:16`; `cargo test -p pqueue-postgres`)
+  is still owed and tracked here.
+  Remaining: Chunk 5 graceful drain, 6a/b/c RESP polish, 7 facade verbs+docs, 8 (B') retry-exhaustion.
 - 2026-06-23 PUSHPORT (append must be a validated port, not raw Backend::write): added `PushPort` +
   `PushSpec` to the engine, implemented by memory/sqlite/objectlog. The backend assigns item ids from its
   OWN command sequence (`cmd_seq`, restored past the max on rebuild_all) so ids are unique across handles

@@ -1,0 +1,39 @@
+[package]
+name = "pqueue-postgres"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Driven adapter: postgres (atomic durability class). Durable command LOG in postgres tables; the
+# priority-ordered projection is the shared `pqueue-projection` materialization, rebuilt from the log.
+# Mirrors `pqueue-sqlite` exactly — same template, same guarantees — over the SYNC `postgres` client.
+# Depends inward on the domain (engine/core) + the shared projection — the correct hexagonal direction.
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+pqueue-projection = { path = "../pqueue-projection" }
+postgres = "0.19"
+serde = "1"
+serde_json = "1"
+bytes = "1"
+
+[dev-dependencies]
+# A NON-tokio executor drives these tests: the sync `postgres` client runs its own internal tokio runtime
+# per call, which PANICS ("cannot start a runtime from within a runtime") if driven from a `#[tokio::test]`
+# runtime. `futures::executor::block_on` has no ambient tokio context, so the client's runtime starts
+# cleanly. This is the test-side face of the blocking-executor caveat documented in `lib.rs`.
+futures = "0.3"
+# Runs the shared backend-conformance suite against the postgres backend (env-gated on PQUEUE_PG_TEST_URL).
+pqueue-conformance = { path = "../pqueue-conformance" }
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+
+[[test]]
+name = "durability"
+path = "tests/durability.rs"

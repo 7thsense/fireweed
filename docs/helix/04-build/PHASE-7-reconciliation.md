@@ -149,9 +149,21 @@ diverge from TD-006 (Owed Item B).
 
 ## Owed items (tracked, with rationale — none are silent drops)
 
-- **A. Postgres adapter — DEFERRED.** Needs a live PostgreSQL (not available in the build env; brew
-  binaries + docker present). Build fresh to the engine ports via the durable-adapter template +
-  env-gated conformance. Atomic-class near-clone of sqlite; low risk.
+- **A. Postgres adapter — RESOLVED** (owed-resolution Chunk 4). `pqueue-postgres` was rebuilt fresh to the
+  engine ports via the durable-adapter template (durable command LOG in postgres tables + projection
+  rebuilt-from-log; atomic class) over the SYNC `postgres` client, implementing EVERY port incl. PushPort
+  + UpsertPort(new) + RenewLeasePort, and re-added to workspace `members`. The full conformance suite (20
+  scenarios) + 2 durability reopen tests run GREEN against a live postgres:16 (schema-isolated, one
+  connection per scenario). Without `PQUEUE_PG_TEST_URL` they LOUD-skip (`eprintln!` + pass) so a green
+  default run is visibly partial, never a hidden pass. **Blocking-executor caveat (I1) recorded** in the
+  crate docs + here: the sync client runs its own internal tokio runtime per call and PANICS if driven
+  from an ambient tokio runtime (tests use `futures::executor::block_on`); the launch posture is single-
+  node durable-log + in-mem projection (guarantees identical to sqlite), and `pqueue-server` does NOT yet
+  wire postgres into its selector, so no tokio path reaches it. Production refinement (spawn_blocking +
+  pool + row-level locking for the MAX(seq)/high-water serialization the process Mutex provides today) is a
+  recorded POST-LAUNCH item. **CI gate (M2):** the live run is in-session; `PHASE-7` marks the
+  "conformance on …+postgres" gate **PASS (live), CI-job owed** — a `PQUEUE_PG_TEST_URL` service-container
+  job is still owed (see build-progress).
 - **B. Attempt-count on reclaim — RESOLVED** (owed-resolution Chunk 1). The reclaim (`LeaseExpired`) no
   longer charges; `attempt_count` = number of deliveries (charged only by `Claim`). TD-006:74/128-129 +
   the RESP XAUTOCLAIM doc updated; e2e asserts exactly 2 (claim + redeliver), conformance comment fixed.

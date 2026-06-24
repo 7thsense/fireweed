@@ -1,9 +1,10 @@
 [workspace]
 # The hexagonal architecture in full (plan v4): the domain (core + engine + projection), the shared
-# conformance harness, the three driven adapters (memory/sqlite/objectlog), and the two driving faces
-# (RESP front + library facade) plus the composition root. The legacy HTTP-service/Kafka/storage-trait
-# crates were deleted in Phase 6; the postgres adapter is deferred and will be (re)added fresh to the
-# engine ports when a database is provisioned. No crate is excluded, so `cargo test` covers everything.
+# conformance harness, the four driven adapters (memory/sqlite/postgres/objectlog), and the two driving
+# faces (RESP front + library facade) plus the composition root. The legacy HTTP-service/Kafka/storage-
+# trait crates were deleted in Phase 6; the postgres adapter was rebuilt fresh to the engine ports
+# (OWED-resolution Chunk 4) via the durable-adapter template. No crate is excluded, so `cargo test`
+# covers everything; postgres conformance is env-gated on PQUEUE_PG_TEST_URL (LOUD skip without a DB).
 members = [
     "crates/pqueue-core",
     "crates/pqueue-engine",
@@ -11,6 +12,7 @@ members = [
     "crates/pqueue-conformance",
     "crates/pqueue-memory",
     "crates/pqueue-sqlite",
+    "crates/pqueue-postgres",
     "crates/pqueue-objectlog",
     "crates/pqueue-resp",
     "crates/pqueue",
