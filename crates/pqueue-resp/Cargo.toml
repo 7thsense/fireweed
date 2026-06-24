@@ -14,6 +14,9 @@ path = "src/lib.rs"
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "macros"] }
+# CancellationToken to signal the serve loop to stop accepting and drain (handlers are owned by a
+# tokio::task::JoinSet, so the drain is hard-bounded — see serve_with_shutdown).
+tokio-util = { version = "0.7" }
 
 [dev-dependencies]
 pqueue-memory = { path = "../pqueue-memory" }

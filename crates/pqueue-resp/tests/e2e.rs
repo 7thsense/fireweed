@@ -10,13 +10,13 @@ use pqueue_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
     UtcTimestamp,
 };
+use pqueue_engine::Clock;
 use pqueue_engine::{
     Backend, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore, FenceLeaseCommand,
     LogWriter, ProjectionWriter, QueueCommand, ShardId, ShardKey,
 };
-use pqueue_engine::Clock;
 use pqueue_memory::{ManualClock, MemoryBackend};
-use pqueue_resp::{serve, RespBackend, SystemClock};
+use pqueue_resp::{RespBackend, SystemClock, serve};
 use redis::streams::StreamReadReply;
 
 /// Boot the RESP front over a real ephemeral TCP port with a fresh memory backend + created queue, and
@@ -66,11 +66,13 @@ async fn fence(backend: &MemoryBackend, id: &str) {
     };
     let sk = shard();
     backend
-        .write(move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-            let pos = lw.append(&sk, std::slice::from_ref(&env))?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
+        .write(
+            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
+                let pos = lw.append(&sk, std::slice::from_ref(&env))?;
+                pw.apply(&pos, std::slice::from_ref(&env))?;
+                Ok(())
+            },
+        )
         .await
         .unwrap();
 }
@@ -217,14 +219,23 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
     }
     // Drain: exactly ONE entry, carrying the LATEST priority (20, the replacement).
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c")
-        .arg("COUNT").arg(10)
-        .arg("STREAMS").arg("t1:q1").arg(">")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(10)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
         .query_async(&mut con)
         .await
         .unwrap();
     let ids: Vec<_> = reply.keys.iter().flat_map(|k| &k.ids).collect();
-    assert_eq!(ids.len(), 1, "same client_item_key upserts to a single pending item");
+    assert_eq!(
+        ids.len(),
+        1,
+        "same client_item_key upserts to a single pending item"
+    );
     let p: i64 = ids[0].get("priority").unwrap();
     assert_eq!(p, 20, "the upsert kept the replacement's priority");
 }
@@ -233,29 +244,64 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
 async fn xpending_lists_leased_then_shrinks_on_ack() {
     let (mut con, _backend) = setup().await;
     for p in [10, 20] {
-        let _: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(p)
-            .query_async(&mut con).await.unwrap();
+        let _: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(p)
+            .query_async(&mut con)
+            .await
+            .unwrap();
     }
     // Claim both → both pending (leased, not acked).
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("COUNT").arg(10)
-        .arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
-    let claimed: Vec<String> = reply.keys.iter().flat_map(|k| k.ids.iter().map(|e| e.id.clone())).collect();
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(10)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let claimed: Vec<String> = reply
+        .keys
+        .iter()
+        .flat_map(|k| k.ids.iter().map(|e| e.id.clone()))
+        .collect();
     assert_eq!(claimed.len(), 2);
 
     // XPENDING extended → 2 entries.
     let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
-        .arg("t1:q1").arg("g").arg("-").arg("+").arg(10)
-        .query_async(&mut con).await.unwrap();
+        .arg("t1:q1")
+        .arg("g")
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(pend.len(), 2, "both leased items are pending");
 
     // Ack one → XPENDING shrinks to 1.
-    let _: i64 = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&claimed[0])
-        .query_async(&mut con).await.unwrap();
+    let _: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&claimed[0])
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
-        .arg("t1:q1").arg("g").arg("-").arg("+").arg(10)
-        .query_async(&mut con).await.unwrap();
+        .arg("t1:q1")
+        .arg("g")
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(pend.len(), 1, "acked item leaves the pending set");
     assert_eq!(pend[0].0, claimed[1], "the un-acked item remains pending");
 }
@@ -265,17 +311,34 @@ async fn fenced_lease_xack_is_stale_over_the_wire() {
     // Operator fences a leased item; the holder's XACK must surface `-ERR pqueue stale_lease` to the
     // stock client (TD-006 §3/§7) — not a silent success.
     let (mut con, backend) = setup().await;
-    let _: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(5)
-        .query_async(&mut con).await.unwrap();
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(5)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let id = reply.keys[0].ids[0].id.clone();
 
     fence(&backend, &id).await;
 
-    let res: redis::RedisResult<i64> = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&id)
-        .query_async(&mut con).await;
+    let res: redis::RedisResult<i64> = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&id)
+        .query_async(&mut con)
+        .await;
     let err = res.expect_err("fenced XACK must be an error reply");
     assert!(
         err.to_string().contains("stale_lease"),
@@ -289,15 +352,33 @@ async fn xack_of_superseded_id_is_superseded_over_the_wire() {
     // `-ERR pqueue superseded` (TD-006 §3/§6.5), NOT the generic `-ERR pqueue invalid`.
     let (mut con, _backend) = setup().await;
     let old_id: String = redis::cmd("XADD")
-        .arg("t1:q1").arg("*").arg("client_item_key").arg("dup").arg("priority").arg(50)
-        .query_async(&mut con).await.unwrap();
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("dup")
+        .arg("priority")
+        .arg(50)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     // Second XADD with the same key supersedes the first.
     let _new_id: String = redis::cmd("XADD")
-        .arg("t1:q1").arg("*").arg("client_item_key").arg("dup").arg("priority").arg(20)
-        .query_async(&mut con).await.unwrap();
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("dup")
+        .arg("priority")
+        .arg(20)
+        .query_async(&mut con)
+        .await
+        .unwrap();
 
-    let res: redis::RedisResult<i64> = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&old_id)
-        .query_async(&mut con).await;
+    let res: redis::RedisResult<i64> = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&old_id)
+        .query_async(&mut con)
+        .await;
     let err = res.expect_err("acking a superseded id must be an error reply");
     assert!(
         err.to_string().contains("superseded"),
@@ -316,12 +397,25 @@ async fn xautoclaim_redelivers_expired_leases() {
     let clock = Arc::new(ManualClock::at(1_000)); // t = 1000s
     let (mut con, _) = serve_backend(backend.clone(), clock.clone()).await;
 
-    let _: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(5)
-        .query_async(&mut con).await.unwrap();
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(5)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     // Claim → leased, lease_expires_at = 1000s + 60s = 1060s, attempt_count = 1.
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(reply.keys[0].ids.len(), 1);
 
     // At exactly expiry (t == 1060): half-open lease still held → nothing reclaimed, and XPENDING still
@@ -329,13 +423,32 @@ async fn xautoclaim_redelivers_expired_leases() {
     clock.set(1_060);
     // A large min-idle-time (1h) is deliberately ignored: pqueue reclaims by lease expiry, not idle.
     let (_c, entries, _d): AutoClaim = redis::cmd("XAUTOCLAIM")
-        .arg("t1:q1").arg("g").arg("c").arg(3_600_000).arg("0-0")
-        .query_async(&mut con).await.unwrap();
-    assert!(entries.is_empty(), "lease valid through the expiry instant; nothing reclaimed");
+        .arg("t1:q1")
+        .arg("g")
+        .arg("c")
+        .arg(3_600_000)
+        .arg("0-0")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        entries.is_empty(),
+        "lease valid through the expiry instant; nothing reclaimed"
+    );
     let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
-        .arg("t1:q1").arg("g").arg("-").arg("+").arg(10)
-        .query_async(&mut con).await.unwrap();
-    assert_eq!(pend.len(), 1, "still leased at the expiry instant (half-open)");
+        .arg("t1:q1")
+        .arg("g")
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        pend.len(),
+        1,
+        "still leased at the expiry instant (half-open)"
+    );
     assert_eq!(pend[0].3, 1, "attempt_count still 1 before any reclaim");
 
     // One unit past expiry: XAUTOCLAIM reclaims + redelivers. attempt_count is EXACTLY 2 — the reclaim
@@ -343,12 +456,31 @@ async fn xautoclaim_redelivers_expired_leases() {
     // (Claim, 1) charge. INVARIANT: attempt_count = number of deliveries (TD-006:129).
     clock.set(1_061);
     let (_c, entries, _d): AutoClaim = redis::cmd("XAUTOCLAIM")
-        .arg("t1:q1").arg("g").arg("c").arg(3_600_000).arg("0-0")
-        .query_async(&mut con).await.unwrap();
-    assert_eq!(entries.len(), 1, "expired lease redelivered despite the large min-idle-time (ignored)");
+        .arg("t1:q1")
+        .arg("g")
+        .arg("c")
+        .arg(3_600_000)
+        .arg("0-0")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expired lease redelivered despite the large min-idle-time (ignored)"
+    );
     let fields = &entries[0].1;
-    let attempt: i64 = fields.iter().find(|(k, _)| k == "attempt_count").unwrap().1.parse().unwrap();
-    assert_eq!(attempt, 2, "claim(1) + redeliver(1) = 2; the reclaim does not charge");
+    let attempt: i64 = fields
+        .iter()
+        .find(|(k, _)| k == "attempt_count")
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    assert_eq!(
+        attempt, 2,
+        "claim(1) + redeliver(1) = 2; the reclaim does not charge"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -369,13 +501,27 @@ async fn crash_recovery_rebuilds_durable_state_over_the_wire() {
             let client = redis::Client::open(format!("redis://{addr}")).unwrap();
             let mut con = client.get_multiplexed_async_connection().await.unwrap();
             for pr in [10, 20, 30] {
-                let _: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(pr)
-                    .query_async(&mut con).await.unwrap();
+                let _: String = redis::cmd("XADD")
+                    .arg("t1:q1")
+                    .arg("*")
+                    .arg("priority")
+                    .arg(pr)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
             }
             let reply: StreamReadReply = redis::cmd("XREADGROUP")
-                .arg("GROUP").arg("g").arg("c").arg("COUNT").arg(1)
-                .arg("STREAMS").arg("t1:q1").arg(">")
-                .query_async(&mut con).await.unwrap();
+                .arg("GROUP")
+                .arg("g")
+                .arg("c")
+                .arg("COUNT")
+                .arg(1)
+                .arg("STREAMS")
+                .arg("t1:q1")
+                .arg(">")
+                .query_async(&mut con)
+                .await
+                .unwrap();
             let id = reply.keys[0].ids[0].id.clone();
             (h, id)
         };
@@ -388,16 +534,34 @@ async fn crash_recovery_rebuilds_durable_state_over_the_wire() {
     let (mut con, _) = serve_backend(b.clone(), Arc::new(SystemClock)).await;
     // The leased item survived as pending-in-flight.
     let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
-        .arg("t1:q1").arg("g").arg("-").arg("+").arg(10)
-        .query_async(&mut con).await.unwrap();
+        .arg("t1:q1")
+        .arg("g")
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(pend.len(), 1, "the leased item is reconstructed as pending");
     assert_eq!(pend[0].0, leased_id);
     // The other two un-claimed items are still drainable.
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("COUNT").arg(10)
-        .arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
-    assert_eq!(reply.keys[0].ids.len(), 2, "the two unclaimed items survived the crash");
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(10)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.keys[0].ids.len(),
+        2,
+        "the two unclaimed items survived the crash"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -407,25 +571,63 @@ async fn xadd_collision_with_leased_then_terminal_is_an_error() {
     // I4: XADD-on-key against an IN-FLIGHT item → `-ERR pqueue invalid`; against a TERMINAL item →
     // `-ERR pqueue terminal` (TD-006 §3 collision contract), never a silent success.
     let (mut con, _b) = setup().await;
-    let a: String = redis::cmd("XADD").arg("t1:q1").arg("*")
-        .arg("client_item_key").arg("k").arg("priority").arg(5)
-        .query_async(&mut con).await.unwrap();
+    let a: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("k")
+        .arg("priority")
+        .arg(5)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     // Claim it → leased.
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(reply.keys[0].ids[0].id, a);
     // Same-key XADD while leased → invalid collision.
-    let res: redis::RedisResult<String> = redis::cmd("XADD").arg("t1:q1").arg("*")
-        .arg("client_item_key").arg("k").arg("priority").arg(6)
-        .query_async(&mut con).await;
-    assert!(res.unwrap_err().to_string().contains("invalid"), "leased collision → -ERR pqueue invalid");
+    let res: redis::RedisResult<String> = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("k")
+        .arg("priority")
+        .arg(6)
+        .query_async(&mut con)
+        .await;
+    assert!(
+        res.unwrap_err().to_string().contains("invalid"),
+        "leased collision → -ERR pqueue invalid"
+    );
     // Ack → terminal. Same-key XADD → terminal collision.
-    let _: i64 = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&a).query_async(&mut con).await.unwrap();
-    let res: redis::RedisResult<String> = redis::cmd("XADD").arg("t1:q1").arg("*")
-        .arg("client_item_key").arg("k").arg("priority").arg(7)
-        .query_async(&mut con).await;
-    assert!(res.unwrap_err().to_string().contains("terminal"), "terminal collision → -ERR pqueue terminal");
+    let _: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&a)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let res: redis::RedisResult<String> = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("k")
+        .arg("priority")
+        .arg(7)
+        .query_async(&mut con)
+        .await;
+    assert!(
+        res.unwrap_err().to_string().contains("terminal"),
+        "terminal collision → -ERR pqueue terminal"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -437,15 +639,42 @@ async fn two_servers_on_one_backend_assign_distinct_xadd_ids() {
     let (mut con_a, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
     let (mut con_b, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
 
-    let id_a: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(5)
-        .query_async(&mut con_a).await.unwrap();
-    let id_b: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(6)
-        .query_async(&mut con_b).await.unwrap();
-    assert_ne!(id_a, id_b, "backend-assigned ids differ across servers on one backend");
+    let id_a: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(5)
+        .query_async(&mut con_a)
+        .await
+        .unwrap();
+    let id_b: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(6)
+        .query_async(&mut con_b)
+        .await
+        .unwrap();
+    assert_ne!(
+        id_a, id_b,
+        "backend-assigned ids differ across servers on one backend"
+    );
 
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("COUNT").arg(10)
-        .arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con_a).await.unwrap();
-    assert_eq!(reply.keys[0].ids.len(), 2, "both items coexist (no silent overwrite)");
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(10)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con_a)
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.keys[0].ids.len(),
+        2,
+        "both items coexist (no silent overwrite)"
+    );
 }

@@ -21,6 +21,8 @@ use pqueue_engine::{
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 /// The backend capabilities the RESP front needs. A concrete backend (e.g. `MemoryBackend`) is
 /// injected by the composition root / tests; the adapter never names one (hexagonal).
@@ -83,8 +85,8 @@ impl Clock for SystemClock {
 
 /// `ts + millis`, normalizing nanoseconds (used to derive a lease expiry from `now`).
 fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
-    let total_nanos = ts.seconds as i128 * 1_000_000_000 + ts.nanoseconds as i128
-        + millis as i128 * 1_000_000;
+    let total_nanos =
+        ts.seconds as i128 * 1_000_000_000 + ts.nanoseconds as i128 + millis as i128 * 1_000_000;
     let seconds = (total_nanos.div_euclid(1_000_000_000)) as i64;
     let nanos = (total_nanos.rem_euclid(1_000_000_000)) as u32;
     UtcTimestamp::new(seconds, nanos).expect("valid ts")
@@ -193,33 +195,88 @@ async fn read_command<R: AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Opt
 // Server
 // ---------------------------------------------------------------------------
 
-/// Serve RESP connections over `listener`, dispatching to `backend`, until the listener closes.
-/// `clock` supplies wall time for lease expiry + reclaim (inject a controllable clock in tests).
+/// Serve RESP connections over `listener`, dispatching to `backend`, with no external shutdown signal.
+/// `clock` supplies wall time for lease expiry + reclaim (inject a controllable clock in tests). The
+/// accept loop runs until `listener.accept()` errors (the listener is dropped/closed); it then **drains**
+/// the in-flight connection handlers before returning — so an idle keep-alive connection will keep this
+/// future pending until that connection closes. Production code wants [`serve_with_shutdown`], which adds
+/// a cancellation signal and a caller-bounded drain. (Every caller of `serve` today spawns it detached
+/// and aborts the handle, so the post-accept drain is never reached in practice.)
 pub async fn serve<B: RespBackend>(listener: TcpListener, backend: Arc<B>, clock: Arc<dyn Clock>) {
+    // A token that is never cancelled: the accept loop ends only when the listener errors.
+    serve_with_shutdown(listener, backend, clock, CancellationToken::new()).await;
+}
+
+/// Serve RESP connections until either the listener errors OR `cancel` fires. On cancel the accept loop
+/// stops taking new connections and the in-flight per-connection handlers are **drained**: each observes
+/// `cancel` between commands (finishing any command already in flight) and exits, and this future awaits
+/// them all before returning — no detached stragglers on the happy path.
+///
+/// The handlers are owned by a [`JoinSet`], so the drain is genuinely **bounded**: if the caller wraps
+/// this future in a timeout (as `pqueue-server`'s `shutdown_and_drain` does) and the bound elapses, the
+/// caller aborts this future; dropping it drops the `JoinSet`, which ABORTS every handler still
+/// running — including one wedged inside a single command that never reaches the between-commands cancel
+/// check. That is the hard bound a `TaskTracker` could not provide (it does not abort on drop).
+pub async fn serve_with_shutdown<B: RespBackend>(
+    listener: TcpListener,
+    backend: Arc<B>,
+    clock: Arc<dyn Clock>,
+    cancel: CancellationToken,
+) {
     let state = Arc::new(ServerState {
         ids: AtomicU64::new(1),
         clock,
     });
+    // The JoinSet OWNS the handler tasks (unlike a TaskTracker, which only observes them): dropping it
+    // aborts every task, which is what makes the caller-bounded drain a hard bound.
+    let mut conns: JoinSet<()> = JoinSet::new();
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            break;
-        };
-        let backend = backend.clone();
-        let state = state.clone();
-        tokio::spawn(async move {
-            let _ = handle_conn(stream, backend, state).await;
-        });
+        tokio::select! {
+            // Stop accepting the moment shutdown is signalled (biased so a pending cancel wins a ready
+            // accept, making the drain deterministic).
+            biased;
+            _ = cancel.cancelled() => break,
+            // Reap finished handlers so the set tracks only LIVE connections (bounded memory on a
+            // long-running server). Disabled while empty so `join_next` does not return `None` and spin.
+            Some(_) = conns.join_next(), if !conns.is_empty() => {}
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else {
+                    break;
+                };
+                let backend = backend.clone();
+                let state = state.clone();
+                let conn_cancel = cancel.clone();
+                conns.spawn(async move {
+                    let _ = handle_conn(stream, backend, state, conn_cancel).await;
+                });
+            }
+        }
     }
+    // Drain the in-flight handlers (each exits on `cancel` between commands). If the caller's bound
+    // elapses and aborts this future, `conns` drops here and aborts any handler still running.
+    while conns.join_next().await.is_some() {}
 }
 
 async fn handle_conn<B: RespBackend>(
     stream: TcpStream,
     backend: Arc<B>,
     state: Arc<ServerState>,
+    cancel: CancellationToken,
 ) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd);
-    while let Some(args) = read_command(&mut reader).await? {
+    loop {
+        // Graceful drain: on shutdown, stop waiting for the NEXT command and close the connection. A
+        // command already being read/dispatched below is allowed to finish (we only branch here while
+        // idle between commands), so no in-flight request is cut off mid-reply.
+        let args = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            r = read_command(&mut reader) => match r? {
+                Some(args) => args,
+                None => break,
+            },
+        };
         if args.is_empty() {
             continue;
         }

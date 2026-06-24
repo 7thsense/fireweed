@@ -19,10 +19,11 @@ use pqueue_core::QueueDefinition;
 use pqueue_engine::{Clock, EngineError, EngineResult};
 use pqueue_memory::MemoryBackend;
 use pqueue_objectlog::ObjectLogBackend;
-use pqueue_resp::{RespBackend, SystemClock, serve};
+use pqueue_resp::{RespBackend, SystemClock, serve_with_shutdown};
 use pqueue_sqlite::SqliteBackend;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// Which durable backend the server runs over.
 pub enum Backend {
@@ -65,10 +66,14 @@ pub struct ReclaimStats {
 }
 
 /// A running server: the bound address + the two background tasks (RESP accept loop + reclaim ticker).
+/// The task handles are `Option` so [`Server::shutdown_and_drain`] can take ownership to await the serve
+/// task; [`Drop`] aborts whatever remains.
 pub struct Server {
     addr: SocketAddr,
-    serve_task: JoinHandle<()>,
-    reclaim_task: JoinHandle<()>,
+    serve_task: Option<JoinHandle<()>>,
+    reclaim_task: Option<JoinHandle<()>>,
+    /// Signals the RESP serve loop to stop accepting and drain in-flight connection handlers.
+    cancel: CancellationToken,
     reclaim: Arc<ReclaimCounters>,
 }
 
@@ -82,7 +87,8 @@ impl Server {
     /// liveness, not deep readiness — it does not prove the listener accepts or that reclaim ticks
     /// succeed. Pair with [`Server::reclaim_stats`] to detect a tick that is erroring every cycle.
     pub fn is_running(&self) -> bool {
-        !self.serve_task.is_finished() && !self.reclaim_task.is_finished()
+        self.serve_task.as_ref().is_some_and(|t| !t.is_finished())
+            && self.reclaim_task.as_ref().is_some_and(|t| !t.is_finished())
     }
 
     /// A snapshot of the background reclaim loop's counters (ticks run, tick errors, leases reclaimed).
@@ -94,13 +100,35 @@ impl Server {
         }
     }
 
-    /// Stop serving and stop the reclaim ticker. NOTE: this aborts the accept loop + the ticker; it is
-    /// NOT a graceful drain — already-accepted connection handlers (spawned inside `serve`) are left to
-    /// finish their current command and exit on the client closing the socket, not cancelled here. A
-    /// graceful connection-drain is tracked as follow-up work.
+    /// Stop serving and stop the reclaim ticker, synchronously. Signals the drain token (so the serve
+    /// loop stops accepting) and then **aborts** both background tasks immediately — it does NOT wait for
+    /// in-flight connection handlers to drain. Being sync, it is safe to call from [`Drop`] and from the
+    /// existing non-async call sites. For a bounded graceful drain, use [`Server::shutdown_and_drain`].
     pub fn shutdown(&self) {
-        self.serve_task.abort();
-        self.reclaim_task.abort();
+        self.cancel.cancel();
+        if let Some(t) = &self.serve_task {
+            t.abort();
+        }
+        if let Some(t) = &self.reclaim_task {
+            t.abort();
+        }
+    }
+
+    /// Gracefully stop: signal the serve loop to stop accepting and **drain** in-flight connection
+    /// handlers (each finishes its current command, then exits), awaiting them up to `timeout`. Past the
+    /// bound the serve task is aborted; because the serve loop owns the handlers in a `JoinSet`, aborting
+    /// it drops the set and hard-aborts any handler still running — so the bound is real, not best-effort.
+    /// The reclaim ticker is aborted (it holds no client work). Consumes the server.
+    pub async fn shutdown_and_drain(mut self, timeout: Duration) {
+        self.cancel.cancel();
+        if let Some(mut serve) = self.serve_task.take()
+            && tokio::time::timeout(timeout, &mut serve).await.is_err()
+        {
+            serve.abort();
+        }
+        if let Some(reclaim) = self.reclaim_task.take() {
+            reclaim.abort();
+        }
     }
 }
 
@@ -130,7 +158,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .await
         }
         Backend::Sqlite(path) => {
-            let p = path.to_str().ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+            let p = path
+                .to_str()
+                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
             start_with(
                 Arc::new(SqliteBackend::open(p)?),
                 clock,
@@ -170,7 +200,13 @@ pub async fn start_with<B: RespBackend>(
     let listener = TcpListener::bind(listen).await.map_err(io_err)?;
     let addr = listener.local_addr().map_err(io_err)?;
     let reclaim = Arc::new(ReclaimCounters::default());
-    let serve_task = tokio::spawn(serve(listener, backend.clone(), clock.clone()));
+    let cancel = CancellationToken::new();
+    let serve_task = tokio::spawn(serve_with_shutdown(
+        listener,
+        backend.clone(),
+        clock.clone(),
+        cancel.clone(),
+    ));
     let reclaim_task = tokio::spawn(reclaim_loop(
         backend,
         clock,
@@ -179,8 +215,9 @@ pub async fn start_with<B: RespBackend>(
     ));
     Ok(Server {
         addr,
-        serve_task,
-        reclaim_task,
+        serve_task: Some(serve_task),
+        reclaim_task: Some(reclaim_task),
+        cancel,
         reclaim,
     })
 }

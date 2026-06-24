@@ -20,6 +20,8 @@ pqueue-memory = { path = "../pqueue-memory" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+# CancellationToken to signal a graceful drain to the RESP serve loop on shutdown.
+tokio-util = { version = "0.7" }
 
 [dev-dependencies]
 pqueue-core = { path = "../pqueue-core" }

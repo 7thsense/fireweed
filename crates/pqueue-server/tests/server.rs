@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use pqueue_core::{
     EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy,
-    RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
+    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ProjectionRead, PushPort, PushSpec, QueueKey, ShardId, ShardKey,
@@ -141,12 +141,28 @@ async fn start_provisions_queues_and_serves_end_to_end() {
     let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
     let _: String = redis::cmd("XADD")
-        .arg("t1:q1").arg("*").arg("priority").arg(7)
-        .query_async(&mut con).await.unwrap();
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(7)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
-    assert_eq!(reply.keys[0].ids.len(), 1, "provisioned queue serves a real request");
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.keys[0].ids.len(),
+        1,
+        "provisioned queue serves a real request"
+    );
     server.shutdown();
 }
 
@@ -167,15 +183,92 @@ async fn boots_and_is_drivable_by_offtheshelf_redis_client() {
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
 
     let _: String = redis::cmd("XADD")
-        .arg("t1:q1").arg("*").arg("priority").arg(5)
-        .query_async(&mut con).await.unwrap();
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(5)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let id = reply.keys[0].ids[0].id.clone();
-    let acked: i64 = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&id)
-        .query_async(&mut con).await.unwrap();
+    let acked: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&id)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(acked, 1);
     assert_eq!(backend.metrics(&qkey()).await.unwrap().complete, 1);
     server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_and_drain_drains_in_flight_then_stops_accepting() {
+    // Graceful drain (owed-item D): with a client connection still OPEN, `shutdown_and_drain` signals the
+    // serve loop, the idle handler exits on the cancel between commands (it is NOT abort-forced), the
+    // JoinSet drains, and the call returns FAR under its bound. Afterwards the listener is closed.
+    let backend = Arc::new(MemoryBackend::new());
+    let server = start_with(
+        backend.clone(),
+        Arc::new(SystemClock),
+        "127.0.0.1:0",
+        Duration::from_secs(60),
+        &[qdef()],
+    )
+    .await
+    .unwrap();
+    let addr = server.addr();
+
+    // A real request succeeds; the connection stays open (idle) afterwards, so a live handler exists to
+    // drain.
+    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(5)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // The drain has a 30s internal bound, but the idle handler exits on cancel immediately, so the whole
+    // call resolves well within an outer 5s guard (proving it drained gracefully, not via the abort path).
+    let drained = tokio::time::timeout(
+        Duration::from_secs(5),
+        server.shutdown_and_drain(Duration::from_secs(30)),
+    )
+    .await;
+    assert!(
+        drained.is_ok(),
+        "graceful drain returned within the bound — in-flight handler drained, no abort-forced wait"
+    );
+
+    // The listener is closed: a fresh connection cannot complete a request.
+    let post = redis::Client::open(format!("redis://{addr}"))
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await;
+    let refused = match post {
+        Err(_) => true,
+        Ok(mut c) => redis::cmd("PING")
+            .query_async::<String>(&mut c)
+            .await
+            .is_err(),
+    };
+    assert!(
+        refused,
+        "server stopped accepting connections after the drain"
+    );
 }
