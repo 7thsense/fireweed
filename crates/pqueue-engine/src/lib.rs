@@ -6,13 +6,18 @@
 //! hexagonal-migration-plan.md` (v4) and TD-007.
 
 mod auth;
+mod claim_validation;
 mod command;
 mod error;
+mod finalize_validation;
 mod idempotency;
 mod port;
 mod types;
 
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
+pub use claim_validation::{
+    ClaimCompatibility, ClaimUnit, GroupBatching, validate_claim_compatibility,
+};
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 
 pub use command::{
@@ -22,6 +27,10 @@ pub use command::{
     ReplacePendingCommand, UnfenceLeaseCommand,
 };
 pub use error::{EngineError, EngineResult};
+pub use finalize_validation::{
+    FinalizeTargeting, validate_finalize_targeting, validate_purge_force, validate_purge_targeting,
+    validate_rearm,
+};
 pub use port::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
     CreateQueueOutcome, FinalizePort, IdGen, ItemView, LeaseView, LogRead, LogWriter,
@@ -60,6 +69,10 @@ mod tests {
         assert_eq!(
             EngineError::Conflict.resp_token(),
             Some("-ERR pqueue conflict")
+        );
+        assert_eq!(
+            EngineError::BatchTooLarge.resp_token(),
+            Some("-ERR pqueue batch_too_large")
         );
         assert_eq!(
             EngineError::RequestIdConflict.resp_token(),

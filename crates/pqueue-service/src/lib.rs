@@ -22,7 +22,17 @@ use pqueue_client::{
     QueueMetrics, RenewLeasesRequest, RenewLeasesResponse, RepairAction, RepairItemsRequest,
     RepairItemsResponse, RetryCountMode, SetGatesRequest, SetGatesResponse,
 };
+use pqueue_core::{
+    CohortPolicy, EligibilityPolicy, GroupKey, MetadataValue, OrderingMode, PriorityModel,
+    QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId,
+    UtcTimestamp,
+};
 pub use pqueue_engine::{AuthContext, RedactedLeaseToken, hash_lease_token};
+use pqueue_engine::{
+    ClaimCompatibility as EngineClaimCompatibility, ClaimUnit as EngineClaimUnit,
+    FinalizeTargeting, GroupBatching as EngineGroupBatching, validate_claim_compatibility,
+    validate_finalize_targeting, validate_purge_force, validate_purge_targeting, validate_rearm,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -1232,121 +1242,116 @@ fn validate_batch_claim_request(
     let Some(compatibility) = req.compatibility.as_ref() else {
         return Ok(ClaimUnit::Item);
     };
-
-    validate_claim_compatibility(compatibility, req.max_items, capabilities)
-}
-
-fn validate_claim_compatibility(
-    compatibility: &ClaimCompatibility,
-    max_items: u32,
-    capabilities: QueueCapabilities,
-) -> Result<ClaimUnit, ApiProblem> {
-    if compatibility.group_key.as_deref().is_some_and(|key| {
-        key.is_empty()
-            || key.len() > 256
-            || !key.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
-            })
-    }) {
+    let engine_compat = engine_claim_compatibility(compatibility)?;
+    if engine_compat.whole_cohort && capabilities.progress_bound_ms.is_none() {
         return Err(ApiProblem::new(
             StatusCode::BAD_REQUEST,
             ApiErrorCode::InvalidRequest,
-            "group_key must match ^[A-Za-z0-9._:-]{1,256}$",
+            "whole_cohort requires queue progress_bound_ms",
         ));
     }
+    let queue = queue_definition_from_capabilities(capabilities);
+    validate_claim_compatibility(&engine_compat, u64::from(req.max_items), &queue)
+        .map(client_claim_unit)
+        .map_err(claim_validation_problem)
+}
 
-    if compatibility.group_batching.is_some() {
-        if compatibility.has_same_group_key_filter()
-            || compatibility.group_key.is_some()
-            || compatibility.is_whole_cohort()
-        {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "group_batching cannot be combined with same_group_key, group_key, or whole_cohort",
-            ));
-        }
-        let group_batching = compatibility.group_batching.as_ref().unwrap();
-        if group_batching.max_groups == 0 {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "group_batching.max_groups must be greater than zero",
-            ));
-        }
-        let Some(max_group_size) = capabilities.max_eligible_group_size else {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "group_batching requires group_co_residency and max_eligible_group_size",
-            ));
-        };
-        if !capabilities.group_co_residency {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "group_batching requires group_co_residency and max_eligible_group_size",
-            ));
-        }
-        if max_group_size > max_items {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::BatchTooLarge,
-                "max_items must be at least max_eligible_group_size for group_batching",
-            ));
-        }
-        return Ok(ClaimUnit::WholeGroup);
-    }
+fn engine_claim_compatibility(
+    compatibility: &ClaimCompatibility,
+) -> Result<EngineClaimCompatibility, ApiProblem> {
+    let group_key = compatibility
+        .group_key
+        .as_deref()
+        .map(|value| {
+            GroupKey::new(value).map_err(|_| {
+                ApiProblem::new(
+                    StatusCode::BAD_REQUEST,
+                    ApiErrorCode::InvalidRequest,
+                    "group_key must match ^[A-Za-z0-9._:-]{1,256}$",
+                )
+            })
+        })
+        .transpose()?;
+    let metadata_equals = compatibility
+        .metadata_equals
+        .iter()
+        .map(|(key, value)| (key.clone(), MetadataValue::String(value.clone())))
+        .collect();
+    Ok(EngineClaimCompatibility {
+        group_key,
+        same_group_key: compatibility.has_same_group_key_filter(),
+        metadata_equals,
+        group_batching: compatibility
+            .group_batching
+            .as_ref()
+            .map(|group| EngineGroupBatching {
+                max_groups: group.max_groups,
+            }),
+        whole_cohort: compatibility.is_whole_cohort(),
+    })
+}
 
-    if compatibility.is_whole_cohort() {
-        if compatibility.has_same_group_key_filter() || compatibility.group_key.is_some() {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "whole_cohort cannot be combined with same_group_key, group_key, or group_batching",
-            ));
-        }
-        if !capabilities.cohort_policy_enabled {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "whole_cohort requires cohort_policy.enabled=true",
-            ));
-        }
-        if !capabilities.group_co_residency {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "whole_cohort requires group_co_residency",
-            ));
-        }
-        let Some(completion_bound_ms) = capabilities.cohort_completion_bound_ms else {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "whole_cohort requires cohort completion_bound_ms",
-            ));
-        };
-        let Some(progress_bound_ms) = capabilities.progress_bound_ms else {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "whole_cohort requires queue progress_bound_ms",
-            ));
-        };
-        if completion_bound_ms > progress_bound_ms {
-            return Err(ApiProblem::new(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidRequest,
-                "cohort completion_bound_ms must be <= progress_bound_ms",
-            ));
-        }
-        return Ok(ClaimUnit::WholeCohort);
+fn queue_definition_from_capabilities(capabilities: QueueCapabilities) -> QueueDefinition {
+    QueueDefinition {
+        tenant_id: TenantId::new("service-validation").expect("static tenant id"),
+        queue_id: QueueId::new("service-validation").expect("static queue id"),
+        priority_model: PriorityModel::timestamp_ascending(),
+        ordering_mode: OrderingMode::Strict,
+        group_co_residency: capabilities.group_co_residency,
+        progress_bound_ms: capabilities.progress_bound_ms.unwrap_or(0),
+        eligibility_policy: EligibilityPolicy::default(),
+        cohort_policy: (capabilities.cohort_policy_enabled
+            || capabilities.cohort_completion_bound_ms.is_some())
+        .then_some(CohortPolicy {
+            enabled: capabilities.cohort_policy_enabled,
+            completion_bound_ms: capabilities.cohort_completion_bound_ms,
+            on_incomplete: None,
+            max_cohort_size: None,
+        }),
+        recurrence: RecurrencePolicy {
+            mode: if capabilities.recurring {
+                RecurrenceMode::Recurring
+            } else {
+                RecurrenceMode::Oneshot
+            },
+            until: capabilities.recurrence_until_seconds.map(|seconds| {
+                UtcTimestamp::new(seconds, 0).expect("valid whole-second timestamp")
+            }),
+        },
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: capabilities.client_item_key_retention_ms.unwrap_or(60_000),
+        max_lease_duration_ms: 60_000,
+        retry_policy: RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: capabilities.max_eligible_group_size.map(u64::from),
+        shard_count: 1,
     }
-    if compatibility.has_same_group_key_filter() {
-        return Ok(ClaimUnit::SameGroupKey);
+}
+
+fn client_claim_unit(unit: EngineClaimUnit) -> ClaimUnit {
+    match unit {
+        EngineClaimUnit::Item => ClaimUnit::Item,
+        EngineClaimUnit::SameGroupKey => ClaimUnit::SameGroupKey,
+        EngineClaimUnit::WholeGroup => ClaimUnit::WholeGroup,
+        EngineClaimUnit::WholeCohort => ClaimUnit::WholeCohort,
     }
-    Ok(ClaimUnit::Item)
+}
+
+fn claim_validation_problem(error: pqueue_engine::EngineError) -> ApiProblem {
+    match error {
+        pqueue_engine::EngineError::BatchTooLarge => ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::BatchTooLarge,
+            "max_items must be at least max_eligible_group_size for group_batching",
+        ),
+        pqueue_engine::EngineError::Invalid(message) => ApiProblem::new(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidRequest,
+            message,
+        ),
+        other => other.into(),
+    }
 }
 
 fn validate_request_id(request_id: &str) -> Result<(), ApiProblem> {
@@ -1362,22 +1367,26 @@ fn validate_request_id(request_id: &str) -> Result<(), ApiProblem> {
 
 fn finalize_result(item: &FinalizeItem, capabilities: QueueCapabilities) -> ItemResult {
     let target = item.item_id.clone();
-    if target.as_deref().is_none_or(str::is_empty) && item.cohort_id.is_none() {
+    if let Err(error) = validate_finalize_targeting(FinalizeTargeting {
+        has_item_id: item
+            .item_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty()),
+        has_cohort_id: item.cohort_id.is_some(),
+        has_lease_token: item
+            .lease_token
+            .as_deref()
+            .is_some_and(|value| !value.is_empty()),
+        has_cohort_lease_token: item
+            .cohort_lease_token
+            .as_deref()
+            .is_some_and(|value| !value.is_empty()),
+    }) {
         return item_result(
             target,
             None,
-            ItemResultStatus::Invalid,
-            Some("item_id or cohort_id is required".to_string()),
-        );
-    }
-    if item.lease_token.as_deref().is_none_or(str::is_empty)
-        && item.cohort_lease_token.as_deref().is_none_or(str::is_empty)
-    {
-        return item_result(
-            target,
-            None,
-            ItemResultStatus::Invalid,
-            Some("lease_token or cohort_lease_token is required".to_string()),
+            item_status_for_engine_error(&error),
+            Some(detail_for_engine_error(&error)),
         );
     }
 
@@ -1392,52 +1401,52 @@ fn finalize_result(item: &FinalizeItem, capabilities: QueueCapabilities) -> Item
 
 fn rearm_result(item: &FinalizeItem, capabilities: QueueCapabilities) -> ItemResult {
     let target = item.item_id.clone();
-    if !capabilities.recurring {
-        return item_result(
+    let queue = queue_definition_from_capabilities(capabilities);
+    let rearm_not_before = item.rearm.as_ref().map(|rearm| {
+        UtcTimestamp::new(rearm.not_before.seconds, rearm.not_before.nanoseconds)
+            .expect("API timestamp nanoseconds already deserialized as u32")
+    });
+    match validate_rearm(rearm_not_before, &queue) {
+        Ok(()) => item_result(target, None, ItemResultStatus::Rearmed, None),
+        Err(error) => item_result(
             target,
             None,
-            ItemResultStatus::Invalid,
-            Some("rearm requires recurrence.mode=recurring".to_string()),
-        );
+            item_status_for_engine_error(&error),
+            Some(match error {
+                pqueue_engine::EngineError::Terminal => {
+                    "rearm is past recurrence.until".to_string()
+                }
+                _ => detail_for_engine_error(&error),
+            }),
+        ),
     }
-    let Some(rearm) = item.rearm.as_ref() else {
-        return item_result(
-            target,
-            None,
-            ItemResultStatus::Invalid,
-            Some("rearm.not_before is required".to_string()),
-        );
-    };
-    if capabilities
-        .recurrence_until_seconds
-        .is_some_and(|until| rearm.not_before.seconds > until)
-    {
-        return item_result(
-            target,
-            None,
-            ItemResultStatus::Terminal,
-            Some("rearm is past recurrence.until".to_string()),
-        );
-    }
-    item_result(target, None, ItemResultStatus::Rearmed, None)
 }
 
 fn purge_result(item: &PurgeItem, force: bool) -> ItemResult {
-    if item.item_id.as_deref().is_none_or(str::is_empty)
-        && item.client_item_key.as_deref().is_none_or(str::is_empty)
-    {
+    let has_item_id = item
+        .item_id
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let has_client_item_key = item
+        .client_item_key
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    if let Err(error) = validate_purge_targeting(has_item_id, has_client_item_key) {
         return item_result(
             item.item_id.clone(),
             item.client_item_key.clone(),
-            ItemResultStatus::Invalid,
-            Some("item_id or client_item_key is required".to_string()),
+            item_status_for_engine_error(&error),
+            Some(detail_for_engine_error(&error)),
         );
     }
-    if !force {
+    // This transitional HTTP service does not read item lease state; keep its old conservative
+    // behavior by treating every purge target as potentially leased. The canonical engine rule is
+    // state-aware and lives in `pqueue-engine::validate_purge_force`.
+    if let Err(error) = validate_purge_force(true, force) {
         return item_result(
             item.item_id.clone(),
             item.client_item_key.clone(),
-            ItemResultStatus::Conflict,
+            item_status_for_engine_error(&error),
             Some("leased items require force=true to purge".to_string()),
         );
     }
@@ -1447,6 +1456,21 @@ fn purge_result(item: &PurgeItem, force: bool) -> ItemResult {
         ItemResultStatus::Purged,
         None,
     )
+}
+
+fn item_status_for_engine_error(error: &pqueue_engine::EngineError) -> ItemResultStatus {
+    match error {
+        pqueue_engine::EngineError::Terminal => ItemResultStatus::Terminal,
+        pqueue_engine::EngineError::Conflict => ItemResultStatus::Conflict,
+        _ => ItemResultStatus::Invalid,
+    }
+}
+
+fn detail_for_engine_error(error: &pqueue_engine::EngineError) -> String {
+    match error {
+        pqueue_engine::EngineError::Invalid(message) => (*message).to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn item_result(

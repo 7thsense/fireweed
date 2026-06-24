@@ -22,6 +22,9 @@ pub enum EngineError {
     Unavailable,
     /// An optimistic-concurrency or cohort conflict. Maps to `-ERR pqueue conflict`.
     Conflict,
+    /// A claim/cohort/group unit would exceed `max_items` (API-001 `batch-too-large`).
+    /// Maps to `-ERR pqueue batch_too_large`.
+    BatchTooLarge,
     /// A retried `request_id` carried a different body (API-001 `request-id-conflict`).
     /// Distinct from the generic `Conflict`. Maps to `-ERR pqueue request_id_conflict`.
     RequestIdConflict,
@@ -46,6 +49,7 @@ impl EngineError {
             EngineError::Superseded => Some("-ERR pqueue superseded"),
             EngineError::Unavailable => Some("-ERR pqueue unavailable"),
             EngineError::Conflict => Some("-ERR pqueue conflict"),
+            EngineError::BatchTooLarge => Some("-ERR pqueue batch_too_large"),
             EngineError::RequestIdConflict => Some("-ERR pqueue request_id_conflict"),
             EngineError::RequestExpired => Some("-ERR pqueue request_expired"),
             // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR pqueue` mappings handled by the adapter.
@@ -68,6 +72,7 @@ impl std::fmt::Display for EngineError {
             EngineError::Superseded => write!(f, "superseded"),
             EngineError::Unavailable => write!(f, "unavailable"),
             EngineError::Conflict => write!(f, "conflict"),
+            EngineError::BatchTooLarge => write!(f, "batch too large"),
             EngineError::RequestIdConflict => write!(f, "request-id conflict"),
             EngineError::RequestExpired => write!(f, "request expired"),
             EngineError::Forbidden(why) => write!(f, "forbidden: {why}"),

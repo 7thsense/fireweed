@@ -86,6 +86,8 @@ fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
 struct LogData {
     epoch: u64,
     entries: Vec<CommandEnvelope>,
+    /// Persisted command_position high-water — a stored field, NOT recomputed from `entries.len()`,
+    /// so it survives log retention/compaction and `item_version` never regresses (TD-007 §4).
     high_water: Option<CommandPosition>,
     snapshots: Vec<(SnapshotRef, ProjectionSnapshot)>,
 }

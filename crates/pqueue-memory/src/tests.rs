@@ -721,3 +721,129 @@ async fn pause_and_fence_reconstruct_from_log() {
         "fence reconstructed"
     );
 }
+
+// White-box helper: read an item's durable item_version straight from the projection.
+fn item_version_of(b: &MemoryBackend, sk: &ShardKey, id: &str) -> u64 {
+    let g = b.state.lock().expect("poisoned");
+    g.projections
+        .get(sk)
+        .unwrap()
+        .items
+        .get(&ItemId::new(id).unwrap())
+        .unwrap()
+        .item_version
+}
+
+#[tokio::test]
+async fn item_version_is_monotonic_per_item() {
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    let sk = shard();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    let v0 = item_version_of(&b, &sk, "a"); // push -> 1
+    b.claim(claim_req(1, 500, 10)).await.unwrap();
+    let v1 = item_version_of(&b, &sk, "a"); // claim bumps -> 2
+    let aid = ItemId::new("a").unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::RenewLease(pqueue_engine::RenewLeaseCommand {
+                item_ids: vec![aid.clone()],
+                lease_expires_at: ts(600),
+            }),
+            vec![aid.clone()],
+        ),
+    )
+    .await; // renew bumps -> 3
+    let v2 = item_version_of(&b, &sk, "a");
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome {
+                    item_id: aid.clone(),
+                    kind: FinalizeKind::Complete,
+                }],
+            }),
+            vec![aid],
+        ),
+    )
+    .await; // finalize bumps -> 4
+    let v3 = item_version_of(&b, &sk, "a");
+    assert_eq!(
+        (v0, v1, v2, v3),
+        (1, 2, 3, 4),
+        "item_version bumps exactly once per committed mutation (API-001)"
+    );
+}
+
+#[tokio::test]
+async fn high_water_advances_on_each_commit() {
+    use pqueue_engine::SnapshotStore;
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    let sk = shard();
+    assert!(b.high_water(&sk).await.unwrap().is_none(), "no commits yet");
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    let h1 = b.high_water(&sk).await.unwrap().expect("after push");
+    b.claim(claim_req(1, 500, 10)).await.unwrap();
+    let h2 = b.high_water(&sk).await.unwrap().expect("after claim");
+    assert!(
+        h1.precedes(&h2),
+        "command_position high-water must advance on each commit (push -> claim)"
+    );
+}
+
+#[tokio::test]
+async fn high_water_survives_log_compaction() {
+    use pqueue_engine::SnapshotStore;
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    let sk = shard();
+    for p in [10_i64, 20, 30] {
+        commit(
+            &b,
+            envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![item(&format!("i{p}"), &format!("k{p}"), p)],
+                }),
+                vec![],
+            ),
+        )
+        .await;
+    }
+    let before = b.high_water(&sk).await.unwrap().unwrap();
+    // Simulate log compaction: drop the stored entries (retention). The persisted high-water is a
+    // separate field, NOT recomputed from entries.len() — so it MUST be unchanged (TD-007 §4).
+    {
+        let mut g = b.state.lock().unwrap();
+        g.logs.get_mut(&sk).unwrap().entries.clear();
+    }
+    let after = b.high_water(&sk).await.unwrap().unwrap();
+    assert_eq!(
+        before, after,
+        "high-water is persisted, not recomputed from a compacted log"
+    );
+    assert_eq!(
+        after.sequence, 2,
+        "3 commits -> seq 2 (would be 0 if recomputed from empty entries)"
+    );
+}

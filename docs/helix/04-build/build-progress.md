@@ -4,17 +4,19 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
-- **Now:** Phase 2 — next §4a unit: **command_position high-water + item_version** (durable, TD-007
-  §4). Today: `item_version` is a per-item counter (correct per API-001) and the SnapshotStore has
-  `high_water`/`set_high_water` (monotonic) but the memory backend never advances the high-water on
-  commit. This unit should: (a) advance the persisted `command_position` high-water in `commit_locked`
-  (or apply path) so it tracks the latest committed position; (b) prove it is read from the snapshot,
-  not recomputed from a (possibly compacted) log (TD-007 §4) — a test that the high-water survives and
-  is monotonic across commits; (c) confirm `item_version` monotonicity per item. Keep it tight.
-  **pause/fence unit DONE** (FinalizePort, B1 fix, reconstruction test, reviewed). **idempotency DONE**.
-  **auth DONE**.
-- **After this unit:** operator-op store (API-002 async model, reuses the idempotency cache) +
-  QueueCatalog metrics/scopes; claim/finalize/rearm/purge validation; then Phase 3 driven adapters.
+- **Now:** Phase 2 — LAST §4a unit: **operator-operation store + QueueCatalog metrics/active-scopes**
+  (API-002 async operation model — operator/library plane). This is the biggest remaining migration
+  unit and may span iterations. Sub-steps: (a) design the operator-operation store as engine durable
+  state — `operation_id → {state ∈ {accepted,running,succeeded,partial,failed,canceled}, progress,
+  errors[]}` keyed/anchored by `request_id → operation_id` (REUSE QueueIdempotencyCache for the
+  replay→409 anchor), with an engine test proving replay-reconstruction; (b) QueueCatalog
+  metrics/active-scopes — the engine already has `ProjectionRead::metrics`; migrate the active-scope
+  rollup (`DiscoverActiveScopes`) as a read over the projection. Read originals from
+  `git show HEAD:crates/pqueue-service/src/lib.rs` (operator_items_response, existing/record_operator_
+  operation, roll_up_queue_scopes). Keep STRUCTURED errors. Size to a coherent sub-chunk; it's large.
+  **Validation family DONE** (claim-compat + finalize/rearm/purge, parity-reviewed). Core durable +
+  worker-path domain logic all migrated.
+- **After §4a:** Phase 3 driven adapters (sqlite, postgres via ClaimPort, objectlog eventual-apply).
 
 ## Checklist
 
@@ -46,9 +48,22 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   validation: Leased+!fenced else StaleLease/Terminal/Invalid, no log/projection divergence); RESP
   XACK wired to it (fenced → `-ERR pqueue stale_lease`); pause gates claim/select_eligible/peek; tests
   incl. a log-replay reconstruction of pause+fence. Fixed B1 (commit_locked divergence) for finalize.
-- [ ] §4a unit: command_position (item_version source, persisted high-water)
+- [x] §4a unit: command_position high-water + item_version (durable, TD-007 §4) — high-water already
+  advanced on every commit; added 3 conformance tests (advances-on-commit, item_version monotonic
+  per item 1→2→3→4, **survives log compaction / not recomputed from entries**) + field doc. Tests-only
+  over already-reviewed code paths.
 - [ ] §4a unit: operator-operation store (API-002 async model) ; QueueCatalog metrics/scopes
-- [ ] §4a unit: claim/finalize/rearm/purge validation
+- [x] §4a unit: **claim-compatibility validation** (most load-bearing) → `pqueue-engine::claim_validation`
+  (`validate_claim_compatibility` → ClaimUnit; charset re-check since GroupKey newtype only checks
+  non-empty; structured `EngineError::BatchTooLarge` added → `-ERR pqueue batch_too_large`). 7 engine
+  tests, parity-reviewed vs original (rule-by-rule GO). Deleted from service.
+- [x] §4a unit: **finalize/rearm/purge validation** → `pqueue-engine::finalize_validation`
+  (validate_finalize_targeting, validate_rearm [Invalid/Terminal], validate_purge_targeting,
+  validate_purge_force). 6 engine tests, parity-reviewed. Service keeps compatibility wrappers that
+  delegate to engine validation while it is still compiling. CORRECTED canonical purge-force gate
+  (leased+!force→Conflict vs service's historical unconditional !force→Conflict) — documented.
+- [ ] §4a unit: operator-operation store (API-002 async model) + QueueCatalog metrics/active-scopes
+  (operator/library plane — last §4a unit before Phase 3)
 - [ ] Final: delete pqueue-service entirely (Phase 6)
 
 ### Phase 3 — driven adapters
@@ -68,6 +83,13 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - [ ] Reconciliation report: every §1–§6 item implemented+tested or descoped-with-reason
 
 ## Decisions log (append as resolved)
+- 2026-06-23 PURGE CORRECTION + DEFERRAL: `validate_purge_force` applies the real API-001 rule
+  (leased item + !force → Conflict; non-leased purges freely), CORRECTING the HTTP service's
+  pre-storage validator which conflicted on !force unconditionally (it had no item state). The
+  transitional service wrapper still passes `item_is_leased=true` to preserve its old conservative
+  response shape. DEFERRAL: when a real PurgePort is wired, `item_is_leased` for the purge-force gate
+  MUST be read in the SAME transaction as the purge mutation (mirror FinalizePort pre-commit fencing)
+  so a stale leased flag can't defeat the gate. (Review IMPORTANT conditions.)
 - 2026-06-23 INVARIANT (commit_locked has no rollback): `MemoryBackend::commit_locked` appends the log
   entry BEFORE applying to the projection, with no rollback. Therefore EVERY orchestration caller MUST
   fully pre-validate the command so `apply_command` is infallible for it (else log/projection diverge).
@@ -90,6 +112,30 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
+- 2026-06-23 Phase 2 §4a finalize/rearm/purge validation: fresh-eyes parity review GO-with-conditions,
+  NO blocking. Verified: finalize-targeting + rearm parity exact (incl. seconds-only past-until
+  boundary, at-until=ok); structured errors (Invalid/Terminal/Conflict) correct; purge factored into
+  pure targeting + state-dependent force gate. The purge-force CORRECTION (leased+!force→Conflict vs
+  service unconditional) confirmed correct per API-001 + safe (a loosening; no existing consumer).
+  Conditions applied: added 2 tests (finalize independent target/lease families; rearm
+  missing-not_before-wins-over-until) + tracking note (real PurgePort must read item_is_leased in the
+  same transaction). Service compatibility wrappers delegate to engine validation and keep historical
+  conservative purge behavior. Engine 25 tests + clippy green; service route tests green.
+- 2026-06-23 Phase 2 §4a claim-compat validation: fresh-eyes parity review GO-with-conditions, NO
+  blocking. Verified rule-by-rule parity vs the original service `validate_claim_compatibility`
+  (charset, all combination rejections, capability checks, `>` not `>=` BatchTooLarge boundary, the
+  cohort completion≤progress bound). Confirmed: the group_key charset re-check is present + correct
+  (GroupKey newtype only validates non-empty); BatchTooLarge is a distinct structured variant with
+  the right wire token; dropping the service's unreachable "requires progress_bound_ms" branch is
+  sound (QueueDefinition.progress_bound_ms is non-Option, domain-validated >0). Condition applied:
+  added 4 missing branch tests (wc-not-coresident, wc-missing-bound, wc-combination-reject, valid
+  group_key happy path) + a code comment on the intentional omission. Engine 19 tests + clippy green.
+- 2026-06-23 Phase 2 §4a command_position: self-review only (tests + 1 doc line, NO production logic
+  change — high-water write paths were already validated in prior reviewed units). Added 3 conformance
+  tests proving TD-007 §4 durable properties: high-water advances on each commit; item_version is
+  monotonic per item (push=1→claim=2→renew=3→finalize=4); high-water survives a simulated log
+  compaction (entries cleared → high-water unchanged at seq 2, proving it is stored not recomputed).
+  Verified non-tautological. Memory 19 tests + clippy green.
 - 2026-06-23 Phase 2 §4a pause/fence: fresh-eyes review GO-with-conditions (one BLOCKING). Confirmed:
   fence check is pre-append + same-lock (no TOCTOU); pause gates claim+select_eligible; fenced XACK →
   `-ERR pqueue stale_lease` (not 0); all-or-nothing honestly marked. Fixes applied — (B1) `finalize`
