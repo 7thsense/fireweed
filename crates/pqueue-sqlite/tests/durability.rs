@@ -24,7 +24,11 @@ async fn projection_rebuilds_from_durable_log_on_reopen() {
             &b,
             envelope(
                 QueueCommand::Push(PushCommand {
-                    items: vec![item("a", "ka", 30), item("b", "kb", 10), item("c", "kc", 20)],
+                    items: vec![
+                        item("a", "ka", 30),
+                        item("b", "kb", 10),
+                        item("c", "kc", 20),
+                    ],
                 }),
                 vec![],
             ),
@@ -48,11 +52,19 @@ async fn projection_rebuilds_from_durable_log_on_reopen() {
         );
         // The still-eligible items are the two unclaimed ones, in priority order (c=20 before a=30).
         let elig = b
-            .select_eligible(&pqueue_conformance::shard(), pqueue_conformance::ts(200), 10)
+            .select_eligible(
+                &pqueue_conformance::shard(),
+                pqueue_conformance::ts(200),
+                10,
+            )
             .await
             .unwrap();
         let ids: Vec<&str> = elig.iter().map(|i| i.as_str()).collect();
-        assert_eq!(ids, vec!["c", "a"], "eligibility order survives the rebuild");
+        assert_eq!(
+            ids,
+            vec!["c", "a"],
+            "eligibility order survives the rebuild"
+        );
     }
 
     let _ = std::fs::remove_file(&path);
@@ -88,7 +100,11 @@ async fn orchestration_writes_after_reopen_do_not_collide() {
         let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
         assert_eq!(claimed.items.len(), 1, "second item claimable after reopen");
         let m = b.metrics(&qkey()).await.unwrap();
-        assert_eq!((m.pending, m.leased), (0, 2), "both items leased across the two sessions");
+        assert_eq!(
+            (m.pending, m.leased),
+            (0, 2),
+            "both items leased across the two sessions"
+        );
         // A third reopen replays the post-reopen claim too (log stayed consistent).
         drop(b);
         let b = SqliteBackend::open(p).expect("reopen 2");
@@ -106,16 +122,32 @@ async fn snapshots_round_trip_and_latest_is_most_recent() {
     let sk = pqueue_conformance::shard();
     let pos = pqueue_engine::CommandPosition::new(sk.clone(), 0, 0);
     let r1 = b
-        .write_snapshot(&sk, pos.clone(), ProjectionSnapshot { payload: vec![1, 2, 3] })
+        .write_snapshot(
+            &sk,
+            pos.clone(),
+            ProjectionSnapshot {
+                payload: vec![1, 2, 3],
+            },
+        )
         .await
         .unwrap();
     let r2 = b
-        .write_snapshot(&sk, pos, ProjectionSnapshot { payload: vec![4, 5, 6] })
+        .write_snapshot(
+            &sk,
+            pos,
+            ProjectionSnapshot {
+                payload: vec![4, 5, 6],
+            },
+        )
         .await
         .unwrap();
     assert_ne!(r1.ref_id, r2.ref_id, "each snapshot gets a distinct ref");
     // latest is the second write.
-    let latest = b.latest_snapshot(&sk).await.unwrap().expect("a snapshot exists");
+    let latest = b
+        .latest_snapshot(&sk)
+        .await
+        .unwrap()
+        .expect("a snapshot exists");
     assert_eq!(latest.ref_id, r2.ref_id);
     // read by ref returns the right payload.
     assert_eq!(b.read_snapshot(&r1).await.unwrap().payload, vec![1, 2, 3]);
@@ -155,7 +187,10 @@ async fn high_water_persists_across_reopen() {
             .await
             .unwrap()
             .expect("high-water persisted");
-        assert_eq!(before, after, "persisted high-water survives reopen (TD-007 §4)");
+        assert_eq!(
+            before, after,
+            "persisted high-water survives reopen (TD-007 §4)"
+        );
     }
 
     let _ = std::fs::remove_file(&path);

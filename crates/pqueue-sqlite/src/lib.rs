@@ -20,17 +20,18 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, PriorityValue, QueueDefinition, QueueId, TenantId,
-    UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
+    QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
-    CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
-    EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, ItemView,
-    LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey,
-    QueueMetrics, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ShardId,
-    ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandChecksum,
+    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
+    FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem, PushPort,
+    PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ShardId, ShardKey,
+    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
 };
 use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, params};
@@ -166,9 +167,10 @@ impl Inner {
     /// the log is the source of truth: a restart loses no committed state (TD-007 §4 replay).
     fn rebuild_all(&mut self) -> EngineResult<()> {
         let rows: Vec<(String, String, String)> = {
-            let mut stmt = st(self.conn.prepare("SELECT tenant, queue, definition FROM queues"))?;
-            let mapped =
-                st(stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))))?;
+            let mut stmt = st(self
+                .conn
+                .prepare("SELECT tenant, queue, definition FROM queues"))?;
+            let mapped = st(stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))))?;
             let mut out = Vec::new();
             for r in mapped {
                 out.push(st(r)?);
@@ -542,6 +544,34 @@ impl RenewLeasePort for SqliteBackend {
     }
 }
 
+impl ReassignLeasePort for SqliteBackend {
+    fn reassign(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: LeaseToken,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.reassign_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_token: new_lease_token,
+                lease_expires_at: new_lease_expires_at,
+            });
+            let env = g.make_envelope(cmd, item_ids, now);
+            g.commit_locked(shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
 impl ReclaimDriver for SqliteBackend {
     fn tick(
         &self,
@@ -672,9 +702,11 @@ impl LogRead for SqliteBackend {
                 "SELECT seq, envelope FROM log_entries \
                  WHERE tenant=?1 AND queue=?2 AND seq>=?3 ORDER BY seq LIMIT ?4",
             ))?;
-            let mapped = st(stmt.query_map(params![t, q, start as i64, limit as i64], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            }))?;
+            let mapped = st(
+                stmt.query_map(params![t, q, start as i64, limit as i64], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                }),
+            )?;
             let mut entries = Vec::new();
             for r in mapped {
                 let (seq, json) = st(r)?;
@@ -727,6 +759,19 @@ impl ProjectionRead for SqliteBackend {
             let g = self.inner.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn claimed_view(
+        &self,
+        shard: &ShardKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.render_claimed(ids))
         })();
         std::future::ready(result)
     }
@@ -841,7 +886,8 @@ impl SnapshotStore for SqliteBackend {
                 params![t, q],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             ))?;
-            Ok(row.map(|(epoch, seq)| CommandPosition::new(shard.clone(), epoch as u64, seq as u64)))
+            Ok(row
+                .map(|(epoch, seq)| CommandPosition::new(shard.clone(), epoch as u64, seq as u64)))
         })();
         std::future::ready(result)
     }
@@ -869,7 +915,12 @@ impl SnapshotStore for SqliteBackend {
             st(g.conn.execute(
                 "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
                  ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
-                params![t, q, position.backend_epoch as i64, position.sequence as i64],
+                params![
+                    t,
+                    q,
+                    position.backend_epoch as i64,
+                    position.sequence as i64
+                ],
             ))?;
             Ok(())
         })();

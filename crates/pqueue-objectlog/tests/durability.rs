@@ -67,11 +67,13 @@ async fn replace_pending_command_is_refused_at_the_write_path() {
         vec![],
     );
     let res = b
-        .write(move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
+        .write(
+            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
+                let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
+                pw.apply(&pos, std::slice::from_ref(&env))?;
+                Ok(())
+            },
+        )
         .await;
     assert_eq!(
         res,
@@ -137,7 +139,11 @@ async fn projection_rebuilds_from_object_log_on_reopen() {
             &b,
             envelope(
                 QueueCommand::Push(PushCommand {
-                    items: vec![item("a", "ka", 30), item("b", "kb", 10), item("c", "kc", 20)],
+                    items: vec![
+                        item("a", "ka", 30),
+                        item("b", "kb", 10),
+                        item("c", "kc", 20),
+                    ],
                 }),
                 vec![],
             ),
@@ -166,7 +172,11 @@ async fn projection_rebuilds_from_object_log_on_reopen() {
     {
         let b = ObjectLogBackend::open(&root).expect("reopen 2");
         let m = b.metrics(&qkey()).await.unwrap();
-        assert_eq!((m.pending, m.leased), (1, 2), "post-reopen claim survived replay");
+        assert_eq!(
+            (m.pending, m.leased),
+            (1, 2),
+            "post-reopen claim survived replay"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&root);

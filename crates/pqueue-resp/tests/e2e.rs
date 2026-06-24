@@ -678,3 +678,58 @@ async fn two_servers_on_one_backend_assign_distinct_xadd_ids() {
         "both items coexist (no silent overwrite)"
     );
 }
+
+/// XCLAIM both semantics over the stock client (owed-item E / Chunk 6a): the RESP "consumer" IS the
+/// lease token (what XPENDING reports). Self-XCLAIM (consumer == current owner) RENEWS without charging
+/// a delivery; cross-consumer XCLAIM REASSIGNS — transfers ownership and charges exactly one delivery
+/// (TD-006:129). Verified through XPENDING's `[id, consumer, idle, delivery-count]` rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump() {
+    let (mut con, _backend) = setup().await;
+
+    // Produce one item and claim it (consumer c1). The front mints the lease token.
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1").arg("*").arg("priority").arg(5)
+        .query_async(&mut con).await.unwrap();
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP").arg("g").arg("c1").arg("STREAMS").arg("t1:q1").arg(">")
+        .query_async(&mut con).await.unwrap();
+    let id = reply.keys[0].ids[0].id.clone();
+
+    // Current owner (lease token) + delivery-count via XPENDING extended.
+    let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
+        .arg("t1:q1").arg("g").arg("-").arg("+").arg(10)
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(pend.len(), 1);
+    let owner = pend[0].1.clone();
+    assert_eq!(pend[0].3, 1, "exactly one delivery so far (the initial claim)");
+
+    // SELF-XCLAIM: consumer == the current owner token → renew, NO attempt charge.
+    let claimed: Vec<String> = redis::cmd("XCLAIM")
+        .arg("t1:q1").arg("g").arg(&owner).arg(0).arg(&id).arg("JUSTID")
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(claimed, vec![id.clone()], "self-XCLAIM returns the claimed id");
+    let pend2: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
+        .arg("t1:q1").arg("g").arg("-").arg("+").arg(10)
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(pend2[0].1, owner, "self-XCLAIM keeps the same owner");
+    assert_eq!(pend2[0].3, 1, "self-XCLAIM (renew) does NOT charge an attempt");
+
+    // CROSS-CONSUMER XCLAIM to c2 → reassign: ownership transfers, delivery-count +1.
+    let claimed2: Vec<String> = redis::cmd("XCLAIM")
+        .arg("t1:q1").arg("g").arg("c2").arg(0).arg(&id).arg("JUSTID")
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(claimed2, vec![id.clone()]);
+    let pend3: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
+        .arg("t1:q1").arg("g").arg("-").arg("+").arg(10)
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(pend3[0].1, "c2", "cross-consumer XCLAIM transfers ownership to c2");
+    assert_eq!(pend3[0].3, 2, "cross-consumer XCLAIM charges one delivery (now 2)");
+
+    // Without JUSTID, XCLAIM returns the rich entry [id, [field value …]] for the (now c2-owned) item.
+    let entries: Vec<(String, Vec<String>)> = redis::cmd("XCLAIM")
+        .arg("t1:q1").arg("g").arg("c2").arg(0).arg(&id)
+        .query_async(&mut con).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, id, "entry carries the item id");
+}

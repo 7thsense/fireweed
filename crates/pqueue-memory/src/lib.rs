@@ -13,19 +13,22 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, PriorityValue, QueueDefinition, QueueId, TenantId,
-    UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
+    QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, IdGen,
-    ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PushCommand, PushItem, QueueCommand, QueueKey, QueueMetrics, ReclaimDriver,
-    ReplacePendingCommand, ShardId, ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome,
-    UpsertPort,
+    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
+    FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LogRead,
+    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem,
+    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, ShardId, ShardKey,
+    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
-use pqueue_engine::{PushPort, PushSpec, RenewLeaseCommand, RenewLeasePort, build_push_items};
+use pqueue_engine::{
+    PushPort, PushSpec, ReassignLeaseCommand, ReassignLeasePort, RenewLeaseCommand, RenewLeasePort,
+    build_push_items,
+};
 use pqueue_projection::{LogData, ProjectionData, commit};
 
 // ---------------------------------------------------------------------------
@@ -125,7 +128,11 @@ impl MemoryBackend {
 
     /// Append `env` to the shard log and apply it to the projection under the already-held lock — the
     /// atomic append+apply unit of work the claim/upsert/reclaim ports rely on (shared `commit`).
-    fn commit_locked(state: &mut State, shard: &ShardKey, env: CommandEnvelope) -> EngineResult<()> {
+    fn commit_locked(
+        state: &mut State,
+        shard: &ShardKey,
+        env: CommandEnvelope,
+    ) -> EngineResult<()> {
         let State {
             logs, projections, ..
         } = state;
@@ -162,7 +169,11 @@ impl ClaimPort for MemoryBackend {
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
             let items: Vec<ClaimedItem> = proj.render_claimed(&candidates);
             // Every just-leased candidate must render (lease fields are Some under this lock).
-            debug_assert_eq!(items.len(), candidates.len(), "leased candidate failed to render");
+            debug_assert_eq!(
+                items.len(),
+                candidates.len(),
+                "leased candidate failed to render"
+            );
             Ok(Claimed { items })
         })();
         std::future::ready(result)
@@ -240,7 +251,9 @@ impl UpsertPort for MemoryBackend {
                             })
                         }
                         // Collision with in-flight work — no lifecycle transition allowed.
-                        ItemState::Leased => Err(EngineError::Invalid("collision with claimed item")),
+                        ItemState::Leased => {
+                            Err(EngineError::Invalid("collision with claimed item"))
+                        }
                         // Terminal collision.
                         ItemState::Complete | ItemState::Failed => Err(EngineError::Terminal),
                     }
@@ -328,6 +341,34 @@ impl RenewLeasePort for MemoryBackend {
             }
             let cmd = QueueCommand::RenewLease(RenewLeaseCommand {
                 item_ids: item_ids.clone(),
+                lease_expires_at: new_lease_expires_at,
+            });
+            let env = self.make_envelope(cmd, item_ids, now);
+            Self::commit_locked(&mut g, shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReassignLeasePort for MemoryBackend {
+    fn reassign(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: LeaseToken,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.reassign_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_token: new_lease_token,
                 lease_expires_at: new_lease_expires_at,
             });
             let env = self.make_envelope(cmd, item_ids, now);
@@ -530,6 +571,19 @@ impl ProjectionRead for MemoryBackend {
             let g = self.state.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn claimed_view(
+        &self,
+        shard: &ShardKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.render_claimed(ids))
         })();
         std::future::ready(result)
     }

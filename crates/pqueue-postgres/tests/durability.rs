@@ -43,7 +43,11 @@ async fn projection_rebuilds_from_durable_log_on_reconnect_inner(url: String) {
             &b,
             envelope(
                 QueueCommand::Push(PushCommand {
-                    items: vec![item("a", "ka", 30), item("b", "kb", 10), item("c", "kc", 20)],
+                    items: vec![
+                        item("a", "ka", 30),
+                        item("b", "kb", 10),
+                        item("c", "kc", 20),
+                    ],
                 }),
                 vec![],
             ),
@@ -68,11 +72,19 @@ async fn projection_rebuilds_from_durable_log_on_reconnect_inner(url: String) {
         );
         // The still-eligible items are the two unclaimed ones, in priority order (c=20 before a=30).
         let elig = b
-            .select_eligible(&pqueue_conformance::shard(), pqueue_conformance::ts(200), 10)
+            .select_eligible(
+                &pqueue_conformance::shard(),
+                pqueue_conformance::ts(200),
+                10,
+            )
             .await
             .unwrap();
         let ids: Vec<&str> = elig.iter().map(|i| i.as_str()).collect();
-        assert_eq!(ids, vec!["c", "a"], "eligibility order survives the rebuild");
+        assert_eq!(
+            ids,
+            vec!["c", "a"],
+            "eligibility order survives the rebuild"
+        );
     }
 }
 
@@ -82,7 +94,9 @@ fn orchestration_writes_after_reconnect_do_not_collide() {
         eprintln!("POSTGRES DURABILITY SKIPPED (recollide) — set PQUEUE_PG_TEST_URL to a live DB");
         return;
     };
-    futures::executor::block_on(orchestration_writes_after_reconnect_do_not_collide_inner(url));
+    futures::executor::block_on(orchestration_writes_after_reconnect_do_not_collide_inner(
+        url,
+    ));
 }
 
 async fn orchestration_writes_after_reconnect_do_not_collide_inner(url: String) {
@@ -109,7 +123,11 @@ async fn orchestration_writes_after_reconnect_do_not_collide_inner(url: String) 
         let b = PostgresBackend::connect_in_schema(&url, &schema).expect("reconnect");
         // Claim again post-reconnect: must succeed (fresh id, no collision) and lease the remaining item.
         let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
-        assert_eq!(claimed.items.len(), 1, "second item claimable after reconnect");
+        assert_eq!(
+            claimed.items.len(),
+            1,
+            "second item claimable after reconnect"
+        );
         let m = b.metrics(&qkey()).await.unwrap();
         assert_eq!(
             (m.pending, m.leased),

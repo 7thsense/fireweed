@@ -33,7 +33,7 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
     ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PushItem, QueueCommand, QueueKey,
-    ReclaimDriver, RenewLeasePort, ShardId, ShardKey, SnapshotStore, UpsertPort,
+    ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, SnapshotStore, UpsertPort,
 };
 
 pub mod scenarios;
@@ -48,6 +48,7 @@ pub trait ConformanceBackend:
     + UpsertPort
     + FinalizePort
     + RenewLeasePort
+    + ReassignLeasePort
     + ReclaimDriver
     + SnapshotStore
     + LogRead
@@ -62,6 +63,7 @@ impl<T> ConformanceBackend for T where
         + UpsertPort
         + FinalizePort
         + RenewLeasePort
+        + ReassignLeasePort
         + ReclaimDriver
         + SnapshotStore
         + LogRead
@@ -181,6 +183,8 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::paused_queue_yields_no_claims(&make).await;
     scenarios::fenced_lease_finalize_is_stale(&make).await;
     scenarios::renew_extends_lease_and_rejects(&make).await;
+    scenarios::reassign_swaps_token_and_charges_attempt(&make).await;
+    scenarios::claimed_view_renders_leased_items(&make).await;
     scenarios::finalize_of_nonleased_item_is_rejected_without_appending(&make).await;
     scenarios::pause_and_fence_reconstruct_from_log(&make).await;
     scenarios::high_water_advances_on_each_commit(&make).await;
@@ -209,6 +213,8 @@ macro_rules! conformance_suite {
             paused_queue_yields_no_claims,
             fenced_lease_finalize_is_stale,
             renew_extends_lease_and_rejects,
+            reassign_swaps_token_and_charges_attempt,
+            claimed_view_renders_leased_items,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,
@@ -248,6 +254,8 @@ macro_rules! eventual_apply_suite {
             paused_queue_yields_no_claims,
             fenced_lease_finalize_is_stale,
             renew_extends_lease_and_rejects,
+            reassign_swaps_token_and_charges_attempt,
+            claimed_view_renders_leased_items,
             finalize_of_nonleased_item_is_rejected_without_appending,
             pause_and_fence_reconstruct_from_log,
             high_water_advances_on_each_commit,

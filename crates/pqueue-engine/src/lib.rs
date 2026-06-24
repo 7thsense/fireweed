@@ -30,8 +30,9 @@ pub use operator::{OperationHandle, OperationId, OperatorOperationState, Operato
 pub use command::{
     ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PurgeItemsCommand, PushCommand, PushItem, QueueCommand, RenewLeaseCommand,
-    ReplacePendingCommand, UnfenceLeaseCommand, build_push_items,
+    LeaseExpiredCommand, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
+    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, UnfenceLeaseCommand,
+    build_push_items,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{
@@ -42,7 +43,8 @@ pub use port::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
     CreateQueueOutcome, FinalizePort, IdGen, ItemView, LeaseView, LogRead, LogWriter,
     ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushPort, PushSpec, QueueMetrics,
-    ReclaimDriver, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport,
+    UpsertOutcome, UpsertPort,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey, ShardId, ShardKey};
 

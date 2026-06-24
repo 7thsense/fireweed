@@ -48,17 +48,18 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use postgres::{Client, NoTls};
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, PriorityValue, QueueDefinition, QueueId, TenantId,
-    UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
+    QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
-    CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
-    EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, ItemView,
-    LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey,
-    QueueMetrics, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ShardId,
-    ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandChecksum,
+    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
+    FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem, PushPort,
+    PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ShardId, ShardKey,
+    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
 };
 use pqueue_projection::ProjectionData;
 
@@ -218,7 +219,11 @@ impl Inner {
     }
 
     /// Every log envelope for a shard, ordered by sequence (replay order).
-    fn read_log_envelopes(&mut self, tenant: &str, queue: &str) -> EngineResult<Vec<CommandEnvelope>> {
+    fn read_log_envelopes(
+        &mut self,
+        tenant: &str,
+        queue: &str,
+    ) -> EngineResult<Vec<CommandEnvelope>> {
         let rows = st(self.client.query(
             "SELECT envelope FROM log_entries WHERE tenant=$1 AND queue=$2 ORDER BY epoch, seq",
             &[&tenant, &queue],
@@ -571,6 +576,34 @@ impl RenewLeasePort for PostgresBackend {
     }
 }
 
+impl ReassignLeasePort for PostgresBackend {
+    fn reassign(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: LeaseToken,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.reassign_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_token: new_lease_token,
+                lease_expires_at: new_lease_expires_at,
+            });
+            let env = g.make_envelope(cmd, item_ids, now);
+            g.commit_locked(shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
 impl ReclaimDriver for PostgresBackend {
     fn tick(
         &self,
@@ -620,7 +653,10 @@ impl ControlPlaneStore for PostgresBackend {
                     definition: existing.clone(),
                 });
             }
-            let (t, q) = (key.tenant_id.as_str().to_string(), key.queue_id.as_str().to_string());
+            let (t, q) = (
+                key.tenant_id.as_str().to_string(),
+                key.queue_id.as_str().to_string(),
+            );
             let def_json = to_json(&definition)?;
             st(g.client.execute(
                 "INSERT INTO queues(tenant,queue,definition) VALUES($1,$2,$3)",
@@ -755,6 +791,19 @@ impl ProjectionRead for PostgresBackend {
             let g = self.inner.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn claimed_view(
+        &self,
+        shard: &ShardKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.render_claimed(ids))
         })();
         std::future::ready(result)
     }

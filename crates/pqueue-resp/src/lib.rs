@@ -17,7 +17,7 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
     FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, PushPort, PushSpec,
-    ReclaimDriver, ShardId, ShardKey, UpsertOutcome, UpsertPort,
+    ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -32,6 +32,8 @@ pub trait RespBackend:
     + ClaimPort
     + UpsertPort
     + FinalizePort
+    + RenewLeasePort
+    + ReassignLeasePort
     + ReclaimDriver
     + ControlPlaneStore
     + ProjectionRead
@@ -46,6 +48,8 @@ impl<T> RespBackend for T where
         + ClaimPort
         + UpsertPort
         + FinalizePort
+        + RenewLeasePort
+        + ReassignLeasePort
         + ReclaimDriver
         + ControlPlaneStore
         + ProjectionRead
@@ -311,6 +315,7 @@ async fn dispatch<B: RespBackend>(
         "XACK" => xack(backend, state, args).await,
         "XPENDING" => xpending(backend, state, args).await,
         "XAUTOCLAIM" => xautoclaim(backend, state, args).await,
+        "XCLAIM" => xclaim(backend, state, args).await,
         other => Resp::Error(format!("ERR unknown command '{other}'")),
     }
 }
@@ -677,6 +682,113 @@ async fn xautoclaim<B: RespBackend>(
                 Resp::Array(vec![]),
             ])
         }
+        Err(e) => err_reply(&e),
+    }
+}
+
+/// `XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [TIME ms] [RETRYCOUNT n] [FORCE]
+/// [JUSTID] [LASTID id]` — transfer ownership of specific in-flight (leased) entries to `consumer`.
+///
+/// pqueue semantics (TD-006 §3): the **consumer name IS the lease token** (the identity `XPENDING`
+/// reports). So per id:
+/// - `consumer` == the id's CURRENT lease token → **renew** (extend the lease, [`RenewLeasePort`], NO
+///   attempt charge — §3 flavor #7, a worker re-affirming its own claim).
+/// - `consumer` != the current token (or a different worker) → **reassign** ([`ReassignLeasePort`]):
+///   swap the token to `consumer` and charge exactly one delivery (TD-006:129).
+///
+/// Divergences: **`min-idle-time` is ignored** (pqueue gates by lease expiry, like `XAUTOCLAIM`); the
+/// `IDLE`/`TIME`/`RETRYCOUNT`/`FORCE`/`LASTID` options are accepted and ignored (the lease deadline is
+/// reset to the queue's `max_lease_duration`). A mixed batch (some ids self-owned, some not) issues a
+/// renew AND a reassign — those two are not atomic with each other, but each is individually all-or-
+/// nothing and pre-validated (a rejected disposition appends nothing). Reply: the claimed entries
+/// (`[id, [field value …]]`), or just the ids with `JUSTID`.
+async fn xclaim<B: RespBackend>(
+    backend: &Arc<B>,
+    state: &Arc<ServerState>,
+    args: &[Vec<u8>],
+) -> Resp {
+    if args.len() < 6 {
+        return Resp::Error("ERR wrong number of arguments for 'xclaim'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let is_opt = |a: &[u8]| {
+        ["IDLE", "TIME", "RETRYCOUNT", "FORCE", "JUSTID", "LASTID"]
+            .iter()
+            .any(|k| arg_eq(a, k))
+    };
+    // Ids are contiguous from arg 5 until the first trailing option keyword (XCLAIM grammar).
+    let mut ids: Vec<ItemId> = Vec::new();
+    let mut i = 5;
+    while i < args.len() && !is_opt(&args[i]) {
+        match ItemId::new(String::from_utf8_lossy(&args[i]).to_string()) {
+            Ok(id) => ids.push(id),
+            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        }
+        i += 1;
+    }
+    if ids.is_empty() {
+        return Resp::Error("ERR wrong number of arguments for 'xclaim'".into());
+    }
+    let justid = args[i..].iter().any(|a| arg_eq(a, "JUSTID"));
+
+    let consumer = String::from_utf8_lossy(&args[3]).to_string();
+    let consumer_token = match LeaseToken::new(consumer.clone()) {
+        Ok(t) => t,
+        Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+    };
+
+    // Partition by CURRENT owner: ids already owned by `consumer` → renew; the rest → reassign. An id that
+    // is not currently leased has no owner, so it falls to reassign and is rejected by reassign_validate.
+    let leases = match backend.pending(&shard).await {
+        Ok(l) => l,
+        Err(e) => return err_reply(&e),
+    };
+    let mut renew_ids: Vec<ItemId> = Vec::new();
+    let mut reassign_ids: Vec<ItemId> = Vec::new();
+    for id in &ids {
+        let current = leases
+            .iter()
+            .find(|lv| lv.item_id == *id)
+            .map(|lv| lv.lease_token.as_str());
+        if current == Some(consumer.as_str()) {
+            renew_ids.push(id.clone());
+        } else {
+            reassign_ids.push(id.clone());
+        }
+    }
+
+    let now = state.now();
+    let lease_ms = match backend.queue_definition(&shard.queue_key()).await {
+        Ok(def) => def.max_lease_duration_ms,
+        Err(e) => return err_reply(&e),
+    };
+    let new_expiry = add_millis(now, lease_ms);
+
+    if !renew_ids.is_empty()
+        && let Err(e) = backend.renew(&shard, renew_ids, new_expiry, now).await
+    {
+        return err_reply(&e);
+    }
+    if !reassign_ids.is_empty()
+        && let Err(e) = backend
+            .reassign(&shard, reassign_ids, consumer_token, new_expiry, now)
+            .await
+    {
+        return err_reply(&e);
+    }
+
+    if justid {
+        return Resp::Array(
+            ids.iter()
+                .map(|id| Resp::Bulk(id.as_str().as_bytes().to_vec()))
+                .collect(),
+        );
+    }
+    match backend.claimed_view(&shard, &ids).await {
+        Ok(items) => Resp::Array(items.iter().map(claimed_to_entry).collect()),
         Err(e) => err_reply(&e),
     }
 }

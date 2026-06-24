@@ -127,6 +127,16 @@ pub trait ProjectionRead: Send + Sync {
         shard: &ShardKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send;
 
+    /// Render the rich claimed-item shape for specific (currently-leased) `ids` — the RESP `XCLAIM` reply
+    /// (and any read that needs an in-flight item's full payload/fields, not just the [`LeaseView`]).
+    /// Ids that are absent or not in a renderable state are silently omitted (the caller knows the set it
+    /// just acted on).
+    fn claimed_view(
+        &self,
+        shard: &ShardKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send;
+
     fn metrics(
         &self,
         queue: &QueueKey,
@@ -247,6 +257,21 @@ pub trait RenewLeasePort: Send + Sync {
         &self,
         shard: &ShardKey,
         item_ids: Vec<ItemId>,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
+}
+
+/// Transfer an in-flight lease to a NEW consumer (RESP cross-consumer `XCLAIM`): swap the lease token and
+/// charge exactly one delivery. Pre-validated identically to renew (`reassign_validate`): the items must
+/// be Leased + not fenced/superseded/terminal, else a structured rejection with NOTHING appended. The
+/// same-consumer case (token unchanged) is a no-charge [`RenewLeasePort::renew`] instead.
+pub trait ReassignLeasePort: Send + Sync {
+    fn reassign(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;

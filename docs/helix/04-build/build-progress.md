@@ -244,8 +244,10 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   TD-006:129 reconciliation), I1 (global tick is correct: reclaims any expired lease, redelivery is
   shard-scoped — documented), I2 (min-idle ignored — documented + non-zero-value test), I3 (half-open
   assertion strengthened). resp 1+8 green, clippy 0.
-- [ ] `pqueue-resp` PART 3 (optional polish, lower priority): XCLAIM (specific-id), two-consumer claim
-  race e2e, paginated XAUTOCLAIM cursor (TD-006 §3 PEL coverage). Can defer to post-Phase-4.
+- [~] `pqueue-resp` PART 3 (optional polish, lower priority): XCLAIM (specific-id) is implemented and
+  covered (`xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump`; conformance covers
+  `ReassignLeasePort` and `claimed_view`). Still owed: two-consumer claim race e2e, paginated XAUTOCLAIM
+  cursor (TD-006 §3 PEL coverage), plus XLEN/XINFO/XDEL.
 
 ### Phase 5 — library + composition root
 - [x] **`pqueue` facade crate** (the ergonomic Rust LIBRARY interface — 2nd of the two faces):

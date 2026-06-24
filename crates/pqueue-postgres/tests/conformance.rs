@@ -65,6 +65,8 @@ pg_conformance!(
     paused_queue_yields_no_claims,
     fenced_lease_finalize_is_stale,
     renew_extends_lease_and_rejects,
+    reassign_swaps_token_and_charges_attempt,
+    claimed_view_renders_leased_items,
     finalize_of_nonleased_item_is_rejected_without_appending,
     pause_and_fence_reconstruct_from_log,
     high_water_advances_on_each_commit,

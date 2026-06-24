@@ -23,16 +23,18 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, PriorityValue, QueueDefinition, QueueId, TenantId, UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, QueueId, TenantId,
+    UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
-    CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
-    EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, ItemView,
-    LeaseExpiredCommand, LeaseView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
-    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ShardId, ShardKey, SnapshotRef, SnapshotStore,
-    TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandChecksum,
+    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
+    FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushPort, PushSpec,
+    QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    RenewLeaseCommand, RenewLeasePort, ShardId, ShardKey, SnapshotRef, SnapshotStore, TickReport,
+    UpsertOutcome, UpsertPort, build_push_items,
 };
 use pqueue_projection::ProjectionData;
 
@@ -54,7 +56,11 @@ fn hex(bytes: &[u8]) -> String {
 
 /// `{root}/{hex(tenant\0queue)}` — a path-safe, collision-free directory per shard.
 fn shard_dir(root: &Path, shard: &ShardKey) -> PathBuf {
-    let raw = format!("{}\u{0}{}", shard.tenant_id.as_str(), shard.queue_id.as_str());
+    let raw = format!(
+        "{}\u{0}{}",
+        shard.tenant_id.as_str(),
+        shard.queue_id.as_str()
+    );
     root.join(hex(raw.as_bytes()))
 }
 
@@ -204,8 +210,8 @@ impl Inner {
         if !path.exists() {
             return Ok(None);
         }
-        let hw: HighWater = serde_json::from_str(&fs::read_to_string(&path).map_err(store)?)
-            .map_err(store)?;
+        let hw: HighWater =
+            serde_json::from_str(&fs::read_to_string(&path).map_err(store)?).map_err(store)?;
         Ok(Some(CommandPosition::new(shard.clone(), hw.epoch, hw.seq)))
     }
 
@@ -484,6 +490,34 @@ impl RenewLeasePort for ObjectLogBackend {
     }
 }
 
+impl ReassignLeasePort for ObjectLogBackend {
+    fn reassign(
+        &self,
+        shard: &ShardKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: LeaseToken,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.reassign_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_token: new_lease_token,
+                lease_expires_at: new_lease_expires_at,
+            });
+            let env = g.make_envelope(cmd, item_ids, now);
+            g.commit_locked(shard, env)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
 impl ReclaimDriver for ObjectLogBackend {
     fn tick(
         &self,
@@ -609,8 +643,7 @@ impl LogRead for ObjectLogBackend {
                 .map(|(seq, env)| (CommandPosition::new(shard.clone(), 0, seq), env))
                 .collect();
             let consumed = start + entries.len() as u64;
-            let next =
-                (consumed < total).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            let next = (consumed < total).then(|| CommandPosition::new(shard.clone(), 0, consumed));
             Ok(CommandPage { entries, next })
         })();
         std::future::ready(result)
@@ -653,6 +686,19 @@ impl ProjectionRead for ObjectLogBackend {
             let g = self.inner.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn claimed_view(
+        &self,
+        shard: &ShardKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.render_claimed(ids))
         })();
         std::future::ready(result)
     }
@@ -731,7 +777,9 @@ impl SnapshotStore for ObjectLogBackend {
                 let Some(ref_id) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                let n = ref_id.strip_prefix("snap-").and_then(|s| s.parse::<usize>().ok());
+                let n = ref_id
+                    .strip_prefix("snap-")
+                    .and_then(|s| s.parse::<usize>().ok());
                 let obj: SnapshotObject =
                     serde_json::from_str(&fs::read_to_string(&path).map_err(store)?)
                         .map_err(store)?;
@@ -764,7 +812,9 @@ impl SnapshotStore for ObjectLogBackend {
             }
             let obj: SnapshotObject =
                 serde_json::from_str(&fs::read_to_string(&path).map_err(store)?).map_err(store)?;
-            Ok(ProjectionSnapshot { payload: obj.payload })
+            Ok(ProjectionSnapshot {
+                payload: obj.payload,
+            })
         })();
         std::future::ready(result)
     }

@@ -23,8 +23,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemEvent, ItemId, ItemState, LeaseToken, PriorityModel, PriorityValue,
-    UtcTimestamp, apply_transition, priority_sort,
+    ClientItemKey, GroupKey, ItemEvent, ItemId, ItemState, LeaseToken, PriorityModel,
+    PriorityValue, UtcTimestamp, apply_transition, priority_sort,
 };
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
@@ -217,7 +217,6 @@ pub fn commit(
     proj.apply_command(&env.command)
 }
 
-
 // ---------------------------------------------------------------------------
 // ProjectionData: items + eligibility index + pause flag
 // ---------------------------------------------------------------------------
@@ -336,6 +335,26 @@ impl ProjectionData {
                 }
                 Ok(())
             }
+            QueueCommand::ReassignLease(c) => {
+                for id in &c.item_ids {
+                    let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
+                    // Like RenewLease, this bare-mutates an already-Leased item, so it relies on the
+                    // caller pre-validating via `reassign_validate`. Assert the pre-condition so a
+                    // divergent replay is LOUD (apply stays infallible in release).
+                    debug_assert!(
+                        rec.state == ItemState::Leased
+                            && !rec.fenced
+                            && !rec.superseded
+                            && !rec.state.is_terminal(),
+                        "ReassignLease applied to a non-renewable item; reassign_validate was bypassed"
+                    );
+                    rec.lease_token = Some(c.lease_token.clone());
+                    rec.lease_expires_at = Some(c.lease_expires_at);
+                    rec.attempt_count += 1; // a re-delivery to a new consumer is a delivery (TD-006:129)
+                    rec.item_version += 1;
+                }
+                Ok(())
+            }
             QueueCommand::Finalize(c) => {
                 for o in &c.outcomes {
                     let ev = match o.kind {
@@ -346,7 +365,10 @@ impl ProjectionData {
                         FinalizeKind::Rearm => ItemEvent::FinalizeRearm,
                     };
                     self.transition(&o.item_id, ev)?;
-                    let rec = self.items.get_mut(&o.item_id).ok_or(EngineError::NotFound)?;
+                    let rec = self
+                        .items
+                        .get_mut(&o.item_id)
+                        .ok_or(EngineError::NotFound)?;
                     rec.lease_token = None;
                     rec.lease_expires_at = None;
                     rec.fenced = false;
@@ -389,7 +411,9 @@ impl ProjectionData {
                 let ids: Vec<ItemId> = self
                     .items
                     .values()
-                    .filter(|r| r.group_key.as_ref() == Some(&c.group_key) && !r.state.is_terminal())
+                    .filter(|r| {
+                        r.group_key.as_ref() == Some(&c.group_key) && !r.state.is_terminal()
+                    })
                     .map(|r| r.item_id.clone())
                     .collect();
                 for id in ids {
@@ -563,6 +587,13 @@ impl ProjectionData {
     /// [`finalize_validate`] (a renew of a fenced/superseded/terminal/non-leased item rejects with the
     /// same structured error, appending nothing), so renew and finalize never diverge.
     pub fn renew_validate(&self, ids: &[ItemId]) -> EngineResult<()> {
+        self.validate_leased(ids.iter())
+    }
+
+    /// Pre-commit validation for a lease REASSIGN batch (cross-consumer `XCLAIM`) — IDENTICAL rejection
+    /// semantics to [`renew_validate`]/[`finalize_validate`]: only a live, non-fenced, non-superseded,
+    /// non-terminal leased item may be transferred.
+    pub fn reassign_validate(&self, ids: &[ItemId]) -> EngineResult<()> {
         self.validate_leased(ids.iter())
     }
 

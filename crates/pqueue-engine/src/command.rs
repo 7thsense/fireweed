@@ -32,6 +32,10 @@ pub enum QueueCommand {
     Push(PushCommand),
     Claim(ClaimCommand),
     RenewLease(RenewLeaseCommand),
+    /// Transfer an in-flight lease to a new consumer (RESP cross-consumer `XCLAIM`): swap the lease token
+    /// AND charge one delivery (it is a re-delivery to a different worker). Same-consumer `XCLAIM` is a
+    /// no-charge [`RenewLeaseCommand`] instead.
+    ReassignLease(ReassignLeaseCommand),
     Finalize(FinalizeCommand),
     /// Pending-item replacement (RESP `XADD`-on-key upsert, Invariant 2). Atomic class only.
     ReplacePending(ReplacePendingCommand),
@@ -107,6 +111,14 @@ pub struct ClaimCommand {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RenewLeaseCommand {
     pub item_ids: Vec<ItemId>,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReassignLeaseCommand {
+    pub item_ids: Vec<ItemId>,
+    /// The new owner's lease token (the `XCLAIM` consumer).
+    pub lease_token: LeaseToken,
     pub lease_expires_at: UtcTimestamp,
 }
 
@@ -221,7 +233,9 @@ mod serde_tests {
 
     fn all_variants() -> Vec<QueueCommand> {
         vec![
-            QueueCommand::Push(PushCommand { items: vec![item()] }),
+            QueueCommand::Push(PushCommand {
+                items: vec![item()],
+            }),
             QueueCommand::Claim(ClaimCommand {
                 item_ids: vec![iid("a")],
                 lease_token: LeaseToken::new("lease").unwrap(),
@@ -276,7 +290,9 @@ mod serde_tests {
 
     #[test]
     fn payload_bytes_and_priority_survive_round_trip() {
-        let env = envelope(QueueCommand::Push(PushCommand { items: vec![item()] }));
+        let env = envelope(QueueCommand::Push(PushCommand {
+            items: vec![item()],
+        }));
         let json = serde_json::to_string(&env).unwrap();
         let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
         let QueueCommand::Push(p) = &decoded.command else {

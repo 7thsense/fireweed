@@ -91,8 +91,11 @@ tokens asserted verbatim (`EngineError::resp_token` + e2e substring assertions).
 
 **OWED (deferred RESP polish — Owed Item E):**
 - `XCLAIM` (specific-id) incl. the §3 "same-consumer `XCLAIM` = no-charge renew, cross-consumer =
-  reclaim+1-attempt" semantics — **NOT implemented.** (Flavor difference #7 is therefore not yet
-  realized over the wire.)
+  reclaim+1-attempt" semantics — **DONE.** `ReassignLeasePort` is implemented across memory, sqlite,
+  objectlog, and postgres; `claimed_view` backs the rich RESP reply; conformance scenarios
+  `reassign_swaps_token_and_charges_attempt` and `claimed_view_renders_leased_items` run across adapter
+  suites; RESP e2e `xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump` proves
+  self-claim renews without attempt charge and cross-consumer claim transfers ownership with +1 attempt.
 - `XLEN` / `XINFO` / `XDEL` — listed "faithful" in §3 but **NOT implemented** (only the worker hot path
   + reclaim/pending are). Deferred.
 - Cursor-pagination e2e (`XAUTOCLAIM 0-0`→…→`0-0` covers whole PEL) — the adapter returns a single-shot
@@ -100,8 +103,9 @@ tokens asserted verbatim (`EngineError::resp_token` + e2e substring assertions).
 - Intra-group exclusion e2e (two consumers, never same item) and the upsert↔claim race e2e — engine-level
   exclusion holds (single lock), but the dedicated e2e scenarios are not written.
 
-**Flavor differences** #1–#6 hold as designed; **#7** owed with #XCLAIM; the attempt-count semantics
-diverge from TD-006 (Owed Item B).
+**Flavor differences** #1–#7 hold as designed; the attempt-count semantics now match TD-006:129 for
+`XCLAIM`/`XAUTOCLAIM` redelivery and preserve the no-charge same-consumer renew divergence documented in
+§3.
 
 ---
 
@@ -187,9 +191,9 @@ diverge from TD-006 (Owed Item B).
   first cut). Test `shutdown_and_drain_drains_in_flight_then_stops_accepting` proves an open connection
   drains gracefully and the server then stops accepting; the 3 sync `shutdown()`/`Drop` call sites are
   unaffected.
-- **E. RESP polish.** `XCLAIM` (specific-id, incl. same-consumer no-charge renew per §3 flavor #7),
-  `XLEN`/`XINFO`/`XDEL`, paginated `XAUTOCLAIM` cursor coverage, intra-group-exclusion + upsert/claim-race
-  e2e. None on the worker hot path; deferred.
+- **E. RESP polish.** `XCLAIM` specific-id is resolved by `ReassignLeasePort`, `claimed_view`, shared
+  conformance, and RESP e2e. Still owed: `XLEN`/`XINFO`/`XDEL`, paginated `XAUTOCLAIM` cursor coverage,
+  intra-group-exclusion e2e, and upsert/claim-race e2e.
 - **F. Library verbs + doc hygiene — port landed (owed-resolution Chunk 3); facade verbs owed (Chunk 7).**
   The `RenewLeasePort` now exists: `renew(shard, ids, new_lease_expires_at, now)` is implemented on
   memory/sqlite/objectlog, each pre-validating via `ProjectionData::renew_validate` (a shared
