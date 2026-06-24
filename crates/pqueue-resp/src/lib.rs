@@ -519,14 +519,16 @@ async fn xack<B: RespBackend>(
     }
 }
 
-/// Order key for a pqueue item id `"{n}-0"`: the numeric `{n}` prefix (insertion order), NOT a lexical
-/// string compare (which would mis-order `"10-0" < "2-0"` past 10 items). Non-conforming ids sort last.
-fn id_order(id: &str) -> (u64, &str) {
-    let n = id
-        .split_once('-')
-        .and_then(|(a, _)| a.parse::<u64>().ok())
-        .unwrap_or(u64::MAX);
-    (n, id)
+/// Numeric order key for a backend-assigned item id `"{prefix}-{n}-{i}"` (e.g. `"mem-5-0"`): order by the
+/// two numeric components `(n, i)` — `n` the command sequence (insertion order), `i` the index within a
+/// batch — NOT a lexical compare (which would mis-order `"mem-10-0" < "mem-2-0"` past 10 items). The full
+/// id is the final tie-break. The `"0-0"` cursor sentinel keys as `(0, 0, "0-0")`, sorting at/before the
+/// first real id so a `start = "0-0"` scan includes the whole PEL.
+fn id_order(id: &str) -> (u64, u64, &str) {
+    let mut nums = id.split('-').filter_map(|p| p.parse::<u64>().ok());
+    let n = nums.next().unwrap_or(u64::MAX);
+    let i = nums.next().unwrap_or(0);
+    (n, i, id)
 }
 
 /// `XPENDING key group [start end count [consumer]]` — the in-flight (leased, not-yet-acked) items.
@@ -621,21 +623,31 @@ async fn xpending<B: RespBackend>(
     Resp::Array(out)
 }
 
-/// `XAUTOCLAIM key group consumer min-idle-time start [COUNT n] [JUSTID]` — reclaim expired leases and
-/// re-deliver. Maps to: `ReclaimDriver::tick(now)` (returns expired leases to pending) then a fresh
-/// priority claim of the now-eligible items. Reply: `[cursor, [entries...], [deleted-ids]]`.
+/// `XAUTOCLAIM key group consumer min-idle-time start [COUNT n] [JUSTID]` — page through the PEL (the
+/// in-flight/leased entries), reclaiming the **idle** (lease-expired) ones to `consumer`. Reply:
+/// `[cursor, [entries...], [deleted-ids]]`.
 ///
-/// pqueue-flavored divergences (TD-006 §3; tracked for Phase-7 reconciliation):
+/// **Paginated cursor (TD-006 §3):** the PEL is scanned in a stable id order from `start` (`0-0` = the
+/// beginning); a `COUNT`-sized window is examined, and the cursor returned is the id of the next
+/// unscanned entry, or `0-0` once the window reaches the end of the PEL — so a client loops `0-0`→…→`0-0`
+/// to cover the whole PEL. Reclaim is per-page (no global sweep): an expired entry in the window is
+/// transferred to `consumer` via [`ReassignLeasePort`] (a re-delivery), keeping its id so the cursor is
+/// stable across the reclaim.
+///
+/// pqueue-flavored divergences:
 /// - **`min-idle-time` is ignored** — pqueue reclaims strictly by **lease expiry** (the engine's timed
-///   transition), not a caller-supplied idle floor. A just-expired lease (TTL elapsed) is reclaimed even
-///   if `min-idle-time` is larger.
-/// - **`tick` is backend-global**, not stream-scoped: it reclaims EVERY expired lease (the background
-///   ReclaimDriver does the same). This is correct — an expired lease is always reclaimable — and the
-///   *re-delivery* (claim) is scoped to the named stream, so a caller only ever receives its own items.
-/// - **attempt accounting** (TD-006:129): `attempt_count` = number of deliveries. The reclaim
-///   (`LeaseExpired`) returns the item to pending and does NOT charge; only the re-delivery (`Claim`)
-///   charges the one attempt. So one reclaim+redeliver bumps `attempt_count` by exactly 1.
-/// - **cursor is always `0-0`** (single-shot full scan); paginated PEL coverage is owed work.
+///   transition: a lease is held THROUGH `lease_expires_at`, idle once `now > lease_expires_at`), not a
+///   caller-supplied idle floor.
+/// - **attempt accounting** (TD-006:129): `attempt_count` = number of deliveries. Reclaiming an idle
+///   entry to `consumer` is one re-delivery, so it charges exactly one attempt (the reassign), never more.
+/// - **direct transfer, not re-queue** — unlike the background `ReclaimDriver` (`tick` → `LeaseExpired`,
+///   which returns an expired lease to *pending* for priority re-dispatch, no charge), XAUTOCLAIM hands
+///   the idle entry straight to the calling `consumer` (the Redis PEL-ownership-transfer semantic). So the
+///   two reclaim paths leave different post-states for the same expired lease; this is intentional.
+/// - **all-or-nothing page** — the window's idle entries are reassigned in ONE batch; if a racing
+///   ack/fence/purge invalidates any of them between the snapshot and the reassign, the whole page errors
+///   and reclaims nothing (a safe failure — nothing wrong is committed; the client simply retries). Redis
+///   is per-entry best-effort here; the third reply element (deleted ids) is therefore always empty.
 async fn xautoclaim<B: RespBackend>(
     backend: &Arc<B>,
     state: &Arc<ServerState>,
@@ -648,7 +660,14 @@ async fn xautoclaim<B: RespBackend>(
         Ok(s) => s,
         Err(e) => return err_reply(&e),
     };
+    let consumer = String::from_utf8_lossy(&args[3]).to_string();
+    let consumer_token = match LeaseToken::new(consumer) {
+        Ok(t) => t,
+        Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+    };
+    let start = String::from_utf8_lossy(&args[5]).to_string();
     let mut count = 100usize;
+    let mut justid = false;
     let mut i = 6;
     while i < args.len() {
         if arg_eq(&args[i], "COUNT") && i + 1 < args.len() {
@@ -657,39 +676,73 @@ async fn xautoclaim<B: RespBackend>(
             }
             i += 2;
         } else {
+            if arg_eq(&args[i], "JUSTID") {
+                justid = true;
+            }
             i += 1;
         }
     }
-    let now = state.now();
-    // 1) Reclaim expired leases across the queue (→ pending, attempt charged).
-    if let Err(e) = backend.tick(now).await {
-        return err_reply(&e);
+    if count == 0 {
+        // Redis rejects COUNT <= 0; we must too — a 0-window never advances the cursor off the first
+        // entry, so a compliant `0-0`→cursor→`0-0` client loop would spin forever.
+        return Resp::Error("ERR COUNT must be > 0".into());
     }
-    // 2) Re-deliver: claim the now-eligible items (incl. the just-reclaimed).
+    let now = state.now();
     let lease_ms = match backend.queue_definition(&shard.queue_key()).await {
         Ok(def) => def.max_lease_duration_ms,
         Err(e) => return err_reply(&e),
     };
-    let lease = state.next();
-    let req = ClaimRequest {
-        shard,
-        worker_id: WorkerId::new("resp").expect("w"),
-        max_items: count,
-        lease_token: LeaseToken::new(format!("L{lease}")).expect("lease"),
-        lease_expires_at: add_millis(now, lease_ms),
-        now,
+
+    // PEL snapshot in a stable id order; page from the `start` cursor.
+    let mut pel = match backend.pending(&shard).await {
+        Ok(p) => p,
+        Err(e) => return err_reply(&e),
     };
-    match backend.claim(req).await {
-        Ok(claimed) => {
-            let entries: Vec<Resp> = claimed.items.iter().map(claimed_to_entry).collect();
-            Resp::Array(vec![
-                Resp::Bulk(b"0-0".to_vec()),
-                Resp::Array(entries),
-                Resp::Array(vec![]),
-            ])
-        }
-        Err(e) => err_reply(&e),
+    pel.sort_by(|a, b| id_order(a.item_id.as_str()).cmp(&id_order(b.item_id.as_str())));
+    let start_key = id_order(&start);
+    let from: Vec<&LeaseView> = pel
+        .iter()
+        .filter(|lv| id_order(lv.item_id.as_str()) >= start_key)
+        .collect();
+
+    // Examine a COUNT-sized window; the idle (lease-expired) entries in it are reclaimed to `consumer`.
+    let expired_ids: Vec<ItemId> = from
+        .iter()
+        .take(count)
+        .filter(|lv| lv.lease_expires_at < now)
+        .map(|lv| lv.item_id.clone())
+        .collect();
+    if !expired_ids.is_empty()
+        && let Err(e) = backend
+            .reassign(&shard, expired_ids.clone(), consumer_token, add_millis(now, lease_ms), now)
+            .await
+    {
+        return err_reply(&e);
     }
+
+    // Cursor: the entry after the scanned window, or `0-0` once the window covers the PEL tail.
+    let next_cursor = if from.len() > count {
+        from[count].item_id.as_str().as_bytes().to_vec()
+    } else {
+        b"0-0".to_vec()
+    };
+
+    let entries: Vec<Resp> = if justid {
+        expired_ids
+            .iter()
+            .map(|id| Resp::Bulk(id.as_str().as_bytes().to_vec()))
+            .collect()
+    } else {
+        match backend.claimed_view(&shard, &expired_ids).await {
+            Ok(items) => items.iter().map(claimed_to_entry).collect(),
+            Err(e) => return err_reply(&e),
+        }
+    };
+    Resp::Array(vec![
+        Resp::Bulk(next_cursor),
+        Resp::Array(entries),
+        Resp::Array(vec![]),
+    ])
 }
 
 /// `XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [TIME ms] [RETRYCOUNT n] [FORCE]

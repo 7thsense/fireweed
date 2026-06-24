@@ -89,7 +89,9 @@ cursorless), `XACK` (complete; operator-fenced → `-ERR pqueue stale_lease` via
 idle), `XAUTOCLAIM` (tick-reclaim + redeliver; `xautoclaim_redelivers_expired_leases`). Canonical error
 tokens asserted verbatim (`EngineError::resp_token` + e2e substring assertions). **DONE.**
 
-**OWED (deferred RESP polish — Owed Item E):**
+**RESP polish — Owed Item E — RESOLVED** (owed-resolution Chunks 6a/6b/6c). Everything below is DONE; the
+only remaining sliver is the `XINFO CONSUMERS`/`XINFO … FULL` subcommands (a documented, non-launch read
+nicety — `STREAM`/`GROUPS` are implemented).
 - `XCLAIM` (specific-id) incl. the §3 "same-consumer `XCLAIM` = no-charge renew, cross-consumer =
   reclaim+1-attempt" semantics — **DONE.** `ReassignLeasePort` is implemented across memory, sqlite,
   objectlog, and postgres; `claimed_view` backs the rich RESP reply; conformance scenarios
@@ -105,10 +107,21 @@ tokens asserted verbatim (`EngineError::resp_token` + e2e substring assertions).
   `purge_removes_present_items_and_gates_leased` (incl. mixed-batch all-or-nothing gate + de-dup) runs
   across adapters; RESP e2e `xlen_xdel_xinfo_over_offtheshelf_client` drives all three via the stock
   client.
-- Cursor-pagination e2e (`XAUTOCLAIM 0-0`→…→`0-0` covers whole PEL) — the adapter returns a single-shot
-  `0-0` cursor (documented divergence); paginated coverage owed.
-- Intra-group exclusion e2e (two consumers, never same item) and the upsert↔claim race e2e — engine-level
-  exclusion holds (single lock), but the dedicated e2e scenarios are not written.
+- Cursor-pagination `XAUTOCLAIM` — **DONE** (owed-resolution Chunk 6c). The handler was rewritten from the
+  single-shot `0-0` into a real PEL scan: it snapshots the in-flight (leased) entries in a numeric id
+  order (`id_order` was also fixed — it was silently sorting lexically, mis-ordering past 10 items + the
+  `XPENDING` min/max), pages a `COUNT`-sized window from the `start` cursor, reclaims the idle (lease-
+  expired) entries in the window to the calling consumer via `ReassignLeasePort` (a re-delivery, +1
+  attempt, id preserved so the cursor is stable), and returns the next-entry cursor or `0-0` at the tail.
+  `COUNT 0` is rejected. e2e `xautoclaim_paginates_the_pel_cursor` produces 12 entries (crossing the
+  10-entry boundary), pages `0-0`→…→`0-0` with `COUNT 5`, and asserts every entry is reclaimed exactly
+  once. Divergences (direct-transfer vs the ReclaimDriver's return-to-pending; all-or-nothing page on a
+  racing ack) are documented in the handler.
+- Intra-group exclusion + upsert↔claim race e2e — **DONE** (owed-resolution Chunk 6c).
+  `two_consumers_in_a_group_never_get_the_same_item` drains one group with two concurrent consumers and
+  asserts disjoint delivery + exactly-once coverage; `upsert_and_claim_race_stays_consistent` races an
+  `XADD`-on-key against a concurrent claim and asserts exactly one live entry survives (the single-writer
+  engine serializes them either way).
 
 **Flavor differences** #1–#7 hold as designed; the attempt-count semantics now match TD-006:129 for
 `XCLAIM`/`XAUTOCLAIM` redelivery and preserve the no-charge same-consumer renew divergence documented in
