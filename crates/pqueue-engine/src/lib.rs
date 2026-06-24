@@ -11,6 +11,7 @@ mod command;
 mod error;
 mod finalize_validation;
 mod idempotency;
+mod operator;
 mod port;
 mod types;
 
@@ -19,6 +20,7 @@ pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, validate_claim_compatibility,
 };
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
+pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
 
 pub use command::{
     ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,

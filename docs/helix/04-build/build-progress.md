@@ -4,18 +4,18 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
-- **Now:** Phase 2 — LAST §4a unit: **operator-operation store + QueueCatalog metrics/active-scopes**
-  (API-002 async operation model — operator/library plane). This is the biggest remaining migration
-  unit and may span iterations. Sub-steps: (a) design the operator-operation store as engine durable
-  state — `operation_id → {state ∈ {accepted,running,succeeded,partial,failed,canceled}, progress,
-  errors[]}` keyed/anchored by `request_id → operation_id` (REUSE QueueIdempotencyCache for the
-  replay→409 anchor), with an engine test proving replay-reconstruction; (b) QueueCatalog
-  metrics/active-scopes — the engine already has `ProjectionRead::metrics`; migrate the active-scope
-  rollup (`DiscoverActiveScopes`) as a read over the projection. Read originals from
-  `git show HEAD:crates/pqueue-service/src/lib.rs` (operator_items_response, existing/record_operator_
-  operation, roll_up_queue_scopes). Keep STRUCTURED errors. Size to a coherent sub-chunk; it's large.
-  **Validation family DONE** (claim-compat + finalize/rearm/purge, parity-reviewed). Core durable +
-  worker-path domain logic all migrated.
+- **Now:** Phase 2 — LAST §4a sub-unit: **QueueCatalog active-scope rollup** (sub B of the operator/
+  library plane). Operator-op store (sub A) DONE + reviewed. This sub-chunk migrates the
+  `DiscoverActiveScopes` aggregation logic as a PURE engine fn: `roll_up_queue_scopes(Vec<ActiveScope>)`
+  + `sum_optional` (group→queue rollup: max(oldest_eligible_age_ms), sum(eligible_count),
+  sum(progress_bound_risk_count)), over an engine-owned `ActiveScope` value type
+  (`queue_id, group_key: Option, oldest_eligible_age_ms, eligible_count: Option<u64>,
+  progress_bound_risk_count: Option<u64>`). Read original from `git show HEAD:crates/pqueue-service/
+  src/lib.rs` (`roll_up_queue_scopes`/`sum_optional` ~line 1516, and the granularity Queue-vs-Group +
+  filter/sort/truncate logic in `discover_active_scopes` ~line 630). The filter/sort/truncate + the
+  read over `ProjectionRead` are adapter/composition concerns; migrate the PURE rollup + (optionally) a
+  small `select_active_scopes` helper for the Queue-vs-Group granularity decision. Keep it a coherent
+  small sub-chunk; tests for rollup math + granularity. After this, §4a is COMPLETE.
 - **After §4a:** Phase 3 driven adapters (sqlite, postgres via ClaimPort, objectlog eventual-apply).
 
 ## Checklist
@@ -52,7 +52,6 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   advanced on every commit; added 3 conformance tests (advances-on-commit, item_version monotonic
   per item 1→2→3→4, **survives log compaction / not recomputed from entries**) + field doc. Tests-only
   over already-reviewed code paths.
-- [ ] §4a unit: operator-operation store (API-002 async model) ; QueueCatalog metrics/scopes
 - [x] §4a unit: **claim-compatibility validation** (most load-bearing) → `pqueue-engine::claim_validation`
   (`validate_claim_compatibility` → ClaimUnit; charset re-check since GroupKey newtype only checks
   non-empty; structured `EngineError::BatchTooLarge` added → `-ERR pqueue batch_too_large`). 7 engine
@@ -62,8 +61,15 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   validate_purge_force). 6 engine tests, parity-reviewed. Service keeps compatibility wrappers that
   delegate to engine validation while it is still compiling. CORRECTED canonical purge-force gate
   (leased+!force→Conflict vs service's historical unconditional !force→Conflict) — documented.
-- [ ] §4a unit: operator-operation store (API-002 async model) + QueueCatalog metrics/active-scopes
-  (operator/library plane — last §4a unit before Phase 3)
+- [x] §4a unit (sub A): **operator-operation store** → `pqueue-engine::operator`
+  (`OperatorOperationStore<R>`: lookup[replay/RequestIdConflict] / record / get / advance / cancel;
+  `OperationId`, `OperatorOperationState{Accepted,Running,Succeeded,Partial,Failed,Canceled}`,
+  `OperationHandle`). 9 engine tests, fresh-eyes reviewed (1 BLOCKING fixed → converged). NOT YET WIRED.
+  DEVIATION: does NOT reuse QueueIdempotencyCache — owns a permanent `request_id→operation_id` index
+  (B1: the expiry-windowed cache would re-execute a destructive op after retention). CORRECTED cancel
+  (terminal states left intact vs service's unconditional flip).
+- [ ] §4a unit (sub B): **QueueCatalog active-scope rollup** (`roll_up_queue_scopes`/`sum_optional` →
+  pure engine fn over an engine ActiveScope; granularity Queue vs Group) — last §4a unit before Phase 3
 - [ ] Final: delete pqueue-service entirely (Phase 6)
 
 ### Phase 3 — driven adapters
@@ -83,6 +89,20 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - [ ] Reconciliation report: every §1–§6 item implemented+tested or descoped-with-reason
 
 ## Decisions log (append as resolved)
+- 2026-06-23 OPERATOR-OP STORE — PLAN DEVIATION (B1, fresh-eyes BLOCKING): the plan said "reuse
+  QueueIdempotencyCache for the replay→409 anchor." `OperatorOperationStore` does NOT — it owns its own
+  PERMANENT `request_id→operation_id` index (fingerprint stored on the record). Reason: API-002 row 206
+  makes replay→same-operation_id UNCONDITIONAL (not scoped to a retention window); the service deduped
+  forever via a deterministic operation_id. The idempotency cache is the API-001 *synchronous* primitive
+  whose `Expired` decision means "treat as new" — for a destructive operator op (purge/redrive) that
+  would re-execute the mutation under a fresh operation_id after `request_id_retention_ms`. Permanent
+  dedup is the faithful + safe behavior. INVARIANT: `by_request` values are always keys in `operations`
+  (both written together); future bounded operation-history retention MUST drop a record + its
+  by_request entry together. CORRECTION: `cancel` leaves terminal states (Succeeded/Failed/Canceled)
+  intact (idempotent), vs the service flipping ANY op to Canceled unconditionally (API-002 cancel only
+  "stops scheduling further per-shard work"). DEFERRALS: operation-history retention is unbounded for
+  now (service parity); per-(tenant,queue,shard) scoping is structural — the wiring site must never
+  share a store across scopes (gets a one-store-per-scope test then).
 - 2026-06-23 PURGE CORRECTION + DEFERRAL: `validate_purge_force` applies the real API-001 rule
   (leased item + !force → Conflict; non-leased purges freely), CORRECTING the HTTP service's
   pre-storage validator which conflicted on !force unconditionally (it had no item state). The
@@ -112,6 +132,16 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
+- 2026-06-23 Phase 2 §4a operator-operation store (sub A): fresh-eyes review returned GO-with-conditions
+  with ONE BLOCKING (B1): the first cut reused QueueIdempotencyCache, importing its retention-windowed
+  `Expired→new-operation` semantics — after `request_id_retention_ms` a retried destructive operator op
+  would mint a new operation_id and re-execute (service deduped permanently/deterministically). FIXED by
+  redesign: store owns a permanent `request_id→operation_id` index + fingerprint-on-record (the service's
+  `existing_operator_operation` logic), no clock. This also resolved I1 (single lifetime, no anchor/ops
+  divergence) and M4 (rebuild test now asserts full `live==rebuilt`). Applied I2 (NOT-YET-WIRED banner +
+  advance monotonicity doc) and I3 (check→record flow test). Cancel correction (M1) + structural scoping
+  (M2) + unbounded ops (M3) confirmed safe/deferred. Re-reviewed via documented self-review (targeted fix
+  over reviewed code). Engine 34 tests + clippy green.
 - 2026-06-23 Phase 2 §4a finalize/rearm/purge validation: fresh-eyes parity review GO-with-conditions,
   NO blocking. Verified: finalize-targeting + rearm parity exact (incl. seconds-only past-until
   boundary, at-until=ok); structured errors (Invalid/Terminal/Conflict) correct; purge factored into
