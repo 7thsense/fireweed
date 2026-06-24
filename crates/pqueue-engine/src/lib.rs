@@ -8,10 +8,12 @@
 mod auth;
 mod command;
 mod error;
+mod idempotency;
 mod port;
 mod types;
 
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
+pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 
 pub use command::{
     ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
@@ -34,7 +36,7 @@ mod tests {
 
     #[test]
     fn canonical_resp_tokens_match_td006() {
-        // The wire vocabulary is pinned in TD-006 §7 and asserted verbatim by conformance.
+        // The wire vocabulary is pinned in TD-006 section 7 and asserted verbatim by conformance.
         assert_eq!(
             EngineError::Invalid("x").resp_token(),
             Some("-ERR pqueue invalid")
@@ -59,14 +61,22 @@ mod tests {
             EngineError::Conflict.resp_token(),
             Some("-ERR pqueue conflict")
         );
-        // NotFound (→ nil) and Forbidden (→ -NOPERM) have non-`-ERR` mappings; no token here.
+        assert_eq!(
+            EngineError::RequestIdConflict.resp_token(),
+            Some("-ERR pqueue request_id_conflict")
+        );
+        assert_eq!(
+            EngineError::RequestExpired.resp_token(),
+            Some("-ERR pqueue request_expired")
+        );
+        // NotFound (to nil) and Forbidden (to -NOPERM) have non-`-ERR` mappings; no token here.
         assert_eq!(EngineError::NotFound.resp_token(), None);
         assert_eq!(EngineError::Forbidden("x").resp_token(), None);
     }
 
     #[test]
     fn durability_class_gates_upsert() {
-        // Invariant 2 / TD-007 §2.3: upsert is offered on atomic backends only.
+        // Invariant 2 / TD-007 section 2.3: upsert is offered on atomic backends only.
         assert!(DurabilityClass::Atomic.supports_upsert());
         assert!(!DurabilityClass::EventualApply.supports_upsert());
     }

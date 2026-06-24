@@ -4,17 +4,18 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
-- **Now:** Phase 2 — next §4a unit: **request-id idempotency + operator replay→409** (the first
-  DURABLE unit, TD-007 §4). This needs a structured engine error model (review B2: NO string-sniffing)
-  and a durable idempotency-cache (command schema + projection rep + retention/compaction + replay).
-  Likely sub-steps: (a) design the idempotency cache as engine state/commands with an engine test
-  proving replay-reconstruction; (b) wire it where push/claim/finalize commit. **Phase 2 auth unit
-  DONE**: AuthContext + authorize_* + hash_lease_token + RedactedLeaseToken migrated to
-  `pqueue-engine::auth` (3 tests); `EngineError::Forbidden`→`-NOPERM` fixed in RESP; service dropped
-  from default-members. Deviation recorded re: service kept compiling via re-export (logic in engine
-  only).
-- **After this unit:** lease fencing, pause/resume, command_position, operator-op store, validation;
-  then Phase 3 driven adapters.
+- **Now:** Phase 2 — next §4a unit: **queue pause/resume + lease fencing** (durable engine state,
+  TD-007 §4). These are already partly modeled in the memory projection (a `paused` flag; per-item
+  `fenced` bool set by FenceLease/UnfenceLease; PauseQueue/ResumeQueue commands exist). This unit
+  should: (a) make the engine's authoritative rules explicit/tested — paused queue → no items
+  eligible/claimable; an operator-fenced lease → the holder's XACK/finalize returns
+  `EngineError::StaleLease` (currently the memory backend sets `fenced` but finalize does not yet
+  reject a fenced lease — wire that, with a test); (b) confirm replay reconstruction of pause/fence
+  state. Keep durable units using STRUCTURED errors. **Idempotency unit DONE** (QueueIdempotencyCache,
+  reviewed/converged). **Auth unit DONE**.
+- **After this unit:** command_position (item_version source, persisted high-water), operator-op store
+  (API-002 async model, reusing the idempotency cache), claim/finalize/rearm/purge validation; then
+  Phase 3 driven adapters.
 
 ## Checklist
 
@@ -38,7 +39,10 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - [x] §4a unit: **auth** (AuthContext + authorize_tenant/authorize_operator + hash_lease_token +
   RedactedLeaseToken) → `pqueue-engine::auth` with 3 engine tests; deleted from service. Added
   `EngineError::Forbidden` (→ `-NOPERM`) + fixed RESP `err_reply` to emit `-NOPERM` (not generic).
-- [ ] §4a unit: request-id idempotency + operator replay→409 (DURABLE — TD-007 §4)
+- [x] §4a unit: request-id idempotency (DURABLE — TD-007 §4) → `pqueue-engine::QueueIdempotencyCache`
+  (Proceed/Replay/Conflict/Expired decisions, retention/compaction, replay-from-retained-window test);
+  added `EngineError::RequestIdConflict`/`RequestExpired` (distinct wire tokens). Operator replay→409
+  deletes from service WITH the operator-op-store unit (it reuses this cache).
 - [ ] §4a unit: lease fencing (durable) ; queue pause/resume (durable) ; command_position
 - [ ] §4a unit: operator-operation store (API-002 async model) ; QueueCatalog metrics/scopes
 - [ ] §4a unit: claim/finalize/rearm/purge validation
@@ -73,6 +77,17 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
+- 2026-06-23 Phase 2 §4a idempotency: fresh-eyes review **NO-GO** → fixed to convergence. The review
+  caught 4 real issues, all addressed: (B1) collapsing request-id-conflict onto generic `Conflict` →
+  added distinct `EngineError::RequestIdConflict` + `RequestExpired` with their own `-ERR pqueue …`
+  tokens (and resp_token tests); (I1) "expired→Proceed" erased API-001 `request-expired` → added an
+  `Expired` decision variant the caller maps per-op (push→Proceed, claim→RequestExpired); (I2)
+  dishonest key scope → renamed `QueueIdempotencyCache` with a "one instance per (tenant,queue,shard)"
+  invariant docstring; (I3) tautological reconstruction test → replaced with a check-then-record flow
+  (proves a live request_id is never overwritten) + a retained-window rebuild test (compacted cache ==
+  replay of only retained entries). Also added not-yet-wired note + relationship to
+  `pqueue_core::check_idempotency`. Engine 12 tests + clippy green. (NOT yet wired into push/claim/
+  finalize or ReclaimDriver compaction — tracked.)
 - 2026-06-23 Phase 2 §4a auth: fresh-eyes review GO-with-conditions. Confirmed: hash+redaction byte-
   parity, tenant set-membership + operator-prefix rules exact, durability classification correct,
   workspace default-members topology correct/non-orphaning. Fixes applied — (B3, REAL BUG) RESP
