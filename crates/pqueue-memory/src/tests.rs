@@ -616,3 +616,108 @@ async fn fenced_lease_finalize_is_stale() {
     b.finalize(&shard(), outcomes, ts(30)).await.unwrap();
     assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }
+
+#[tokio::test]
+async fn finalize_of_nonleased_item_is_rejected_without_appending() {
+    use pqueue_engine::LogRead;
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    let id = ItemId::new("a").unwrap();
+    let before = b
+        .read_from(&shard(), None, 1000)
+        .await
+        .unwrap()
+        .entries
+        .len();
+    // Item is Pending (never claimed) -> finalize rejected, and NOTHING is appended (no divergence, B1).
+    let outcomes = vec![FinalizeOutcome {
+        item_id: id,
+        kind: FinalizeKind::Complete,
+    }];
+    assert_eq!(
+        b.finalize(&shard(), outcomes, ts(10)).await,
+        Err(EngineError::Invalid("item is not leased"))
+    );
+    let after = b
+        .read_from(&shard(), None, 1000)
+        .await
+        .unwrap()
+        .entries
+        .len();
+    assert_eq!(before, after, "rejected finalize must NOT append a command");
+}
+
+#[tokio::test]
+async fn pause_and_fence_reconstruct_from_log() {
+    use pqueue_engine::LogRead;
+    // Backend A: push two items, claim+fence one, leave one pending, pause the queue.
+    let a = MemoryBackend::new();
+    a.create_queue(qdef()).await.unwrap();
+    commit(
+        &a,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5), item("p", "kp", 9)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    a.claim(claim_req(1, 500, 10)).await.unwrap(); // claims "a" (priority 5 < 9)
+    let aid = ItemId::new("a").unwrap();
+    commit(
+        &a,
+        envelope(
+            QueueCommand::FenceLease(FenceLeaseCommand {
+                item_ids: vec![aid.clone()],
+            }),
+            vec![aid.clone()],
+        ),
+    )
+    .await;
+    commit(&a, envelope(QueueCommand::PauseQueue, vec![])).await;
+
+    // Replay A's full log into a fresh backend B (TD-007 §4 replay reconstruction).
+    let page = a.read_from(&shard(), None, 1000).await.unwrap();
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    for (_pos, env) in &page.entries {
+        let env = env.clone();
+        b.write(move |lw, pw| {
+            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
+            pw.apply(&pos, std::slice::from_ref(&env))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    // B reconstructed the durable state: pause withholds the pending item, and the fence holds.
+    assert!(
+        b.claim(claim_req(10, 500, 50))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "pause reconstructed"
+    );
+    let outcomes = vec![FinalizeOutcome {
+        item_id: aid,
+        kind: FinalizeKind::Complete,
+    }];
+    assert_eq!(
+        b.finalize(&shard(), outcomes, ts(60)).await,
+        Err(EngineError::StaleLease),
+        "fence reconstructed"
+    );
+}

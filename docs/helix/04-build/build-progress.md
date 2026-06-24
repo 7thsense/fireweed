@@ -4,18 +4,17 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
-- **Now:** Phase 2 — next §4a unit: **queue pause/resume + lease fencing** (durable engine state,
-  TD-007 §4). These are already partly modeled in the memory projection (a `paused` flag; per-item
-  `fenced` bool set by FenceLease/UnfenceLease; PauseQueue/ResumeQueue commands exist). This unit
-  should: (a) make the engine's authoritative rules explicit/tested — paused queue → no items
-  eligible/claimable; an operator-fenced lease → the holder's XACK/finalize returns
-  `EngineError::StaleLease` (currently the memory backend sets `fenced` but finalize does not yet
-  reject a fenced lease — wire that, with a test); (b) confirm replay reconstruction of pause/fence
-  state. Keep durable units using STRUCTURED errors. **Idempotency unit DONE** (QueueIdempotencyCache,
-  reviewed/converged). **Auth unit DONE**.
-- **After this unit:** command_position (item_version source, persisted high-water), operator-op store
-  (API-002 async model, reusing the idempotency cache), claim/finalize/rearm/purge validation; then
-  Phase 3 driven adapters.
+- **Now:** Phase 2 — next §4a unit: **command_position high-water + item_version** (durable, TD-007
+  §4). Today: `item_version` is a per-item counter (correct per API-001) and the SnapshotStore has
+  `high_water`/`set_high_water` (monotonic) but the memory backend never advances the high-water on
+  commit. This unit should: (a) advance the persisted `command_position` high-water in `commit_locked`
+  (or apply path) so it tracks the latest committed position; (b) prove it is read from the snapshot,
+  not recomputed from a (possibly compacted) log (TD-007 §4) — a test that the high-water survives and
+  is monotonic across commits; (c) confirm `item_version` monotonicity per item. Keep it tight.
+  **pause/fence unit DONE** (FinalizePort, B1 fix, reconstruction test, reviewed). **idempotency DONE**.
+  **auth DONE**.
+- **After this unit:** operator-op store (API-002 async model, reuses the idempotency cache) +
+  QueueCatalog metrics/scopes; claim/finalize/rearm/purge validation; then Phase 3 driven adapters.
 
 ## Checklist
 
@@ -43,7 +42,11 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   (Proceed/Replay/Conflict/Expired decisions, retention/compaction, replay-from-retained-window test);
   added `EngineError::RequestIdConflict`/`RequestExpired` (distinct wire tokens). Operator replay→409
   deletes from service WITH the operator-op-store unit (it reuses this cache).
-- [ ] §4a unit: lease fencing (durable) ; queue pause/resume (durable) ; command_position
+- [x] §4a unit: **queue pause/resume + lease fencing** (durable) → new `FinalizePort` (pre-commit
+  validation: Leased+!fenced else StaleLease/Terminal/Invalid, no log/projection divergence); RESP
+  XACK wired to it (fenced → `-ERR pqueue stale_lease`); pause gates claim/select_eligible/peek; tests
+  incl. a log-replay reconstruction of pause+fence. Fixed B1 (commit_locked divergence) for finalize.
+- [ ] §4a unit: command_position (item_version source, persisted high-water)
 - [ ] §4a unit: operator-operation store (API-002 async model) ; QueueCatalog metrics/scopes
 - [ ] §4a unit: claim/finalize/rearm/purge validation
 - [ ] Final: delete pqueue-service entirely (Phase 6)
@@ -65,6 +68,16 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - [ ] Reconciliation report: every §1–§6 item implemented+tested or descoped-with-reason
 
 ## Decisions log (append as resolved)
+- 2026-06-23 INVARIANT (commit_locked has no rollback): `MemoryBackend::commit_locked` appends the log
+  entry BEFORE applying to the projection, with no rollback. Therefore EVERY orchestration caller MUST
+  fully pre-validate the command so `apply_command` is infallible for it (else log/projection diverge).
+  claim selects Pending candidates; upsert checks state; reclaim selects Leased; finalize now
+  pre-checks Leased+!fenced. Future durable units must keep this discipline. (Surfaced by review B1.)
+- 2026-06-23 DEFERRALS (tracked): (a) per-item finalize results — `FinalizePort` is all-or-nothing for
+  this slice (one rejected item fails the batch); API-001 per-item results are a later refinement.
+  (b) lease-token / PEL-ownership fencing — finalize validates operator-fencing only; token/PEL
+  ownership (TD-006 §5.3) deferred (any holder can finalize a leased item until then). Both honestly
+  marked in port + RESP docs.
 - 2026-06-23 Phase 2 deviation (recorded): pqueue-service is kept COMPILING during demolition via
   logic-free re-exports of the canonical engine types + a transitional `From<EngineError>` error
   shim, rather than left broken, until its REST handlers (which consume them) are deleted as their
@@ -77,6 +90,14 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
+- 2026-06-23 Phase 2 §4a pause/fence: fresh-eyes review GO-with-conditions (one BLOCKING). Confirmed:
+  fence check is pre-append + same-lock (no TOCTOU); pause gates claim+select_eligible; fenced XACK →
+  `-ERR pqueue stale_lease` (not 0); all-or-nothing honestly marked. Fixes applied — (B1) `finalize`
+  now pre-validates each item is Leased+!fenced so apply is infallible (commit_locked has no
+  rollback); added a test that a rejected finalize appends NO log command; (I1) added a log-replay
+  reconstruction test proving pause+fence survive a rebuild (TD-007 §4); gated `peek` by pause; (I2)
+  tightened FinalizePort doc (token/PEL ownership deferred). Deferrals recorded in decisions log.
+  Engine 12 + memory 16 + resp 1+1 green, clippy clean.
 - 2026-06-23 Phase 2 §4a idempotency: fresh-eyes review **NO-GO** → fixed to convergence. The review
   caught 4 real issues, all addressed: (B1) collapsing request-id-conflict onto generic `Conflict` →
   added distinct `EngineError::RequestIdConflict` + `RequestExpired` with their own `-ERR pqueue …`
