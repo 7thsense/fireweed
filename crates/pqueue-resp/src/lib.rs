@@ -698,9 +698,13 @@ async fn xautoclaim<B: RespBackend>(
 ///
 /// Divergences: **`min-idle-time` is ignored** (pqueue gates by lease expiry, like `XAUTOCLAIM`); the
 /// `IDLE`/`TIME`/`RETRYCOUNT`/`FORCE`/`LASTID` options are accepted and ignored (the lease deadline is
-/// reset to the queue's `max_lease_duration`). A mixed batch (some ids self-owned, some not) issues a
-/// renew AND a reassign — those two are not atomic with each other, but each is individually all-or-
-/// nothing and pre-validated (a rejected disposition appends nothing). Reply: the claimed entries
+/// reset to the queue's `max_lease_duration`). Repeated ids are de-duplicated (Redis treats them
+/// idempotently; without this a duplicated id would charge the delivery count twice). A mixed batch
+/// (some ids self-owned, some not) issues a renew AND a reassign — these are two separate commits and
+/// NOT atomic with each other: each is individually all-or-nothing + pre-validated, but if the first
+/// disposition commits and the second then rejects (e.g. an id was fenced/reclaimed between the snapshot
+/// and the commit), the client gets the error yet the first disposition's effects are already durable
+/// (PARTIAL EFFECTS POSSIBLE on a mixed-batch error). Reply: the claimed entries
 /// (`[id, [field value …]]`), or just the ids with `JUSTID`.
 async fn xclaim<B: RespBackend>(
     backend: &Arc<B>,
@@ -732,6 +736,10 @@ async fn xclaim<B: RespBackend>(
     if ids.is_empty() {
         return Resp::Error("ERR wrong number of arguments for 'xclaim'".into());
     }
+    // De-duplicate (preserving order): a repeated id must transfer/renew once, not charge the delivery
+    // count once per occurrence in the command's `item_ids` (the apply arm bumps per element).
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
     let justid = args[i..].iter().any(|a| arg_eq(a, "JUSTID"));
 
     let consumer = String::from_utf8_lossy(&args[3]).to_string();
