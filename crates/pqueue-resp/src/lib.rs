@@ -558,10 +558,9 @@ async fn xpending<B: RespBackend>(
 /// - **`tick` is backend-global**, not stream-scoped: it reclaims EVERY expired lease (the background
 ///   ReclaimDriver does the same). This is correct — an expired lease is always reclaimable — and the
 ///   *re-delivery* (claim) is scoped to the named stream, so a caller only ever receives its own items.
-/// - **attempt accounting**: the reclaim (`LeaseExpired`) charges one attempt and the re-delivery
-///   (`Claim`) charges another, so one reclaim+redeliver bumps `attempt_count` by 2. TD-006 §"XCLAIM"
-///   specifies one; this is the projection's established attempt model (conformance `tick_reclaims`),
-///   flagged for reconciliation — NOT silently downgraded.
+/// - **attempt accounting** (TD-006:129): `attempt_count` = number of deliveries. The reclaim
+///   (`LeaseExpired`) returns the item to pending and does NOT charge; only the re-delivery (`Claim`)
+///   charges the one attempt. So one reclaim+redeliver bumps `attempt_count` by exactly 1.
 /// - **cursor is always `0-0`** (single-shot full scan); paginated PEL coverage is owed work.
 async fn xautoclaim<B: RespBackend>(
     backend: &Arc<B>,

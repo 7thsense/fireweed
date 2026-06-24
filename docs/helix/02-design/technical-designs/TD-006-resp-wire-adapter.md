@@ -71,7 +71,7 @@ reserved fields in claim replies. Non-reserved fields are opaque payload.
 | `payload` | request | Opaque application payload. |
 | `item_version` | reply | Server-assigned monotonic item version. |
 | `lease_expires_at` | reply | Server-computed lease expiry timestamp. |
-| `attempt_count` | reply | Delivery/reclaim attempt count. |
+| `attempt_count` | reply | Delivery count (claims handed to a worker); a timed reclaim does not charge. |
 
 The RESP entry id is the wire `item_id`. `client_item_key` is not the entry id; it is the caller's
 logical replacement/idempotency key.
@@ -125,8 +125,13 @@ Rules:
 
 - Reclaim pagination is entry-id ordered, matching the cursor shape of Redis Streams.
 - Priority governs delivery through `XREADGROUP`, not cursor pagination through `XAUTOCLAIM`.
+- `attempt_count` = the number of times the item was **delivered** (handed to a worker via a claim). A
+  timed reclaim (`ReclaimDriver`/`XAUTOCLAIM` returning an expired lease to pending) is NOT a delivery and
+  does **not** charge; the subsequent re-delivery charges the one attempt. So a reclaim+redeliver cycle
+  bumps `attempt_count` by exactly one.
 - Same-consumer `XCLAIM` is treated as a lease renew and does not charge an attempt.
-- Cross-consumer `XCLAIM`/`XAUTOCLAIM` reclaims ownership and charges one attempt.
+- Cross-consumer `XCLAIM` reclaims ownership to the new consumer and charges one attempt (the re-lease is
+  the delivery).
 - The engine-owned `ReclaimDriver` is still required so quiet queues make lease/progress transitions
   without depending on client-driven `XAUTOCLAIM` traffic.
 

@@ -365,7 +365,11 @@ impl ProjectionData {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = None;
                     rec.lease_expires_at = None;
-                    rec.attempt_count += 1; // reclaim charges an attempt
+                    // INVARIANT: `attempt_count` = number of times the item was handed to a worker, so
+                    // it increments ONLY in the Claim arm. A reclaim returns the item to pending (not a
+                    // delivery) and does NOT charge — the subsequent redelivery (a fresh Claim) charges
+                    // the one attempt. (TD-006:129 reconciliation; poison detection is preserved since
+                    // every redelivery still increments.)
                 }
                 Ok(())
             }

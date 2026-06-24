@@ -338,9 +338,9 @@ async fn xautoclaim_redelivers_expired_leases() {
     assert_eq!(pend.len(), 1, "still leased at the expiry instant (half-open)");
     assert_eq!(pend[0].3, 1, "attempt_count still 1 before any reclaim");
 
-    // One unit past expiry: XAUTOCLAIM reclaims + redelivers. attempt_count is EXACTLY 3 — claim(1) +
-    // reclaim/LeaseExpired(1) + redeliver/Claim(1) — the projection's attempt model (see lib XAUTOCLAIM
-    // doc; TD-006 "one attempt" divergence is tracked for Phase-7 reconciliation).
+    // One unit past expiry: XAUTOCLAIM reclaims + redelivers. attempt_count is EXACTLY 2 — the reclaim
+    // (LeaseExpired) does NOT charge (it's not a delivery); only the original claim(1) + the redelivery
+    // (Claim, 1) charge. INVARIANT: attempt_count = number of deliveries (TD-006:129).
     clock.set(1_061);
     let (_c, entries, _d): AutoClaim = redis::cmd("XAUTOCLAIM")
         .arg("t1:q1").arg("g").arg("c").arg(3_600_000).arg("0-0")
@@ -348,7 +348,7 @@ async fn xautoclaim_redelivers_expired_leases() {
     assert_eq!(entries.len(), 1, "expired lease redelivered despite the large min-idle-time (ignored)");
     let fields = &entries[0].1;
     let attempt: i64 = fields.iter().find(|(k, _)| k == "attempt_count").unwrap().1.parse().unwrap();
-    assert_eq!(attempt, 3, "claim(1) + reclaim(1) + redeliver(1) = 3");
+    assert_eq!(attempt, 2, "claim(1) + redeliver(1) = 2; the reclaim does not charge");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -466,7 +466,8 @@ pub async fn tick_reclaims_expired_lease_with_no_client_traffic<B: ConformanceBa
     let r = b.tick(ts(200)).await.unwrap();
     assert_eq!(r.leases_reclaimed, 0);
 
-    // Reclaim charged a second attempt (claim=1, reclaim=2).
+    // The reclaimed item is back to pending/eligible. (The reclaim itself does NOT charge an attempt —
+    // attempt_count = number of deliveries; a fresh claim of this item would charge the next one.)
     let pending = b.select_eligible(&shard(), ts(300), 10).await.unwrap();
     assert_eq!(
         pending.iter().map(|i| i.as_str()).collect::<Vec<_>>(),

@@ -152,11 +152,12 @@ diverge from TD-006 (Owed Item B).
 - **A. Postgres adapter — DEFERRED.** Needs a live PostgreSQL (not available in the build env; brew
   binaries + docker present). Build fresh to the engine ports via the durable-adapter template +
   env-gated conformance. Atomic-class near-clone of sqlite; low risk.
-- **B. Attempt-count on reclaim (TD-006 §"XCLAIM").** The projection charges an attempt on BOTH reclaim
-  (`LeaseExpired`) and redelivery (`Claim`) → a reclaim+redeliver bumps `attempt_count` by 2; TD-006
-  specifies one. Reconcile by either amending TD-006 to "reclaim + redelivery each charge" or adding a
-  combined reclaim-relelease engine op that charges once. Documented at the RESP XAUTOCLAIM surface +
-  exact-count e2e; a unilateral change to the shared attempt model was intentionally NOT made here.
+- **B. Attempt-count on reclaim — RESOLVED** (owed-resolution Chunk 1). The reclaim (`LeaseExpired`) no
+  longer charges; `attempt_count` = number of deliveries (charged only by `Claim`). TD-006:74/128-129 +
+  the RESP XAUTOCLAIM doc updated; e2e asserts exactly 2 (claim + redeliver), conformance comment fixed.
+- **B'. Retry-exhaustion NOT wired (NEW, owed).** `max_attempts` is `#[allow(dead_code)]` — "Finalize-Retry
+  beyond `max_attempts` → terminal" is not enforced. Chunk 1 fixed the attempt *counter* (the input);
+  the exhaustion *policy* is a separate owed item (surfaced by the Chunk-1 plan review, M5).
 - **C. RESP/facade server-side id generation.** Two RESP servers (or two facades) over ONE backend, or a
   process restart, can collide self-generated ids. The **facade was fixed** (Phase 5: ids assigned by the
   backend via `PushPort`, restart-safe; two-handle test proves it). The **RESP front** still generates
