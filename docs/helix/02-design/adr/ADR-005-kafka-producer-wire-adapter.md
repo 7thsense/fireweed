@@ -4,10 +4,10 @@ ddx:
   depends_on:
     - prd
   review:
-    self_hash: 71580229772a08492d0c0f333e25c9aa9df5356ffadc04d1ce1731c162fd16b0
+    self_hash: ce301c0752122881cff38d9294a2db8bd3fff1e2c6c72495a39daadd89c006fc
     deps:
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-    reviewed_at: "2026-06-16T17:42:59Z"
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # ADR-005: Kafka Producer Wire Adapter as P2 Compatibility Layer

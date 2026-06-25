@@ -7,13 +7,13 @@ ddx:
     - adr-rust-workspace-and-toolchain-policy
     - td-storage-architecture-backend-contracts
   review:
-    self_hash: bb88006608f011c35bc42d5686e17467b0e3c81e56d7931e04442b01e71d672a
+    self_hash: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
     deps:
-      adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
-      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-    reviewed_at: "2026-06-22T18:57:24Z"
+      adr-rust-workspace-and-toolchain-policy: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # ADR-006: Embedded Engine Integration and Public Crate Surface
@@ -66,7 +66,7 @@ one-minor deprecation window where feasible):
 - `pqueue-core`: the domain types (ids, `QueueDefinition`, priority/lifecycle).
 - `pqueue-storage`: `traits` (`LogStore`/`ProjectionStore`/`ControlPlaneStore`/
   `SnapshotStore`), `commands` (`CommandEnvelope`/`QueueCommand`/finalize kinds),
-  and `types` (`ShardKey`/`QueueKey`/`CommandPosition`/`CommandChecksum`).
+  and `types` (`QueueKey`/`CommandPosition`/`CommandChecksum`).
 
 This supersedes TD-001's "storage contracts are internal" statement **for these
 modules**: they are now an embedding contract, not just a backend-author one.

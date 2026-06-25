@@ -17,26 +17,43 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 903a5d1277524c550297beafbbef6a88f3e161b0bf319ab703713733f9b28ad9
+    self_hash: 3234935e1274435e86b9396e2b107230e0142fc12c46c0603b01f0a9965a9fc8
     deps:
-      adr-auth-tenancy-and-storage-isolation: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
-      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
-      adr-granularity-mapping-and-claim-domain: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
-      adr-rust-workspace-and-toolchain-policy: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
-      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
-      api-operator-repair-contract: 65ec2e36500a6c404ae53af1a65da26fcdcc0a07e0ef1578bae30ec94f2be6e6
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-      td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
-      td-s3-object-log-sqlite-projection-mode: d346e72f23f5859de62807f41e81b34409b43814faf95db8de237ff1ede895b7
-      td-sharding-and-shard-ownership: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
-      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-      tp-governing-test-traceability: f8f62ced47ebb892960d6e710a78b27fe64a1f9b796fb0089963708eecab8a96
-      tp-scale-substantiation: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
-      tp-verification-acceptance-criteria: 15f28d510bdac36217eeba3ea37849174111de98af410d6a5c59dd296125e6bf
-    reviewed_at: "2026-06-23T01:45:57Z"
+      adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
+      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
+      adr-granularity-mapping-and-claim-domain: f84d9bd6d3a8ab886c14f84afa45d189923e0cb7db32f57b700a9a0d8b1655b4
+      adr-rust-workspace-and-toolchain-policy: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+      td-postgres-native-reference-mode: ea91286ed9f810497a7da0dd05f962e0bfe2cb001acb682f3d7b10e1e69cdc64
+      td-s3-object-log-sqlite-projection-mode: fde8c520a39579fd2c2e771a3f251d09714bb370db6e2eaf040c2d84e9e7dc0d
+      td-sharding-and-shard-ownership: 6bf3dcc75c94fefa35af4ed9f1859e76b76df3f171a89622fcb24888d92c93e4
+      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
+      tp-governing-test-traceability: 07ab40e9e68c15d39d73de4b373c0a75d6b5b4a2ae0db1fd19009dc00cb32d9e
+      tp-scale-substantiation: ed173bd7adce26c78059c7d347ecb31bfbea8a7e8f679b11f3d9761ddb4fb3d3
+      tp-verification-acceptance-criteria: cda220585cc9e5cf4b660a323298baa0550451a1ee9482ecb9de93c02b8e723e
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence
+
+> **Superseded-as-target note (ADR-008 reframe).** The intra-queue-shard build
+> items below — the `shard_count` policy fields (B-010), the `group_co_residency`
+> shape work (B-051), the cross-shard portions of discovery (B-054), **B-072
+> "Multi-shard claim, progress, discovery, and command convergence" and its
+> entire "Multi-Shard Sub-Decomposition"**, the cross-shard convergence pieces of
+> B-080/B-081, and INV-9's `shard_count > 1` placement — describe the **prior
+> intra-queue-shard build**. Under ADR-008 (the queue is the unit of sharding)
+> they are **retired as targets**: horizontal scale is cross-queue (per-queue
+> ownership + routing, TD-003/TD-006), there is no `shard_count` /
+> `group_co_residency`, claims are single-owner-local (no fan-out / k-way merge),
+> and the per-group summary is keyed `(tenant, queue, group_key)`. This build plan
+> will be **re-decomposed** for the per-queue model in the later code-build phase
+> (the spec cascade was reframed first, doc-only); the durable substrate items
+> (core types, durable log + projection, object-log group-commit/manifest/fence/
+> recovery, conformance suite) carry forward. Treat the multi-shard beads here as
+> historical sequencing, not the current target.
 
 ## Scope
 
@@ -187,6 +204,12 @@ INV-11 stress path and do not block the P0/core release gate.
 | INV-11 lease fence on operator action | B-100 | B-101 |
 
 ## Multi-Shard Sub-Decomposition
+
+> **Retired as a target (ADR-008).** This sub-decomposition is for the prior
+> intra-queue-shard model and is superseded by per-queue ownership + cross-queue
+> scale-out (TD-003/TD-006); it will be replaced by a per-queue ownership / routing
+> / cross-queue decomposition in the later code-build phase. Retained as historical
+> sequencing — see the superseded-as-target note at the top of this plan.
 
 B-072 must be broken into focused beads rather than filed as one broad shard
 task. Each child bead depends on B-070, B-054, and B-021 unless the dependency is

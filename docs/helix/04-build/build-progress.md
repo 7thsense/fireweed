@@ -4,6 +4,23 @@ Tracks the in-loop execution of `hexagonal-migration-plan.md` (v4). Each chunk: 
 test/realign → update this file → continue. Update the **Cursor** and the checklist every iteration.
 
 ## Cursor
+- **✅ SPEC CASCADE — "the queue is the unit of sharding" (2026-06-25, DOC-ONLY, loop C0–C12 done).**
+  A separate spec-evolution loop reframed the entire helix cascade away from intra-queue sharding to
+  **the queue as the unit of sharding** (ADR-008, the keystone). Chunks C0–C12 on branch
+  `spec/coordinated-log-relational-projection`: C0 PRD, C1 ADR-008, C2 ADR-004, C3 ADR-001+ADR-007,
+  C4a/C4b TD-003 (per-queue ownership + Single Authoritative Fencing Rule re-scoped per-`(tenant,queue)`
+  + pluggable ControlPlaneStore seam contract), C5 TD-001 (single-owner claim + two projection families
+  held by conformance: core/log/relational-reconnect classes), C6 TD-002 (per-queue relational projection,
+  `shard_id` dropped, `%N` recast as internal storage-only), C7 API-001 (`shard_count`/`group_co_residency`
+  removed; claim + progress per-queue), C8 API-002 + ADR-002 (operator ops whole-queue; `admin:shard`→
+  `admin:queue`), C9 TD-004/005/006/007 (object-log per-queue; **TD-006 new client routing — HRW/MOVED,
+  fence-safe redirect, no scatter-gather — fresh-eyes NO-GO→fixed→GO**), C10 TP-002 (E2 → cross-queue
+  scale-out), C11 TP-001+TP-003 (test rows per-queue ownership/routing), C12 full-cascade sweep +
+  `ddx doc stamp` re-stamp + this ledger entry. **Deferred to a later build phase:** re-decomposing the
+  CODE build (BUILD-001's multi-shard beads are superseded-as-target), the no-Postgres / object-store
+  control plane (spike-gated on S3-CAS multi-object atomicity, ADR-008 §4), and re-measuring the reframed
+  cross-queue TP-002 E2 (the prior E2 source beads measured the retired multi-shard build). The spec
+  cascade is logically consistent and re-stamped; no source changed.
 - **✅ MIGRATION COMPLETE (Phases 0–7 all done).** Hexagonal "one engine, two interfaces" is built,
   reviewed, and green: 10 crates, full default workspace 39 suites + 0 fails + clippy 0, dependency-
   direction test passing, legacy deleted, reconciliation report (`PHASE-7-reconciliation.md`) shows no

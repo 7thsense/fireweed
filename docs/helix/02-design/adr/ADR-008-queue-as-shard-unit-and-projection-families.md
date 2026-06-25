@@ -3,11 +3,12 @@ ddx:
   id: adr-queue-as-shard-unit-and-projection-families
   depends_on:
     - prd
-    - adr-cqrs-log-projection-storage-model
-    - adr-granularity-mapping-and-claim-domain
-    - adr-hexagonal-architecture-and-two-interfaces
-    - td-sharding-and-shard-ownership
   status: accepted
+  review:
+    self_hash: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+    deps:
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # Architecture Decision Record

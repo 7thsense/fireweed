@@ -9,15 +9,15 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: d280ca50b2019dce5e9ee346744307d88ab09cbb7f674ba11df07f6582a800da
+    self_hash: f6f9e85aec0b5a2b9db0fbc511fc22189acf93e13b13fbf8969d348838f2bd76
     deps:
-      build-implementation-plan: 903a5d1277524c550297beafbbef6a88f3e161b0bf319ab703713733f9b28ad9
-      td-postgres-native-reference-mode: 443e433bb2fa0ac55f95cb9ad02d35f8486e5e015967fb69807a3a50b97474c3
-      td-s3-object-log-sqlite-projection-mode: d346e72f23f5859de62807f41e81b34409b43814faf95db8de237ff1ede895b7
-      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-      tp-scale-substantiation: 1e6b2b70c2f613ac9999e7e295c2c2845c76b2d69eaed81f949785d2ab5d51a7
-      tp-verification-acceptance-criteria: 15f28d510bdac36217eeba3ea37849174111de98af410d6a5c59dd296125e6bf
-    reviewed_at: "2026-06-23T01:45:57Z"
+      build-implementation-plan: 3234935e1274435e86b9396e2b107230e0142fc12c46c0603b01f0a9965a9fc8
+      td-postgres-native-reference-mode: ea91286ed9f810497a7da0dd05f962e0bfe2cb001acb682f3d7b10e1e69cdc64
+      td-s3-object-log-sqlite-projection-mode: fde8c520a39579fd2c2e771a3f251d09714bb370db6e2eaf040c2d84e9e7dc0d
+      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
+      tp-scale-substantiation: ed173bd7adce26c78059c7d347ecb31bfbea8a7e8f679b11f3d9761ddb4fb3d3
+      tp-verification-acceptance-criteria: cda220585cc9e5cf4b660a323298baa0550451a1ee9482ecb9de93c02b8e723e
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -87,9 +87,10 @@ readiness contract.
 - Do not claim provider-specific live cloud S3 certification unless a later
   bead adds a concrete provider adapter, credentials-backed acceptance run, and
   release evidence for that provider.
-- Do not treat multi-shard `postgres_native` as horizontal-scale headline
-  evidence. TP-002 reserves the horizontal scale/cost evidence path for
-  `object_log_sqlite_projection`.
+- Do not treat single-deployment `postgres_native` as horizontal-scale headline
+  evidence. TP-002 reserves the horizontal (cross-queue) scale/cost evidence path
+  for `object_log_sqlite_projection`; a `postgres_native` cross-queue run is a
+  comparator only.
 - Do not block P0/core production readiness on P1 operator APIs unless a release
   explicitly claims the operator-enabled surface.
 - Do not claim provider-specific managed-Postgres (Lakebase) certification from
@@ -211,9 +212,12 @@ concrete, not reserved:
 - `PQUEUE_SQLITE_PROJECTION_DIR` is rendered from
   `backend.sqliteProjection.mountPath`; the CI/default path is
   `/var/lib/pqueue/projection`.
-- `PQUEUE_SHARD_COUNT_MIN` and `PQUEUE_SHARD_COUNT_MAX` are rendered from
-  `backend.shardCount.min` and `backend.shardCount.max`; they bound the
-  deployment shard-count contract for the selected backend.
+- (Superseded by ADR-008 — queue is the unit of sharding.) The former
+  `PQUEUE_SHARD_COUNT_MIN`/`PQUEUE_SHARD_COUNT_MAX` env (`backend.shardCount.*`)
+  are **retired**: there is no client `shard_count`. Any internal item-table
+  partition factor (`hash(tenant,queue) % N`, TD-002) is a backend storage detail,
+  not a deployment-facing contract. This env wiring will be removed when the
+  per-queue model is built (the spec was reframed first, doc-only).
 - Production-like Kubernetes proofs must use a PVC for the SQLite projection
   path (`persistence.enabled=true`, default claim name
   `<release-fullname>-sqlite-projection`, configured by

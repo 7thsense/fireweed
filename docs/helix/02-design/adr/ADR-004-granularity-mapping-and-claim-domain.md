@@ -6,26 +6,27 @@ ddx:
     - concerns
     - api-native-client-interface
   review:
-    self_hash: ba2d4c26c9fcaa4470ea65b61eff20cf382b6bba9e261cbd453f13122bfbc7c8
+    self_hash: f84d9bd6d3a8ab886c14f84afa45d189923e0cb7db32f57b700a9a0d8b1655b4
     deps:
-      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
-      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-    reviewed_at: "2026-06-20T19:01:18Z"
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # ADR-004: Granularity Mapping and Claim Domain
 
 ## Context
 
-API-001 defines `tenant_id`, `queue_id`, `group_key`, and `metadata`; ADR-002
-adds a physical `shard_id`. The first validation workload (Seventh Sense) nests
-account, job, connector, and campaign concepts, claims work in
-scheduled-timestamp order, and physically hash-shards on a job-like key. The
-native model never mapped that nesting onto pqueue's axes, never stated at what
-domain claim result order is guaranteed, never stated the placement precondition
-under which per-group order is achievable, and never stated whether `shard_id`
-is client-visible. Several downstream gap designs (group-cardinality claim,
+API-001 defines `tenant_id`, `queue_id`, `group_key`, and `metadata`; physical
+placement is an internal storage concern (ADR-008: the queue is the unit of
+sharding; any item-table partition is client-invisible). The first validation
+workload (Seventh Sense) nests account, job, connector, and campaign concepts,
+claims work in scheduled-timestamp order, and physically hash-partitions on a
+job-like key. The native model never mapped that nesting onto pqueue's axes, never
+stated at what domain claim result order is guaranteed, never stated the placement
+precondition under which per-group order is achievable, and never stated whether
+physical placement is client-visible. Several downstream gap designs (group-cardinality claim,
 atomic cohort claim, active-scope discovery, recurring/perpetual items) depend
 on a single, shared answer.
 
@@ -128,7 +129,8 @@ recurring" topology. CreateQueue MUST reject a queue that sets both
 ### Per-group summary projection (single canonical projection)
 
 There is exactly ONE per-group summary projection, **`pqueue_group_summary`**,
-keyed by **`(tenant_id, queue_id, shard_id, group_key)`**. It is the single
+keyed by **`(tenant_id, queue_id, group_key)`** (owner-local; one row per group —
+ADR-008). It is the single
 source of truth for (a) g1 `group_batching` oldest-group selection, (b) g4
 `DiscoverActiveScopes` group-granularity ranking, and (c) per-group
 observability. Per group it holds the authoritative oldest-eligible timestamp

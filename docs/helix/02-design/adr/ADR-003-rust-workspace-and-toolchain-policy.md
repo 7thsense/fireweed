@@ -7,13 +7,13 @@ ddx:
     - api-native-client-interface
     - td-storage-architecture-backend-contracts
   review:
-    self_hash: 1f0c7eb647424e5ff2875cf5726f5de88b88276fabd7f203424ace231c1f6ab2
+    self_hash: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
     deps:
-      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
-      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-    reviewed_at: "2026-06-20T19:01:18Z"
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # ADR-003: Rust Workspace and Toolchain Policy
@@ -99,11 +99,11 @@ service or backend crates.
 - Batch sizes, request body sizes, lease durations, and metadata/payload sizes
   must be configurable and bounded.
 - Use cancellation-safe async patterns in storage calls and background workers.
-- Per-queue and per-`(queue,shard)` background work (lease-expiry sweeps,
-  cross-shard progress aggregation, summary recompute, recurring rearm,
-  idempotency/retention GC) MUST be multiplexed onto bounded, shared per-node
-  resources (worker pools, connection pools, batched sweepers), never one task,
-  loop, or connection per queue or per shard. This is a hard requirement for the
+- Per-queue background work (lease-expiry sweeps, progress-bound aggregation,
+  summary recompute, recurring rearm, idempotency/retention GC) MUST be
+  multiplexed onto bounded, shared per-node resources (worker pools, connection
+  pools, batched sweepers), never one task, loop, or connection per queue. This is
+  a hard requirement for the
   PRD queue-density target (>=1000 concurrently active queues per node): adding
   the 1000th active queue must cost only bounded incremental resource. Per-shard
   projection state (e.g. SQLite databases) must be opened lazily and bounded by

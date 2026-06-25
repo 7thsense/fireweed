@@ -2,9 +2,9 @@
 ddx:
   id: prd
   review:
-    self_hash: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
+    self_hash: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
     deps: {}
-    reviewed_at: "2026-06-16T17:42:59Z"
+    reviewed_at: "2026-06-25T04:21:18Z"
 kind: product
 ---
 
@@ -255,8 +255,9 @@ priority, retry, claim, and state logic with different table shapes.
 - **FR-7** - Strict queues claim eligible items according to priority key plus
   deterministic tie-breaker, computed over the claim's effective domain (the
   candidate set after the queue eligibility predicate and any caller
-  group/metadata filters); when that domain is a single `group_key` on a
-  `group_co_residency=true` queue, the order is exact per-group priority order.
+  group/metadata filters); when that domain is a single `group_key`, the order is
+  exact per-group priority order (every group is co-resident on the queue's owner
+  by construction — the queue is the unit of sharding).
   The progress bound (FR-9, FR-12) remains queue-global regardless of group
   filtering; group filtering does not create a per-group progress metric and
   never causes the engine to return items outside the caller's declared filter.
@@ -438,8 +439,8 @@ priority, retry, claim, and state logic with different table shapes.
   onto the four client-visible axes (ADR-004): `tenant_id` for the
   account/isolation boundary, `queue_id` per logical stream, `group_key` for the
   per-queue ordering/atomicity key (`job_id` for non-cohort scheduled-action
-  queues; `callback_id` for cohort-enabled callback queues, with
-  `group_co_residency=true` so per-group order and cohort atomicity hold), and
+  queues; `callback_id` for cohort-enabled callback queues — co-resident on the
+  queue's owner by construction, so per-group order and cohort atomicity hold), and
   `account`, `connector`, `campaign` as `metadata`. The scheduled timestamp maps
   to timestamp-ascending `priority`. Progress is enforced queue-globally; per-job
   or per-callback fairness is a worker-routing concern via active-scope discovery.

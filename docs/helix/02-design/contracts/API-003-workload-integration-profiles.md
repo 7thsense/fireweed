@@ -6,12 +6,12 @@ ddx:
     - api-native-client-interface
     - api-operator-repair-contract
   review:
-    self_hash: dc9e97f201ac546ad838d120811aa790826aee707b6870c4396c2f97d1ba81a8
+    self_hash: ffe476dda307011c7d0974a14df3309b4c42402af183af001e76e2cab0a2a611
     deps:
-      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
-      api-operator-repair-contract: 65ec2e36500a6c404ae53af1a65da26fcdcc0a07e0ef1578bae30ec94f2be6e6
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-    reviewed_at: "2026-06-22T18:57:24Z"
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # Contract
@@ -100,12 +100,13 @@ The adapter SHOULD create one queue per logical delivery stream with:
 - `progress_bound_ms`: set to the workload's freshness SLA. Progress is
   **queue-global**; the profile MUST NOT assume a per-group or per-domain SLA
   (ADR-004; PRD FR-9/FR-12).
-- `group_co_residency`: `true` **only if** the workload claims whole
-  compatibility batches (e.g. "all work for one *sender*+*provider* together")
-  via `compatibility.group_batching`; in that case also set
-  `max_eligible_group_size`. Otherwise leave it `false` and treat `group_key` as
-  an optional opaque routing/ordering hint. `group_key` carries no progress
-  meaning either way.
+- group batching: enable it **only if** the workload claims whole compatibility
+  batches (e.g. "all work for one *sender*+*provider* together") via
+  `compatibility.group_batching`; in that case set `max_eligible_group_size`.
+  There is no `group_co_residency` flag — the queue is the unit of sharding, so a
+  `group_key`'s members are co-resident on the queue's owner by construction
+  (ADR-008). Otherwise treat `group_key` as an optional opaque ordering/compatibility
+  hint. `group_key` carries no progress meaning either way.
 - `eligibility_policy.gate_keys`: `dynamic` if the workload needs to pause a
   scope (a sender, a provider, a tenant) without deleting work; `none`
   otherwise.

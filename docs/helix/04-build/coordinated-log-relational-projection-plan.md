@@ -135,7 +135,7 @@ Source-of-truth first; each independently committable; re-stamp affected `ddx:` 
 
 - [x] C0 PRD cleanup · [x] C1 ADR-008 · [x] C2 ADR-004 · [x] C3 ADR-001+007 · [x] C4a TD-003 simplify
 - [x] C4b TD-003 control-plane seam · [x] C5 TD-001 · [x] C6 TD-002 · [x] C7 API-001 · [x] C8 API-002
-- [x] C9 TD-004/005/006/007 · [x] C10 TP-002 · [x] C11 TP-001/003 · [ ] C12 re-stamp + sweep
+- [x] C9 TD-004/005/006/007 · [x] C10 TP-002 · [x] C11 TP-001/003 · [x] C12 re-stamp + sweep
 
 > Code phase (separate, out of scope for this loop): M1 sqlite-relational projection (log-less,
 > single-owner) → core conformance; M2 postgres relational + `SKIP LOCKED`; M3 per-partition ownership +
