@@ -133,7 +133,7 @@ Source-of-truth first; each independently committable; re-stamp affected `ddx:` 
 
 ## 4. Progress
 
-- [x] C0 PRD cleanup · [x] C1 ADR-008 · [x] C2 ADR-004 · [x] C3 ADR-001+007 · [ ] C4a TD-003 simplify
+- [x] C0 PRD cleanup · [x] C1 ADR-008 · [x] C2 ADR-004 · [x] C3 ADR-001+007 · [x] C4a TD-003 simplify
 - [ ] C4b TD-003 control-plane seam · [ ] C5 TD-001 · [ ] C6 TD-002 · [ ] C7 API-001 · [ ] C8 API-002
 - [ ] C9 TD-004/005/006/007 · [ ] C10 TP-002 · [ ] C11 TP-001/003 · [ ] C12 re-stamp + sweep
 
