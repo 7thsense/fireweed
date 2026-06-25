@@ -46,20 +46,21 @@ The client-visible granularity axes are exactly four:
 4. **`metadata`** — caller-defined eligibility-gate inputs and observability
    dimensions (FR-16, FR-17, FR-45).
 
-### `shard_id` is never client-visible
+### Physical placement is never client-visible
 
-`shard_id` is a physical routing/capacity unit owned by the control plane
-(ADR-002, TD-001). It **MUST NOT** appear in any client request, response,
+A queue's physical placement — its single owning node and any internal storage
+partitioning of that node's item table (ADR-008) — is owned by the control plane
+(ADR-002, TD-001/TD-003). It **MUST NOT** appear in any client request, response,
 ordering rule, progress metric, or discovery descriptor, and **MUST NOT** be a
 client-visible ordering or progress scope. Result order and progress
 guarantees are defined entirely in terms of `queue_id` and `group_key`.
 
-### Progress scope is queue-global
+### Progress scope is queue-local
 
-Every queue has exactly ONE progress bound, enforced queue-globally over all
-eligible items across all shards (FR-9, FR-12; cross-shard aggregation owned by
-the shard-ownership technical design, TD-003). `group_key` is **not** a progress
-scope: the engine does not owe a per-group non-starvation invariant, and there
+Every queue has exactly ONE progress bound, enforced over all of that queue's
+eligible items on its single owner (FR-9, FR-12; ADR-008 — the queue is the unit
+of sharding, so there is no cross-shard aggregation). `group_key` is **not** a
+progress scope: the engine does not owe a per-group non-starvation invariant, and there
 is **no per-group progress metric**. Per-group fairness, where a worker fleet
 needs it, is achieved by routing workers to groups with eligible work via
 `DiscoverActiveScopes` (API-001, g4), not by an engine invariant. No field named
@@ -80,49 +81,37 @@ request's caller compatibility filters (`group_key`, `same_group_key`,
 effective claim domain under the queue's `ordering_mode`, `priority_model`, and
 queue-global progress contract.
 
-**Per-group order is a placement-enabled property.** When the effective claim
-domain is a single `group_key` **on a queue with `group_co_residency=true`**,
-that group's items are co-resident on one shard, the single-shard candidate set
-covers the whole group, and the claim result order over that domain **MUST** be
-the exact per-group priority order. When a `group_key` filter is applied on a
-queue with `group_co_residency=false`, the filter is a valid claim-domain
-restriction but pqueue does **NOT** promise per-group total order across shards
-(older same-group items MAY live on another shard); the result order is the
-queue's ordering mode over the matching items observed, deterministic per shard
-and merged per the cross-shard merge rule (TD-003), not a per-group total order.
-Ordering ACROSS distinct `group_key`s in one response is unspecified except as a
-claim-unit mode's own contract defines it (g1 defines its representative
-ordering; g6 returns one cohort).
+**Per-group order is unconditional.** Because the queue is the unit of sharding
+(ADR-008) — a whole queue is owned by one node, with no intra-queue sharding —
+every `group_key`'s items are co-resident on that one owner **by construction**.
+When the effective claim domain is a single `group_key`, the candidate set covers
+the whole group and the claim result order over that domain **MUST** be the exact
+per-group priority order. Ordering ACROSS distinct `group_key`s in one response is
+unspecified except as a claim-unit mode's own contract defines it (g1 defines its
+representative ordering; g6 returns one cohort).
 
-### Group co-residency (placement capability)
+### Group co-residency is automatic (ADR-008)
 
-A queue MAY declare `group_co_residency=true` at creation (API-001 CreateQueue;
-default false; immutable after creation). When true:
+Co-residency is **no longer a queue option**. Under ADR-008 the queue is the unit
+of sharding, so all items of a `group_key` are co-resident on the queue's single
+owner **by construction**. The `group_co_residency` field is therefore **removed
+from the contract** (API-001 CreateQueue) and **from the configuration-identity
+hash**. Its former consequences become **unconditional queue properties**:
 
-- Shard placement is a deterministic function of `group_key`:
-  `shard_id = hash(group_key) mod shard_count`. All items sharing a `group_key`
-  are co-resident on exactly one shard.
-- Every pushed item **MUST** carry `group_key`; an item without `group_key`
-  **MUST** be rejected per item with `invalid`.
-- Because a group is shard-local, whole-group (g1 `group_batching`) and
-  whole-cohort (g6 `whole_cohort`) claims are shard-local and atomic without
-  cross-shard coordination, and a single-`group_key` claim returns exact
-  per-group order.
+- Whole-group (g1 `group_batching`) and whole-cohort (g6 `whole_cohort`) claims
+  are always shard-local and atomic — there is no cross-shard coordination to
+  avoid, so no `group_co_residency=true` precondition is needed.
+- A single-`group_key` claim always returns exact per-group order.
+- The "every pushed item MUST carry `group_key`" rule, where it applies, is gated
+  by the queue's group/cohort configuration (`cohort_policy.enabled` or
+  `compatibility.group_batching`) alone — never by a `group_co_residency` flag.
 
-When `group_co_residency=false` (default), `group_key` is still a valid
-ordering/compatibility restriction filter, but items of one `group_key` MAY be
-spread across shards; claim modes that require whole-group atomicity (g1
-`group_batching`, g6 `whole_cohort`) are then invalid and **MUST** be rejected
-with `invalid-request`, and a bare `group_key` filter is honored only with the
-weaker (non-per-group-total-order) guarantee above. `group_co_residency` is a
-PLACEMENT capability only; it carries no progress meaning (progress remains
-queue-global).
-
-`group_co_residency` is part of a queue's stable configuration identity:
-idempotent `CreateQueue` MUST treat a differing `group_co_residency` value as an
-incompatible definition and reject it as a conflict (API-001 idempotent-create
-rules); it participates in the queue's configuration hash and is immutable after
-creation.
+`group_key` is an **ordering/compatibility** key only; it carries **no placement
+or progress meaning** (placement is per-queue, ADR-008; the progress bound is
+queue-local). The former `group_co_residency=false` mode — a `group_key` filter
+honored with a weaker, non-per-group-total-order, cross-shard-merged guarantee —
+is **retracted together with intra-queue sharding** (ADR-008; PRD FR-13). There
+is no cross-shard merge.
 
 ### Recurrence vs cohort exclusivity
 
@@ -181,14 +170,14 @@ in the group).
 |----------------|-------------|-----------|
 | Tenant / account class / deployment boundary | `tenant_id` | Auth + storage isolation (ADR-002). |
 | Logical work stream with its own ordering policy & progress bound | `queue_id` | Config + ordering + metrics boundary (FR-1). |
-| Per-key FIFO/priority ordering & compatibility unit | `group_key` | Ordering/compatibility partition; physical shard derives from it iff `group_co_residency`; per-group order requires `group_co_residency`. |
+| Per-key FIFO/priority ordering & compatibility unit | `group_key` | Ordering/compatibility partition only; never a placement key (ADR-008); per-group order is unconditional (the queue is its own shard). |
 | Application states / filters (paused, connector, campaign, account) | `metadata` | Eligibility gates + observability (FR-45, FR-17). |
-| Physical partition / capacity unit | `shard_id` | API-invisible; never a client ordering/progress scope. |
+| Physical placement / capacity unit | queue owner + internal storage partition | API-invisible (ADR-008); the queue's owner and any internal storage partitioning are physical-only, never a client ordering/progress scope. |
 
 ### Per-queue `group_key` topology
 
-`group_key` is the queue's single placement and ordering partition; a queue
-chooses ONE topology at creation:
+`group_key` is the queue's ordering/compatibility partition (not a placement key;
+placement is per-queue, ADR-008); a queue chooses ONE topology at creation:
 
 | Queue topology | `group_key` is | `metadata` carries | Use |
 |----------------|----------------|--------------------|-----|
@@ -196,13 +185,13 @@ chooses ONE topology at creation:
 | Cohort-enabled queue (`cohort_policy.enabled=true`) | `callback_id` | `job_id`, `account_id`, `connector`, `campaign_id` | Atomic complete-cohort claim keyed by `batch_checksum`/`callback_id`. |
 | Recurring non-cohort scheduled-action queue (`recurrence.mode=recurring`) | `job_id` (resp. `connector_id`) | `account_id`, `connector`, `campaign_id`, `callback_id` | Per-job/connector recurring tick; the recurrence key IS the `group_key`. Recurring singletons are non-cohort (g6); a recurring item MUST NOT be a cohort member. |
 
-Because `group_key` owns BOTH placement (group co-residency) and the cohort
+Because `group_key` owns BOTH the ordering/compatibility unit and the cohort
 identity, a single queue MUST pick one topology. If a single queue genuinely
 requires both per-job ordering AND callback-cohort atomicity at once, that is an
 explicit Seventh Sense confirmation item: `metadata` cannot substitute for a
-lost placement/ordering/atomicity key, so the workload would need either two
-queues (one keyed by `job_id`, one by `callback_id`) or a future composite-key
-design. v1 does not provide a composite `group_key`.
+lost ordering/atomicity key, so the workload would need either two queues (one
+keyed by `job_id`, one by `callback_id`) or a future composite-key design. v1
+does not provide a composite `group_key`.
 
 ### Seventh Sense topology (per-queue, resolves the group_key question)
 
@@ -214,22 +203,21 @@ Seventh Sense has distinct queue shapes, each with its OWN `group_key` topology:
 | **Non-cohort scheduled-action queue** (per-job scheduled actions) | `job_id` | `account_id`, `connector`, `campaign_id` are `metadata` | Per-job ordering + group-aware claim by job; no cohort. |
 | **Recurring scheduled-action queue** (per-job/connector recurring tick) | `job_id` (resp. `connector_id`) | `account_id`, `connector`, `campaign_id`, `callback_id` are `metadata` | Per-job/connector recurring ordering; non-cohort; the recurrence key IS the `group_key`. |
 
-In all shapes the scheduled timestamp maps to `priority` (timestamp ascending),
-and `group_co_residency=true` is set so the chosen `group_key` is shard-local
-(required for per-group order and whole-group/whole-cohort atomicity, and so a
-recurring singleton stays on one shard for its lifetime — re-arm never relocates
-it). Progress remains queue-global in all shapes; per-job or per-callback
-fairness, where needed, is a `DiscoverActiveScopes` routing concern (g4), not an
-engine invariant (D1). Discovery is topology-agnostic: it reports whatever
-`group_key` the queue's topology defines and supports group granularity on BOTH
-`group_co_residency` modes (co-residency affects placement and atomic claim
-modes, not whether discovery can rank a queue's groups); group descriptors carry
+In all shapes the scheduled timestamp maps to `priority` (timestamp ascending).
+Per-group order and whole-group/whole-cohort atomicity hold by construction (the
+queue is the unit of sharding, ADR-008 — a group is always on the queue's single
+owner), and a recurring singleton stays on that owner for its lifetime — re-arm
+never relocates it. Progress remains queue-local in all shapes; per-job or
+per-callback fairness, where needed, is a `DiscoverActiveScopes` routing concern
+(g4), not an engine invariant (D1). Discovery is topology-agnostic: it reports
+whatever `group_key` the queue's topology defines and supports group granularity
+regardless (placement is per-queue, not a `group_key` function); group descriptors carry
 no per-group progress guarantee.
 
 **Seventh Sense confirmation item.** If a single physical queue genuinely needs
 BOTH per-`job_id` ordering (or per-`job_id` recurrence) AND callback-cohort
 atomicity at the same time, that is NOT expressible by moving one key to
-`metadata` (metadata cannot carry a placement/atomicity key). Such a queue MUST
+`metadata` (metadata cannot carry an ordering/atomicity key). Such a queue MUST
 be split into two queues (one keyed by `job_id`, one by `callback_id`) OR the
 migration MUST confirm which single key is authoritative. This is flagged for
 Seventh Sense confirmation before the migration design; it is NOT assumed
@@ -238,28 +226,28 @@ resolved here.
 ## Consequences
 
 Positive: one queue hosts many groups without queue-cardinality explosion;
-per-group order is enforceable shard-locally under co-residency; whole-group and
-whole-cohort claims need no cross-shard coordination; `shard_id` stays a pure
-physical concern; there is exactly one per-group summary projection with a
-well-defined exact-on-read consistency model.
+per-group order is enforceable locally and unconditionally (the queue is its own
+shard); whole-group and whole-cohort claims need no cross-shard coordination by
+construction; queue placement stays a pure physical concern (ADR-008); there is
+exactly one per-group summary projection with a well-defined exact-on-read
+consistency model.
 
-Negative: per-group total order and whole-group/whole-cohort atomicity require
-`group_co_residency=true`, which makes shard placement a function of `group_key`,
-so a single very large group cannot be split across shards (accepted for v1; a
-group is the ordering/atomicity unit). On non-co-resident queues a `group_key`
-filter restricts but does not totally order across shards. Queues that need
-cross-group metadata-spanning claims must NOT use whole-group/whole-cohort modes.
+Negative: a single very large queue cannot be split across owners — it lives on
+one node, and therefore so does any single large group within it (accepted for
+v1; scale by partitioning the workload across multiple queues, ADR-008 / PRD
+FR-13). Queues that need cross-group metadata-spanning claims must NOT use
+whole-group/whole-cohort modes.
 
 ### Open topology decisions
 
-A recurring singleton's placement key is its `group_key`; with
-`group_co_residency=true` the singleton is fixed to one shard for its lifetime
-and re-arm never relocates it. If a single workload genuinely needs BOTH
-per-`job_id` recurrence ordering AND callback-cohort atomicity, those are two
-distinct queues (one non-cohort recurring queue keyed by `job_id`, one
-cohort-enabled queue keyed by `callback_id`); a single queue cannot carry both
-axes because `group_key` can encode only one of them and metadata cannot replace
-a lost placement/ordering/atomicity key. That case MUST be confirmed with
+A recurring singleton's `group_key` is its ordering key; the singleton lives on
+the queue's single owner for its lifetime and re-arm never relocates it. If a
+single workload genuinely needs BOTH per-`job_id` recurrence ordering AND
+callback-cohort atomicity, those are two distinct queues (one non-cohort
+recurring queue keyed by `job_id`, one cohort-enabled queue keyed by
+`callback_id`); a single queue cannot carry both axes because `group_key` can
+encode only one of them and metadata cannot replace a lost ordering/atomicity
+key. That case MUST be confirmed with
 Seventh Sense before migration and is recorded as an explicit confirmation item —
 it is NOT silently resolved by moving one axis to metadata.
 
