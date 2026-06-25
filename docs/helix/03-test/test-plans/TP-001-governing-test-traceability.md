@@ -10,9 +10,11 @@ ddx:
     - adr-auth-tenancy-and-storage-isolation
     - adr-rust-workspace-and-toolchain-policy
     - adr-granularity-mapping-and-claim-domain
+    - adr-queue-as-shard-unit-and-projection-families
     - td-storage-architecture-backend-contracts
     - td-postgres-native-reference-mode
     - td-sharding-and-shard-ownership
+    - td-resp-wire-adapter
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
   review:
@@ -45,8 +47,8 @@ including the full gap-closure surface: group-cardinality / whole-group claim
 (ADR-004, API-001 `group_batching`), dynamic eligibility gates (`SetGates`),
 active-scope discovery (`DiscoverActiveScopes`), recurring / never-terminal items
 (`rearm`, `PurgeItems`), atomic complete-cohort claim (`cohort_policy`,
-`whole_cohort`), granularity / group co-residency (ADR-004), multi-shard claim
-with cross-shard queue-global progress (TD-001, TD-003), and the
+`whole_cohort`), granularity (ADR-004), per-queue ownership with queue-local
+progress and client routing (TD-003, TD-006), and the
 `object_log_sqlite_projection` second backend (TD-004).
 
 This is a pre-implementation test plan. Exact Rust function names may change
@@ -54,7 +56,7 @@ when the workspace is created, but implementation beads must preserve the suite
 intent and cite the relevant requirement IDs.
 
 Scale, queue-density, and horizontal-envelope evidence (the per-queue throughput
-floor, ≥1000-active-queue density, multi-shard scale-out, and object-log
+floor, ≥1000-active-queue density, cross-queue scale-out, and object-log
 cost/ack/recovery) are owned by the **scale-substantiation test plan**
 (`tp-scale-substantiation`, TP-002, evidence records E0–E3). This governing plan
 references TP-002 for those records rather than restating them; the two plans are
@@ -92,34 +94,34 @@ complementary and non-overlapping.
 | FR-40, FR-41, FR-42 | PRD observability | Metrics expose lifecycle counts, active leases, retry backlog, oldest eligible age, progress-bound risk, throughput, and latency. |
 | FR-43 | PRD noisy-neighbor isolation | Hot queue or tenant load does not prevent another queue from meeting claim latency and progress bounds under configured limits. |
 | FR-44, FR-45, FR-46, FR-47 | PRD Seventh Sense validation | Timestamp scheduled work can be pushed early, updated later, gated through metadata, and claimed in compatible batches. |
-| FR-47a, ADR-004 granularity | ADR-004 / API-001 | The four client axes (tenant/queue/group/metadata) hold; `shard_id` is never client-visible; claim result order is deterministic within the effective claim domain; 7thsense `job_id`→`group_key` (non-cohort) and `callback_id`→`group_key` (cohort) topologies validate. |
-| ADR-004 group co-residency | ADR-004 / TD-001 / TD-002 | `group_co_residency=true` ⇒ all items of a `group_key` resolve to one shard (`hash(group_key) mod shard_count`); a non-co-resident `group_key` is an item-level filter only (may return a partial group) and never routes to a single shard. |
+| FR-47a, ADR-004 granularity | ADR-004 / API-001 / ADR-008 | The four client axes (tenant/queue/group/metadata) hold; physical placement (queue owner; the internal `hash(tenant,queue)%N` item-table partition) is never client-visible; claim result order is deterministic within the effective claim domain; 7thsense `job_id`→`group_key` (non-cohort) and `callback_id`→`group_key` (cohort) topologies validate. |
+| ADR-008 group co-residency by construction | ADR-008 / ADR-004 / TD-001 / TD-002 | The queue is the unit of sharding, so all items of a `group_key` are co-resident on the queue's single owner **by construction** (no `group_co_residency` flag, no `hash(group_key) mod shard_count`); `whole_group`/`whole_cohort` claims are owner-local and atomic; `same_group_key` remains an item-level filter (may return a partial group). |
 | FR-31a, FR-32 (g1 whole-group) | API-001 `group_batching` / TD-001 / TD-002 | `compatibility.group_batching` returns up to `max_groups` whole eligible groups, atomically per group, ordered by the group representative; `same_group_key` remains an item filter (not whole-group); `max_eligible_group_size` enforced at push; `batch-too-large` when the next group will not fit. |
 | FR (g6 cohort) | API-001 `cohort_policy`/`whole_cohort` / TD-001 / TD-002 / TD-004 | A `whole_cohort` claim leases one complete, claim-eligible cohort atomically under one shared cohort lease; members are never individually claimable; cohort key = `group_key`; `completion_bound_ms <= progress_bound_ms` enforced; idempotent under duplicate push; cohort never leaks members to other claim units. |
 | FR-15, FR-17a (g2 dynamic gates) | API-001 Eligibility Precedence / `SetGates` / TD-002 | `gate_keys`/`SetGates` flip queue-scoped gate state O(1) without rewriting item rows; gate predicate is evaluated at claim/discovery time (anti-join); a blocked gate makes matching items ineligible without accruing progress-bound age beyond policy; one Eligibility Precedence definition is the sole eligibility source. |
 | FR-23, FR-49–FR-55 (g5 recurring) | API-001 `recurrence`/`rearm`/`PurgeItems` / TD-002 / TD-004 | `rearm` releases the lease, sets `eligible_since = max(commit_time, not_before)`, resets per-cycle retry, bumps version without terminating; `recurrence.until` drains; in-band `PurgeItems` (P0, per-key/`item_id`) removes the item with tombstone + replay safety; recurring metrics served from the metrics projection (idle excluded from oldest-eligible age and retry backlog); recurrence and cohort are mutually exclusive. |
-| FR-48 (g4 discovery) | API-001 `DiscoverActiveScopes` / TD-002 / TD-003 | Tenant-scoped top-N across queues, or queue-global group ranking across shards, by oldest-eligible age via the single `pqueue_group_summary` projection; gate-current (advance past blocked, not exclude); `as_of` = min observed frontier across shards; per-queue authorization; advisory for routing (`BatchClaim` remains authoritative). |
-| FR (multi-shard) | TD-001 / TD-003 | A queue with `shard_count > 1` fans out non-group claims with a deterministic k-way merge within global `max_items`; single active lease across rebalance/drain; cross-shard queue-global `oldest_eligible_age_ms` = max effective age over shards; stale-epoch appends rejected. (Scale magnitude → TP-002 E2.) |
+| FR-48 (g4 discovery) | API-001 `DiscoverActiveScopes` / TD-002 / TD-003 | Tenant-scoped top-N across queues, or owner-local group ranking for one queue, by oldest-eligible age via the single `pqueue_group_summary` projection; gate-current (advance past blocked, not exclude); `as_of` = the owner's observed frontier (min over queues read for the tenant-wide case); per-queue authorization; advisory for routing (`BatchClaim` remains authoritative). |
+| FR (per-queue ownership + routing) | TD-003 / TD-006 / ADR-008 | A queue is owned by one node; claims are single-owner-local (no fan-out / k-way merge); single active lease across owner reassignment/drain; a deposed owner's append is epoch-fenced; a wrong-node command is `-MOVED`-redirected to the owner and converges in one hop. (Cross-queue scale magnitude → TP-002 E2.) |
 | API-002 operator repair | API-002 / TD-001 / TD-002 | `PauseQueue`/`ResumeQueue` stop/resume claims durably; `RepairItems` (reschedule/force_*/clear_lease) mutates leased/terminal items and fences the active lease; `force_release` preserves the progress clock (FR-11); every repair is a durable command and bumps `item_version`. |
 | API-002 redrive (DLQ) | API-002 / TD-002 | `RedriveItems` returns terminal `failed` items by selector to eligible with `retry_count_mode` semantics; redriven items get `eligible_since = commit time`; `max_affected`/`expected_match_count` guards enforced; large spans run async and converge. |
-| API-002 bulk purge | API-002 / TD-001 / TD-002 | `PurgeQueueItems` (selector, bulk) is distinct from native per-key `PurgeItems`; writes tombstones; `dry_run` is side-effect-free; multi-shard split + partial-commit re-drive converges; purge of a leased item fences the lease; idempotent (`not_found` on absent). |
+| API-002 bulk purge | API-002 / TD-001 / TD-002 | `PurgeQueueItems` (selector, bulk) is distinct from native per-key `PurgeItems`; writes tombstones; `dry_run` is side-effect-free; runs queue-local on the owner in bounded batches that re-drive and converge; purge of a leased item fences the lease; idempotent (`not_found` on absent). |
 | API-002 archive / retention | API-002 / TD-002 | `ArchiveItems` exports/marks-retained before purge (idempotent); `RunRetention` reclaims only within policy. |
-| API-002 async operations | API-002 | Selector mutation returns one `operation_id`; replayed `request_id` returns the same id (no second op); `GetOperation` progress is exact at terminal state; `partial`/`failed` is resumable and converges; `CancelOperation` never rolls back committed shards. |
-| API-002 operator authorization | API-002 / ADR-002 | `operator:inspect`/`operator:repair`/`operator:purge`/`admin:shard` are deny-by-default and distinct from data-plane grants; a data-plane principal cannot pause, repair, redrive, or purge; denied paths return `operator-forbidden`; audit record emitted without payloads. |
+| API-002 async operations | API-002 | Selector mutation returns one `operation_id`; replayed `request_id` returns the same id (no second op); `GetOperation` progress is exact at terminal state; `partial`/`failed` is resumable and converges; `CancelOperation` never rolls back committed batches. |
+| API-002 operator authorization | API-002 / ADR-002 | `operator:inspect`/`operator:repair`/`operator:purge`/`admin:queue` are deny-by-default and distinct from data-plane grants; a data-plane principal cannot pause, repair, redrive, or purge; denied paths return `operator-forbidden`; audit record emitted without payloads. |
 | Eligibility Precedence (single home) | API-001 | The Eligibility Precedence subsection is the only definition of "eligible"/"active"; g1/g4/g5/g6/g7 reference it by name; no second eligibility definition exists in any doc. |
-| `pqueue_group_summary` (single projection) | TD-001 / TD-002 / TD-004 | Exactly one shard-scoped per-group summary projection `(tenant_id, queue_id, shard_id, group_key)`; `oldest_eligible_at` exact-on-read through the gate predicate; counts MAY lag; the former `pqueue_active_scope_summary` does not exist. |
+| `pqueue_group_summary` (single projection) | TD-001 / TD-002 / TD-004 | Exactly one per-group summary projection keyed `(tenant_id, queue_id, group_key)` (owner-local; one row per group); `oldest_eligible_at` exact-on-read through the gate predicate; counts MAY lag; the former `pqueue_active_scope_summary` does not exist. |
 | API-001 idempotency | API-001 | Request replay, request conflict, claim replay while leases are active, and request-expired after leases end. |
 | API-001 auth | API-001 / ADR-002 | Principal authorized for tenant A cannot access tenant B routes or storage-backed data. |
 | API-001 claimed-item response shape | API-001 | Every `BatchClaim` result returns the documented field set (`item_id`, `client_item_key`, `item_version`, `lease_token`, `lease_expires_at`, `priority`); conditional fields (`not_before`, `group_key`, `payload`, `metadata`, `gate_keys`) are present/omitted per the rules; `gate_keys` appear only on `gate_keys=dynamic` queues; `whole_cohort` results omit the per-item `lease_token`. |
 | API-003 workload integration profile | API-003 / API-001 / API-002 | The scheduled-batch-delivery profile maps producer/worker/finalize obligations onto native primitives; finalize maps only to the five outcomes (`complete`/`fail`/`retry`/`release`/`rearm`); the downstream-rate non-goal is preserved (caller-driven pacing only); archive/retention defers to API-002. Anchored by `product_workflow_scheduled_action_delivery_e2e`. |
 | TD-001 durability | TD-001 | Kill process after acknowledged append; replay or committed Postgres rows preserve the command and projection state. |
-| TD-001 backend conformance | TD-001 | Every backend passes shared conformance before it is selectable by backend profile. |
+| TD-001 backend conformance (conformance-as-contract) | TD-001 / ADR-008 | Every backend passes the shared conformance suite before it is selectable: the **core** class (substrate-independent behavior incl. ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, per-queue progress) binds every backend; the **log** class (replay/snapshot+tail/segment-commit) binds log-bearing backends; the **relational reconnect-after-crash** class binds the transactional-authoritative relational projection. The two projection families are held behaviorally identical by this suite. |
 | TD-002 Postgres fencing | TD-002 | Stale `assignment_epoch` appends are rejected; current epoch appends succeed. |
 | TD-002 Postgres locking | TD-002 | `FOR UPDATE SKIP LOCKED` claim tests prove single active lease under concurrent workers. |
-| TD-003 shard ownership | TD-003 | Deterministic assignment (target vs active owner), durable epoch fence at acquire, stale-epoch append reject, graceful drain without loss/duplication, interrupted-drain single-writer safety, reassignment recovery from snapshot + log tail, cross-shard queue-global progress aggregation, and stalled/unowned-shard visibility. |
-| TD-004 object-log backend | TD-004 / ADR-001 | Group-commit ack boundary (no command acked before its manifest commit), manifest-CAS fencing against the current control-plane epoch (and the Postgres-pointer fallback on no-CAS stores), in-flight claim reservation, replay-response idempotency, SQLite snapshot + bounded log-tail recovery, and parity on the shared TD-001 backend conformance suite (incl. group co-residency, cohort, gates, multi-shard rows). Cost/ack/recovery magnitude → TP-002 E3. |
+| TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment (target vs active owner), durable epoch fence at acquire, stale-epoch append reject, graceful drain without loss/duplication, interrupted-drain single-writer safety, reassignment recovery from snapshot + log tail, per-queue local progress, and stalled/unowned-queue visibility. |
+| TD-004 object-log backend | TD-004 / ADR-001 | Group-commit ack boundary (no command acked before its manifest commit), manifest-CAS fencing against the current control-plane (queue) epoch (and the Postgres-pointer fallback on no-CAS stores), in-flight claim reservation, replay-response idempotency, SQLite snapshot + bounded log-tail recovery, and parity on the shared TD-001 backend conformance suite (incl. group co-residency by construction, cohort, gates, and the queue-scoped single-owner command path). Cost/ack/recovery magnitude → TP-002 E3. |
 | TD-005 standalone sqlite backend | TD-005 / ADR-006 | Single-file durable backend: atomic single-transaction append+apply (strict read-after-write, one WAL fsync ack boundary), epoch bootstrap (log/control-plane lockstep) and bump-on-open fencing, single-writer ownership (second opener rejected), reopen recovery preserves committed state (no log-tail replay needed), parity with the in-memory reference on the item-lifecycle conformance dimensions (`shared_conformance`), and the embedder delivery-adapter conformance (`embedder_delivery_conformance`) mapping to 7snx `assert_delivery_queue_adapter_conformance`. NOTE: `client_item_key` convergence is the embedder adapter's responsibility (pqueue converges by `item_id`); see bead pqueue-9ff01321. |
-| Queue density / bounded per-node resources | ADR-002 / ADR-003 / TD-001 / TD-002 / TD-003 / TD-004 | Per-queue and per-`(queue,shard)` background work (lease-expiry sweeps, cross-shard progress aggregation, summary recompute, recurring rearm, idempotency/retention GC) is multiplexed onto bounded shared per-node pools — never one task/loop/connection per queue or shard; per-shard projection handles are LRU-bounded. Density magnitude (≥1000 active queues/node) → TP-002 E2 `queue_density_single_node_tests`. |
+| Queue density / bounded per-node resources | ADR-002 / ADR-003 / TD-001 / TD-002 / TD-003 / TD-004 | Per-queue background work (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring rearm, idempotency/retention GC) is multiplexed onto bounded shared per-node pools — never one task/loop/connection per queue; per-queue projection handles are LRU-bounded. Density magnitude (≥1000 active queues/node) → TP-002 E2 `queue_density_single_node_tests`. |
 | ADR-003 Rust policy | ADR-003 | `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, dependency checks, unsafe denial, and the bounded-per-node-background-work rule run/verified in CI. |
 
 ## Named Test Suites
@@ -139,16 +141,17 @@ Implementation beads should create or extend these suites:
 - `storage_conformance_cohort_tests`
 - `storage_conformance_gate_tests`
 - `storage_conformance_discovery_tests`
-- `storage_conformance_multi_shard_tests`
+- `storage_conformance_ownership_routing_tests`
 - `fault_injection_harness_tests`
 - `postgres_schema_migration_tests`
 - `postgres_transaction_flow_tests`
 - `postgres_concurrency_claim_tests`
 - `postgres_group_coresidency_tests`
 - `postgres_retention_tests`
-- `sharding_assignment_fencing_tests`
-- `sharding_rebalance_drain_tests`
-- `cross_shard_progress_tests`
+- `queue_ownership_fencing_tests`
+- `queue_reassignment_drain_tests`
+- `per_queue_progress_tests`
+- `routing_redirect_tests`
 - `object_log_commit_recovery_tests`
 - `sqlite_projection_tests`
 - `sqlite_backend_tests`
@@ -188,7 +191,7 @@ Implementation beads should create or extend these suites:
   operator suites)
 
 Scale, density, and object-log performance suites (`performance_single_deployment_baseline_tests`,
-`performance_multi_shard_scale_out_tests`, `queue_density_single_node_tests`,
+`performance_cross_queue_scale_out_tests`, `queue_density_single_node_tests`,
 `object_log_commit_recovery_tests` cost/ack rows, `recurrence_scale_both_profiles_tests`)
 are owned by TP-002 (`tp-scale-substantiation`); see that plan for their pass bars.
 
