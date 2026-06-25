@@ -13,8 +13,9 @@ ddx:
 
 **ADR ID**: ADR-007
 **Title**: Hexagonal architecture and two interfaces (RESP + Rust library)
-**Status**: draft
-**Related**: ADR-001 (CQRS log/projection), ADR-006 (embedded surface), API-001, API-002,
+**Status**: draft (the "one shared projection" consequence superseded by ADR-008)
+**Related**: ADR-001 (CQRS log/projection), ADR-006 (embedded surface), ADR-008 (queue-as-shard-unit &
+two projection families — supersedes the one-shared-projection consequence below), API-001, API-002,
 TD-006 (RESP surface), TD-007 (durability), `docs/helix/04-build/hexagonal-migration-plan.md`
 
 ## Context
@@ -67,8 +68,11 @@ deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the mig
   domain, not in a transport crate.
 - Off-the-shelf Redis clients (and `redis-cli`) drive the worker hot path; no SDK to maintain for the
   common case.
-- Storage backends are uniform driven adapters; the "fused vs split" special case disappears (a
-  backend is just a durability class).
+- Storage backends are driven adapters classified by durability class. (**Superseded in part by
+  ADR-008:** the "fused vs split disappears / one shared projection" framing is retracted — there are
+  **two projection families**, an in-memory log-replay projection and a relational / DB-resident
+  projection, held identical by the conformance suite, not a single shared projection. A backend is a
+  durability class *and* a projection family.)
 - Modularity is mechanically enforced (dependency-direction test, behavioral no-stub conformance).
 
 **Negative / accepted costs:**
