@@ -29,9 +29,10 @@ Substantiation").
 
 The top success measures are throughput, latency, and correctness. Every queue
 sustains at least 10M items/hr with sub-second p95/p99 for core batch
-operations; a horizontally distributed queue spreads write and claim load across
-independent shards to exceed any single deployment's ceiling and to preserve that
-per-queue floor for every queue as the number of queues and total load grow. A
+operations; a horizontally distributed deployment spreads write and claim load by
+placing queues across independent nodes to exceed any single deployment's ceiling
+and to preserve that per-queue floor for every queue as the number of queues and
+total load grow. A
 single deployment supports at least 1000 concurrently active queues (single node
 as the target host) with no cross-queue degradation, while still claiming every
 eligible item before its queue-global progress bound.
@@ -63,7 +64,7 @@ queue with timestamp ordering as a first-class validation case.
    when scale requires it, without starving eligible items.
 3. Producers and schedulers can write and update items idempotently at the
    single-deployment write rate in Success Metrics, and beyond it by distributing
-   the queue horizontally across independent shards.
+   work across multiple queues.
 4. Downstream API workers can claim, update, and finalize compatible batches
    efficiently.
 5. Seventh Sense can replace or consolidate its scheduled delivery/action queues
@@ -75,9 +76,9 @@ queue with timestamp ordering as a first-class validation case.
 | Metric | Target | Measurement Method |
 |--------|--------|--------------------|
 | Per-queue throughput floor | Every queue sustains at least 10M accepted items/hr (ingest and claim/finalize) under representative batch + idempotent-duplicate load | Single-deployment benchmark per the Tier-1 evidence record (TP-002 E1) against the per-queue throughput floor (TP-002 E0) |
-| Throughput preserved at any scale | The ≥10M items/hr per-queue floor holds for any queue regardless of queue count or total deployment load; a single queue scales beyond a single deployment's ceiling via shards | Multi-shard scale-out + multi-queue concurrency benchmark per the Tier-2 evidence record (TP-002 E2) |
+| Throughput preserved at any scale | The ≥10M items/hr per-queue floor holds for any queue regardless of queue count or total deployment load; horizontal scale beyond a single deployment is achieved by distributing queues across nodes | Multi-queue scale-out + concurrency benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Queue density | At least 1000 concurrently active queues are supported, with a single node as the target host: every active queue meets its progress bound, there is no cross-queue degradation as the active-queue count grows to 1000, and any single queue can still reach the per-queue throughput floor when it is the hot queue. Aggregate single-node throughput is bounded by the node (not 1000× the floor); multi-node provides aggregate headroom | Multi-queue density benchmark per the Tier-2 evidence record (TP-002 E2) |
-| Hot queue scale | At least 10M items resident in a single active queue (including terminal retained rows per retention policy) remain claimable and observable with sub-second p95/p99, both single-deployment and when the queue is distributed across shards | Benchmark per TP-002 E1 (single deployment) and E2 (multi-shard) |
+| Hot queue scale | At least 10M items resident in a single active queue (including terminal retained rows per retention policy) remain claimable and observable with sub-second p95/p99 on its single owning deployment | Benchmark per TP-002 E1 (single deployment) |
 | Core operation latency | Sub-second p95 and p99 for batch push, batch update, batch claim, and batch finalize | Benchmark harness under representative Seventh Sense and synthetic workloads |
 | Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
 | Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
@@ -93,13 +94,13 @@ mechanism, or query: those belong in the governing design and test documents.
   storage deployment, validated against the per-queue throughput floor (TP-002
   evidence record E0: at least 10M items/hr per queue) by the Tier-1 benchmark
   (E1).
-- **Horizontal envelope** - a queue distributed across independent shards exceeds
-  any single deployment's write/claim ceiling, and the ≥10M items/hr per-queue
-  floor is preserved for every queue as the number of queues and total load grow
-  (no cross-queue degradation), while still claiming every eligible item before
-  its queue-global progress bound, validated by the multi-shard scale-out +
-  multi-queue benchmark (E2). The shard-ownership and second-backend mechanisms
-  that deliver this live in the design artifacts the technical context references.
+- **Horizontal envelope** - the queue population distributed across nodes exceeds
+  any single deployment's aggregate write/claim ceiling, and the ≥10M items/hr
+  per-queue floor is preserved for every queue as the number of queues and total
+  load grow (no cross-queue degradation), while still claiming every eligible item
+  before its per-queue progress bound, validated by the multi-queue scale-out
+  benchmark (E2). The queue-ownership and second-backend mechanisms that deliver
+  this live in the design artifacts the technical context references.
 
 Both envelopes are v1 commitments. A scale claim that cannot reference its
 evidence record is not publishable.
@@ -179,32 +180,35 @@ priority, retry, claim, and state logic with different table shapes.
     eligible age, and progress-bound risk.
 11. Performance at 10M-item hot queue scale with sub-second p95/p99 for core
     batch operations under representative load: every queue sustains at least
-    10M items/hr (the per-queue floor), in a single deployment and horizontally
-    across independent shards, with that floor preserved for every queue at any
-    deployment scale while still preserving the queue-global progress bound.
+    10M items/hr (the per-queue floor) on its single owning deployment, with that
+    floor preserved for every queue at any deployment scale (horizontal scale is
+    achieved by distributing queues across nodes) while still preserving the
+    per-queue progress bound.
     Substantiated by the recorded scale evidence (see "Scale Substantiation").
 12. Active-scope discovery (native service mode): a tenant-scoped read operation
     (`DiscoverActiveScopes`, API-001) returns the queues, and group keys within a
     queue, that currently have eligible work, ranked by oldest-eligible age -
     tenant-scoped top-N across queues when no queue is named, and queue-global
-    across all shards when one queue is named - so a worker fleet can route
+    when one queue is named - so a worker fleet can route
     claims for per-group fairness. Per-group fairness is a routing concern served
     by this operation, not an engine progress invariant; the engine guarantees
     only the single queue-global progress bound (FR-9/FR-12). Discovery is
     advisory for reservation - `BatchClaim` remains the authoritative selection
     path. Compatibility adapters MAY omit it and MUST document the omission.
-13. A queue can be distributed across multiple independent shards so write and
-    claim load scale beyond a single storage deployment, while preserving
-    single-active-lease, deterministic claim ordering, and one queue-global
-    progress bound across all shards.
+13. The queue is the unit of sharding: each queue is owned by a single node.
+    Write and claim load scale beyond one storage deployment by distributing
+    queues across nodes; a producer needing more than one owner's throughput for
+    a logical stream partitions it across multiple queues at the application
+    layer. Single-active-lease, deterministic claim ordering, and the per-queue
+    progress bound are preserved per queue.
 14. Queue density: a single deployment supports at least 1000 concurrently active
     queues, with a single node as the target host, with no cross-queue
     degradation - every active queue meets its progress bound and any queue can
     still reach the per-queue throughput floor when it is the hot queue. This
-    requires per-queue and per-`(queue,shard)` background work (lease-expiry
-    sweeps, cross-shard progress aggregation, summary recompute, recurring rearm,
-    idempotency/retention GC) to be multiplexed onto bounded shared per-node
-    resources, never one task, loop, or connection per queue or per shard.
+    requires per-queue background work (lease-expiry sweeps, progress monitoring,
+    summary recompute, recurring rearm, idempotency/retention GC) to be
+    multiplexed onto bounded shared per-node resources, never one task, loop, or
+    connection per queue.
     Aggregate single-node throughput is bounded by the node (not 1000x the
     per-queue floor); multi-node deployment provides aggregate headroom.
 
@@ -399,8 +403,7 @@ priority, retry, claim, and state logic with different table shapes.
   read that enumerates the queues, and group keys within a queue, that currently
   have eligible work for the principal, ranked by oldest-eligible age. With no
   `queue_id` it ranks authorized queues (tenant-scoped top-N across queues); with
-  one `queue_id` it ranks that queue's group keys aggregated across all the
-  queue's shards. Discovery MUST use the same eligibility predicate as
+  one `queue_id` it ranks that queue's group keys. Discovery MUST use the same eligibility predicate as
   `BatchClaim` (the API-001 Eligibility Precedence subsection) and MUST be
   gate-current at read time. Discovery is the mechanism by which a worker fleet
   achieves per-group fairness; per-group fairness is NOT an engine progress
@@ -475,8 +478,7 @@ priority, retry, claim, and state logic with different table shapes.
 | API-001 | Tenant spoofing rejection | HTTP principal authorized for tenant A calls route for tenant B | Request fails as forbidden or not found |
 | API-001 | SQS adapter limitation | Client attempts to update priority through SQS-shaped adapter | Adapter rejects or documents unsupported operation; native `BatchUpdate` is required |
 | FR-48 | Active-scope ranking across queues | Three queues authorized to caller: A empty, B oldest-eligible 9s, C oldest-eligible 30s | Discovery (no `queue_id`) returns C then B (oldest first); A omitted |
-| FR-48 | Queue-global group ranking across shards | One queue, 4 shards, `group_co_residency=true`; group `g_old` (oldest-eligible 40s) on shard 3, group `g_new` (5s) on shard 1 | Group discovery returns `g_old` before `g_new`; ranking is the true queue-global order, not a per-shard top-N union |
-| FR-48 | Group spanning shards (`group_co_residency=false`) | One queue, `group_co_residency=false`; group `g` has its oldest-eligible item (35s) on shard 2 and a newer item (4s) on shard 0 | Group `g` is reported once with `oldest_eligible_age_ms` = 35s (cross-shard min timestamp), not two rows and not 4s |
+| FR-48 | Queue-global group ranking | One queue; group `g_old` (oldest-eligible 40s) and group `g_new` (oldest-eligible 5s) | Group discovery returns `g_old` before `g_new` in true queue-global oldest-first order |
 | FR-48 | Auth filtering | Tenant has queues B (authorized) and D (not authorized), both with eligible work | Discovery returns B only; D never appears and presence is not leaked |
 | FR-48 | Gate-current advance (not just exclude) | Group `g` has oldest item `i1` whose gate key is `blocked` and a next item `i2` (eligible, age 12s) | Discovery reports `g` with `oldest_eligible_age_ms` = 12s (`i1` skipped, `g` NOT omitted); blocking all of `g`'s items omits `g` |
 | FR-48 | Eligibility parity under cohort | Incomplete cohort exists | Discovery does not report the cohort group as eligible until complete |
@@ -551,9 +553,8 @@ Reference systems and interfaces to study:
 - Seventh Sense production workload data for realistic load profiles, group
   distributions, priority skew, and downstream API batch constraints.
 - The committed v1 technical designs for storage backends (including the second,
-  higher-scale backend), shard ownership/assignment/fencing/rebalance, and
-  cross-shard progress aggregation. These substantiate the horizontal envelope in
-  Success Metrics.
+  higher-scale backend) and queue ownership/assignment/fencing/rebalance across
+  nodes. These substantiate the horizontal envelope in Success Metrics.
 - API-001 for native pqueue operations. SQS-shaped compatibility remains a
   later adapter, not the native contract.
 - A later operator/retention contract for P1 redrive, purge, archive, and
@@ -591,10 +592,10 @@ Reference systems and interfaces to study:
   priority or schedule updates.
 - v1 scale is committed in two envelopes - single-deployment (validated against
   the per-queue throughput floor of at least 10M items/hr per queue) and
-  horizontal multi-shard (which preserves that floor for every queue at any
-  scale) - each referencing a recorded evidence artifact (see "Scale
+  horizontal cross-queue scale-out (which preserves that floor for every queue at
+  any scale) - each referencing a recorded evidence artifact (see "Scale
   Substantiation"). The PRD states product envelopes only; storage backend and
-  shard mechanism live in the governing design/test artifacts.
+  placement mechanism live in the governing design/test artifacts.
 - Downstream API rate/quota enforcement is a non-goal of the pqueue engine, not a
   deferred feature. Callers pace claim output using `max_items`, claim cadence,
   `not_before`, and group selection (`compatibility.group_key` / `same_group_key`
