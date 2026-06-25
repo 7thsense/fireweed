@@ -53,41 +53,44 @@ the next dependency-ready bead → `cargo fmt` + `clippy -D warnings` + the bead
 review → commit → `ddx bead close`.
 
 ### P0 — Per-queue re-key
-- **BQ-01 engine types/ports re-key.** Remove `ShardId` + `ShardId::ZERO`; make `QueueKey =
-  (tenant_id, queue_id)` the unit. `CommandPosition { queue: QueueKey, backend_epoch, sequence }`; drop
-  `CommandEnvelope.shard_id`; re-key `ClaimRequest`, `LogRead`/`ProjectionRead`/`SnapshotRef`,
-  `ControlPlaneStore::current_epoch(&QueueKey)`. *Acc:* `cargo build` workspace; `cargo test -p
-  pqueue-engine -p pqueue-core`; `! grep -rE 'ShardId|ShardKey' crates/*/src` (no symbol remains).
-- **BQ-02 driven-adapter + projection re-key.** `pqueue-projection` + memory/sqlite/postgres/objectlog:
-  maps keyed `QueueKey`; durable schemas drop the shard column; `(tenant,queue,seq)` PKs. *Acc:* `cargo
-  test -p pqueue-projection -p pqueue-memory -p pqueue-sqlite -p pqueue-objectlog`; the env-gated
-  `pqueue-postgres` build compiles.
-- **BQ-03 driving-adapter + harness re-key.** `pqueue-resp`, `pqueue` lib, `pqueue-server`,
-  `pqueue-conformance`. *Acc:* full `cargo test` workspace green + `cargo clippy --all-targets -D
-  warnings`.
+- **BQ-01 per-queue re-key (whole workspace) + remove `shard_count`.** **One ATOMIC bead** — re-keying the
+  engine trait signatures breaks every adapter until all are updated, so it must compile as a unit
+  (convergence-review B1; the original BQ-02/BQ-03 are folded in and closed). (1) Remove `ShardId` +
+  `ShardId::ZERO`; `QueueKey = (tenant_id, queue_id)` is the unit; `CommandPosition { queue, backend_epoch,
+  sequence }`; drop `CommandEnvelope.shard_id`; re-key every port + `pqueue-projection` + all four driven
+  adapters (schemas drop the shard column, `(tenant,queue,seq)` PK) + `pqueue-resp` + `pqueue` lib +
+  `pqueue-server` + `pqueue-conformance`. (2) Remove `shard_count` + `deployment_max_shard_count` from
+  `QueueDefinition`/`CreateQueue`/validation/the config-identity hash (ADR-008 §1; `pqueue-core/src/domain.rs`
+  — convergence-review B2). *Acc:* `cargo build --workspace`; full `cargo test` green; `clippy --all-targets
+  -D warnings`; no `ShardId`/`ShardKey`/`shard_count` symbol remains.
 
 ### P1 — Relational projection family ⭐
-- **BQ-10 relational seam + conformance class.** Decide how a backend declares a DB-authoritative
-  projection (the ports already permit it; add the `relational-reconnect` durability/conformance class
-  to `pqueue-conformance` — core suite that every family passes + a reconnect-after-crash suite that
-  substitutes for log-replay). *Acc:* `relational_reconnect_suite!` skeleton compiles + runs; design note
-  committed.
-- **BQ-11 sqlite relational projection.** `pqueue_items` (TD-002 columns), serialized SQL claim (the
-  TD-002 claim CTE; SQLite serializes writers), `pqueue_group_summary`, idempotency/tombstone tables,
-  lifecycle apply as SQL UPDATEs; log-optional single-writer; reopen→committed-state recovery. *Acc:*
-  sqlite relational mode passes the core conformance suite at parity with the in-memory reference +
-  relational-reconnect.
-- **BQ-12 postgres relational projection.** Same schema in Postgres; real `FOR UPDATE SKIP LOCKED` claim
-  CTE; connection pool + `spawn_blocking` (fix the sync-client-in-tokio limitation). *Acc:* `cargo test
-  -p pqueue-postgres` (env-gated `PQUEUE_PG_TEST_URL`) passes core + relational-reconnect; non-gated
-  subset runs without a DB.
-- **BQ-13 two-family parity.** Hold the in-memory log-replay family and the relational family
-  behaviorally identical on the core class; relational backends additionally pass relational-reconnect,
-  log-bearing backends pass log-replay. *Acc:* the full conformance matrix passes per backend's class.
-- **BQ-14 group/cohort/gate/discovery on the relational projection.** `pqueue_group_summary` keyed
-  `(tenant,queue,group_key)`; whole_group / whole_cohort owner-local; `SetGates` exact-on-read anti-join;
-  `DiscoverActiveScopes` owner-local ranking. *Acc:* group-batching, cohort, gate, and discovery
-  conformance/service tests pass on the relational backend.
+- **BQ-10 relational family in the conformance harness.** Relax/split the `ConformanceBackend` umbrella
+  bound so a **log-optional** relational backend (projection IS the authority, no separate
+  `LogRead`/`SnapshotStore`) qualifies; split the flat `conformance_suite!` into **core** (every family)
+  + **log-replay-addon** (`pause_and_fence_reconstruct_from_log`, `high_water_*`, `snapshots_*`) +
+  **relational-reconnect-addon** (new) (convergence-review I1). *Acc:* the three suite macros compile + run;
+  existing backends still pass their classes.
+- **BQ-11a sqlite relational schema + lifecycle apply-as-SQL.** `pqueue_items` (TD-002 columns) as a 2nd
+  DB-authoritative projection; the 14-command apply-UoW as SQL INSERT/UPDATE. *Acc:* lifecycle commands
+  round-trip item state (unit + core-non-claim subset).
+- **BQ-11b sqlite relational claim CTE + eligibility.** Serialized SQL claim (TD-002 CTE) + Eligibility
+  Precedence in SQL. *Acc:* core claim/lease/eligibility conformance at parity with the in-memory reference.
+- **BQ-11c sqlite relational group_summary + idempotency/tombstone.** `pqueue_group_summary`
+  `(tenant,queue,group_key)`; idempotency + `client_item_key` tombstone, maintained in-transaction. *Acc:*
+  idempotency replay, dup-push convergence, purge tombstone, group_summary scenarios pass.
+- **BQ-11d sqlite relational reconnect recovery.** Reopen→committed-state, no log replay (the
+  relational-reconnect class). *Acc:* relational-reconnect suite passes on sqlite.
+- **BQ-12 postgres relational projection (live-DB-gated).** Same schema in Postgres; real `FOR UPDATE SKIP
+  LOCKED` CTE; pool + `spawn_blocking` **fixing the recorded high-water TOCTOU** (convergence-review I4).
+  *Acc:* env-gated `cargo test -p pqueue-postgres` passes core + relational-reconnect **incl. a
+  contended-writer test**; non-gated SQL-assembly subset runs without a DB; deferred live-DB evidence noted.
+- **BQ-13 two-family parity.** Both families identical on core; relational also passes relational-reconnect.
+  Without a live DB, parity evidence is **sqlite-relational vs in-memory only**; postgres half
+  deferred-with-reason (convergence-review I3). *Acc:* the conformance matrix passes per backend's class.
+- **BQ-14 group/cohort/gate/discovery on the relational projection.** whole_group/whole_cohort owner-local;
+  `SetGates` exact-on-read anti-join; `DiscoverActiveScopes` owner-local ranking. *Acc:* group-batching,
+  cohort, gate, discovery tests pass on the relational backend.
 
 ### P2 — Per-queue ownership + fencing (TD-003)
 - **BQ-20 epoch fence.** `assignment_epoch` on durable schemas; the Single Authoritative Fencing Rule:
@@ -141,8 +144,15 @@ review → commit → `ddx bead close`.
   spec (small, reviewed) or escalate — don't silently diverge.
 
 ## 4. Progress
-- [ ] BQ-01 · [ ] BQ-02 · [ ] BQ-03   (P0)
-- [ ] BQ-10 · [ ] BQ-11 · [ ] BQ-12 · [ ] BQ-13 · [ ] BQ-14   (P1)
+- [ ] BQ-01 (P0, atomic; folds in the old BQ-02/03)
+- [ ] BQ-10 · [ ] BQ-11a · [ ] BQ-11b · [ ] BQ-11c · [ ] BQ-11d · [ ] BQ-12 · [ ] BQ-13 · [ ] BQ-14   (P1)
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
 - [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
 - [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
+
+> Per-bead dependency edges live in ddx (`ddx bead ready` computes the next implementable bead). Phase
+> deps in §1 are the coarse view. Convergence review (2026-06-25): GO-WITH-CONDITIONS, all four must-fix
+> applied (B1 atomic P0, B2 shard_count, I1 conformance refactor, I2 BQ-11 split, I3/I4 postgres gating).
+> P4 bench suites (`performance_cross_queue_scale_out_tests`, `queue_density_single_node_tests`) are
+> **net-new** authoring (the old multi-shard suites lived in the deleted service/storage crates), likely
+> in the untracked `crates/pqueue-bench` — adopt or replace it at P4.
