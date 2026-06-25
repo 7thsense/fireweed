@@ -8,6 +8,7 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - adr-auth-tenancy-and-storage-isolation
     - adr-granularity-mapping-and-claim-domain
+    - adr-queue-as-shard-unit-and-projection-families
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
@@ -57,12 +58,11 @@ outcomes, the async operation model, and the error rules.
   items; bulk operator purge by selector; archive; retention runs; operator
   inspection (get/list items, get/list operations); the asynchronous operation
   model for selector-scoped mutations.
-- In scope: the durability, shard-fencing, idempotency, lease-fencing, and
+- In scope: the durability, queue-epoch-fencing, idempotency, lease-fencing, and
   invariant-preservation rules these operations MUST obey.
-- Out of scope: shard placement, rebalance, backend-profile change, and
-  resharding/backend migration. Those are governed by the `admin:shard`
-  permission (ADR-002) and the later sharding-migration design (TD-003 defers
-  online resharding). API-002 references but does not define them.
+- Out of scope: queue placement / ownership handoff, backend-profile change, and
+  backend migration. Those are governed by the `admin:queue` permission (ADR-002)
+  and the later migration design. API-002 references but does not define them.
 - Out of scope: the native per-key/`item_id` `PurgeItems` recurring-teardown
   operation, which is **P0 and defined in API-001/TD-001** (`item:update` scope).
   API-002 `PurgeQueueItems` is the **bulk, selector-scoped** operator purge and
@@ -78,8 +78,8 @@ state transition") and preserves the engine's correctness invariants:
 |-----------|--------------------------|
 | Single active lease (FR-25) | Any operator action on a leased item (`force_*`, `clear_lease`, purge, redrive) MUST fence the active lease: the lease token becomes stale and the worker's next renew/finalize MUST return `stale_lease`. No operator action creates a second active lease. |
 | Queue-global progress bound (FR-9/FR-12) | An item returned to `pending` by repair/redrive becomes newly eligible; `eligible_since` is set to `max(commit_time, not_before)` — the single API-001 timing rule — so an item rescheduled into the future accrues no eligible age until its `not_before`. The one exception is `force_release` of an unexpired lease, which preserves the prior progress clock per FR-11. |
-| Group co-residency and cohorts (ADR-004 / G6) | Selector-scoped operations resolve per shard; a `group_key`-bearing selector on a `group_co_residency=true` queue targets exactly one shard. Operator mutations against cohort members obey the **Cohort and group targeting** rule below: they expand to the whole cohort or are rejected; an operator action MUST NOT split a live cohort across claim units. |
-| Durable ack (ADR-001 / TD-001) | An operator mutation is acknowledged only after its command(s) reach the backend durable boundary. Selector spans across shards are split into per-shard commands, each shard-epoch fenced; partial commit re-drives only uncommitted shards and converges (TD-001 multi-shard mutation rule). |
+| Group co-residency and cohorts (ADR-004 / G6) | A queue is owned by one node (ADR-008), so a selector-scoped operation resolves on the queue's single owner and every `group_key`'s members — including a cohort's — are co-resident there by construction. Operator mutations against cohort members obey the **Cohort and group targeting** rule below: they expand to the whole cohort or are rejected; an operator action MUST NOT split a live cohort across claim units. |
+| Durable ack (ADR-001 / TD-001) | An operator mutation is acknowledged only after its command(s) reach the backend durable boundary. A selector-scoped mutation runs on the queue's single owner under one queue epoch; a large match set is processed in bounded batches, each durably committed and queue-epoch fenced, and partial commit re-drives only the uncommitted batches and converges. There is no cross-owner split. |
 | Idempotency | `request_id` deduplicates synchronous calls within `request_id_retention_ms`; for asynchronous operations the returned `operation_id` is the idempotency anchor (replay of the same `request_id` returns the same `operation_id`). |
 | Tenant isolation (ADR-002) | Every operation is authorized against `tenant_id`/`queue_id` before reading or mutating any control-plane, log, projection, or snapshot state. |
 
@@ -91,8 +91,8 @@ act on a strict subset of a cohort:
 
 - If `cohort_whole=true` (request field), an operation whose `item_refs`/`selector`
   matches any member of a live cohort MUST expand to operate on **all** members of
-  that cohort atomically (one shard-local transaction, since cohort members are
-  co-resident).
+  that cohort atomically (one owner-local transaction, since cohort members are
+  co-resident on the queue's single owner by construction).
 - If `cohort_whole` is absent/false, an operation that would touch a strict subset
   of a live cohort's members MUST reject those members per item with
   `conflict` (reason `cohort-partial-target`) and MUST NOT mutate them.
@@ -132,7 +132,7 @@ contract extends the ADR-002 permission table:
 | `operator:inspect` | `GetItem`, `ListItems`, `GetQueueAdminState`, `GetOperation`, `ListOperations` (read-only) |
 | `operator:repair` | `PauseQueue`, `ResumeQueue`, `RepairItems`, `RedriveItems`, `ArchiveItems`, `RunRetention`, `CancelOperation` |
 | `operator:purge` | `PurgeQueueItems` (the most destructive operation; deployments MAY require a distinct grant) |
-| `admin:shard` | shard placement / resharding / backend migration (out of scope; see migration design) |
+| `admin:queue` | queue placement / ownership handoff / backend migration (out of scope; see migration design) |
 
 A principal MUST be authorized for the tenant, queue, and the specific operator
 permission before the operation reads or mutates any state. `worker_id` is never
@@ -160,7 +160,7 @@ without logging payloads by default.
 |-------|------|-------|
 | `lifecycle_states[]` | enum array | Subset of `pending`, `leased`, `complete`, `failed`. If absent, defaults are per-operation (e.g. redrive defaults to `failed`). |
 | `metadata_equals` | object | Conjunctive key/value equality, same predicate shape as API-001 claim compatibility. |
-| `group_key` | string | Restricts to one group; on a `group_co_residency=true` queue this restricts to one shard. |
+| `group_key` | string | Restricts to one group (owner-local by construction). |
 | `failure_code` | string | Matches terminal `failed` items with this `failure_code`. |
 | `older_than_ms` | integer | Matches items whose `terminal_at` (terminal) or `created_at` (non-terminal) is older than now − value. |
 | `not_before_before` | timestamp | Matches items whose `not_before` is at or before this instant. |
@@ -194,18 +194,19 @@ JSON request/response bodies. Operator routes are namespaced under `:operator`.
 ## Asynchronous Operation Model
 
 Selector-scoped mutations (`RepairItems`, `RedriveItems`, `PurgeQueueItems`,
-`ArchiveItems`) MAY affect items across many shards and large item counts. They
-MUST therefore support an asynchronous model:
+`ArchiveItems`) MAY match large item counts on a queue. Because the queue is owned
+by one node (ADR-008), they run on that single owner, processing the matched set
+in bounded batches; they MUST support an asynchronous model:
 
 | Element | Type / Shape | Required | Rules |
 |---------|--------------|----------|-------|
-| async accept | response | yes | A selector-scoped mutation returns `operation_id` and `state=accepted` once the operation is durably recorded; it then progresses asynchronously per shard. Small `item_refs`-scoped calls MAY complete synchronously and return per-item results inline. |
-| `operation.state` | enum | yes | One of `accepted`, `running`, `succeeded`, `partial`, `failed`, `canceled`. `partial` means some shards/items committed and others failed and remain re-drivable. |
-| `operation.progress` | object | yes | MUST include `shards_total`, `shards_complete`, `matched`, `affected`, `failed`, and `updated_at`. Counts MAY be approximate while running but MUST be exact at a terminal `state`. |
-| `operation.errors[]` | array | yes | Per-shard or per-item error detail for `partial`/`failed`. |
+| async accept | response | yes | A selector-scoped mutation returns `operation_id` and `state=accepted` once the operation is durably recorded; it then progresses asynchronously in bounded batches on the queue's owner. Small `item_refs`-scoped calls MAY complete synchronously and return per-item results inline. |
+| `operation.state` | enum | yes | One of `accepted`, `running`, `succeeded`, `partial`, `failed`, `canceled`. `partial` means some batches committed and others failed and remain re-drivable. |
+| `operation.progress` | object | yes | MUST include `matched`, `affected`, `failed`, and `updated_at` (and MAY include `batches_total`/`batches_complete`). Counts MAY be approximate while running but MUST be exact at a terminal `state`. |
+| `operation.errors[]` | array | yes | Per-batch or per-item error detail for `partial`/`failed`. |
 | idempotency | rule | yes | Replaying the create `request_id` MUST return the same `operation_id` and MUST NOT start a second operation. A different request body under the same `request_id` MUST fail with `request-id-conflict`. |
-| retry/convergence | rule | yes | A `partial`/`failed` operation MUST be resumable: re-invoking it (same `operation_id` or same `request_id`) re-drives only uncommitted shards and converges to the same end state (TD-001 multi-shard mutation rule). |
-| `CancelOperation` | operation | yes | Best-effort: stops scheduling further per-shard work; already-committed shard mutations are durable and are not rolled back. Returns the operation in `canceled` with its progress. |
+| retry/convergence | rule | yes | A `partial`/`failed` operation MUST be resumable: re-invoking it (same `operation_id` or same `request_id`) re-drives only the uncommitted batches and converges to the same end state. |
+| `CancelOperation` | operation | yes | Best-effort: stops scheduling further batches; already-committed item mutations are durable and are not rolled back. Returns the operation in `canceled` with its progress. |
 
 ## Operations
 
@@ -253,7 +254,7 @@ MUST therefore support an asynchronous model:
 | lease fence | rule | yes | Purging a `leased` item MUST fence the lease (worker sees `stale_lease`). | |
 | retention | rule | yes | A purge MUST NOT delete command-log rows still required for replay/audit windows; only item/projection rows and (after retention) idempotency/tombstone state are removed (TD-002 retention rules). | |
 | safety guards | rule | yes | MUST honor the **Selector-scoped safety guards** (`dry_run`, `expected_match_count`, `max_affected`); `dry_run` SHOULD be the recommended first step. | |
-| convergence | rule | yes | Multi-shard purge splits into per-shard `PurgeItemsCommand`s; partial commit re-drives uncommitted shards and converges to the same merged per-item result (TD-001). | |
+| convergence | rule | yes | A large purge runs on the queue's owner in bounded batches of `PurgeItemsCommand`s; partial commit re-drives the uncommitted batches and converges to the same per-item result. | |
 | result | per item | yes | `purged`, `not_found` (already absent — idempotent), `conflict`, or `unavailable`. | |
 
 ### ArchiveItems
@@ -284,7 +285,7 @@ MUST therefore support an asynchronous model:
 
 Defined by the Asynchronous Operation Model above. `GetOperation` MUST return the
 full operation record; `ListOperations` pages operations by recency/state;
-`CancelOperation` is best-effort and never rolls back committed shard mutations.
+`CancelOperation` is best-effort and never rolls back committed item mutations.
 
 ## Error Semantics
 
@@ -299,7 +300,7 @@ map the same `code` values to typed errors.
 | Matched count ≠ `expected_match_count`, or > `max_affected` | Envelope `match-count-mismatch` (no mutation) | yes after re-scoping | Re-run with `dry_run` to inspect, then adjust the guard. |
 | Reused `request_id`, different body | Envelope `request-id-conflict` | no | New `request_id` for different work. |
 | Unknown `operation_id` | Envelope `operation-not-found` | no | List operations. |
-| Backend cannot durably commit before timeout | Envelope `commit-timeout` or operation `partial` | yes (resumable) | Re-drive the operation; uncommitted shards converge. |
+| Backend cannot durably commit before timeout | Envelope `commit-timeout` or operation `partial` | yes (resumable) | Re-drive the operation; uncommitted batches converge. |
 | Operator action invalid for an item's current state | Per-item `conflict` or `terminal` | maybe | Inspect item; choose a valid action. |
 | Item already absent (purge) | Per-item `not_found` (idempotent success) | no | Treat as purged. |
 | Acting on a leased item | Per-item action succeeds and the lease is fenced; the worker later sees `stale_lease` | n/a | Worker re-claims if the item becomes eligible. |
@@ -314,10 +315,11 @@ map the same `code` values to typed errors.
 - Idempotency precedence: synchronous operator mutations dedupe by `request_id`
   within `request_id_retention_ms`; asynchronous operations dedupe by the
   `operation_id` the first `request_id` produced.
-- Atomicity: `PauseQueue`/`ResumeQueue` are atomic. Per-shard operator commands
-  are individually atomic and shard-fenced; a selector spanning shards is
-  best-effort-per-shard with per-item results and resumable convergence — there is
-  no global all-or-nothing across shards.
+- Atomicity: `PauseQueue`/`ResumeQueue` are atomic. Operator commands run on the
+  queue's single owner, each batch individually atomic and queue-epoch fenced; a
+  large selector is processed best-effort in bounded batches with per-item results
+  and resumable convergence — there is no global all-or-nothing across the whole
+  selector.
 - A `dry_run` MUST be free of side effects and MUST NOT emit commands.
 
 ## Examples
@@ -342,7 +344,7 @@ map the same `code` values to typed errors.
   "request_id": "op_redrive_20260607_001",
   "operation_id": "oper_01JX9Z...",
   "state": "accepted",
-  "progress": { "shards_total": 8, "shards_complete": 0, "matched": 412333, "affected": 0, "failed": 0, "updated_at": "2026-06-07T17:42:10Z" }
+  "progress": { "matched": 412333, "affected": 0, "failed": 0, "batches_total": 413, "batches_complete": 0, "updated_at": "2026-06-07T17:42:10Z" }
 }
 ```
 
@@ -371,17 +373,19 @@ map the same `code` values to typed errors.
 A hosted operator dashboard (PRD P2) is a client of this contract, not part of it.
 The supported recurring-key teardown order is `recurrence.until` → drain →
 `ArchiveItems` (optional) → native `PurgeItems` (per key) or operator
-`PurgeQueueItems` (bulk). Shard placement and backend migration belong to
-`admin:shard` and the migration design; this contract intentionally excludes them.
+`PurgeQueueItems` (bulk). Queue placement / ownership handoff and backend
+migration belong to `admin:queue` and the migration design; this contract
+intentionally excludes them.
 
 ## Validation Checklist
 
 - [x] Normative fields, operations, and rules are explicit.
 - [x] Authorization is deny-by-default and operator-scoped.
-- [x] Engine invariants (single active lease, queue-global progress, co-residency,
-  durable ack, idempotency, tenant isolation) are preserved by every mutation.
+- [x] Engine invariants (single active lease, queue-global progress, co-residency
+  by construction, durable ack, idempotency, tenant isolation) are preserved by
+  every mutation.
 - [x] Destructive operations support `dry_run` and blast-radius guards.
-- [x] The asynchronous, multi-shard, resumable operation model is explicit.
+- [x] The asynchronous, bounded-batch, resumable operation model is explicit.
 - [x] Error handling is explicit, including per-item and envelope cases.
 - [x] At least one executable test can be derived from each operation.
 - [x] Bulk operator purge is not conflated with native per-key `PurgeItems`.

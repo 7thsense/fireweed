@@ -5,6 +5,7 @@ ddx:
     - prd
     - concerns
     - api-native-client-interface
+    - adr-queue-as-shard-unit-and-projection-families
   review:
     self_hash: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
     deps:
@@ -50,17 +51,17 @@ pqueue will use a layered auth and tenancy model:
 2. **Tenant**: storage and authorization boundary named by `tenant_id`.
 3. **Queue namespace**: client-visible queue identifier named by `queue_id`,
    unique within a tenant.
-4. **Shard**: physical routing and capacity unit named by
-   `tenant_id/queue_id/shard_id`.
+4. **Queue ownership**: the queue is the unit of sharding (ADR-008) — a whole
+   queue is owned by exactly one node at a time, placed by a deterministic
+   function of `(tenant_id, queue_id)`. An optional internal item-table partition
+   (`hash(tenant_id, queue_id) % N`, TD-002) is a client-invisible storage detail,
+   never an ownership/routing/authorization unit.
 5. **Group**: `group_key` is a client-visible logical ordering/compatibility
    partition within a queue (ADR-004). Claim result order is exact per-group
-   order only on a `group_co_residency=true` queue, where
-   `shard_id = hash(group_key) mod shard_count` co-locates a group's items on
-   one shard; on a `group_co_residency=false` queue `group_key` restricts the
-   claim domain but does not promise per-group total order across shards.
-   `shard_id` MUST co-locate a `group_key`'s items when co-residency is enabled,
-   but `shard_id` is never a client-visible ordering or progress scope, and
-   `group_key` carries no progress-bound meaning (progress is queue-global).
+   order on any queue, because every item of a `group_key` is co-resident on the
+   queue's single owner by construction (ADR-008). `group_key` carries no
+   progress-bound meaning (progress is queue-global, computed locally on the
+   owner).
 
 The core queue engine requires an already-resolved `PrincipalContext` for
 service-mode operations. It does not implement login, signup, session storage,
@@ -88,7 +89,7 @@ The first service implementation uses operation-scoped permissions:
 | `operator:inspect` | API-002 operator reads (`GetItem`, `ListItems`, `GetQueueAdminState`, `GetOperation`, `ListOperations`) |
 | `operator:repair` | API-002 repair/redrive/archive/retention/pause/resume |
 | `operator:purge` | API-002 bulk operator `PurgeQueueItems` (most destructive; may require a distinct grant) |
-| `admin:shard` | shard placement, resharding, and backend migration (migration design) |
+| `admin:queue` | queue placement / ownership handoff and backend migration (migration design) |
 
 The operator surface (`operator:inspect`/`operator:repair`/`operator:purge`) is
 defined by API-002. Operator mutations may act on leased and terminal items and
@@ -136,8 +137,9 @@ is allowed by backend profile or deployment class:
 | Dedicated database or cluster per tenant class | Large, regulated, or noisy tenants. |
 
 The control plane may assign queues or tenants to different Postgres databases,
-clusters, object buckets, or log partitions through backend profile and shard
-placement metadata. That placement is not visible in the native queue API.
+clusters, object buckets, or log partitions through backend profile and
+queue-owner assignment metadata. That placement is not visible in the native
+queue API.
 
 ## Noisy-Neighbor Controls
 
@@ -146,7 +148,7 @@ requires:
 
 - queue and tenant identifiers in metrics;
 - configurable max batch size and lease duration per queue;
-- backend profile and shard count per queue;
+- backend profile per queue;
 - pqueue deployment/tenant rate-limit and capacity outcomes in API-001 error
   semantics (the envelope rate-limit error and the per-item `rate_limited`
   partial-batch status protect the pqueue deployment, not a caller's downstream
@@ -156,11 +158,11 @@ requires:
   eligible work within its configured limits;
 - queue density: a single node MUST support at least 1000 concurrently active
   queues without cross-queue degradation. This makes noisy-neighbor isolation a
-  density concern as well as a capacity one: per-queue and per-`(queue,shard)`
-  background work (lease-expiry sweeps, cross-shard progress aggregation, summary
-  recompute, recurring rearm, idempotency/retention GC) MUST be multiplexed onto
-  bounded shared per-node resources (worker pools, connection pools, sweeper
-  batches), never one task, loop, or connection per queue or per shard, so that
+  density concern as well as a capacity one: per-queue background work
+  (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring
+  rearm, idempotency/retention GC) MUST be multiplexed onto bounded shared
+  per-node resources (worker pools, connection pools, sweeper batches), never one
+  task, loop, or connection per queue, so that
   the 1000th active queue costs no more than bounded incremental resource and
   every active queue still meets its progress bound.
 
