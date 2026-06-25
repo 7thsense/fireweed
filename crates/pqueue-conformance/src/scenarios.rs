@@ -1188,6 +1188,96 @@ pub async fn reconnect_after_crash_preserves_committed_state<B: ConformanceCore>
     );
 }
 
+/// Reconnect preserves NON-pending lifecycle state too: a completed item stays terminal and the
+/// untouched items stay pending across a reopen. (Relational: read from the DB-resident projection;
+/// log-bearing: reconstructed by replay — the scenario asserts only the recovered *state*, so both
+/// recovery models satisfy it.)
+pub async fn reconnect_preserves_terminal_and_pending_state<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let a = make();
+    a.create_queue(qdef()).await.unwrap();
+    commit(
+        &a,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![
+                    item("a", "ka", 30),
+                    item("b", "kb", 10),
+                    item("c", "kc", 20),
+                ],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    // Claim the priority-10 item ("b") and complete it -> terminal; "a"/"c" stay pending.
+    let claimed = a.claim(claim_req(1, 500, 10)).await.unwrap();
+    assert_eq!(claimed.items[0].item_id.as_str(), "b");
+    a.finalize(
+        &shard(),
+        vec![FinalizeOutcome {
+            item_id: ItemId::new("b").unwrap(),
+            kind: FinalizeKind::Complete,
+        }],
+        ts(20),
+    )
+    .await
+    .unwrap();
+
+    drop(a);
+    let b = make();
+
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!(
+        (m.pending, m.leased, m.complete),
+        (2, 0, 1),
+        "terminal + pending counts survive reconnect"
+    );
+    assert_eq!(
+        b.select_eligible(&shard(), ts(100), 10).await.unwrap(),
+        vec![ItemId::new("c").unwrap(), ItemId::new("a").unwrap()],
+        "the two untouched items remain pending in priority order; the completed one does not reappear"
+    );
+}
+
+/// Reconnect preserves a LEASED item as leased (token-contract-safe: asserts the recovered lifecycle
+/// *state* via metrics, NOT the lease token — the relational family deliberately loses the cleartext token
+/// on reopen, while a log-bearing family reconstructs it; both keep the item `Leased`). The tokenless
+/// in-flight lease is still reclaimable by the owner: a tick past the deadline returns it to pending.
+pub async fn reconnect_preserves_leased_item_state<B: ConformanceCore>(make: impl Fn() -> B) {
+    let a = make();
+    a.create_queue(qdef()).await.unwrap();
+    commit(
+        &a,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    a.claim(claim_req(1, 500, 10)).await.unwrap(); // leased through ts(500)
+
+    drop(a);
+    let b = make();
+
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().leased,
+        1,
+        "the in-flight lease survives reconnect as Leased"
+    );
+    // The lease deadline survived too, so the reclaim tick can return the tokenless lease to pending.
+    b.tick(ts(501)).await.unwrap();
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!(
+        (m.leased, m.pending),
+        (0, 1),
+        "the reclaim tick recovers the tokenless in-flight lease"
+    );
+}
+
 /// **Log-class** durability guarantee (B1, no-divergence): a REJECTED mutation must not append any
 /// command — the durable log length is unchanged. The behavioral rejection itself (the structured
 /// `NotFound`/`Conflict`/`Invalid` error) is asserted in the CORE class (the renew/reassign/purge/

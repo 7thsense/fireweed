@@ -35,7 +35,12 @@ path = "tests/conformance.rs"
 name = "durability"
 path = "tests/durability.rs"
 
-# BQ-11a: the relational projection family's claim-free core conformance subset + lifecycle round-trip.
+# BQ-11a/b/c: the relational projection family's core conformance + lifecycle round-trip + group/retention.
 [[test]]
 name = "relational_conformance"
 path = "tests/relational_conformance.rs"
+
+# BQ-11d: the relational-reconnect conformance class against the DB-authoritative relational backend.
+[[test]]
+name = "relational_reconnect"
+path = "tests/relational_reconnect.rs"

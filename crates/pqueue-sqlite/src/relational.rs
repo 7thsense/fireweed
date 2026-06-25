@@ -1949,4 +1949,39 @@ mod group_summary_tests {
         .await
         .unwrap();
     }
+
+    /// BQ-11d: `pqueue_group_summary` is durable — it survives a reopen with the recovered representative,
+    /// because it is a DB table maintained in-transaction, not in-process state.
+    #[tokio::test]
+    async fn group_summary_survives_reopen() {
+        let path = std::env::temp_dir()
+            .join(format!("pqueue-rel-gs-reopen-{}.db", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let _ = std::fs::remove_file(&path);
+
+        let rep_before;
+        {
+            let a = SqliteRelationalBackend::open(&path).unwrap();
+            a.create_queue(qdef()).await.unwrap();
+            let ids = a
+                .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0))
+                .await
+                .unwrap();
+            let (_, count, rep) = summary(&a, "g").unwrap();
+            assert_eq!(count, 2);
+            assert_eq!(rep.as_deref(), Some(ids[0].as_str()));
+            rep_before = rep;
+        } // crash
+
+        let b = SqliteRelationalBackend::open(&path).unwrap();
+        let (_, count, rep) = summary(&b, "g").expect("group_summary row survives reopen");
+        assert_eq!(
+            count, 2,
+            "eligible count recovered from the durable summary"
+        );
+        assert_eq!(rep, rep_before, "representative recovered unchanged");
+        let _ = std::fs::remove_file(&path);
+    }
 }

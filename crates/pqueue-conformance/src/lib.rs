@@ -298,6 +298,8 @@ macro_rules! relational_reconnect_suite {
     ($make:expr) => {
         $crate::conformance_suite!(@scenarios $make,
             reconnect_after_crash_preserves_committed_state,
+            reconnect_preserves_terminal_and_pending_state,
+            reconnect_preserves_leased_item_state,
         );
     };
 }
