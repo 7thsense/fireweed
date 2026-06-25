@@ -12,7 +12,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: ea91286ed9f810497a7da0dd05f962e0bfe2cb001acb682f3d7b10e1e69cdc64
+    self_hash: 69eab6b9a93ad895edbddee1b950ce3c38275dc51b972e6ef4e62cae7389d769
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
@@ -23,7 +23,7 @@ ddx:
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
       prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
       td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-25T04:21:18Z"
+    reviewed_at: "2026-06-25T22:49:59Z"
 ---
 
 # Technical Design: TD-002 Postgres-Native Reference Mode
@@ -251,6 +251,18 @@ create table pqueue_items (
 `priority_sort` is a backend-owned canonical encoding of the declared priority
 model and direction. Claim queries sort by `priority_sort`, not by ad hoc JSON
 comparison.
+
+A backend MAY carry additional per-item operational columns to realize the
+lifecycle command arms (`FenceLease`/`UnfenceLease`, `ReplacePending`, retry
+exhaustion) directly. The sqlite reference projection carries `fenced` (operator
+lease fence), `superseded` (the pending item replaced by an upsert, excluded from
+the active `client_item_key` partial-unique index and from eligibility), and
+`max_attempts` (the per-item retry bound, denormalized from the queue's
+`retry_policy`). In the production Postgres mode these are realized without
+dedicated columns where cheaper — fence via the `assignment_epoch` fence record,
+supersede via the `client_item_key` tombstone/retention table, and the retry
+bound read from the queue definition — but the *behavior* of every arm is
+identical across both projection families (the conformance core class).
 
 ### Per-Group Summary Projection
 

@@ -19,6 +19,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = "1"
 serde_json = "1"
 bytes = "1"
+# Lease-token hashing for the relational projection (hash-only at rest; TD-004 §security / TD-002 parity).
+sha2 = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
@@ -32,3 +34,8 @@ path = "tests/conformance.rs"
 [[test]]
 name = "durability"
 path = "tests/durability.rs"
+
+# BQ-11a: the relational projection family's claim-free core conformance subset + lifecycle round-trip.
+[[test]]
+name = "relational_conformance"
+path = "tests/relational_conformance.rs"
