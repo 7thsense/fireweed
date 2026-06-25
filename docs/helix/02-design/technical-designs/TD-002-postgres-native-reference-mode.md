@@ -7,6 +7,7 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - adr-auth-tenancy-and-storage-isolation
     - adr-granularity-mapping-and-claim-domain
+    - adr-queue-as-shard-unit-and-projection-families
     - adr-rust-workspace-and-toolchain-policy
     - prd
     - concerns
@@ -36,31 +37,39 @@ ddx:
 > [`hexagonal-migration-plan.md`](../../04-build/hexagonal-migration-plan.md).
 
 
-**Contract**: API-001 | **ADR**: ADR-001, ADR-004 | **Scope**: Postgres-native backend
+**Contract**: API-001 | **ADR**: ADR-001, ADR-004, ADR-008 | **Scope**: Postgres-native backend
 
 ## Scope
 
 This technical design defines the first concrete storage backend for pqueue:
 `postgres_native`. In this mode, Postgres provides the control plane, durable
-command log, operational projection, idempotency state, leases, and queue
-metrics.
+command log, operational projection (the **relational projection family**),
+idempotency state, leases, and queue metrics. Per ADR-008 the queue is the unit
+of sharding: a whole queue is owned by exactly one node, so `postgres_native`'s
+log and projection are per-queue and its claim is a single owner-local
+`FOR UPDATE SKIP LOCKED` statement.
 
 In scope:
 
-- Postgres logical schema for queue definitions, shard assignments, command
+- Postgres logical schema for queue definitions, queue-owner leases, command
   log, queue items, leases, idempotency, and metrics.
 - Transaction boundaries for API-001 mutating operations.
 - Claim query shape for strict and bounded-relaxed ordering.
-- Shard epoch fencing without pqueue-owned node discovery or cluster consensus;
-  the shard-owner lease lifecycle that allocates and advances `assignment_epoch`
-  (and durably fences it into the shard row at acquire time) is specified in
-  TD-003 (`td-sharding-and-shard-ownership`) and stored in `pqueue_shards`.
+- The Postgres binding of TD-003's queue-epoch fence (the `assignment_epoch`
+  column + the append-transaction stale-epoch reject) without pqueue-owned node
+  discovery or cluster consensus; the queue-owner lease lifecycle that allocates
+  and advances `assignment_epoch` (and durably fences it into the queue-owner row
+  at acquire time) is specified in TD-003 (`td-sharding-and-shard-ownership`) and
+  stored in `pqueue_queue_owners`.
 - Retention and compaction rules needed for bounded storage growth.
-- Indexing and partitioning assumptions for 10M-item hot queues.
+- Indexing and internal table-partitioning assumptions for 10M-item hot queues.
 
 Out of scope:
 
 - Cross-backend object-log manifests and SQLite projections.
+- The pluggable control plane's non-Postgres implementation. `ControlPlaneStore`
+  is a pluggable seam (ADR-008); Postgres is the default and the one this TD
+  specifies. The deferred object-store control plane is spike-gated elsewhere.
 - P1 operator APIs for redrive, repair, and migration. (Active-scope discovery is
   in-contract, served from `pqueue_group_summary`; targeted recurring teardown
   `PurgeItems` is in-band native scope. Broad operator purge/redrive/repair remains
@@ -70,19 +79,25 @@ Out of scope:
 
 ## Technical Approach
 
-`postgres_native` is the reference correctness backend. It uses ordinary
+`postgres_native` is the reference correctness backend and the reference member
+of the **relational projection family** (ADR-008): `pqueue_items` is authoritative
+in-place and claim is an SQL `FOR UPDATE SKIP LOCKED` statement. It uses ordinary
 Postgres transactions to commit the durable command record and the operational
 projection together. This keeps the first implementation simple, gives
 low-latency small-batch commits, and creates executable semantics for later
-backends to match through conformance tests.
+backends to match through conformance tests. Because the projection is DB-resident
+and transactional-authoritative, it satisfies its durability obligation via the
+**relational reconnect-after-crash** conformance class (TD-001) rather than
+replay-from-log.
 
 The backend still follows TD-001's capability boundaries:
 
-- `ControlPlaneStore`: queue definitions, shard assignments, backend profile,
-  and assignment epochs.
-- `LogStore`: append-only command records with monotonic per-shard positions.
+- `ControlPlaneStore` (the default Postgres implementation of the pluggable seam):
+  queue definitions, queue-owner assignment, backend profile, and assignment
+  epochs.
+- `LogStore`: append-only command records with monotonic per-queue positions.
 - `ProjectionStore`: queue item state, claim planning, lease state,
-  idempotency, and metrics.
+  idempotency, and metrics (relational family).
 - `SnapshotStore`: optional in v1 for Postgres-native mode; logical dump or
   checkpoint support may be added after the first backend passes conformance.
 
@@ -99,7 +114,6 @@ create table pqueue_queues (
   queue_id text not null,
   priority_model jsonb not null,
   ordering_mode text not null,
-  group_co_residency boolean not null default false,
   recurring boolean not null default false,
   progress_bound_ms bigint not null,
   eligibility_policy jsonb not null default '{}'::jsonb,
@@ -111,64 +125,67 @@ create table pqueue_queues (
   max_push_batch_size integer not null,
   max_claim_batch_size integer not null,
   backend_profile text not null default 'postgres_native',
-  shard_count integer not null,
   created_at timestamptz not null,
   updated_at timestamptz not null,
   primary key (tenant_id, queue_id)
 );
 
-create table pqueue_shards (
+create table pqueue_queue_owners (
   tenant_id text not null,
   queue_id text not null,
-  shard_id integer not null,
   assignment_epoch bigint not null,
-  placement jsonb not null default '{}'::jsonb,
   state text not null,
   active_owner_id text,
   target_owner_id text,
   lease_expires_at timestamptz,
   updated_at timestamptz not null,
-  primary key (tenant_id, queue_id, shard_id),
+  primary key (tenant_id, queue_id),
   foreign key (tenant_id, queue_id)
     references pqueue_queues (tenant_id, queue_id)
 );
 ```
 
-`placement` stores control-plane routing metadata. It is not a node-discovery
-protocol. Service nodes consume assignments from Postgres and pass
-`assignment_epoch` into data-plane mutations as a fencing token.
+There is no `shard_count` column: the queue is the unit of sharding (ADR-008), so
+a queue maps to exactly one owner. `pqueue_queue_owners` holds at most one active
+owner lease per `(tenant_id, queue_id)`. Service nodes consume assignments from
+Postgres and pass `assignment_epoch` into data-plane mutations as a fencing token.
 
-`state` values are `unassigned`, `assigned`, and `draining`. The shard-owner
-lease operations `acquire_shard_lease`, `renew_shard_lease`, `begin_drain`, and
-`release_shard_lease` (TD-003) operate on the `active_owner_id`, `target_owner_id`,
+`state` values are `unassigned`, `assigned`, and `draining`. The queue-owner
+lease operations `acquire_queue_lease`, `renew_queue_lease`, `begin_drain`, and
+`release_queue_lease` (TD-003) operate on the `active_owner_id`, `target_owner_id`,
 `lease_expires_at`, and `assignment_epoch` columns transactionally.
-`acquire_shard_lease` allocates a strictly greater `assignment_epoch` and updates
+`acquire_queue_lease` allocates a strictly greater `assignment_epoch` and updates
 the row in the same transaction — this IS the durable epoch fence for
-`postgres_native`; `renew_shard_lease` preserves the epoch. The data-plane append
+`postgres_native`; `renew_queue_lease` preserves the epoch. The data-plane append
 transaction (Transaction Flows step 3) validates `expected_epoch == current
 assignment_epoch`, which is the safety fence. `target_owner_id` MAY differ from
 `active_owner_id` transiently during reassignment; safety depends on the epoch,
-not on the two agreeing.
+not on the two agreeing. The full ownership/lease/drain/recovery mechanism is
+TD-003's; this table is its Postgres binding.
 
-`group_co_residency` is immutable after creation and is part of the queue's
-configuration identity for idempotent `CreateQueue` (a differing value is a
-definition conflict), exactly as for `ordering_mode`, `priority_model`, and
-`shard_count`. When `group_co_residency=true`, item placement MUST use
-`shard_id = hash(group_key) mod shard_count` (mirroring the validation workload's
-hash-on-job-key), so a `group_key`'s items are co-resident on one shard; this is
+`group_key` is an **ordering/compatibility** concern only (ADR-004 D2 / ADR-008),
+never a placement key, and there is no `group_co_residency` flag (removed from the
+contract and the config-identity hash). Because the whole queue lives on one
+owner, every item of a `group_key` is co-resident **by construction**; this is
 what makes whole-group (`compatibility.group_batching`) and whole-cohort
-(`compatibility.whole_cohort`) claims shard-local and atomic and lets a
+(`compatibility.whole_cohort`) claims owner-local and atomic and lets a
 single-`group_key` claim return exact per-group order. The `group_key` topology
 (cohort-keyed by `callback_id` versus job-keyed by `job_id`) is per ADR-004
-(`adr-granularity-mapping-and-claim-domain`). For queues with
-`group_co_residency=false`, shard routing MAY use any stable scheme; `group_key`
-then does not constrain placement and does not promise per-group total order
-across shards. `group_co_residency` is a placement capability only; it is NOT a
-`claim_scope` and carries no progress meaning (progress remains queue-global).
+(`adr-granularity-mapping-and-claim-domain`). `group_key` carries no progress
+meaning (progress remains queue-global and is computed locally on the owner).
 
 `recurring` is an immutable per-queue flag. On a `recurring` queue, a `rearm`
 finalize returns an item to `pending` without a terminal transition (see
 `BatchFinalize`); one-shot and recurring items are never mixed in one queue.
+
+> **Internal storage partitioning (non-normative for ownership).** A
+> `postgres_native` deployment MAY *physically* partition the large item/command
+> tables — e.g. Postgres declarative `partition by hash (tenant_id, queue_id)`,
+> `N` partitions (default 16, power-of-2) — purely for vacuum and index-size
+> isolation on 10M-item hot queues. This `% N` partition is an **internal storage
+> detail**: it is client-invisible and is **not** an ownership, routing, or
+> progress unit (ADR-008). It does not bound how many nodes the queue population
+> spreads across, and it never appears in a result ordering or a client field.
 
 ### Durable Command Log
 
@@ -176,7 +193,6 @@ finalize returns an item to `pending` without a terminal transition (see
 create table pqueue_commands (
   tenant_id text not null,
   queue_id text not null,
-  shard_id integer not null,
   sequence bigint not null,
   assignment_epoch bigint not null,
   command_id text not null,
@@ -187,15 +203,15 @@ create table pqueue_commands (
   command_payload jsonb not null,
   checksum bytea not null,
   created_at timestamptz not null,
-  primary key (tenant_id, queue_id, shard_id, sequence),
-  unique (tenant_id, queue_id, shard_id, command_id)
+  primary key (tenant_id, queue_id, sequence),
+  unique (tenant_id, queue_id, command_id)
 );
 ```
 
-`sequence` is allocated under the same transaction that validates the shard
-epoch. Implementations may use a shard sequence table, advisory locks scoped to
-`tenant_id/queue_id/shard_id`, or row locking on `pqueue_shards`. The result must
-be a monotonic command position per shard.
+`sequence` is allocated under the same transaction that validates the queue
+epoch. Implementations may use a per-queue sequence table, advisory locks scoped
+to `tenant_id/queue_id`, or row locking on `pqueue_queue_owners`. The result must
+be a monotonic command position per queue.
 
 ### Projection
 
@@ -203,7 +219,6 @@ be a monotonic command position per shard.
 create table pqueue_items (
   tenant_id text not null,
   queue_id text not null,
-  shard_id integer not null,
   item_id text not null,
   client_item_key text not null,
   lifecycle_state text not null,
@@ -239,7 +254,7 @@ comparison.
 ### Per-Group Summary Projection
 
 There is exactly ONE per-group summary projection, `pqueue_group_summary`, keyed
-by `(tenant_id, queue_id, shard_id, group_key)`. It is the single source of truth
+by `(tenant_id, queue_id, group_key)`. It is the single source of truth
 for (a) `group_batching` oldest-group selection (g1), (b) `DiscoverActiveScopes`
 group-granularity ranking (g4), and (c) per-group observability. There is no
 separate `pqueue_active_scope_summary` table. This projection is authored once
@@ -252,7 +267,6 @@ here and is consumed by g1 selection/locking and g4 discovery alike.
 create table pqueue_group_summary (
   tenant_id text not null,
   queue_id  text not null,
-  shard_id  integer not null,
   group_key text not null,
   -- authoritative oldest-eligible age source (exact-on-read under the gate predicate):
   oldest_eligible_at      timestamptz,    -- null = no currently-eligible item
@@ -266,28 +280,28 @@ create table pqueue_group_summary (
   eligible_item_count     bigint not null default 0,
   at_risk_count           bigint not null default 0,
   updated_at              timestamptz not null default now(),  -- per-row watermark -> discovery as_of
-  primary key (tenant_id, queue_id, shard_id, group_key)
+  primary key (tenant_id, queue_id, group_key)
 );
 
 -- g1 selection: oldest-N groups by representative claim key.
 create index pqueue_group_summary_select_idx
   on pqueue_group_summary (
-    tenant_id, queue_id, shard_id,
+    tenant_id, queue_id,
     rep_progress_guard_sort, rep_priority_sort, rep_created_at, rep_item_id
   )
   where oldest_eligible_at is not null;
 
--- g4 discovery: rank groups by oldest-eligible age (queue-global after cross-shard merge).
+-- g4 discovery: rank the queue's groups by oldest-eligible age (local to the owner).
 create index pqueue_group_summary_rank_idx
   on pqueue_group_summary (tenant_id, queue_id, oldest_eligible_at)
   where oldest_eligible_at is not null;
 ```
 
-A group is co-resident on one shard when `group_co_residency=true` (D2), so this
-shard-scoped grain has exactly one row per active group while remaining coherent
-for the local-SQLite backend (TD-004) and for multi-shard aggregation. Cross-shard
-queue-global aggregation merges these rows by `(tenant_id, queue_id, group_key)`;
-under co-residency the merge has no collisions (TD-003 Cross-Shard Progress).
+Because the whole queue lives on one owner, a `group_key` has exactly one summary
+row; this grain has exactly one row per active group and stays coherent for the
+local-SQLite backend (TD-004). There is no cross-shard aggregation: the queue's
+oldest-eligible age is a local `now() - min(oldest_eligible_at)` over the queue's
+rows on the owner.
 
 Consistency model (binding):
 
@@ -298,32 +312,34 @@ Consistency model (binding):
    predicate (API-001, authored by g2). g1 group selection and g4 discovery
    ranking MUST rely on these, never on the counts.
 2. **Gate flips are NOT applied synchronously to every affected group's summary
-   row.** A queue-scoped `SetGates` flip (g2) is O(shards × keys), not O(groups or
-   items), and changes no item's `eligible_since`. The summary keeps the
-   authoritative fields correct WITHOUT a per-group rewrite via exact-on-read: the
-   read path (g1 selection, g4 discovery, metrics) joins the candidate group's
-   gate keys to current gate state (`pqueue_gate_state`), and if the stored
-   representative item is gate-blocked at read time it advances to the group's
-   next item open under all gate keys; a group all of whose items are gate-blocked
-   is excluded entirely. This distinguishes "whole group blocked" (group excluded)
-   from "oldest item blocked" (advance to the next open item). Because a group is
+   row.** A queue-scoped `SetGates` flip (g2) is O(keys), not O(groups or items),
+   and changes no item's `eligible_since`. The summary keeps the authoritative
+   fields correct WITHOUT a per-group rewrite via exact-on-read: the read path (g1
+   selection, g4 discovery, metrics) joins the candidate group's gate keys to
+   current gate state (`pqueue_gate_state`), and if the stored representative item
+   is gate-blocked at read time it advances to the group's next item open under
+   all gate keys; a group all of whose items are gate-blocked is excluded
+   entirely. This distinguishes "whole group blocked" (group excluded) from
+   "oldest item blocked" (advance to the next open item). Because a group is
    gate-blocked as a unit only when a shared gate key it carries is blocked, the
-   join is O(blocked keys), not O(items).
+   join is O(blocked keys), not O(items). (`pqueue_gate_state` is the queue's
+   gate-state projection maintained by `SetGates` (g2): one row per gate key
+   carrying its current open/blocked generation; its authoritative shape is owned
+   by the g2 gate model in API-001. TD-002 consumes it read-only at gate-revalidation
+   time.)
 3. **`eligible_item_count` / `at_risk_count` MAY be lagged or approximate** and
    MUST be documented as such when served. They are routing/observability hints,
    never selection or completeness inputs (whole-group/whole-cohort completeness
    re-derives membership under the group lock). After a gate flip the counts MAY
    momentarily over-count gate-blocked items until a bounded, asynchronous
-   recompute (scoped to the groups sharing the flipped key on that shard) corrects
-   them.
+   recompute (scoped to the groups sharing the flipped key) corrects them.
 4. A group row is deleted (or `oldest_eligible_at` / `rep_*` set null) when its
    last eligible item becomes ineligible. Recompute on push/finalize/expiry is
    bounded per affected group, never O(items) per read.
-5. Cross-shard aggregation: the queue-global oldest-eligible age is the cross-shard
-   maximum of per-shard gate-filtered oldest ages = `now() - min(oldest_eligible_at)`
-   (TD-003 / D4); discovery merge-then-limit takes the queue-global top-N by
-   `oldest_eligible_at` across shards before applying the result limit. Counts sum
-   the (possibly lagged) per-shard counts.
+5. The queue-global oldest-eligible age is the local
+   `now() - min(oldest_eligible_at)` over the queue's gate-filtered group rows on
+   the owner (TD-003 per-queue progress); discovery ranking is a local top-N by
+   `oldest_eligible_at`. Counts are the (possibly lagged) per-row counts.
 
 ### Cohort Projection
 
@@ -332,7 +348,6 @@ create table pqueue_cohorts (
   tenant_id          text    not null,
   queue_id           text    not null,
   group_key          text    not null,   -- cohort key (logical identity)
-  shard_id           integer not null,   -- derived: hash(group_key) mod shard_count (co-residency)
   cohort_id          text    not null,   -- stable cohort identity (new on group_key reuse)
   cohort_size        integer not null,
   member_count       integer not null,   -- non-terminal members persisted
@@ -346,11 +361,11 @@ create table pqueue_cohorts (
 );
 
 create index pqueue_cohorts_claim_idx
-  on pqueue_cohorts (tenant_id, queue_id, shard_id, state)
+  on pqueue_cohorts (tenant_id, queue_id, state)
   where state = 'complete';
 
 create index pqueue_cohorts_expiry_idx
-  on pqueue_cohorts (tenant_id, queue_id, shard_id, cohort_created_at)
+  on pqueue_cohorts (tenant_id, queue_id, cohort_created_at)
   where state in ('forming', 'complete');
 ```
 
@@ -376,9 +391,11 @@ delay such as `not_before` or retry backoff. This supports PRD progress-bound
 semantics.
 
 `cohort_size` is set only on cohort members (queues with `cohort_policy.enabled`,
-g6); the cohort key is the existing `group_key` and placement is the group
-co-residency capability, so no separate cohort-to-shard derivation exists.
-Cohort completion state lives in `pqueue_cohorts` (below), not on the item row.
+g6); the cohort key is the existing `group_key`, co-resident on the queue's owner
+by construction, so no cohort-to-shard derivation exists. Cohort completion state
+lives in `pqueue_cohorts` (below), not on the item row. `pqueue_cohorts.cohort_size`
+is authoritative; the `pqueue_items.cohort_size` copy is denormalized and MUST
+match (a divergent push value is a `conflict`).
 
 `recurrence_until` is the optional per-item recurrence drain instant on a
 `recurring` queue. A `rearm` past `recurrence_until` MUST terminate the item
@@ -427,7 +444,6 @@ create index pqueue_items_claim_strict_idx
   on pqueue_items (
     tenant_id,
     queue_id,
-    shard_id,
     lifecycle_state,
     priority_sort,
     created_at,
@@ -439,7 +455,6 @@ create index pqueue_items_eligible_age_idx
   on pqueue_items (
     tenant_id,
     queue_id,
-    shard_id,
     lifecycle_state,
     eligible_since
   )
@@ -449,7 +464,6 @@ create index pqueue_items_lease_expiry_idx
   on pqueue_items (
     tenant_id,
     queue_id,
-    shard_id,
     lifecycle_state,
     lease_expires_at
   )
@@ -459,7 +473,6 @@ create index pqueue_items_group_claim_idx
   on pqueue_items (
     tenant_id,
     queue_id,
-    shard_id,
     group_key,
     priority_sort,
     created_at,
@@ -468,15 +481,16 @@ create index pqueue_items_group_claim_idx
   where lifecycle_state = 'pending';
 
 create index pqueue_commands_replay_idx
-  on pqueue_commands (tenant_id, queue_id, shard_id, sequence);
+  on pqueue_commands (tenant_id, queue_id, sequence);
 
 create index pqueue_request_idempotency_expiry_idx
   on pqueue_request_idempotency (expires_at);
 ```
 
-Implementations may use partial indexes per lifecycle state and table
-partitioning by tenant, queue, shard, or hash. A 10M-item hot queue must not rely
-on a full-table scan for claim, lease expiry, idempotency, or progress metrics.
+Implementations may use partial indexes per lifecycle state and internal
+declarative table partitioning by `hash(tenant_id, queue_id)` (the storage detail
+above) for vacuum/index-size isolation. A 10M-item hot queue must not rely on a
+full-table scan for claim, lease expiry, idempotency, or progress metrics.
 
 Discovery is served from `pqueue_group_summary` and its rank index
 (`pqueue_group_summary_rank_idx`, joined to `pqueue_gate_state` at read time), not
@@ -488,12 +502,11 @@ per-group summary exists specifically to avoid that aggregate scan.
 ## Active-Scope Discovery Reads
 
 `DiscoverActiveScopes` (g4) serves from the maintained per-group summary projection
-`pqueue_group_summary`, keyed `(tenant_id, queue_id, shard_id, group_key)`. No
-separate `pqueue_active_scope_summary` table exists. Discovery never scans
-`pqueue_items`.
+`pqueue_group_summary`, keyed `(tenant_id, queue_id, group_key)`. No separate
+`pqueue_active_scope_summary` table exists. Discovery never scans `pqueue_items`,
+and because the queue has one owner there is no cross-owner merge.
 
-Per-shard group-granularity read (one shard; the service layer merges across the
-queue's shards and joins live gate state):
+Group-granularity read (local to the owner; joins live gate state):
 
 ```sql
 select gs.group_key,
@@ -501,18 +514,18 @@ select gs.group_key,
        gs.eligible_item_count,
        gs.updated_at
 from pqueue_group_summary gs
-where gs.tenant_id = $1 and gs.queue_id = $2 and gs.shard_id = any($3)
+where gs.tenant_id = $1 and gs.queue_id = $2
   and gs.oldest_eligible_at is not null
 -- gate-current derivation (advance past a gate-blocked representative) is applied
 -- by the read path joining pqueue_gate_state; see the consistency model.
 order by gs.oldest_eligible_at asc
-limit $4;   -- per-shard prefetch bound >= max_results; final top-N after merge
+limit $3;   -- top-N by oldest-eligible age
 ```
 
 Queue-granularity discovery derives a per-queue oldest-eligible from the SAME
-table as `min(oldest_eligible_at)` over the queue's group rows across shards,
-exposed as a `granularity=queue` descriptor (no `group_key` field, no materialized
-queue rollup). It MUST NOT be stored or exposed as a `group_key = null` row; the
+table as `min(oldest_eligible_at)` over the queue's group rows, exposed as a
+`granularity=queue` descriptor (no `group_key` field, no materialized queue
+rollup). It MUST NOT be stored or exposed as a `group_key = null` row; the
 projection's `group_key` column is `not null`.
 
 **Discovery consistency model.** `oldest_eligible_at` is authoritative and exact
@@ -524,19 +537,13 @@ or summary rows; discovery applies the gate predicate at read time by joining
 Eligibility-Precedence-eligible item, and omits a group only when no item in it is
 currently eligible.
 
-**Cross-shard `as_of` is an observed projection frontier.** `response.as_of` MUST
-be the minimum per-row `updated_at` watermark across EVERY shard read for the
-result, including shards that returned no eligible rows, shards stale or unowned at
-read time (using their last-known watermark; a shard with no live owner for longer
-than `progress_bound_ms` is a progress-bound violation surfaced by TD-003), and the
-watermark of any candidate row skipped during gate revalidation. The service layer
-merges by `(queue_id, group_key)` taking the minimum `oldest_eligible_at` (== max
-age) and summed counts BEFORE applying `max_results`; the returned top-N is the
-true cross-shard top-N, never a per-shard top-N union. This merge is correct for
-both placement modes: under `group_co_residency=true` each `group_key` lives on one
-shard (a union of disjoint groups); under `group_co_residency=false` a `group_key`
-MAY appear on several shards and the merge takes the cross-shard minimum timestamp.
-A queue's shard set, lease validity, and epoch fencing are owned by TD-003.
+**`as_of` is the owner's observed projection frontier.** `response.as_of` MUST be
+the minimum per-row `updated_at` watermark across the rows read for the result,
+including the watermark of any candidate row skipped during gate revalidation,
+so callers can reason about summary lag. The returned top-N is the true top-N over
+the queue's groups on its owner. The queue's owner, lease validity, and epoch
+fencing are owned by TD-003; a queue with no live owner for longer than
+`progress_bound_ms` is a progress-bound violation surfaced by TD-003.
 
 ## Transaction Flows
 
@@ -544,7 +551,7 @@ Every mutating operation follows this order inside one transaction unless
 otherwise stated:
 
 1. Authorize tenant and queue access before opening data-plane mutation state.
-2. Load queue definition and target shard row.
+2. Load queue definition and the queue-owner row.
 3. Validate `assignment_epoch`; stale epochs fail before append.
 4. Check request idempotency.
 5. Validate item-level conditions.
@@ -565,9 +572,6 @@ otherwise stated:
   set only when the item is eligible at commit time, and lifecycle counters
   updated.
 - Insert item-key retention record for duplicate convergence.
-- On a `group_co_residency=true` queue, an item pushed without `group_key` MUST
-  fail per item with `invalid`; placement is `shard_id = hash(group_key) mod
-  shard_count`.
 - On a cohort-enabled queue (`cohort_policy.enabled`), validate
   `cohort_size <= max_cohort_size` and that `cohort_size` matches the existing
   `pqueue_cohorts` row (else `conflict`). After `client_item_key` idempotency
@@ -590,7 +594,9 @@ otherwise stated:
 
 ### `BatchClaim`
 
-`BatchClaim` must atomically select and lease items using row-level locks:
+`BatchClaim` must atomically select and lease items using row-level locks. The
+claim is owner-local: the queue has one owner, so there is no shard filter and no
+cross-owner fan-out.
 
 ```sql
 -- Conceptual query shape. The metadata and compatibility predicates are
@@ -600,21 +606,20 @@ with candidates as (
   from pqueue_items
   where tenant_id = $1
     and queue_id = $2
-    and shard_id = $3
     and lifecycle_state = 'pending'
     and (not_before is null or not_before <= now())
     and eligible_since is not null
     -- and queue eligibility policy matches metadata
     -- and compatibility predicates match group_key/metadata
   order by progress_guard_sort, priority_sort, created_at, item_id
-  limit $4
+  limit $3
   for update skip locked
 )
 update pqueue_items i
 set lifecycle_state = 'leased',
-    lease_token_hash = $5,
-    lease_expires_at = $6,
-    worker_id = $7,
+    lease_token_hash = $4,
+    lease_expires_at = $5,
+    worker_id = $6,
     item_version = item_version + 1,
     updated_at = now()
 from candidates c
@@ -622,9 +627,13 @@ where i.item_id = c.item_id
 returning i.*;
 ```
 
-`progress_guard_sort` is conceptual. Implementations must ensure items near
-`progress_bound_ms` cannot be bypassed indefinitely by relaxed ordering or
-group-aware selection. A valid first implementation may use strict ordering for
+`progress_guard_sort` is conceptual: it is a **query-time derivation** (over
+`eligible_since` against `progress_bound_ms`, ahead of `priority_sort`), NOT a
+stored `pqueue_items` column. The strict-claim index orders by
+`priority_sort, created_at, item_id` (the covering subset for the normal window);
+the progress-protection window is the derivation prepended at claim time.
+Implementations must ensure items near `progress_bound_ms` cannot be bypassed
+indefinitely by relaxed ordering or group-aware selection. A valid first implementation may use strict ordering for
 `ordering_mode=strict` and a two-window bounded-relaxed strategy for
 `ordering_mode=bounded_relaxed`:
 
@@ -644,37 +653,31 @@ The claim CTE performs no downstream-rate admission; there is no rate-admission
 stage in the claim pipeline, and pacing is caller-driven (see TD-001 Key Decisions
 and the API-001 caller-driven downstream pacing paragraph).
 
-When the request pins a single `group_key` on a `group_co_residency=true` queue
-(or the queue's claim mode resolves to one group), the claim is routed to the
-single shard owning that group, the candidate CTE filters to that group, and the
-existing `order by progress_guard_sort, priority_sort, created_at, item_id` IS the
-exact per-group order — no new query is required for deterministic-in-domain
-ordering (ADR-004). On a `group_co_residency=false` queue a `group_key` filter is
-applied as a candidate restriction within each shard's CTE; results are merged per
-the cross-shard merge rule (TD-003) but are NOT a per-group total order. `shard_id`
-never appears in the result ordering. The single queue-global progress guard
-(`progress_guard_sort`) is unchanged and is NOT evaluated per group; progress is
-queue-global (FR-12).
+When the request pins a single `group_key` (or the queue's claim mode resolves to
+one group), the candidate CTE filters to that group, and the existing
+`order by progress_guard_sort, priority_sort, created_at, item_id` IS the exact
+per-group order — no new query is required for deterministic-in-domain ordering
+(ADR-004), and no routing is needed because the group is already owner-local. The
+single queue-global progress guard (`progress_guard_sort`) is unchanged and is NOT
+evaluated per group; progress is queue-global and local to the owner (FR-12).
 
 #### `group_batching` (whole-eligible-group claim)
 
 For `group_batching` (`group_completeness=whole_eligible`, `max_groups=N`), claim
 runs inside one serialized critical section (one Postgres transaction) with
-group-level locking, and is valid only on queues created with group co-residency
-(`group_co_residency=true`, ADR-004 / D2), where
-`shard_id = hash(group_key) mod shard_count`; selection is therefore shard-local.
-The target shard is resolved server-side from the cross-shard oldest-eligible
-aggregate (TD-003), never from the client request.
+group-level locking. Because the queue has one owner, every group is owner-local
+by construction (ADR-008); selection is over the queue's groups with no shard
+resolution.
 
 1. **Overfetch candidates.** Open a cursor over `pqueue_group_summary` for the
-   resolved shard, ordered by each group's representative claim key
+   queue, ordered by each group's representative claim key
    (`rep_progress_guard_sort, rep_priority_sort, rep_created_at, rep_item_id`),
    honoring the queue-global progress-protection window first under `ordering_mode`.
    Fetch more than N candidates (`N + k`, refill on demand). Group eligibility is
    defined solely by the Eligibility Precedence subsection; the candidate
    `eligible_item_count` is a hint only.
 2. **Lock + revalidate, in canonical order.** Sort the candidate set by group lock
-   identity (`hash(tenant_id, queue_id, shard_id, group_key)`) ascending and, in
+   identity (`hash(tenant_id, queue_id, group_key)`) ascending and, in
    that order, try-acquire an exclusive group lock per candidate
    (`pg_try_advisory_xact_lock(...)`, OR `select ... for update skip locked` on the
    group's summary row). A lock not immediately available means the group is
@@ -690,7 +693,7 @@ aggregate (TD-003), never from the client request.
    whole groups until adding the next group would exceed `max_items`; then stop. If
    discards exhaust the candidate set before N valid groups are collected, advance
    the cursor and fetch the next page (refill) until N valid whole groups, the
-   `max_items` ceiling, or the shard's candidate groups are exhausted — so the claim
+   `max_items` ceiling, or the queue's candidate groups are exhausted — so the claim
    returns the true next N groups even if early candidates were invalidated by a
    mid-claim gate flip or concurrent lease. If the next group in order alone exceeds
    `max_items`, roll back and return envelope `batch-too-large`, leasing nothing.
@@ -702,11 +705,11 @@ guarantees two concurrent claims never split a group.
 ```sql
 -- group_batching (N groups): overfetch candidates, then lock-per-group (canonical
 -- order, try-lock-skip), revalidate, lease each valid locked group whole, refill.
--- Run inside one transaction; queue must have group co-residency (shard=hash(group_key)).
+-- Run inside one transaction on the queue's owner; every group is owner-local.
 with candidate_groups as (
   select group_key
   from pqueue_group_summary           -- single per-group summary (also backs discovery)
-  where tenant_id = $1 and queue_id = $2 and shard_id = $3
+  where tenant_id = $1 and queue_id = $2
     and oldest_eligible_at is not null            -- has a current eligible representative
     -- and metadata_equals predicate satisfiable for the group (if present)
   order by rep_progress_guard_sort, rep_priority_sort, rep_created_at, rep_item_id
@@ -714,7 +717,7 @@ with candidate_groups as (
 )
 -- application logic, candidates sorted by lock identity ascending (deadlock-free):
 --   for each candidate in canonical lock order:
---     if not pg_try_advisory_xact_lock(hash(tenant,queue,shard,group_key)): skip (contended)
+--     if not pg_try_advisory_xact_lock(hash(tenant,queue,group_key)): skip (contended)
 --     re-read eligible items of group_key under live predicate (gate state + metadata_equals);
 --       if zero eligible OR any active lease held by another claim: discard (do not count)
 --     else lease all eligible items (FOR UPDATE, no SKIP LOCKED inside group)
@@ -724,7 +727,7 @@ with candidate_groups as (
 
 #### `whole_cohort` (complete-cohort claim)
 
-For `compatibility.whole_cohort` (g6) the claim is one transaction, shard-local, and
+For `compatibility.whole_cohort` (g6) the claim is one transaction, owner-local, and
 locks the cohort first:
 
 1. Candidate select: most-urgent `pqueue_cohorts` row with `state='complete'` (via
@@ -778,7 +781,11 @@ so g1 and g6 share one lock regime.
   remaining eligible items; `oldest_eligible_at` stays authoritative/exact,
   `eligible_item_count` MAY be served lagged). Recurring observability counters
   (`recurring_pending` / `recurring_leased`) are served from the metrics
-  projection, NOT from `pqueue_group_summary`.
+  projection, NOT from `pqueue_group_summary`. (The metrics projection is the
+  maintained per-queue metrics record of TD-001's Logical Projection Records —
+  lifecycle counts, active leases, recurring counters, `oldest_eligible_age_ms`,
+  `progress_bound_risk_count` — keyed `(tenant_id, queue_id)` on the owner; its
+  exact column list is an implementation detail bounded by that record.)
 
 ## Lease Expiry
 
@@ -788,12 +795,12 @@ claimable again, unless TD-002 is amended to prove that lease expiry can be a
 pure projection rule without breaking replay or audit.
 
 The first implementation should prefer lazy expiry in the claim path plus a
-bounded background sweeper for metrics freshness. The sweeper must be shard and
+bounded background sweeper for metrics freshness. The sweeper must be queue and
 epoch fenced, batch-limited, and safe to run concurrently.
 
 ## Cohort Completion and Expiry
 
-A shard- and epoch-fenced sweeper MUST, for any `pqueue_cohorts` row in
+A queue- and epoch-fenced sweeper MUST, for any `pqueue_cohorts` row in
 `forming`/`complete` whose expiry deadline
 `min(cohort_created_at, first_eligible_at) + completion_bound_ms` has passed: take
 the cohort row lock, recheck the deadline and state under the lock, append
@@ -813,7 +820,8 @@ operator purge/redrive/retention remains a separate P1 operator contract, and th
 two MUST NOT be conflated. A `PurgeItems` removal deletes the `pqueue_items` row
 (and, with `force`, the lease), MUST be recorded as a durable `PurgeItemsCommand`,
 and MUST write a tombstone keyed by `(tenant_id, queue_id, client_item_key)`
-retained for at least `client_item_key_retention_ms`. The existing
+retained for at least `client_item_key_retention_ms`. A purge that targets an item
+with an active lease MUST return `conflict` unless `force=true`. The existing
 `unique (tenant_id, queue_id, client_item_key)` constraint enforces the
 single-live-recurring-item-per-key invariant; once purged, the tombstone (not a
 retained item row) carries replay/audit, and a re-push after the tombstone window
@@ -857,13 +865,14 @@ These targets define the single-deployment (Tier-1) envelope. `postgres_native`
 mirrors a proven single-Postgres `SKIP LOCKED` design and inherits its
 single-deployment scale ceiling; per ADR-001 "Scale Claim Scoping" it delivers
 Tier-1 and MUST NOT be cited as evidence for the horizontal envelope (TP-002 E1
-vs the per-queue throughput floor E0: >=10M items/hr per queue). The claim path here is single-shard (scoped by
-`shard_id`). The horizontal envelope is delivered by multi-shard claim with
-cross-shard progress (TD-001), sharding & shard ownership (TD-003), and the
-`object_log_sqlite_projection` backend (TD-004, `td-s3-object-log-sqlite-projection-mode`),
-validated by TP-002 E2/E3. A multi-shard `postgres_native` queue is the per-shard
-building block those designs compose; each shard remains a single-shard
-`SKIP LOCKED` claim.
+vs the per-queue throughput floor E0: >=10M items/hr per queue). The claim path
+here is a single owner-local `SKIP LOCKED` statement. The horizontal envelope is
+delivered by **cross-queue scale-out** (ADR-008) — distributing queues across
+owners — with per-queue ownership (TD-003) and the `object_log_sqlite_projection`
+backend (TD-004, `td-s3-object-log-sqlite-projection-mode`), validated by TP-002
+E2/E3. A `postgres_native` queue is one owner-local `SKIP LOCKED` claim; scale is
+achieved by running many such queues across many owners, not by sharding within a
+queue.
 
 Targets inherit PRD success metrics: 10M items in a hot queue, the per-queue
 throughput floor (TP-002 E0: >=10M items/hr per queue, preserved for every queue
@@ -875,8 +884,10 @@ Design constraints:
 
 - Mutating operations are batch-first and use one transaction per request.
 - Claim queries must use partial indexes and `FOR UPDATE SKIP LOCKED`.
-- Hot queues must be shardable by `shard_id`; no implementation may assume a
-  single Postgres table partition is sufficient forever.
+- Hot queues must be internally partitionable by `hash(tenant_id, queue_id)` (the
+  storage detail above); no implementation may assume a single Postgres table
+  partition is sufficient forever. This partitioning is for vacuum/index-size
+  isolation only, never an ownership or routing unit.
 - Metrics may be approximate when documented, but progress-bound risk must be
   trustworthy enough to trigger operational action.
 - Telemetry overhead must be included in performance tests.
@@ -886,15 +897,14 @@ Design constraints:
 A node MUST sustain at least 1000 concurrently active queues without per-queue
 resource blow-up. The Postgres-native reference backend therefore:
 
-- uses ONE shared, bounded connection pool per node across all queues/shards
-  (sized to the node, not per queue); it MUST NOT open a pool or a long-lived
-  connection per queue or per `(queue, shard)`;
+- uses ONE shared, bounded connection pool per node across all queues (sized to
+  the node, not per queue); it MUST NOT open a pool or a long-lived connection per
+  queue;
 - runs ONE shared lease-expiry sweeper per node that scans due leases across many
-  `(tenant, queue, shard)` partitions per pass with a bounded batch and bounded
-  cadence (using `pqueue_items_lease_expiry_idx`), instead of one sweeper task
-  per queue/shard;
+  `(tenant, queue)` partitions per pass with a bounded batch and bounded cadence
+  (using `pqueue_items_lease_expiry_idx`), instead of one sweeper task per queue;
 - runs idempotency/terminal-retention GC and `pqueue_group_summary` reconcile as
-  bounded shared batch jobs across queues/shards, not per-queue loops;
+  bounded shared batch jobs across queues, not per-queue loops;
 - relies on shared, partial, partition-pruned indexes so 1000+ active queues do
   not each require dedicated hot index memory beyond what their resident set
   justifies.
@@ -909,9 +919,9 @@ This is validated by `queue_density_single_node_tests` (TP-002 E2).
 TD-002 implementation is not complete until these scenarios pass against a real
 Postgres instance:
 
-- Create queue and shard definitions transactionally.
+- Create queue and queue-owner definitions transactionally.
 - Reject stale `assignment_epoch` appends.
-- Replay command log by shard position.
+- Replay command log by per-queue position.
 - Push duplicate `client_item_key` without mutation.
 - Update pending item priority and verify claim order changes.
 - Reject update of leased and terminal items.
@@ -920,6 +930,9 @@ Postgres instance:
 - Renew active lease and reject stale token.
 - Finalize complete, fail, retry, release, and retry exhaustion.
 - Materialize lease expiry and preserve progress-bound eligible age.
+- Reconnect-after-crash durability: after a process kill the DB-resident
+  projection still returns acknowledged state on reconnect (the relational
+  durability conformance class, TD-001).
 - Expire request-id and item-key retention records.
 - Reject cross-tenant reads and writes.
 - Benchmark strict and group-aware claims on a 10M-item hot queue fixture.
@@ -945,9 +958,8 @@ Postgres instance:
 - Discovery on a 10M-item hot queue reads `pqueue_group_summary` via index (no
   `pqueue_items` scan in the captured plan); a gate flip blocking only the oldest
   item of a group still reports the group at the next eligible item's age; the
-  cross-shard merge reports the true cross-shard min age, never a per-shard top-N
-  union; `as_of` is the minimum watermark across all shards read including a
-  stale/unowned shard.
+  ranking is the true owner-local top-N by oldest-eligible age; `as_of` is the
+  minimum watermark across the rows read.
 - High-frequency immediate `rearm` sustains target throughput without
   version-monotonicity or projection corruption; idle recurring inventory does not
   inflate discovery or `oldest_eligible_age_ms`; `PurgeItems` (targeted, and `force`
@@ -957,8 +969,8 @@ Postgres instance:
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| One Postgres deployment becomes a hidden central data plane and is mistaken for the horizontal-scale story | M | H | Horizontal scale is delivered by multi-shard claim (TD-001), sharding & shard ownership (TD-003), and the `object_log_sqlite_projection` backend (TD-004), each with a benchmark gate (TP-002 E2/E3). Keep shard keys, partitioning, and backend-profile boundaries in schema and tests so a single-shard deployment is never mistaken for the scaled envelope. |
-| Per-group summary grain diverges across shards/backends, breaking cross-shard aggregation | M | M | Single `pqueue_group_summary` keyed `(tenant_id, queue_id, shard_id, group_key)`; one row per active group under co-residency; cross-shard merge by `(tenant_id, queue_id, group_key)` (TD-003). |
+| One Postgres deployment becomes a hidden central data plane and is mistaken for the horizontal-scale story | M | H | Horizontal scale is delivered by cross-queue scale-out (ADR-008) — per-queue ownership (TD-003) and the `object_log_sqlite_projection` backend (TD-004), each with a benchmark gate (TP-002 E2/E3). Keep the per-queue ownership boundary and backend-profile boundaries in schema and tests so a single-queue deployment is never mistaken for the scaled envelope. |
+| Per-group summary grain diverges across backends | M | M | Single `pqueue_group_summary` keyed `(tenant_id, queue_id, group_key)`; one row per active group; same grain in the SQLite local projection (TD-004). |
 | JSON priority or metadata predicates cause slow scans | M | H | Use canonical `priority_sort`, narrow v1 predicates, and partial indexes. |
 | `SKIP LOCKED` hides starvation under contention | M | H | Add progress-bound tests with skew and explicit oldest-eligible metrics. |
 | Idempotency response reconstruction is inconsistent | M | M | Prefer transactional response persistence in Postgres-native mode. |
@@ -966,12 +978,19 @@ Postgres instance:
 
 ## Review Checklist
 
-- [x] TD-001 storage traits map to concrete Postgres tables.
+- [x] TD-001 storage traits map to concrete Postgres tables (relational projection
+      family).
 - [x] API-001 operations map to transaction flows.
 - [x] Durable append and projection commit are in one transaction.
-- [x] Shard epoch fencing is explicit.
-- [x] Claim concurrency uses row locks and duplicate-lease tests.
-- [x] Progress bounds and group-aware claims are represented.
+- [x] Queue-epoch fencing is explicit (Postgres binding of TD-003's fence: the
+      `assignment_epoch` column + append-tx validation).
+- [x] Claim concurrency uses row locks and duplicate-lease tests; claim is a single
+      owner-local `SKIP LOCKED` statement (no shard filter, no fan-out).
+- [x] Progress bounds and group-aware claims are represented; progress is queue-global
+      and computed locally on the owner.
+- [x] Queue is the unit of sharding (ADR-008): no `shard_count`, no `shard_id`
+      columns, no `group_co_residency`; `hash(tenant,queue)%N` is internal table
+      partitioning only.
 - [x] Terminal retention is bounded without adding P1 operator APIs.
 - [x] Performance and conformance evidence is required before implementation is
-  accepted.
+      accepted; horizontal envelope is cross-queue scale-out.
