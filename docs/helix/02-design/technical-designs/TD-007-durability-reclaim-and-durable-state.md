@@ -4,6 +4,7 @@ ddx:
   depends_on:
     - adr-cqrs-log-projection-storage-model
     - adr-hexagonal-architecture-and-two-interfaces
+    - adr-queue-as-shard-unit-and-projection-families
     - td-storage-architecture-backend-contracts
     - api-native-client-interface
     - api-operator-repair-contract
@@ -30,8 +31,9 @@ adapters can be built against fixed semantics:
    (idempotency, lease fences, queue pause, operator-operation store, `command_position`);
 5. **`client_item_key` uniqueness** routing.
 
-Launch scope is **single shard** (ADR-007 / plan §2.5); cross-shard mechanics are noted where a port
-must admit them later but are not built for launch.
+The queue is the unit of sharding (ADR-008): a whole queue is owned by exactly one node, so all engine
+state below is **per-`(tenant, queue)`** on that single owner. Horizontal scale is cross-queue
+(distributing queues across owners), never intra-queue sharding.
 
 ## 1. Durability classes
 
@@ -102,27 +104,27 @@ DoD: an item is reclaimed/expired with **zero** intervening client commands on i
 ## 4. Durable engine state (migrated off in-memory service `Mutex`)
 
 The HTTP service held these in `Arc<Mutex<QueueAdminState>>`. The engine makes each **log-backed**:
-written as a command, materialized in the projection, and reconstructable by replay. Launch is
-single-shard, so all keys below are shard-local.
+written as a command, materialized in the projection, and reconstructable by replay. The queue is the
+unit of sharding (ADR-008), so all keys below are per-`(tenant, queue)` on the queue's single owner.
 
 | State | Command(s) | Projection representation | Retention / compaction | Replay reconstruction |
 |---|---|---|---|---|
 | **Idempotency cache** (`request_id`→outcome; operator replay→409 fingerprint) | stamped on each mutating command | `request_id → {fingerprint, outcome, expires_at}` | bounded by `request_id_retention_ms`; compact expired on apply | replay re-derives from retained window |
 | **Lease fences** | `FenceLease`/`UnfenceLease` | per-item `lease_generation`; stale gen ⇒ `XACK`→`stale_lease` | `UnfenceLease` + compaction once item terminal | replay rebuilds current generation |
 | **Queue pause** | `PauseQueue`/`ResumeQueue` | `queue_admin_paused` flag | latest wins; no growth | last command wins |
-| **Operator-operation store** (API-002 async ops) — **library/operator-only; built in Phase 2 (§4a migration), NOT Phase 1** | `OpStarted`/`OpProgress`/`OpFinished`/`OpCanceled` | `operation_id → {state ∈ {accepted,running,succeeded,partial,failed,canceled}, progress{shards_total,shards_complete,matched,affected,failed,updated_at}, errors[]}` **and** the `request_id → operation_id` idempotency anchor (replay of same `request_id` returns same `operation_id`; different body ⇒ `request-id-conflict`) | bounded retention after terminal | replay rebuilds the full API-002 async shape (full normative schema = API-002 §Asynchronous Operation Model; RESP never touches this store) |
-| **`command_position`** (item_version source) | every committed command advances it | monotonic per shard | none (counter) | **high-water mark persisted in the projection/SnapshotStore, NOT recomputed by counting a possibly-compacted log** — so replay after retention/compaction is monotonic and `item_version` never regresses |
+| **Operator-operation store** (API-002 async ops) — **library/operator-only; built in Phase 2 (§4a migration), NOT Phase 1** | `OpStarted`/`OpProgress`/`OpFinished`/`OpCanceled` | `operation_id → {state ∈ {accepted,running,succeeded,partial,failed,canceled}, progress{matched,affected,failed,batches_total,batches_complete,updated_at}, errors[]}` **and** the `request_id → operation_id` idempotency anchor (replay of same `request_id` returns same `operation_id`; different body ⇒ `request-id-conflict`) | bounded retention after terminal | replay rebuilds the full API-002 async shape (full normative schema = API-002 §Asynchronous Operation Model; a large selector runs in bounded batches on the queue's single owner; RESP never touches this store) |
+| **`command_position`** (item_version source) | every committed command advances it | monotonic per queue | none (counter) | **high-water mark persisted in the projection/SnapshotStore, NOT recomputed by counting a possibly-compacted log** — so replay after retention/compaction is monotonic and `item_version` never regresses |
 
 Each is covered by a **replay-reconstruction conformance test**: build state via commands, drop the
-projection, replay the log, assert identical state. (Cross-shard idempotency/fences are post-launch;
-the command schema already carries `shard_id`.)
+projection, replay the log, assert identical state. Idempotency and lease fences are per-`(tenant,
+queue)` on the queue's single owner; there is no cross-shard fence to coordinate (ADR-008).
 
 ## 5. `client_item_key` uniqueness
 
 Uniqueness is enforced per `(tenant, queue)` and indexed in the projection so `UpsertPort` and dedup
-are O(1) lookups in the claim unit of work. At launch (single shard) the index is shard-local and the
-check is trivially atomic with claim/upsert. Multi-shard requires deterministic key→shard routing
-(hash, or `group_key` co-residency) so the check stays shard-local — **post-launch** (plan §2.5).
+are O(1) lookups in the claim unit of work. Because the queue is owned by exactly one node (ADR-008),
+the index is owner-local and the check is trivially atomic with claim/upsert — there is no
+key→shard routing to keep it local, and no multi-shard uniqueness concern.
 
 ## 6. Conformance requirements (durability DoD)
 

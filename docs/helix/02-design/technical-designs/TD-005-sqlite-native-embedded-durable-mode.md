@@ -8,6 +8,7 @@ ddx:
     - adr-embedded-engine-integration-and-public-surface
     - td-storage-architecture-backend-contracts
     - td-s3-object-log-sqlite-projection-mode
+    - adr-queue-as-shard-unit-and-projection-families
   review:
     self_hash: 92f84037765c772d48e72afaea301ad013e51258a81c96af5ecee6c9ce281ebf
     deps:
@@ -45,8 +46,8 @@ In scope:
   (`pqueue-sqlite`, `projection.rs`) as the `ProjectionStore`, unchanged from
   object-log mode. (This is the full `ProjectionStore` — not the group/cohort
   `SqliteProjection` in `lib.rs` used by object-log group-summary materialization.)
-- A SQLite `ControlPlaneStore` (queue definitions, shard assignment + epoch) in
-  the same database.
+- A SQLite `ControlPlaneStore` (queue definitions, queue-owner assignment +
+  epoch) in the same database.
 - **Single-transaction append+apply**: a command is written to the log table and
   applied to the projection tables in one SQLite transaction, so the projection
   is never inconsistent with the log and the durable ack boundary is one WAL
@@ -73,8 +74,8 @@ Out of scope:
 SQLite database file:
 
 - `LogStore` — appends serialized `CommandEnvelope`s to `pqueue_command_log`
-  `(tenant_id, queue_id, shard_id, sequence, backend_epoch, checksum, payload,
-  created_at)`, `PRIMARY KEY (tenant_id, queue_id, shard_id, sequence)`. The
+  `(tenant_id, queue_id, sequence, backend_epoch, checksum, payload,
+  created_at)`, `PRIMARY KEY (tenant_id, queue_id, sequence)`. The
   durable ack boundary is the committed SQLite transaction under WAL with
   `synchronous=FULL`, which fsyncs the WAL on every commit so a returned append
   survives process crash AND power loss. (`NORMAL` only fsyncs at checkpoint,
@@ -85,7 +86,7 @@ SQLite database file:
   the full item-lifecycle projection), applied only from committed log rows
   (unchanged semantics from TD-004).
 - `ControlPlaneStore` — `pqueue_queue` (validated `QueueDefinition`) and
-  `pqueue_shard_assignment` (shard → epoch) tables in the same database.
+  `pqueue_queue_owner` (queue → epoch) tables in the same database.
 - `SnapshotStore` — optional/no-op for v1: the projection is persisted in the
   same file and is always current with the log (atomic append+apply), so there is
   no replay to accelerate. A compaction/checkpoint may be added later but is not
@@ -100,7 +101,7 @@ SQLite database file:
   removes the apply-lag/reservation machinery TD-004 needs and gives strict
   read-after-write: a returned ack means the projection already reflects it.
 - **Single-writer ownership = simpler fencing.** The embedded host process is the
-  sole writer of the file. `backend_epoch` is recorded per shard and bumped on
+  sole writer of the file. `backend_epoch` is recorded per queue and bumped on
   open for restart-fencing/observability; there is no concurrent-writer CAS. A
   second process opening the same file is a misconfiguration the backend rejects.
   v1 enforces this with `PRAGMA locking_mode=EXCLUSIVE` plus an exclusive write

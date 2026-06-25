@@ -6,6 +6,8 @@ ddx:
     - api-operator-repair-contract
     - adr-cqrs-log-projection-storage-model
     - adr-granularity-mapping-and-claim-domain
+    - adr-queue-as-shard-unit-and-projection-families
+    - td-sharding-and-shard-ownership
   status: draft
   review:
     self_hash: ca22dc211e4bc9226ba212fee6e03c57589371ec73499d86f540b1ea65395b6f
@@ -22,7 +24,7 @@ ddx:
 **TD ID**: TD-006
 **Title**: RESP wire adapter — stock Redis Streams worker surface plus Rust library control surface
 **Status**: draft (v3, refolded against hexagonal migration plan v4)
-**Related**: API-001, API-002, ADR-007, TD-007, `docs/helix/04-build/hexagonal-migration-plan.md`
+**Related**: API-001, API-002, ADR-007, ADR-008, TD-003 (queue ownership/routing), TD-007, `docs/helix/04-build/hexagonal-migration-plan.md`
 
 ## Purpose
 
@@ -53,6 +55,61 @@ Consequences:
 - Redis clients must treat returned batches as opaque work sets; pqueue delivery order is priority
   order, not stream-id order.
 
+## 1A. Queue Routing and Ownership (normative)
+
+Per ADR-008 the queue is the unit of sharding: each queue `(tenant_id, queue_id)` is owned by exactly
+one node at a time (TD-003). Horizontal scale is **cross-queue** — many queues distributed across owner
+nodes — so a queue-addressed worker command is a single hop to that queue's owner: no scatter-gather on
+the wire. The RESP surface presents Redis Cluster's slot/redirect vocabulary so stock cluster-aware
+clients route unmodified.
+
+**Scope.** This section governs **queue-addressed** commands — those naming one `(tenant_id, queue_id)`,
+i.e. every §3 stock command. Tenant-spanning operations (e.g. tenant-wide active-scope discovery) are
+NOT queue-addressed and are out of scope for the RESP worker surface (library-only, §4).
+
+### Authority and redirect
+
+| Element | Rule |
+|---|---|
+| Single owner of record | The authoritative current owner of a queue is the `active_owner` recorded in the TD-003 control-plane authority record (returned by `resolve_queue_owner`), NOT a value each node recomputes independently. The deterministic HRW/rendezvous placement function (TD-003) is how the control plane *selects* a target owner; the wire redirect always names the recorded `active_owner`. Routing therefore converges on one source of truth and cannot enter a persistent two-node `-MOVED` loop from divergent membership views (a divergence is a TD-003 liveness concern resolved by the authority record, not a routing-safety problem). |
+| Serve only under a live current-epoch lease | A node MUST serve a queue-addressed command only while it holds a live TD-003 lease for the queue at the current epoch. A node that does not — never owned it, or was deposed and has learned so via a failed renew (`queue-epoch-stale`, TD-003) — MUST redirect, not serve. |
+| MOVED on miss | A node that will not serve a queue it does not currently own MUST reply `-MOVED <slot> <owner-endpoint>` naming the recorded `active_owner`. A stock cluster-aware client updates its routing table and retries against the owner (the standard Redis Cluster client loop). **Authorization is checked first**: a principal not authorized for the queue receives `-NOPERM` (§7) and never a `-MOVED`, so a redirect never leaks a queue's existence or placement across a tenant boundary. |
+| Slot mapping (stock-client compatibility) | pqueue presents the Redis Cluster 16384-slot space so stock clients bootstrap and parse redirects unmodified: `slot = crc16(routing_key) % 16384`, `routing_key = "{" + tenant_id + "/" + queue_id + "}"` (a Redis hash-tag, so the client's own key→slot computation matches). A `CLUSTER SLOTS` / `CLUSTER SHARDS` response advertises the current slot→owner view for bootstrap. The slot is a **routing hint only**: ownership is per-queue, so two queues sharing a slot MAY have different owners; the per-queue `-MOVED` corrects the client, which updates its table. Because a worker drains one queue, redirect churn is one-time per queue, not per command. |
+
+### Staleness safety (what the fence does and does not cover)
+
+The owner-of-record + redirect model tolerates a stale client routing table or a briefly-stale node
+view **without distributed consensus**. The window in which a deposed node still believes it owns a
+queue is bounded by the lease/renew interval (TD-003): on its next renew it learns it is deposed and
+begins redirecting. Within that window:
+
+| Command class | On a deposed/stale owner, within the renew window |
+|---|---|
+| **Durable writes** (`XADD`; the `append_batch` of any mutating command) | **Cannot corrupt state.** The TD-003 Single Authoritative Fencing Rule rejects an append whose `expected_epoch` is not the current control-plane epoch, the instant the epoch advances — so a misrouted write is rejected and the client retries against the current owner. `client_item_key` makes the `XADD` retry converge. |
+| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On the eventual-apply backend (`objectlog`) the claim selects from a lagging local projection and MAY hand a worker items before its `BatchClaim` `append_batch` is fenced; that append is then rejected, so **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced → `-ERR pqueue stale_lease` (§3): the redundant delivery **cannot complete**. The new owner redelivers — ordinary at-least-once (FR-28). Stock `XREADGROUP` carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection, not on request-id replay (library-only, §4). |
+| **Pure reads** (`XLEN`, `XINFO`, `XPENDING`, `XRANGE`) | **Bounded-stale, never authoritative.** A read has no `append_batch` and is not epoch-fenced; a deposed owner that has not yet failed a renew MAY serve a read from its frozen local projection. Such reads are best-effort and bounded-stale by the lease/renew interval (and, on the eventual-apply backend, additionally by the projection apply window). A client needing an authoritative read MUST reach the current owner (follow the redirect). The read guarantee is "bounded staleness," not "fresh-or-fenced"; a node MUST still redirect once it has learned it is not the owner. |
+
+### Reassignment (drain) on the wire
+
+During a TD-003 `draining` handoff the queue still has exactly one lease-holding owner (the draining
+owner); the incoming `target_owner` MUST NOT acquire until the queue reaches `unassigned` (TD-003). So
+no second node can serve the queue during drain, and an `-ASK`-style "try this one query at the other
+node" does NOT apply (the target cannot serve yet). Instead the command set splits:
+
+- **In-flight commands stay on the draining owner**: `XACK`, same-consumer `XCLAIM` (lease renew),
+  `XAUTOCLAIM` of the caller's own PEL, and `BatchRenewLeases` continue to be served so in-flight leases
+  finalize (TD-003 drain MUST NOT cancel in-flight worker leases). A worker is never redirected
+  mid-lease.
+- **New claims are not started**: `XREADGROUP >` and cross-consumer `XCLAIM` (a new delivery) MUST NOT
+  be served by the draining owner; it returns a retryable `-ERR pqueue unavailable` until handoff
+  completes. Once the new owner has acquired (queue `assigned` to the target), the normal MOVED-on-miss
+  path redirects new claims to it.
+
+This section adds no custom RESP command and re-specifies no TD-003 mechanism: placement, lease, epoch
+fence, and the `unassigned`/`assigned`/`draining` states are TD-003's. TD-006 states only the wire
+behavior — owner-of-record redirect, slot mapping for stock clients, the staleness-safety envelope, and
+the drain command split.
+
 ## 2. Container Entry Contract
 
 RESP entries are flat field/value pairs. pqueue reserves fields used by API-001 and returns additional
@@ -62,7 +119,7 @@ reserved fields in claim replies. Non-reserved fields are opaque payload.
 |---|---|---|
 | `client_item_key` | request | Caller-provided logical key for pending-item replacement and audit. |
 | `priority` | request | Ordering key interpreted by the queue's priority model. |
-| `group_key` | request | Optional co-residency and per-group ordering key. |
+| `group_key` | request | Optional per-group ordering/compatibility key (co-resident on the queue's owner by construction, ADR-008). |
 | `cohort_id` | request | Optional cohort identity. Whole-cohort semantics are library-only. |
 | `not_before` | request | Earliest eligibility timestamp. |
 | `max_attempts` | request | Retry bound override. |
