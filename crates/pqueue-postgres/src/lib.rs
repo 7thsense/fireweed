@@ -56,10 +56,10 @@ use pqueue_engine::{
     CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
-    PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
-     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
+    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
+    ReplacePendingCommand, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
     build_push_items, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
@@ -679,8 +679,7 @@ impl ControlPlaneStore for PostgresBackend {
             let mut g = self.inner.lock().expect("poisoned");
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             if let Some(existing) = g.queues.get(&key) {
-                if existing.group_co_residency != definition.group_co_residency
-                {
+                if existing.group_co_residency != definition.group_co_residency {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
                 return Ok(CreateQueueOutcome {

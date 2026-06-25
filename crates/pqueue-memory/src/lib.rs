@@ -22,8 +22,8 @@ use pqueue_engine::{
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LogRead,
     LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem,
-    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, 
-    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, SnapshotRef,
+    SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
     PurgeItemsCommand, PurgePort, PushPort, PushSpec, ReassignLeaseCommand, ReassignLeasePort,
@@ -485,8 +485,7 @@ impl ControlPlaneStore for MemoryBackend {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             if let Some(existing) = g.queues.get(&key) {
                 // Idempotent create: compatible iff the placement-identity fields match (API-001).
-                if existing.group_co_residency != definition.group_co_residency
-                {
+                if existing.group_co_residency != definition.group_co_residency {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
                 return Ok(CreateQueueOutcome {

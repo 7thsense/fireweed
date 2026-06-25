@@ -23,7 +23,7 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
     ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, RenewLeasePort,
-     UpsertPort,
+    UpsertPort,
 };
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
@@ -63,9 +63,8 @@ impl<T> LibBackend for T where
 
 /// `ts + millis`, normalizing nanoseconds — derives a lease expiry from `now`.
 fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
-    let total = ts.seconds as i128 * 1_000_000_000
-        + ts.nanoseconds as i128
-        + millis as i128 * 1_000_000;
+    let total =
+        ts.seconds as i128 * 1_000_000_000 + ts.nanoseconds as i128 + millis as i128 * 1_000_000;
     UtcTimestamp::new(
         total.div_euclid(1_000_000_000) as i64,
         total.rem_euclid(1_000_000_000) as u32,
@@ -111,7 +110,10 @@ impl<B: LibBackend> Pqueue<B> {
         self.ids.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub async fn create_queue(&self, definition: QueueDefinition) -> EngineResult<CreateQueueOutcome> {
+    pub async fn create_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> EngineResult<CreateQueueOutcome> {
         self.backend.create_queue(definition).await
     }
 
@@ -123,7 +125,11 @@ impl<B: LibBackend> Pqueue<B> {
     }
 
     /// Enqueue a batch of new items in one command (append). Returns the server-assigned ids in order.
-    pub async fn push_batch(&self, queue: &QueueKey, items: Vec<NewItem>) -> EngineResult<Vec<ItemId>> {
+    pub async fn push_batch(
+        &self,
+        queue: &QueueKey,
+        items: Vec<NewItem>,
+    ) -> EngineResult<Vec<ItemId>> {
         let specs: Vec<PushSpec> = items
             .into_iter()
             .map(|it| PushSpec {
@@ -134,9 +140,7 @@ impl<B: LibBackend> Pqueue<B> {
                 payload: it.payload,
             })
             .collect();
-        self.backend
-            .push(queue, specs, self.clock.now())
-            .await
+        self.backend.push(queue, specs, self.clock.now()).await
     }
 
     /// Upsert on a caller-supplied `client_item_key` (Invariant 2). Replaces a pending item with the
@@ -182,7 +186,11 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Complete (ack) the given leased items. All-or-nothing (a fenced/superseded/non-leased id rejects
     /// the batch with the structured error, committing nothing).
-    pub async fn ack(&self, queue: &QueueKey, ids: impl IntoIterator<Item = ItemId>) -> EngineResult<()> {
+    pub async fn ack(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+    ) -> EngineResult<()> {
         self.finalize(queue, ids, FinalizeKind::Complete).await
     }
 
@@ -221,7 +229,11 @@ impl<B: LibBackend> Pqueue<B> {
     }
 
     /// Dead-letter (terminal `fail`) the given leased items.
-    pub async fn fail(&self, queue: &QueueKey, ids: impl IntoIterator<Item = ItemId>) -> EngineResult<()> {
+    pub async fn fail(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+    ) -> EngineResult<()> {
         self.finalize(queue, ids, FinalizeKind::Fail).await
     }
 
@@ -290,7 +302,11 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Rich view of specific in-flight (leased) items in the claimed-item shape (the read behind RESP
     /// `XCLAIM`'s reply). Ids that are absent or not currently leased are omitted.
-    pub async fn claimed(&self, queue: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
+    pub async fn claimed(
+        &self,
+        queue: &QueueKey,
+        ids: &[ItemId],
+    ) -> EngineResult<Vec<ClaimedItem>> {
         self.backend.claimed_view(queue, ids).await
     }
 }

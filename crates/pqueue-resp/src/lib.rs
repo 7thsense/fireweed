@@ -17,7 +17,7 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
     FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, PurgePort, PushPort,
-    PushSpec, ReassignLeasePort, ReclaimDriver, RenewLeasePort, QueueKey, UpsertOutcome,
+    PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, UpsertOutcome,
     UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -714,7 +714,13 @@ async fn xautoclaim<B: RespBackend>(
         .collect();
     if !expired_ids.is_empty()
         && let Err(e) = backend
-            .reassign(&shard, expired_ids.clone(), consumer_token, add_millis(now, lease_ms), now)
+            .reassign(
+                &shard,
+                expired_ids.clone(),
+                consumer_token,
+                add_millis(now, lease_ms),
+                now,
+            )
             .await
     {
         return err_reply(&e);
@@ -880,7 +886,11 @@ async fn xlen<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
 /// `XDEL key id [id ...]` — hard-delete the named entries via [`PurgePort`] (`force = true`, like Redis
 /// which deletes regardless of PEL/lease state). Reply: the count actually removed (absent ids are
 /// no-ops). Distinct from `XACK` (which completes a lease); `XDEL` removes the item outright.
-async fn xdel<B: RespBackend>(backend: &Arc<B>, state: &Arc<ServerState>, args: &[Vec<u8>]) -> Resp {
+async fn xdel<B: RespBackend>(
+    backend: &Arc<B>,
+    state: &Arc<ServerState>,
+    args: &[Vec<u8>],
+) -> Resp {
     if args.len() < 3 {
         return Resp::Error("ERR wrong number of arguments for 'xdel'".into());
     }

@@ -23,18 +23,18 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition, QueueId,
-    TenantId, UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
+    QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandChecksum,
     CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
-    PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, RenewLeaseCommand, RenewLeasePort,  SnapshotRef, SnapshotStore,
-    TickReport, UpsertOutcome, UpsertPort, build_push_items, validate_purge_force,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
+    PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, SnapshotRef,
+    SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -593,8 +593,7 @@ impl ControlPlaneStore for ObjectLogBackend {
             let mut g = self.inner.lock().expect("poisoned");
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             if let Some(existing) = g.queues.get(&key) {
-                if existing.group_co_residency != definition.group_co_residency
-                {
+                if existing.group_co_residency != definition.group_co_residency {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
                 return Ok(CreateQueueOutcome {

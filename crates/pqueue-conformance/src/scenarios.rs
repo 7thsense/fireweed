@@ -895,7 +895,12 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>
     let b_id = ItemId::new("b").unwrap();
 
     // Purging a LEASED item without force is gated (Conflict), appending nothing.
-    let before = b.read_from(&shard(), None, 1000).await.unwrap().entries.len();
+    let before = b
+        .read_from(&shard(), None, 1000)
+        .await
+        .unwrap()
+        .entries
+        .len();
     assert_eq!(
         b.purge(&shard(), vec![a.clone()], false, ts(20)).await,
         Err(EngineError::Conflict)
@@ -907,7 +912,12 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>
             .await,
         Err(EngineError::Conflict)
     );
-    let after = b.read_from(&shard(), None, 1000).await.unwrap().entries.len();
+    let after = b
+        .read_from(&shard(), None, 1000)
+        .await
+        .unwrap()
+        .entries
+        .len();
     assert_eq!(before, after, "gated purge must NOT append a command");
     assert_eq!(
         b.metrics(&qkey()).await.unwrap().pending,
@@ -926,13 +936,20 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>
         )
         .await
         .unwrap();
-    assert_eq!(removed, 1, "a repeated present id removes/counts once; absent is a no-op");
+    assert_eq!(
+        removed, 1,
+        "a repeated present id removes/counts once; absent is a no-op"
+    );
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0, "b is gone");
 
     // Force-purge the leased item "a": removed, count 1, no longer leased.
     let removed_a = b.purge(&shard(), vec![a], true, ts(22)).await.unwrap();
     assert_eq!(removed_a, 1);
-    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 0, "a force-purged");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().leased,
+        0,
+        "a force-purged"
+    );
 }
 
 pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceBackend>(make: impl Fn() -> B) {
@@ -969,15 +986,26 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceBackend>(make
     // Retry UNDER the bound (1 < 2) → back to pending, still claimable.
     b.finalize(&shard(), retry_outcome(), ts(20)).await.unwrap();
     let m = b.metrics(&qkey()).await.unwrap();
-    assert_eq!((m.pending, m.leased, m.failed), (1, 0, 0), "retry under max → pending");
+    assert_eq!(
+        (m.pending, m.leased, m.failed),
+        (1, 0, 0),
+        "retry under max → pending"
+    );
     assert!(
-        !b.select_eligible(&shard(), ts(30), 10).await.unwrap().is_empty(),
+        !b.select_eligible(&shard(), ts(30), 10)
+            .await
+            .unwrap()
+            .is_empty(),
         "the retried item is claimable again"
     );
 
     // Delivery 2: claim again → attempt_count = 2 (now AT the bound).
     b.claim(claim_req(1, 500, 30)).await.unwrap();
-    assert_eq!(b.pending(&shard()).await.unwrap()[0].attempt_count, 2, "second delivery");
+    assert_eq!(
+        b.pending(&shard()).await.unwrap()[0].attempt_count,
+        2,
+        "second delivery"
+    );
     // Retry AT the bound (2 >= 2) → TERMINAL (Failed), NOT back to pending.
     b.finalize(&shard(), retry_outcome(), ts(40)).await.unwrap();
     let m = b.metrics(&qkey()).await.unwrap();
@@ -987,7 +1015,10 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceBackend>(make
         "retry at/beyond max_attempts → terminal Failed"
     );
     assert!(
-        b.select_eligible(&shard(), ts(50), 10).await.unwrap().is_empty(),
+        b.select_eligible(&shard(), ts(50), 10)
+            .await
+            .unwrap()
+            .is_empty(),
         "the exhausted item is terminal — not claimable"
     );
     // It is now terminal: a further finalize is rejected (Terminal), not a silent re-queue.

@@ -28,8 +28,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
-    FinalizeOutcome, ItemView, LeaseView, ProjectionSnapshot, PushItem, QueueCommand, QueueMetrics,
-    QueueKey, SnapshotRef,
+    FinalizeOutcome, ItemView, LeaseView, ProjectionSnapshot, PushItem, QueueCommand, QueueKey,
+    QueueMetrics, SnapshotRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -655,13 +655,11 @@ mod tests {
     };
     use pqueue_engine::{
         ClaimCommand, CommandChecksum, CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-        PushCommand, RenewLeaseCommand, };
+        PushCommand, RenewLeaseCommand,
+    };
 
     fn shard() -> QueueKey {
-        QueueKey::new(
-            TenantId::new("t1").unwrap(),
-            QueueId::new("q1").unwrap(),
-        )
+        QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
     }
     fn ts(s: i64) -> UtcTimestamp {
         UtcTimestamp::new(s, 0).unwrap()

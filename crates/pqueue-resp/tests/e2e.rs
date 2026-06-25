@@ -42,10 +42,7 @@ async fn serve_backend<B: RespBackend>(
 }
 
 fn shard() -> QueueKey {
-    QueueKey::new(
-        TenantId::new("t1").unwrap(),
-        QueueId::new("q1").unwrap(),
-    )
+    QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
 }
 
 /// Operator-fence a leased item directly on the backend (no RESP operator surface yet), so the e2e can
@@ -849,30 +846,63 @@ async fn xlen_xdel_xinfo_over_offtheshelf_client() {
     let mut produced: Vec<String> = Vec::new();
     for p in [5, 9] {
         let id: String = redis::cmd("XADD")
-            .arg("t1:q1").arg("*").arg("priority").arg(p)
-            .query_async(&mut con).await.unwrap();
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(p)
+            .query_async(&mut con)
+            .await
+            .unwrap();
         produced.push(id);
     }
-    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    let len: i64 = redis::cmd("XLEN")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(len, 2, "two live (pending) entries");
 
     // Claim one → still 2 live (1 pending + 1 in-flight).
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c").arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let claimed_id = reply.keys[0].ids[0].id.clone();
-    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    let len: i64 = redis::cmd("XLEN")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(len, 2, "leased entry still counts as live");
 
     // Ack (complete) the claimed one → drops out of XLEN (terminal, like an acked+trimmed entry).
-    let _: i64 = redis::cmd("XACK").arg("t1:q1").arg("g").arg(&claimed_id)
-        .query_async(&mut con).await.unwrap();
-    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    let _: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&claimed_id)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let len: i64 = redis::cmd("XLEN")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(len, 1, "completed entry is not counted");
 
     // XINFO STREAM: length reflects the one remaining live (pending) entry.
-    let info: std::collections::HashMap<String, redis::Value> =
-        redis::cmd("XINFO").arg("STREAM").arg("t1:q1").query_async(&mut con).await.unwrap();
+    let info: std::collections::HashMap<String, redis::Value> = redis::cmd("XINFO")
+        .arg("STREAM")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     let stream_len = match &info["length"] {
         redis::Value::Int(n) => *n,
         other => panic!("XINFO STREAM length should be an int, got {other:?}"),
@@ -880,8 +910,12 @@ async fn xlen_xdel_xinfo_over_offtheshelf_client() {
     assert_eq!(stream_len, 1, "XINFO STREAM length == live entries");
 
     // XINFO GROUPS: a single implicit group is reported (non-empty array).
-    let groups: redis::Value = redis::cmd("XINFO").arg("GROUPS").arg("t1:q1")
-        .query_async(&mut con).await.unwrap();
+    let groups: redis::Value = redis::cmd("XINFO")
+        .arg("GROUPS")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     match groups {
         redis::Value::Array(ref g) => assert_eq!(g.len(), 1, "one group"),
         other => panic!("expected an array of groups, got {other:?}"),
@@ -889,14 +923,30 @@ async fn xlen_xdel_xinfo_over_offtheshelf_client() {
 
     // XDEL the remaining (still-pending) entry directly — the produced id that was not the claimed one.
     // XDEL force-removes regardless of state, so no need to claim it first.
-    let survivor = produced.iter().find(|id| **id != claimed_id).expect("the other produced id").clone();
-    let deleted: i64 = redis::cmd("XDEL").arg("t1:q1").arg(&survivor)
-        .query_async(&mut con).await.unwrap();
+    let survivor = produced
+        .iter()
+        .find(|id| **id != claimed_id)
+        .expect("the other produced id")
+        .clone();
+    let deleted: i64 = redis::cmd("XDEL")
+        .arg("t1:q1")
+        .arg(&survivor)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(deleted, 1, "one entry hard-deleted");
-    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con).await.unwrap();
+    let len: i64 = redis::cmd("XLEN")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(len, 0, "no live entries after XDEL");
-    let deleted_again: i64 = redis::cmd("XDEL").arg("t1:q1").arg(&survivor)
-        .query_async(&mut con).await.unwrap();
+    let deleted_again: i64 = redis::cmd("XDEL")
+        .arg("t1:q1")
+        .arg(&survivor)
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(deleted_again, 0, "deleting an absent id is a no-op");
 }
 
@@ -914,19 +964,41 @@ async fn xautoclaim_paginates_the_pel_cursor() {
     // "…-10-0" before "…-2-0") and claim them ALL → the PEL has 12 in-flight entries (expiry = 1060).
     let mut produced = Vec::new();
     for p in 0..12 {
-        let id: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(p)
-            .query_async(&mut con).await.unwrap();
+        let id: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(p)
+            .query_async(&mut con)
+            .await
+            .unwrap();
         produced.push(id);
     }
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
-        .arg("GROUP").arg("g").arg("c1").arg("COUNT").arg(12).arg("STREAMS").arg("t1:q1").arg(">")
-        .query_async(&mut con).await.unwrap();
+        .arg("GROUP")
+        .arg("g")
+        .arg("c1")
+        .arg("COUNT")
+        .arg(12)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
     assert_eq!(reply.keys[0].ids.len(), 12, "all twelve leased");
 
     // COUNT 0 is rejected (it would never advance the cursor → client livelock).
     let zero: redis::RedisResult<redis::Value> = redis::cmd("XAUTOCLAIM")
-        .arg("t1:q1").arg("g").arg("c2").arg(0).arg("0-0").arg("COUNT").arg(0)
-        .query_async(&mut con).await;
+        .arg("t1:q1")
+        .arg("g")
+        .arg("c2")
+        .arg(0)
+        .arg("0-0")
+        .arg("COUNT")
+        .arg(0)
+        .query_async(&mut con)
+        .await;
     assert!(zero.is_err(), "COUNT 0 must be rejected");
 
     // Past expiry: page the PEL with COUNT 5 until the cursor returns to 0-0.
@@ -938,8 +1010,16 @@ async fn xautoclaim_paginates_the_pel_cursor() {
         guard += 1;
         assert!(guard < 30, "pagination did not terminate");
         let (next, entries, _del): AutoClaim = redis::cmd("XAUTOCLAIM")
-            .arg("t1:q1").arg("g").arg("c2").arg(0).arg(&cursor).arg("COUNT").arg(5)
-            .query_async(&mut con).await.unwrap();
+            .arg("t1:q1")
+            .arg("g")
+            .arg("c2")
+            .arg(0)
+            .arg(&cursor)
+            .arg("COUNT")
+            .arg(5)
+            .query_async(&mut con)
+            .await
+            .unwrap();
         for (id, _fields) in entries {
             reclaimed.push(id);
         }
@@ -951,14 +1031,29 @@ async fn xautoclaim_paginates_the_pel_cursor() {
     reclaimed.sort();
     let mut expected = produced.clone();
     expected.sort();
-    assert_eq!(reclaimed, expected, "every PEL entry reclaimed EXACTLY once across the pages");
-    assert!(guard >= 3, "COUNT 5 over 12 entries must take multiple pages (not single-shot)");
+    assert_eq!(
+        reclaimed, expected,
+        "every PEL entry reclaimed EXACTLY once across the pages"
+    );
+    assert!(
+        guard >= 3,
+        "COUNT 5 over 12 entries must take multiple pages (not single-shot)"
+    );
 
     // A fresh full scan reclaims nothing — the reclaimed entries hold fresh (unexpired) leases.
     let (next, entries, _): AutoClaim = redis::cmd("XAUTOCLAIM")
-        .arg("t1:q1").arg("g").arg("c2").arg(0).arg("0-0")
-        .query_async(&mut con).await.unwrap();
-    assert!(entries.is_empty(), "freshly-reclaimed leases are not expired");
+        .arg("t1:q1")
+        .arg("g")
+        .arg("c2")
+        .arg(0)
+        .arg("0-0")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        entries.is_empty(),
+        "freshly-reclaimed leases are not expired"
+    );
     assert_eq!(next, "0-0");
 }
 
@@ -975,8 +1070,14 @@ async fn two_consumers_in_a_group_never_get_the_same_item() {
 
     let mut produced = std::collections::HashSet::new();
     for p in 0..20 {
-        let id: String = redis::cmd("XADD").arg("t1:q1").arg("*").arg("priority").arg(p)
-            .query_async(&mut con1).await.unwrap();
+        let id: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(p)
+            .query_async(&mut con1)
+            .await
+            .unwrap();
         produced.insert(id);
     }
 
@@ -984,10 +1085,23 @@ async fn two_consumers_in_a_group_never_get_the_same_item() {
         let mut got = Vec::new();
         loop {
             let reply: Option<StreamReadReply> = redis::cmd("XREADGROUP")
-                .arg("GROUP").arg("g").arg(consumer).arg("COUNT").arg(1).arg("STREAMS").arg("t1:q1").arg(">")
-                .query_async(con).await.unwrap();
+                .arg("GROUP")
+                .arg("g")
+                .arg(consumer)
+                .arg("COUNT")
+                .arg(1)
+                .arg("STREAMS")
+                .arg("t1:q1")
+                .arg(">")
+                .query_async(con)
+                .await
+                .unwrap();
             let Some(reply) = reply else { break };
-            let ids: Vec<String> = reply.keys.iter().flat_map(|k| k.ids.iter().map(|e| e.id.clone())).collect();
+            let ids: Vec<String> = reply
+                .keys
+                .iter()
+                .flat_map(|k| k.ids.iter().map(|e| e.id.clone()))
+                .collect();
             if ids.is_empty() {
                 break;
             }
@@ -999,11 +1113,17 @@ async fn two_consumers_in_a_group_never_get_the_same_item() {
 
     let set_a: std::collections::HashSet<_> = a.iter().cloned().collect();
     let set_b: std::collections::HashSet<_> = b.iter().cloned().collect();
-    assert!(set_a.is_disjoint(&set_b), "no item delivered to BOTH consumers (intra-group exclusion)");
+    assert!(
+        set_a.is_disjoint(&set_b),
+        "no item delivered to BOTH consumers (intra-group exclusion)"
+    );
     assert_eq!(a.len(), set_a.len(), "no item delivered twice to c1");
     assert_eq!(b.len(), set_b.len(), "no item delivered twice to c2");
     let union: std::collections::HashSet<_> = set_a.union(&set_b).cloned().collect();
-    assert_eq!(union, produced, "every produced item delivered exactly once across the group");
+    assert_eq!(
+        union, produced,
+        "every produced item delivered exactly once across the group"
+    );
 }
 
 /// upsert ↔ claim race (owed-item E.4 / Chunk 6c, best-effort): an `XADD`-on-key (replace-pending) racing
@@ -1019,14 +1139,35 @@ async fn upsert_and_claim_race_stays_consistent() {
 
     // Seed one pending item under a client_item_key (so the next XADD-on-key is an upsert/replace).
     let _: redis::Value = redis::cmd("XADD")
-        .arg("t1:q1").arg("*").arg("client_item_key").arg("k1").arg("priority").arg(5)
-        .query_async(&mut con1).await.unwrap();
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("k1")
+        .arg("priority")
+        .arg(5)
+        .query_async(&mut con1)
+        .await
+        .unwrap();
 
     // Concurrently: (a) upsert the same key, (b) claim via XREADGROUP. One serializes before the other.
     let mut upsert_cmd = redis::cmd("XADD");
-    upsert_cmd.arg("t1:q1").arg("*").arg("client_item_key").arg("k1").arg("priority").arg(9);
+    upsert_cmd
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("k1")
+        .arg("priority")
+        .arg(9);
     let mut claim_cmd = redis::cmd("XREADGROUP");
-    claim_cmd.arg("GROUP").arg("g").arg("c").arg("COUNT").arg(1).arg("STREAMS").arg("t1:q1").arg(">");
+    claim_cmd
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">");
     let (_u, _c) = tokio::join!(
         upsert_cmd.query_async::<redis::Value>(&mut con1),
         claim_cmd.query_async::<Option<StreamReadReply>>(&mut con2),
@@ -1034,6 +1175,13 @@ async fn upsert_and_claim_race_stays_consistent() {
 
     // Whichever won, exactly ONE live entry survives (claim→leased + upsert-collision-error, OR
     // upsert→supersede-old+new-pending then claim→leased). No double-insert, no loss.
-    let len: i64 = redis::cmd("XLEN").arg("t1:q1").query_async(&mut con1).await.unwrap();
-    assert_eq!(len, 1, "exactly one live entry survives the upsert↔claim race");
+    let len: i64 = redis::cmd("XLEN")
+        .arg("t1:q1")
+        .query_async(&mut con1)
+        .await
+        .unwrap();
+    assert_eq!(
+        len, 1,
+        "exactly one live entry survives the upsert↔claim race"
+    );
 }

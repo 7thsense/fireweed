@@ -9,9 +9,7 @@ use pqueue_core::{
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
-use pqueue_engine::{
-    ClaimPort, ClaimRequest, Clock, ProjectionRead, PushPort, PushSpec, QueueKey,
-};
+use pqueue_engine::{ClaimPort, ClaimRequest, Clock, ProjectionRead, PushPort, PushSpec, QueueKey};
 use pqueue_memory::{ManualClock, MemoryBackend};
 use pqueue_resp::SystemClock;
 use pqueue_server::{Backend, Config, start, start_with};
@@ -21,10 +19,7 @@ fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
 }
 fn shard() -> QueueKey {
-    QueueKey::new(
-        TenantId::new("t1").unwrap(),
-        QueueId::new("q1").unwrap(),
-    )
+    QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
 }
 fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()

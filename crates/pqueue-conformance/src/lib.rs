@@ -33,8 +33,7 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
     ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem, QueueCommand,
-    QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort,  SnapshotStore,
-    UpsertPort,
+    QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotStore, UpsertPort,
 };
 
 pub mod scenarios;

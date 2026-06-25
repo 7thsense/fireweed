@@ -6,8 +6,8 @@ use std::sync::Arc;
 use pqueue::{EngineError, Nack, NewItem, Pqueue};
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy,
-    RetryPolicy, TenantId,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
+    RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, MemoryBackend};
@@ -202,9 +202,15 @@ async fn fail_dead_letters_a_claimed_item() {
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
     let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
-    pq.fail(&q, claimed.iter().map(|c| c.item_id.clone())).await.unwrap();
+    pq.fail(&q, claimed.iter().map(|c| c.item_id.clone()))
+        .await
+        .unwrap();
     let m = pq.metrics(&q).await.unwrap();
-    assert_eq!((m.failed, m.leased), (1, 0), "fail moves the item to terminal failed");
+    assert_eq!(
+        (m.failed, m.leased),
+        (1, 0),
+        "fail moves the item to terminal failed"
+    );
 }
 
 #[tokio::test]
@@ -243,8 +249,15 @@ async fn reassign_transfers_and_charges_one_delivery() {
 
     pq.reassign(&q, [id.clone()], 30_000).await.unwrap();
     let view = pq.claimed(&q, std::slice::from_ref(&id)).await.unwrap();
-    assert_eq!(view[0].attempt_count, 2, "reassign is a re-delivery (claim 1 + reassign 1)");
-    assert_eq!(pq.metrics(&q).await.unwrap().leased, 1, "still leased under the new owner");
+    assert_eq!(
+        view[0].attempt_count, 2,
+        "reassign is a re-delivery (claim 1 + reassign 1)"
+    );
+    assert_eq!(
+        pq.metrics(&q).await.unwrap().leased,
+        1,
+        "still leased under the new owner"
+    );
 }
 
 #[tokio::test]
@@ -258,11 +271,16 @@ async fn rearm_resets_attempt_and_requeues_the_item() {
     assert_eq!(claimed[0].attempt_count, 1);
 
     // Re-arm: the item returns to pending with attempt_count reset to 0.
-    pq.rearm(&q, claimed.iter().map(|c| c.item_id.clone())).await.unwrap();
+    pq.rearm(&q, claimed.iter().map(|c| c.item_id.clone()))
+        .await
+        .unwrap();
     let m = pq.metrics(&q).await.unwrap();
     assert_eq!((m.pending, m.leased), (1, 0), "rearm re-queues the item");
     let again = pq.claim(&q, 1, 30_000).await.unwrap();
-    assert_eq!(again[0].attempt_count, 1, "the fresh delivery starts at 1 (attempt was reset)");
+    assert_eq!(
+        again[0].attempt_count, 1,
+        "the fresh delivery starts at 1 (attempt was reset)"
+    );
 }
 
 #[tokio::test]
@@ -298,6 +316,10 @@ async fn claimed_renders_only_leased_items() {
     assert_eq!(claimed[0].item_id, lo);
 
     let view = pq.claimed(&q, &[lo.clone(), hi]).await.unwrap();
-    assert_eq!(view.len(), 1, "only the leased item renders; the pending one is omitted");
+    assert_eq!(
+        view.len(),
+        1,
+        "only the leased item renders; the pending one is omitted"
+    );
     assert_eq!(view[0].item_id, lo);
 }
