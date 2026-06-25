@@ -367,6 +367,23 @@ it is gated on an S3-CAS multi-object acquire→fence-atomicity spike before it 
 specified as settled (ADR-008 §4). This design specs only the pluggable **seam**;
 the object-store implementation gets its own fresh-eyes review when it lands.
 
+**Seam contract (what any `ControlPlaneStore` implementation MUST provide).** The
+seam is substrate-neutral; an implementation is admissible only if it upholds these
+invariants — which the Postgres implementation obtains for free from a single
+serializable transaction, and which the deferred object-store implementation MUST
+prove out in the spike before it is specified:
+
+| Invariant | Requirement |
+|-----------|-------------|
+| Single active lease | At most one `active_owner` lease per `(tenant_id, queue_id)` at any instant. Concurrent `acquire_queue_lease` calls MUST linearize: at most one succeeds against a given prior epoch. |
+| Monotonic epoch allocation | `assignment_epoch` is allocated strictly increasing per queue and never repeats or decreases, even across acquire races and reclaims (Epoch monotonicity, above). |
+| Atomic acquire→fence ordering | The acquired epoch MUST become durable and binding on the log **before** the new owner serves any claim or appends any data segment (Single Authoritative Fencing Rule step 1). On a non-transactional substrate this multi-object ordering (lease record + log/manifest epoch) is the hard part the spike must establish. |
+| Bounded staleness on resolve | `resolve_queue_owner` MAY return a stale `active_owner`/`state`, but a stale result MUST be *safe*: acting on it can only fail closed (the fenced append rejects a deposed owner), never produce two live writers. |
+| Fail-closed unavailability | When the control plane is unreachable, existing owners keep serving under live leases and new acquisitions/renewals fail with a retryable error (TD-001 control-plane fallback); no append proceeds on an unconfirmed epoch. |
+
+The trait below is the seam; backend DDL/CAS mechanics live in TD-002 (Postgres)
+and the deferred object-store design (TD-004 territory).
+
 ## API / Interface Design
 
 TD-003 extends the `ControlPlaneStore` capability (TD-001) with queue-ownership
