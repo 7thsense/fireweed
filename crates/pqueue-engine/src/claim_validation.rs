@@ -76,14 +76,9 @@ pub fn validate_claim_compatibility(
         }
         let Some(max_group_size) = queue.max_eligible_group_size else {
             return Err(EngineError::Invalid(
-                "group_batching requires group_co_residency and max_eligible_group_size",
+                "group_batching requires max_eligible_group_size",
             ));
         };
-        if !queue.group_co_residency {
-            return Err(EngineError::Invalid(
-                "group_batching requires group_co_residency and max_eligible_group_size",
-            ));
-        }
         if max_group_size > max_items {
             return Err(EngineError::BatchTooLarge);
         }
@@ -100,11 +95,6 @@ pub fn validate_claim_compatibility(
         if !enabled {
             return Err(EngineError::Invalid(
                 "whole_cohort requires cohort_policy.enabled=true",
-            ));
-        }
-        if !queue.group_co_residency {
-            return Err(EngineError::Invalid(
-                "whole_cohort requires group_co_residency",
             ));
         }
         let Some(completion_bound_ms) = queue.cohort_policy.and_then(|c| c.completion_bound_ms)
@@ -138,17 +128,12 @@ mod tests {
     };
 
     /// Queue def with knobs for the group/cohort capabilities the validation reads.
-    fn qdef(
-        group_co_residency: bool,
-        max_eligible_group_size: Option<u64>,
-        cohort: Option<CohortPolicy>,
-    ) -> QueueDefinition {
+    fn qdef(max_eligible_group_size: Option<u64>, cohort: Option<CohortPolicy>) -> QueueDefinition {
         QueueDefinition {
             tenant_id: TenantId::new("t").unwrap(),
             queue_id: QueueId::new("q").unwrap(),
             priority_model: PriorityModel::timestamp_ascending(),
             ordering_mode: OrderingMode::Strict,
-            group_co_residency,
             progress_bound_ms: 60_000,
             eligibility_policy: EligibilityPolicy::default(),
             cohort_policy: cohort,
@@ -176,7 +161,7 @@ mod tests {
     fn default_is_item_unit() {
         let c = ClaimCompatibility::default();
         assert_eq!(
-            validate_claim_compatibility(&c, 10, &qdef(false, None, None)),
+            validate_claim_compatibility(&c, 10, &qdef(None, None)),
             Ok(ClaimUnit::Item)
         );
     }
@@ -188,35 +173,30 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            validate_claim_compatibility(&c, 10, &qdef(false, None, None)),
+            validate_claim_compatibility(&c, 10, &qdef(None, None)),
             Ok(ClaimUnit::SameGroupKey)
         );
     }
 
     #[test]
-    fn group_batching_requires_co_residency_and_max_group_size() {
+    fn group_batching_requires_max_group_size() {
         let c = ClaimCompatibility {
             group_batching: Some(GroupBatching { max_groups: 2 }),
             ..Default::default()
         };
         // Valid: co-resident + max_eligible_group_size <= max_items.
         assert_eq!(
-            validate_claim_compatibility(&c, 10, &qdef(true, Some(5), None)),
+            validate_claim_compatibility(&c, 10, &qdef(Some(5), None)),
             Ok(ClaimUnit::WholeGroup)
         );
         // Missing max_eligible_group_size.
         assert!(matches!(
-            validate_claim_compatibility(&c, 10, &qdef(true, None, None)),
-            Err(EngineError::Invalid(_))
-        ));
-        // Not co-resident.
-        assert!(matches!(
-            validate_claim_compatibility(&c, 10, &qdef(false, Some(5), None)),
+            validate_claim_compatibility(&c, 10, &qdef(None, None)),
             Err(EngineError::Invalid(_))
         ));
         // max_group_size > max_items → BatchTooLarge.
         assert_eq!(
-            validate_claim_compatibility(&c, 3, &qdef(true, Some(5), None)),
+            validate_claim_compatibility(&c, 3, &qdef(Some(5), None)),
             Err(EngineError::BatchTooLarge)
         );
     }
@@ -228,7 +208,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            validate_claim_compatibility(&zero, 10, &qdef(true, Some(5), None)),
+            validate_claim_compatibility(&zero, 10, &qdef(Some(5), None)),
             Err(EngineError::Invalid(_))
         ));
         let combined = ClaimCompatibility {
@@ -237,42 +217,30 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            validate_claim_compatibility(&combined, 10, &qdef(true, Some(5), None)),
+            validate_claim_compatibility(&combined, 10, &qdef(Some(5), None)),
             Err(EngineError::Invalid(_))
         ));
     }
 
     #[test]
-    fn whole_cohort_requires_enabled_coresident_and_bound() {
+    fn whole_cohort_requires_enabled_and_bound() {
         let c = ClaimCompatibility {
             whole_cohort: true,
             ..Default::default()
         };
         // Valid: cohort enabled, co-resident, completion_bound <= progress_bound.
         assert_eq!(
-            validate_claim_compatibility(
-                &c,
-                10,
-                &qdef(true, None, Some(cohort(true, Some(30_000))))
-            ),
+            validate_claim_compatibility(&c, 10, &qdef(None, Some(cohort(true, Some(30_000))))),
             Ok(ClaimUnit::WholeCohort)
         );
         // Cohort not enabled.
         assert!(matches!(
-            validate_claim_compatibility(
-                &c,
-                10,
-                &qdef(true, None, Some(cohort(false, Some(30_000))))
-            ),
+            validate_claim_compatibility(&c, 10, &qdef(None, Some(cohort(false, Some(30_000))))),
             Err(EngineError::Invalid(_))
         ));
         // completion_bound > progress_bound (60_000).
         assert!(matches!(
-            validate_claim_compatibility(
-                &c,
-                10,
-                &qdef(true, None, Some(cohort(true, Some(90_000))))
-            ),
+            validate_claim_compatibility(&c, 10, &qdef(None, Some(cohort(true, Some(90_000))))),
             Err(EngineError::Invalid(_))
         ));
     }
@@ -283,18 +251,9 @@ mod tests {
             whole_cohort: true,
             ..Default::default()
         };
-        // whole_cohort but not co-resident.
-        assert!(matches!(
-            validate_claim_compatibility(
-                &wc,
-                10,
-                &qdef(false, None, Some(cohort(true, Some(30_000))))
-            ),
-            Err(EngineError::Invalid(_))
-        ));
         // whole_cohort but missing completion_bound_ms.
         assert!(matches!(
-            validate_claim_compatibility(&wc, 10, &qdef(true, None, Some(cohort(true, None)))),
+            validate_claim_compatibility(&wc, 10, &qdef(None, Some(cohort(true, None)))),
             Err(EngineError::Invalid(_))
         ));
         // whole_cohort combined with an explicit group_key.
@@ -304,11 +263,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            validate_claim_compatibility(
-                &wc_gk,
-                10,
-                &qdef(true, None, Some(cohort(true, Some(30_000))))
-            ),
+            validate_claim_compatibility(&wc_gk, 10, &qdef(None, Some(cohort(true, Some(30_000))))),
             Err(EngineError::Invalid(_))
         ));
         // A VALID group_key (good charset) flows through to the Item unit.
@@ -317,7 +272,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            validate_claim_compatibility(&gk, 10, &qdef(false, None, None)),
+            validate_claim_compatibility(&gk, 10, &qdef(None, None)),
             Ok(ClaimUnit::Item)
         );
     }
@@ -329,7 +284,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            validate_claim_compatibility(&c, 10, &qdef(false, None, None)),
+            validate_claim_compatibility(&c, 10, &qdef(None, None)),
             Err(EngineError::Invalid(_))
         ));
     }

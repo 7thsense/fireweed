@@ -445,7 +445,6 @@ pub struct CreateQueue {
     pub queue_id: QueueId,
     pub priority_model: PriorityModel,
     pub ordering_mode: OrderingMode,
-    pub group_co_residency: bool,
     pub progress_bound_ms: u64,
     pub eligibility_policy: EligibilityPolicy,
     pub cohort_policy: CohortPolicy,
@@ -465,7 +464,6 @@ pub struct QueueDefinition {
     pub queue_id: QueueId,
     pub priority_model: PriorityModel,
     pub ordering_mode: OrderingMode,
-    pub group_co_residency: bool,
     pub progress_bound_ms: u64,
     pub eligibility_policy: EligibilityPolicy,
     pub cohort_policy: Option<CohortPolicy>,
@@ -541,12 +539,6 @@ impl CreateQueue {
         }
 
         if self.cohort_policy.enabled {
-            if !self.group_co_residency {
-                return Err(CreateQueueError::conflict(
-                    "cohort-enabled queues require group_co_residency=true",
-                ));
-            }
-
             if self.recurrence.mode == RecurrenceMode::Recurring {
                 return Err(CreateQueueError::invalid_request(
                     "recurrence.mode=recurring is mutually exclusive with cohort_policy.enabled=true",
@@ -624,11 +616,6 @@ impl CreateQueue {
                     "max_eligible_group_size must be greater than 0",
                 ));
             }
-            if !self.group_co_residency {
-                return Err(CreateQueueError::invalid_request(
-                    "max_eligible_group_size requires group_co_residency=true",
-                ));
-            }
             if max_eligible_group_size > self.max_claim_batch_size {
                 return Err(CreateQueueError::conflict(
                     "max_eligible_group_size must be less than or equal to max_claim_batch_size",
@@ -681,7 +668,6 @@ impl CreateQueue {
             queue_id: self.queue_id,
             priority_model: self.priority_model,
             ordering_mode: self.ordering_mode,
-            group_co_residency: self.group_co_residency,
             progress_bound_ms: self.progress_bound_ms,
             eligibility_policy,
             cohort_policy: if self.cohort_policy.enabled {

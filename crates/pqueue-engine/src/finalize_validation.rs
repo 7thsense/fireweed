@@ -90,7 +90,6 @@ mod tests {
             queue_id: QueueId::new("q").unwrap(),
             priority_model: PriorityModel::timestamp_ascending(),
             ordering_mode: OrderingMode::Strict,
-            group_co_residency: false,
             progress_bound_ms: 60_000,
             eligibility_policy: EligibilityPolicy::default(),
             cohort_policy: None,

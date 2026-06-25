@@ -14,7 +14,6 @@ fn valid_create_queue() -> CreateQueue {
         queue_id: QueueId::new("scheduled_actions").unwrap(),
         priority_model: PriorityModel::timestamp_ascending(),
         ordering_mode: OrderingMode::Strict,
-        group_co_residency: true,
         progress_bound_ms: 10_000,
         eligibility_policy: pqueue_core::EligibilityPolicy::default(),
         cohort_policy: CohortPolicy::disabled(),
@@ -81,29 +80,6 @@ fn core_domain_tests_rejects_completion_bound_above_progress_bound() {
         error
             .message
             .contains("less than or equal to progress_bound_ms"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
-#[test]
-fn core_domain_tests_rejects_cohort_without_group_co_residency() {
-    let mut request = valid_create_queue();
-    request.group_co_residency = false;
-    request.cohort_policy = CohortPolicy {
-        enabled: true,
-        completion_bound_ms: Some(9_000),
-        on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
-        max_cohort_size: Some(10),
-    };
-
-    let error = request.validate(&policy()).unwrap_err();
-    assert_eq!(
-        error.kind,
-        pqueue_core::CreateQueueErrorKind::QueueDefinitionConflict
-    );
-    assert!(
-        error.message.contains("group_co_residency=true"),
         "unexpected error message: {}",
         error.message
     );
@@ -361,14 +337,6 @@ fn core_domain_tests_rejects_invalid_recurrence_group_and_gate_shapes() {
             CreateQueueErrorKind::InvalidRequest,
             |request| {
                 request.max_eligible_group_size = Some(0);
-            },
-        ),
-        (
-            "max_eligible_group_size requires group_co_residency=true",
-            CreateQueueErrorKind::InvalidRequest,
-            |request| {
-                request.group_co_residency = false;
-                request.max_eligible_group_size = Some(1);
             },
         ),
         (

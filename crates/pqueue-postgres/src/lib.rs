@@ -679,7 +679,9 @@ impl ControlPlaneStore for PostgresBackend {
             let mut g = self.inner.lock().expect("poisoned");
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             if let Some(existing) = g.queues.get(&key) {
-                if existing.group_co_residency != definition.group_co_residency {
+                if existing.ordering_mode != definition.ordering_mode
+                    || existing.priority_model != definition.priority_model
+                {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
                 return Ok(CreateQueueOutcome {
