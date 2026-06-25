@@ -10,11 +10,25 @@
 //!
 //! Scope (plan §2): BQ-11a = the schema + the 14-arm apply-UoW. BQ-11b = the serialized claim CTE
 //! (candidate-select + lease in one transaction) + Eligibility Precedence in SQL, wiring the full
-//! `core_suite!(@atomic)` at parity with the in-memory reference. Still ahead: `pqueue_group_summary` +
-//! dup-push idempotency/tombstone (BQ-11c), the relational-reconnect suite (BQ-11d), and group/cohort/gate
-//! selection (BQ-14). [`UpsertPort`] is the basic insert/replace-pending form (its idempotency-replay +
-//! `client_item_key` tombstone hardening is BQ-11c); `progress_guard_sort` bounded-relaxed promotion is a
-//! cross-family enhancement deferred so the two projection families never diverge on the core class.
+//! `core_suite!(@atomic)` at parity with the in-memory reference. BQ-11c = `pqueue_group_summary`
+//! (maintained in-transaction with every grouped-item mutation; consumer is BQ-14 g1/g4) + the
+//! `client_item_key` retention tombstone (`pqueue_item_key_retention`) for duplicate-push convergence
+//! across a purge. Still ahead: the relational-reconnect suite (BQ-11d) and group/cohort/gate selection
+//! (BQ-14). `progress_guard_sort` bounded-relaxed promotion is a cross-family enhancement deferred so the
+//! two projection families never diverge on the core class.
+//!
+//! RELATIONAL-ONLY (deliberately OUT of the shared core class): the retention tombstone makes
+//! push→complete→purge→re-push(same key) return `Terminal` here, whereas the log-replay/in-memory family
+//! (no retention) would `Insert` a fresh item. No core conformance scenario exercises that sequence, so
+//! the "two families identical on core" invariant holds; BQ-13 must keep retention (and `group_summary`)
+//! a relational-class concern, NOT add it to the shared core suite — else the families would diverge.
+//!
+//! DEFERRED — data-plane request-id idempotency (`pqueue_request_idempotency`, TD-002 §Idempotency): no
+//! orchestration port carries a `request_id` today (every `CommandEnvelope` is built with `request_id:
+//! None`; the facade passes none; `QueueIdempotencyCache` is deliberately operator-repair-only, see
+//! `pqueue_engine::operator`). Building the table now would be unreachable dead code; end-to-end
+//! request-id replay needs a request-id-carrying port (a separate cross-cutting bead), so it is not
+//! implemented here rather than faked. Tracked as a follow-up.
 //!
 //! ## Lease tokens (TD-004 §security / TD-002 parity)
 //! The durable projection stores only the lease token **hash** (`lease_token_hash`, never the cleartext
@@ -108,6 +122,34 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     next_seq INTEGER NOT NULL,        -- command-position sequence (last_command_sequence source)
     next_item_seq INTEGER NOT NULL,   -- monotonic per-queue item insertion counter (created_seq source)
     PRIMARY KEY (tenant, queue)
+);
+-- BQ-11c: the single per-group summary projection (TD-002 §Per-Group Summary Projection), maintained
+-- in the SAME transaction as every grouped-item mutation (recompute-from-items; exact at mutation time,
+-- lagged across a time-only not_before crossing — see refresh_group_summary). Consumer: BQ-14 g1
+-- whole-group selection + g4 discovery + per-group observability. `rep_progress_guard_sort` is NULL while
+-- the progress-guard derivation is deferred (parity with the strict claim ordering); pause is not modeled
+-- (the summary counts intrinsic eligibility, ignoring the queue-global pause gate — BQ-14 applies pause).
+CREATE TABLE IF NOT EXISTS pqueue_group_summary (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
+    oldest_eligible_at INTEGER,          -- NULL = no currently-eligible item
+    rep_progress_guard_sort BLOB,
+    rep_priority_sort BLOB,
+    rep_created_at INTEGER,
+    rep_item_id TEXT,
+    eligible_item_count INTEGER NOT NULL DEFAULT 0,
+    at_risk_count INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, group_key)
+);
+-- BQ-11c: duplicate-push convergence across a purge (TD-002 §Idempotency `pqueue_item_key_retention`):
+-- when a TERMINAL item is purged, its `client_item_key` is retained until `client_item_key_retention_ms`
+-- elapses, so a re-push of the same key is still rejected as a duplicate (Terminal) rather than
+-- resurrecting the work. (A pending purge records no tombstone — its key is freely reusable, matching the
+-- log-replay family.)
+CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, client_item_key TEXT NOT NULL,
+    item_id TEXT NOT NULL, expires_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, client_item_key)
 );
 "#;
 
@@ -374,10 +416,109 @@ fn apply_token_ops(live_tokens: &mut HashMap<ItemId, LeaseToken>, ops: Vec<Token
     }
 }
 
+/// The distinct non-null `group_key`s of the given item ids (for summary refresh). For arms that DELETE
+/// (purge), call this BEFORE the delete so the groups are still discoverable.
+fn groups_of(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    ids: &[ItemId],
+) -> EngineResult<Vec<GroupKey>> {
+    let (t, q) = parts(shard);
+    let mut seen: Vec<GroupKey> = Vec::new();
+    for id in ids {
+        let g: Option<String> = st(tx
+            .query_row(
+                "SELECT group_key FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                params![t, q, id.as_str()],
+                |row| row.get(0),
+            )
+            .optional())?
+        .flatten();
+        if let Some(g) = g {
+            let gk = GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?;
+            if !seen.contains(&gk) {
+                seen.push(gk);
+            }
+        }
+    }
+    Ok(seen)
+}
+
+/// Recompute `pqueue_group_summary` for one group from `pqueue_items` (exact aggregate over the group's
+/// currently-eligible items, in the SAME transaction as the mutation that touched it). The representative
+/// is the would-be-first-claimed eligible item (strict-claim key `priority_sort, created_seq`), matching
+/// the claim selection; `rep_progress_guard_sort`/`at_risk_count` stay NULL/0 while the progress-guard
+/// derivation is deferred (parity with the strict claim ordering, BQ-14).
+///
+/// EXACT AT MUTATION TIME, lagged across a time-only `not_before` crossing: the aggregate filters
+/// `not_before<=now`, so a deferred item that becomes due WITHOUT a subsequent mutation is not reflected
+/// in `oldest_eligible_at`/`rep_*`/`eligible_item_count` until the next mutation refreshes its group. The
+/// per-item `select_eligible` path re-evaluates `not_before` on read and is unaffected. BQ-14 g1/g4
+/// consumers MUST re-apply the `not_before` gate on read (or a due-sweep must refresh) rather than trust
+/// the stored value as live across time alone.
+fn refresh_group_summary(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    group_key: &GroupKey,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    // Eligible aggregate: pending, not superseded, due at `now`.
+    let (count, oldest): (i64, Option<i64>) = st(tx.query_row(
+        "SELECT COUNT(*), MIN(eligible_since) FROM pqueue_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+         AND lifecycle_state='Pending' AND superseded=0 AND (not_before IS NULL OR not_before<=?4)",
+        params![t, q, group_key.as_str(), now_n],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ))?;
+    // Representative = first-claimable eligible item of the group.
+    let rep: Option<(Vec<u8>, i64, String)> = st(tx
+        .query_row(
+            "SELECT priority_sort, created_at, item_id FROM pqueue_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+             AND lifecycle_state='Pending' AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
+             ORDER BY priority_sort, created_seq LIMIT 1",
+            params![t, q, group_key.as_str(), now_n],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional())?;
+    let (rep_psort, rep_created, rep_item): (Option<Vec<u8>>, Option<i64>, Option<String>) =
+        match rep {
+            Some((p, c, i)) => (Some(p), Some(c), Some(i)),
+            None => (None, None, None),
+        };
+    st(tx.execute(
+        "INSERT INTO pqueue_group_summary \
+         (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
+          rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+         VALUES (?1,?2,?3,?4,NULL,?5,?6,?7,?8,0,?9) \
+         ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
+          oldest_eligible_at=excluded.oldest_eligible_at, \
+          rep_progress_guard_sort=excluded.rep_progress_guard_sort, \
+          rep_priority_sort=excluded.rep_priority_sort, rep_created_at=excluded.rep_created_at, \
+          rep_item_id=excluded.rep_item_id, eligible_item_count=excluded.eligible_item_count, \
+          at_risk_count=excluded.at_risk_count, updated_at=excluded.updated_at",
+        params![
+            t,
+            q,
+            group_key.as_str(),
+            oldest,
+            rep_psort,
+            rep_created,
+            rep_item,
+            count,
+            now_n,
+        ],
+    ))?;
+    Ok(())
+}
+
 /// Apply one command to `pqueue_items` as SQL. Mirrors `ProjectionData::apply_command` arm-for-arm. The
 /// caller must have pre-validated rejectable commands (commit has no rollback past this point), so the
 /// only errors here are storage/`NotFound` faults, never behavioral rejections. Live-token mutations are
-/// appended to `token_ops` (applied post-commit by the caller), never mutated in place.
+/// appended to `token_ops` (applied post-commit by the caller), never mutated in place. Grouped-item
+/// mutations also refresh `pqueue_group_summary` for the affected group(s) in this same transaction.
 fn apply_command_sql(
     tx: &Transaction<'_>,
     queues: &HashMap<QueueKey, QueueDefinition>,
@@ -397,8 +538,17 @@ fn apply_command_sql(
                 .get(shard)
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
+            let mut groups: Vec<GroupKey> = Vec::new();
             for it in &c.items {
                 insert_item(tx, &model, shard, it, seq, now)?;
+                if let Some(g) = &it.group_key
+                    && !groups.contains(g)
+                {
+                    groups.push(g.clone());
+                }
+            }
+            for g in &groups {
+                refresh_group_summary(tx, shard, g, now)?;
             }
             Ok(())
         }
@@ -414,6 +564,9 @@ fn apply_command_sql(
                     params![t, q, id.as_str(), hash, exp, now_n, seq as i64],
                 ))?;
                 token_ops.push(TokenOp::Set(id.clone(), c.lease_token.clone()));
+            }
+            for g in groups_of(tx, shard, &c.item_ids)? {
+                refresh_group_summary(tx, shard, &g, now)?;
             }
             Ok(())
         }
@@ -488,6 +641,10 @@ fn apply_command_sql(
                 ))?;
                 token_ops.push(TokenOp::Clear(o.item_id.clone()));
             }
+            let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id.clone()).collect();
+            for g in groups_of(tx, shard, &ids)? {
+                refresh_group_summary(tx, shard, &g, now)?;
+            }
             Ok(())
         }
         QueueCommand::ReplacePending(c) => {
@@ -503,6 +660,16 @@ fn apply_command_sql(
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
             insert_item(tx, &model, shard, &c.replacement, seq, now)?;
+            // Refresh both the superseded item's group and the replacement's (often the same).
+            let mut groups = groups_of(tx, shard, std::slice::from_ref(&c.superseded_item_id))?;
+            if let Some(g) = &c.replacement.group_key
+                && !groups.contains(g)
+            {
+                groups.push(g.clone());
+            }
+            for g in &groups {
+                refresh_group_summary(tx, shard, g, now)?;
+            }
             Ok(())
         }
         QueueCommand::LeaseExpired(c) => {
@@ -514,6 +681,9 @@ fn apply_command_sql(
                     params![t, q, id.as_str(), now_n, seq as i64],
                 ))?;
                 token_ops.push(TokenOp::Clear(id.clone()));
+            }
+            for g in groups_of(tx, shard, &c.item_ids)? {
+                refresh_group_summary(tx, shard, &g, now)?;
             }
             Ok(())
         }
@@ -544,6 +714,8 @@ fn apply_command_sql(
                 ))?;
                 token_ops.push(TokenOp::Clear(id.clone()));
             }
+            // The whole cohort (group) is now terminal — refresh its summary to empty.
+            refresh_group_summary(tx, shard, &c.group_key, now)?;
             Ok(())
         }
         QueueCommand::FenceLease(c) => {
@@ -580,12 +752,52 @@ fn apply_command_sql(
             Ok(())
         }
         QueueCommand::PurgeItems(c) => {
+            let retention_ms = queues
+                .get(shard)
+                .map(|d| d.client_item_key_retention_ms)
+                .unwrap_or(0);
+            let mut groups: Vec<GroupKey> = Vec::new();
             for id in &c.item_ids {
+                // Read group + key + state BEFORE the delete (for summary refresh + terminal-key retention).
+                let row: Option<(Option<String>, String, String)> = st(tx
+                    .query_row(
+                        "SELECT group_key, client_item_key, lifecycle_state FROM pqueue_items \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        params![t, q, id.as_str()],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional())?;
+                if let Some((gk, ck, state)) = row {
+                    // TD-002 retention tombstone: purging a TERMINAL item keeps its client_item_key a
+                    // duplicate (re-push rejected) until `client_item_key_retention_ms` elapses. A pending
+                    // purge records nothing (its key is freely reusable, matching the log-replay family).
+                    if parse_state(&state)?.is_terminal() && retention_ms > 0 {
+                        let expires =
+                            now_n.saturating_add((retention_ms as i64).saturating_mul(1_000_000));
+                        st(tx.execute(
+                            "INSERT INTO pqueue_item_key_retention \
+                             (tenant_id,queue_id,client_item_key,item_id,expires_at) \
+                             VALUES (?1,?2,?3,?4,?5) ON CONFLICT(tenant_id,queue_id,client_item_key) \
+                             DO UPDATE SET item_id=excluded.item_id, expires_at=excluded.expires_at",
+                            params![t, q, ck, id.as_str(), expires],
+                        ))?;
+                    }
+                    if let Some(g) = gk {
+                        let gk2 =
+                            GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?;
+                        if !groups.contains(&gk2) {
+                            groups.push(gk2);
+                        }
+                    }
+                }
                 st(tx.execute(
                     "DELETE FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                     params![t, q, id.as_str()],
                 ))?;
                 token_ops.push(TokenOp::Clear(id.clone()));
+            }
+            for g in &groups {
+                refresh_group_summary(tx, shard, g, now)?;
             }
             Ok(())
         }
@@ -1225,8 +1437,12 @@ impl ClaimPort for SqliteRelationalBackend {
 }
 
 impl UpsertPort for SqliteRelationalBackend {
-    /// BQ-11a: basic insert / replace-pending / reject-claimed / reject-terminal (mirrors the log-replay
-    /// backend). Dup-push idempotency-replay + the `client_item_key` tombstone are BQ-11c.
+    /// Insert / replace-pending / reject-claimed / reject-terminal. BQ-11c adds the `client_item_key`
+    /// retention tombstone: when no active item exists but a non-expired retention record does (a TERMINAL
+    /// item under this key was purged within `client_item_key_retention_ms`), the re-push is still rejected
+    /// as a duplicate (`Terminal`) rather than resurrecting the work — duplicate-push convergence across a
+    /// purge (TD-002 §Idempotency). Data-plane request-id replay is a separate concern (no port carries a
+    /// `request_id` yet — see the module note).
     fn replace_if_pending(
         &self,
         shard: &QueueKey,
@@ -1269,6 +1485,28 @@ impl UpsertPort for SqliteRelationalBackend {
             };
             match existing {
                 None => {
+                    // No active item — but a non-expired retention tombstone (a terminal item under this
+                    // key was purged within retention) keeps the re-push a duplicate (TD-002).
+                    let retained: Option<i64> = st(g
+                        .conn
+                        .query_row(
+                            "SELECT expires_at FROM pqueue_item_key_retention \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
+                            params![t, q, client_item_key.as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional())?;
+                    if let Some(expires) = retained {
+                        if expires > ts_nanos(now) {
+                            return Err(EngineError::Terminal);
+                        }
+                        // Expired: the key is reusable again — clear the stale tombstone, then insert.
+                        st(g.conn.execute(
+                            "DELETE FROM pqueue_item_key_retention \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
+                            params![t, q, client_item_key.as_str()],
+                        ))?;
+                    }
                     g.commit_command(
                         shard,
                         QueueCommand::Push(PushCommand { items: vec![item] }),
@@ -1470,5 +1708,245 @@ impl ReclaimDriver for SqliteRelationalBackend {
             Ok(report)
         })();
         std::future::ready(result)
+    }
+}
+
+#[cfg(test)]
+mod group_summary_tests {
+    //! White-box tests for `pqueue_group_summary` maintenance — they read the summary table directly
+    //! (it has no read port yet; BQ-14 consumes it), driving state through the public ports.
+    use super::*;
+    use pqueue_core::{
+        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModelKind, PriorityTieBreaker,
+        QueueId, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
+    };
+    use pqueue_engine::{ClaimRequest, CommandChecksum, CommandId};
+
+    fn qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t1").unwrap(),
+            queue_id: QueueId::new("q1").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+        }
+    }
+
+    fn shard() -> QueueKey {
+        QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
+    }
+    fn ts(s: i64) -> UtcTimestamp {
+        UtcTimestamp::new(s, 0).unwrap()
+    }
+    fn grouped(priority: i64, group: &str) -> PushSpec {
+        PushSpec {
+            priority: Some(PriorityValue::Int64(priority)),
+            group_key: Some(GroupKey::new(group).unwrap()),
+            ..Default::default()
+        }
+    }
+    fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
+        ClaimRequest {
+            shard: shard(),
+            worker_id: WorkerId::new("w1").unwrap(),
+            max_items: max,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: ts(exp),
+            now: ts(now),
+        }
+    }
+
+    /// (oldest_eligible_at, eligible_item_count, rep_item_id) for the group, or None if no row exists.
+    fn summary(
+        b: &SqliteRelationalBackend,
+        group: &str,
+    ) -> Option<(Option<i64>, i64, Option<String>)> {
+        let g = b.inner.lock().unwrap();
+        g.conn
+            .query_row(
+                "SELECT oldest_eligible_at, eligible_item_count, rep_item_id \
+                 FROM pqueue_group_summary WHERE tenant_id='t1' AND queue_id='q1' AND group_key=?1",
+                params![group],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn group_summary_tracks_eligibility_through_the_lifecycle() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+
+        // Push two grouped items (priorities 10, 20) — rep is the priority-10 item, count 2.
+        let ids = b
+            .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0))
+            .await
+            .unwrap();
+        let (oldest, count, rep) = summary(&b, "g").expect("summary row created on grouped push");
+        assert_eq!(count, 2);
+        assert!(
+            oldest.is_some(),
+            "oldest_eligible_at set while items eligible"
+        );
+        assert_eq!(
+            rep.as_deref(),
+            Some(ids[0].as_str()),
+            "rep is the first-claimable item"
+        );
+
+        // Claim the rep (priority 10) — it leaves eligibility; count 1, rep advances to the priority-20 item.
+        b.claim(claim_req(1, 500, 10)).await.unwrap();
+        let (_, count, rep) = summary(&b, "g").unwrap();
+        assert_eq!(count, 1, "leased item leaves the eligible count");
+        assert_eq!(
+            rep.as_deref(),
+            Some(ids[1].as_str()),
+            "rep advances to the next eligible item"
+        );
+
+        // Purge the remaining pending grouped item — group drains to empty.
+        b.purge(&shard(), vec![ids[1].clone()], false, ts(20))
+            .await
+            .unwrap();
+        let (oldest, count, rep) = summary(&b, "g").unwrap();
+        assert_eq!(count, 0, "empty group has zero eligible");
+        assert!(
+            oldest.is_none() && rep.is_none(),
+            "no representative when empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_expiry_returns_item_to_the_group_summary() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let ids = b
+            .push(&shard(), vec![grouped(5, "g")], ts(0))
+            .await
+            .unwrap();
+        b.claim(claim_req(1, 100, 10)).await.unwrap();
+        assert_eq!(summary(&b, "g").unwrap().1, 0, "leased -> not eligible");
+
+        // Reclaim the expired lease (tick) -> the item is pending again and back in the group's count.
+        b.tick(ts(101)).await.unwrap();
+        let (_, count, rep) = summary(&b, "g").unwrap();
+        assert_eq!(count, 1, "reclaimed item is eligible again");
+        assert_eq!(rep.as_deref(), Some(ids[0].as_str()));
+    }
+
+    #[tokio::test]
+    async fn finalize_release_returns_item_to_the_group_summary() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let ids = b
+            .push(&shard(), vec![grouped(5, "g")], ts(0))
+            .await
+            .unwrap();
+        b.claim(claim_req(1, 500, 10)).await.unwrap();
+        assert_eq!(summary(&b, "g").unwrap().1, 0, "leased -> not eligible");
+
+        // Release (no-fault give-back) returns the item to pending -> back in the group's eligible count.
+        b.finalize(
+            &shard(),
+            vec![FinalizeOutcome {
+                item_id: ids[0].clone(),
+                kind: FinalizeKind::Release,
+            }],
+            ts(20),
+        )
+        .await
+        .unwrap();
+        let (_, count, rep) = summary(&b, "g").unwrap();
+        assert_eq!(count, 1, "released item is eligible again");
+        assert_eq!(rep.as_deref(), Some(ids[0].as_str()));
+    }
+
+    #[tokio::test]
+    async fn cohort_expired_drains_the_group_summary() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        b.push(&shard(), vec![grouped(5, "g"), grouped(6, "g")], ts(0))
+            .await
+            .unwrap();
+        assert_eq!(summary(&b, "g").unwrap().1, 2);
+
+        // Force the whole cohort terminal -> the group's eligible summary drains to empty.
+        commit_cohort_expired(&b, "g", ts(20)).await;
+        let (oldest, count, rep) = summary(&b, "g").unwrap();
+        assert_eq!(
+            count, 0,
+            "cohort-expired members are terminal -> not eligible"
+        );
+        assert!(oldest.is_none() && rep.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_purge_records_no_retention_tombstone() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let key = ClientItemKey::new("pk").unwrap();
+        let id = match b
+            .replace_if_pending(
+                &shard(),
+                &key,
+                Some(PriorityValue::Int64(5)),
+                None,
+                None,
+                None,
+                ts(0),
+            )
+            .await
+            .unwrap()
+        {
+            UpsertOutcome::Inserted { item_id } => item_id,
+            _ => panic!("insert"),
+        };
+        // Purge a PENDING item (not terminal) -> no retention tombstone, so the key is freely reusable.
+        b.purge(&shard(), vec![id], false, ts(1)).await.unwrap();
+        assert!(
+            matches!(
+                b.replace_if_pending(&shard(), &key, None, None, None, None, ts(2))
+                    .await
+                    .unwrap(),
+                UpsertOutcome::Inserted { .. }
+            ),
+            "a pending purge leaves no tombstone (parity with the log-replay family)"
+        );
+    }
+
+    /// Apply a `CohortExpired` command through the write UoW (no dedicated port).
+    async fn commit_cohort_expired(b: &SqliteRelationalBackend, group: &str, now: UtcTimestamp) {
+        let env = CommandEnvelope {
+            command_id: CommandId::new("ce"),
+            request_id: None,
+            item_ids: vec![],
+            command: QueueCommand::CohortExpired(pqueue_engine::CohortExpiredCommand {
+                group_key: GroupKey::new(group).unwrap(),
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        b.write(move |lw, pw| {
+            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
+            pw.apply(&pos, std::slice::from_ref(&env))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 }

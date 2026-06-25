@@ -79,6 +79,13 @@ review → commit → `ddx bead close`.
 - **BQ-11c sqlite relational group_summary + idempotency/tombstone.** `pqueue_group_summary`
   `(tenant,queue,group_key)`; idempotency + `client_item_key` tombstone, maintained in-transaction. *Acc:*
   idempotency replay, dup-push convergence, purge tombstone, group_summary scenarios pass.
+  *DELIVERED:* `pqueue_group_summary` (refresh-from-items in-tx on every grouped-item-affecting arm; consumer
+  BQ-14) + `pqueue_item_key_retention` (terminal-purge tombstone → dup-push convergence). dup-push convergence
+  for live keys was already done (UpsertPort, BQ-11a/b). **DEFERRED → BQ-11e:** data-plane request-id
+  idempotency (`pqueue_request_idempotency`) — no orchestration port carries a `request_id` yet (all
+  envelopes `request_id:None`; `QueueIdempotencyCache` is operator-repair-only), so the table would be dead
+  code; needs a request-id-carrying port (cross-cutting). group_summary/retention are RELATIONAL-ONLY
+  (kept out of the shared core class so the two families stay identical on core; BQ-13 must respect this).
 - **BQ-11d sqlite relational reconnect recovery.** Reopen→committed-state, no log replay (the
   relational-reconnect class). *Acc:* relational-reconnect suite passes on sqlite.
 - **BQ-12 postgres relational projection (live-DB-gated).** Same schema in Postgres; real `FOR UPDATE SKIP
@@ -145,7 +152,7 @@ review → commit → `ddx bead close`.
 
 ## 4. Progress
 - [x] BQ-01 (P0, atomic; folds in the old BQ-02/03)
-- [x] BQ-10 · [x] BQ-11a · [x] BQ-11b · [ ] BQ-11c · [ ] BQ-11d · [ ] BQ-12 · [ ] BQ-13 · [ ] BQ-14   (P1)
+- [x] BQ-10 · [x] BQ-11a · [x] BQ-11b · [x] BQ-11c · [ ] BQ-11d · [ ] BQ-12 · [ ] BQ-13 · [ ] BQ-14 · [ ] BQ-11e (deferred: request-id idempotency, needs request_id port)   (P1)
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
 - [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
 - [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)

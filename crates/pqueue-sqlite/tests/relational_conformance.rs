@@ -499,6 +499,76 @@ async fn upsert_inserts_then_replaces_then_rejects() {
     );
 }
 
+/// BQ-11c: duplicate-push convergence across a purge (TD-002 `pqueue_item_key_retention`). After a
+/// TERMINAL item under a key is purged, a re-push of the same key is still rejected as a duplicate
+/// (`Terminal`) until `client_item_key_retention_ms` elapses — it cannot resurrect the completed work.
+#[tokio::test]
+async fn purged_terminal_key_is_retained_against_repush() {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap(); // client_item_key_retention_ms = 60_000
+    let key = ClientItemKey::new("rk").unwrap();
+
+    // Insert, claim, complete -> terminal; then purge the terminal item (no force: it is not leased).
+    let UpsertOutcome::Inserted { item_id } = b
+        .replace_if_pending(
+            &shard(),
+            &key,
+            Some(PriorityValue::Int64(5)),
+            None,
+            None,
+            None,
+            ts(0),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("insert");
+    };
+    b.claim(claim_req(1, 500, 1)).await.unwrap();
+    b.finalize(
+        &shard(),
+        vec![FinalizeOutcome {
+            item_id: item_id.clone(),
+            kind: FinalizeKind::Complete,
+        }],
+        ts(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        b.purge(&shard(), vec![item_id], false, ts(3))
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Re-push the SAME key within retention (now=10 << expiry 3s + 60s): still a duplicate, not a new item.
+    assert!(
+        b.replace_if_pending(&shard(), &key, None, None, None, None, ts(10))
+            .await
+            .is_err(),
+        "purged terminal key is retained -> re-push rejected as a duplicate"
+    );
+
+    // After retention expires (now beyond 3s + 60s), the key is reusable: a fresh insert succeeds.
+    let outcome = b
+        .replace_if_pending(
+            &shard(),
+            &key,
+            Some(PriorityValue::Int64(7)),
+            None,
+            None,
+            None,
+            ts(70),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, UpsertOutcome::Inserted { .. }),
+        "after retention elapses the key is freely reusable"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. Regression guards from the BQ-11a fresh-eyes review
 // ---------------------------------------------------------------------------
