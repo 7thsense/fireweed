@@ -59,7 +59,7 @@ use pqueue_engine::{
     ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
     PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand,
     ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
-    ShardId, ShardKey, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
     build_push_items, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
@@ -96,7 +96,7 @@ fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
 }
 
-fn parts(shard: &ShardKey) -> (String, String) {
+fn parts(shard: &QueueKey) -> (String, String) {
     (
         shard.tenant_id.as_str().to_string(),
         shard.queue_id.as_str().to_string(),
@@ -105,7 +105,7 @@ fn parts(shard: &ShardKey) -> (String, String) {
 
 struct Inner {
     client: Client,
-    projections: HashMap<ShardKey, ProjectionData>,
+    projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
     cmd_seq: u64,
 }
@@ -122,7 +122,6 @@ impl Inner {
         CommandEnvelope {
             command_id: CommandId::new(format!("pg-{n}")),
             request_id: None,
-            shard_id: ShardId::ZERO,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -134,7 +133,7 @@ impl Inner {
     /// Returns the committed position. Does NOT touch the projection (caller applies after, infallibly).
     fn append_durable(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         env: &CommandEnvelope,
     ) -> EngineResult<CommandPosition> {
         let (t, q) = parts(shard);
@@ -168,7 +167,7 @@ impl Inner {
     /// doesn't, the durable log has advanced past the live projection — a silent in-process divergence. We
     /// refuse to return that as an ordinary `Err` (indistinguishable from a clean pre-commit rejection);
     /// we panic, which is the correct "rebuild the projection" signal.
-    fn commit_locked(&mut self, shard: &ShardKey, env: CommandEnvelope) -> EngineResult<()> {
+    fn commit_locked(&mut self, shard: &QueueKey, env: CommandEnvelope) -> EngineResult<()> {
         self.append_durable(shard, &env)?;
         self.projections
             .get_mut(shard)
@@ -197,7 +196,7 @@ impl Inner {
             let definition: QueueDefinition =
                 serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            let shard = PostgresBackend::launch_shard(&key);
+            let shard = key.clone();
             let mut proj = ProjectionData::new(definition.priority_model);
             for env in self.read_log_envelopes(&t, &q)? {
                 if let Some(n) = env
@@ -282,10 +281,6 @@ impl PostgresBackend {
             inner: Mutex::new(inner),
         })
     }
-
-    fn launch_shard(key: &QueueKey) -> ShardKey {
-        ShardKey::new(key.tenant_id.clone(), key.queue_id.clone(), ShardId::ZERO)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +294,7 @@ struct PgLogWriter<'a> {
 impl LogWriter for PgLogWriter<'_> {
     fn append(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         commands: &[CommandEnvelope],
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
@@ -329,7 +324,7 @@ impl LogWriter for PgLogWriter<'_> {
 }
 
 struct PgProjectionWriter<'a> {
-    projections: &'a mut HashMap<ShardKey, ProjectionData>,
+    projections: &'a mut HashMap<QueueKey, ProjectionData>,
 }
 
 impl ProjectionWriter for PgProjectionWriter<'_> {
@@ -340,7 +335,7 @@ impl ProjectionWriter for PgProjectionWriter<'_> {
     ) -> EngineResult<()> {
         for (pos, cmd) in positions.iter().zip(commands) {
             self.projections
-                .get_mut(&pos.shard_key)
+                .get_mut(&pos.queue)
                 .ok_or(EngineError::NotFound)?
                 .apply_command(&cmd.command)?;
         }
@@ -410,7 +405,7 @@ impl ClaimPort for PostgresBackend {
 impl UpsertPort for PostgresBackend {
     fn replace_if_pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         client_item_key: &ClientItemKey,
         priority: Option<PriorityValue>,
         group_key: Option<GroupKey>,
@@ -426,7 +421,7 @@ impl UpsertPort for PostgresBackend {
             };
             let max_attempts = g
                 .queues
-                .get(&shard.queue_key())
+                .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
             // ONE command-sequence number stamps both the command id and the assigned item id (the
@@ -446,7 +441,6 @@ impl UpsertPort for PostgresBackend {
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("pg-{n}")),
                 request_id: None,
-                shard_id: ShardId::ZERO,
                 item_ids: vec![new_item_id.clone()],
                 command,
                 checksum: CommandChecksum(0),
@@ -493,7 +487,7 @@ impl UpsertPort for PostgresBackend {
 impl PushPort for PostgresBackend {
     fn push(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
@@ -506,7 +500,7 @@ impl PushPort for PostgresBackend {
             }
             let max_attempts = g
                 .queues
-                .get(&shard.queue_key())
+                .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
             let n = g.cmd_seq;
@@ -515,7 +509,6 @@ impl PushPort for PostgresBackend {
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("pg-{n}")),
                 request_id: None,
-                shard_id: ShardId::ZERO,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),
@@ -531,7 +524,7 @@ impl PushPort for PostgresBackend {
 impl FinalizePort for PostgresBackend {
     fn finalize(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
@@ -554,7 +547,7 @@ impl FinalizePort for PostgresBackend {
 impl RenewLeasePort for PostgresBackend {
     fn renew(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
@@ -580,7 +573,7 @@ impl RenewLeasePort for PostgresBackend {
 impl ReassignLeasePort for PostgresBackend {
     fn reassign(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
@@ -608,7 +601,7 @@ impl ReassignLeasePort for PostgresBackend {
 impl PurgePort for PostgresBackend {
     fn purge(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
@@ -654,7 +647,7 @@ impl ReclaimDriver for PostgresBackend {
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            let expired: Vec<(ShardKey, Vec<ItemId>)> = g
+            let expired: Vec<(QueueKey, Vec<ItemId>)> = g
                 .projections
                 .iter()
                 .filter_map(|(shard, proj)| {
@@ -687,7 +680,6 @@ impl ControlPlaneStore for PostgresBackend {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             if let Some(existing) = g.queues.get(&key) {
                 if existing.group_co_residency != definition.group_co_residency
-                    || existing.shard_count != definition.shard_count
                 {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
@@ -705,7 +697,7 @@ impl ControlPlaneStore for PostgresBackend {
                 "INSERT INTO queues(tenant,queue,definition) VALUES($1,$2,$3)",
                 &[&t, &q, &def_json],
             ))?;
-            let shard = PostgresBackend::launch_shard(&key);
+            let shard = key.clone();
             g.projections
                 .insert(shard, ProjectionData::new(definition.priority_model));
             g.queues.insert(key, definition.clone());
@@ -750,7 +742,7 @@ impl ControlPlaneStore for PostgresBackend {
 
     fn current_epoch(
         &self,
-        _shard: &ShardKey,
+        _shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         // Single-node, single-epoch for launch (plan §2.5); epoch fencing is post-launch.
         std::future::ready(Ok(0))
@@ -760,7 +752,7 @@ impl ControlPlaneStore for PostgresBackend {
 impl LogRead for PostgresBackend {
     fn read_from(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
@@ -801,7 +793,7 @@ impl LogRead for PostgresBackend {
 impl ProjectionRead for PostgresBackend {
     fn select_eligible(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
@@ -815,7 +807,7 @@ impl ProjectionRead for PostgresBackend {
 
     fn peek(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
         let result = (|| {
@@ -828,7 +820,7 @@ impl ProjectionRead for PostgresBackend {
 
     fn pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
         let result = (|| {
             let g = self.inner.lock().expect("poisoned");
@@ -840,7 +832,7 @@ impl ProjectionRead for PostgresBackend {
 
     fn claimed_view(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         let result = (|| {
@@ -857,7 +849,7 @@ impl ProjectionRead for PostgresBackend {
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         let result = (|| {
             let g = self.inner.lock().expect("poisoned");
-            let shard = PostgresBackend::launch_shard(queue);
+            let shard = queue.clone();
             let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
             Ok(proj.metrics())
         })();
@@ -868,7 +860,7 @@ impl ProjectionRead for PostgresBackend {
 impl SnapshotStore for PostgresBackend {
     fn write_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
@@ -894,7 +886,7 @@ impl SnapshotStore for PostgresBackend {
                 ],
             ))?;
             Ok(SnapshotRef {
-                shard_key: shard.clone(),
+                queue: shard.clone(),
                 position,
                 ref_id,
             })
@@ -904,7 +896,7 @@ impl SnapshotStore for PostgresBackend {
 
     fn latest_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
@@ -919,7 +911,7 @@ impl SnapshotStore for PostgresBackend {
                 let epoch: i64 = row.get(1);
                 let seq: i64 = row.get(2);
                 SnapshotRef {
-                    shard_key: shard.clone(),
+                    queue: shard.clone(),
                     position: CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
                     ref_id,
                 }
@@ -933,7 +925,7 @@ impl SnapshotStore for PostgresBackend {
         snapshot_ref: &SnapshotRef,
     ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send {
         let result = (|| {
-            let (t, q) = parts(&snapshot_ref.shard_key);
+            let (t, q) = parts(&snapshot_ref.queue);
             let mut g = self.inner.lock().expect("poisoned");
             let row = st(g.client.query_opt(
                 "SELECT payload FROM snapshots WHERE tenant=$1 AND queue=$2 AND ref_id=$3",
@@ -949,7 +941,7 @@ impl SnapshotStore for PostgresBackend {
 
     fn high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
@@ -969,7 +961,7 @@ impl SnapshotStore for PostgresBackend {
 
     fn set_high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {

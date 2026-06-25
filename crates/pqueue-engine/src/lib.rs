@@ -46,7 +46,7 @@ pub use port::{
     QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotRef, SnapshotStore,
     TickReport, UpsertOutcome, UpsertPort,
 };
-pub use types::{CommandPosition, DurabilityClass, QueueKey, ShardId, ShardKey};
+pub use types::{CommandPosition, DurabilityClass, QueueKey};
 
 #[cfg(test)]
 mod tests {
@@ -107,7 +107,7 @@ mod tests {
     fn command_position_is_shard_local_monotonic() {
         let tenant = pqueue_core::TenantId::new("t").unwrap();
         let queue = pqueue_core::QueueId::new("q").unwrap();
-        let shard = ShardKey::new(tenant, queue, ShardId::ZERO);
+        let shard = QueueKey::new(tenant, queue);
         let p1 = CommandPosition::new(shard.clone(), 0, 1);
         let p2 = CommandPosition::new(shard.clone(), 0, 2);
         let p3 = CommandPosition::new(shard, 1, 0);

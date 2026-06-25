@@ -38,7 +38,6 @@ fn qdef() -> QueueDefinition {
         max_push_batch_size: 100,
         max_claim_batch_size: 100,
         max_eligible_group_size: None,
-        shard_count: 1,
     }
 }
 

@@ -33,7 +33,7 @@ use pqueue_engine::{
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
     ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
     PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, ShardId, ShardKey, SnapshotRef, SnapshotStore,
+    ReclaimDriver, RenewLeaseCommand, RenewLeasePort,  SnapshotRef, SnapshotStore,
     TickReport, UpsertOutcome, UpsertPort, build_push_items, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
@@ -55,7 +55,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// `{root}/{hex(tenant\0queue)}` — a path-safe, collision-free directory per shard.
-fn shard_dir(root: &Path, shard: &ShardKey) -> PathBuf {
+fn shard_dir(root: &Path, shard: &QueueKey) -> PathBuf {
     let raw = format!(
         "{}\u{0}{}",
         shard.tenant_id.as_str(),
@@ -91,7 +91,7 @@ fn next_seq(log_dir: &Path) -> EngineResult<u64> {
 /// durable chokepoint both write paths funnel through (`commit_locked` and `Backend::write` →
 /// `ObjLogWriter`): a `ReplacePending` command is refused with `Unavailable` BEFORE any object is
 /// written, so the ban holds at the write path, not just the `replace_if_pending` port.
-fn append_object(root: &Path, shard: &ShardKey, env: &CommandEnvelope) -> EngineResult<u64> {
+fn append_object(root: &Path, shard: &QueueKey, env: &CommandEnvelope) -> EngineResult<u64> {
     if matches!(env.command, QueueCommand::ReplacePending(_)) {
         return Err(EngineError::Unavailable);
     }
@@ -126,13 +126,13 @@ struct SnapshotObject {
 
 struct Inner {
     root: PathBuf,
-    projections: HashMap<ShardKey, ProjectionData>,
+    projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
     cmd_seq: u64,
 }
 
 impl Inner {
-    fn shard_dir(&self, shard: &ShardKey) -> PathBuf {
+    fn shard_dir(&self, shard: &QueueKey) -> PathBuf {
         shard_dir(&self.root, shard)
     }
 
@@ -147,7 +147,6 @@ impl Inner {
         CommandEnvelope {
             command_id: CommandId::new(format!("obj-{n}")),
             request_id: None,
-            shard_id: ShardId::ZERO,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -156,7 +155,7 @@ impl Inner {
     }
 
     /// Durable append + infallible in-memory apply (the orchestration unit). Caller MUST pre-validate.
-    fn commit_locked(&mut self, shard: &ShardKey, env: CommandEnvelope) -> EngineResult<()> {
+    fn commit_locked(&mut self, shard: &QueueKey, env: CommandEnvelope) -> EngineResult<()> {
         append_object(&self.root, shard, &env)?;
         self.projections
             .get_mut(shard)
@@ -173,7 +172,7 @@ impl Inner {
     /// (an append interrupted by a crash): since `next_seq` is `max+1`, only the highest-seq object can
     /// be a partial write, and it has no successor, so it is treated as uncommitted and skipped. A parse
     /// failure on any NON-final object is genuine corruption and is propagated.
-    fn read_envelopes(&self, shard: &ShardKey) -> EngineResult<Vec<(u64, CommandEnvelope)>> {
+    fn read_envelopes(&self, shard: &QueueKey) -> EngineResult<Vec<(u64, CommandEnvelope)>> {
         let log_dir = self.shard_dir(shard).join("log");
         if !log_dir.exists() {
             return Ok(Vec::new());
@@ -205,7 +204,7 @@ impl Inner {
         Ok(rows)
     }
 
-    fn read_high_water(&self, shard: &ShardKey) -> EngineResult<Option<CommandPosition>> {
+    fn read_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         let path = self.shard_dir(shard).join("high_water.json");
         if !path.exists() {
             return Ok(None);
@@ -233,7 +232,7 @@ impl Inner {
                 serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?)
                     .map_err(store)?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            let shard = launch_shard(&key);
+            let shard = key.clone();
             let mut proj = ProjectionData::new(definition.priority_model);
             for (_seq, env) in self.read_envelopes(&shard)? {
                 if let Some(n) = env
@@ -255,10 +254,6 @@ impl Inner {
         }
         Ok(())
     }
-}
-
-fn launch_shard(key: &QueueKey) -> ShardKey {
-    ShardKey::new(key.tenant_id.clone(), key.queue_id.clone(), ShardId::ZERO)
 }
 
 /// Object-log backed, eventual-apply-class backend (filesystem object store).
@@ -294,7 +289,7 @@ struct ObjLogWriter {
 impl LogWriter for ObjLogWriter {
     fn append(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         commands: &[CommandEnvelope],
     ) -> EngineResult<Vec<CommandPosition>> {
         let mut positions = Vec::with_capacity(commands.len());
@@ -307,7 +302,7 @@ impl LogWriter for ObjLogWriter {
 }
 
 struct ObjProjectionWriter<'a> {
-    projections: &'a mut HashMap<ShardKey, ProjectionData>,
+    projections: &'a mut HashMap<QueueKey, ProjectionData>,
 }
 
 impl ProjectionWriter for ObjProjectionWriter<'_> {
@@ -318,7 +313,7 @@ impl ProjectionWriter for ObjProjectionWriter<'_> {
     ) -> EngineResult<()> {
         for (pos, cmd) in positions.iter().zip(commands) {
             self.projections
-                .get_mut(&pos.shard_key)
+                .get_mut(&pos.queue)
                 .ok_or(EngineError::NotFound)?
                 .apply_command(&cmd.command)?;
         }
@@ -390,7 +385,7 @@ impl UpsertPort for ObjectLogBackend {
     #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
-        _shard: &ShardKey,
+        _shard: &QueueKey,
         _client_item_key: &ClientItemKey,
         _priority: Option<PriorityValue>,
         _group_key: Option<GroupKey>,
@@ -407,7 +402,7 @@ impl UpsertPort for ObjectLogBackend {
 impl PushPort for ObjectLogBackend {
     fn push(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
@@ -419,7 +414,7 @@ impl PushPort for ObjectLogBackend {
             }
             let max_attempts = g
                 .queues
-                .get(&shard.queue_key())
+                .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
             let n = g.cmd_seq;
@@ -428,7 +423,6 @@ impl PushPort for ObjectLogBackend {
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("obj-{n}")),
                 request_id: None,
-                shard_id: ShardId::ZERO,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),
@@ -444,7 +438,7 @@ impl PushPort for ObjectLogBackend {
 impl FinalizePort for ObjectLogBackend {
     fn finalize(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
@@ -467,7 +461,7 @@ impl FinalizePort for ObjectLogBackend {
 impl RenewLeasePort for ObjectLogBackend {
     fn renew(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
@@ -493,7 +487,7 @@ impl RenewLeasePort for ObjectLogBackend {
 impl ReassignLeasePort for ObjectLogBackend {
     fn reassign(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
@@ -521,7 +515,7 @@ impl ReassignLeasePort for ObjectLogBackend {
 impl PurgePort for ObjectLogBackend {
     fn purge(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
@@ -567,7 +561,7 @@ impl ReclaimDriver for ObjectLogBackend {
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            let expired: Vec<(ShardKey, Vec<ItemId>)> = g
+            let expired: Vec<(QueueKey, Vec<ItemId>)> = g
                 .projections
                 .iter()
                 .filter_map(|(shard, proj)| {
@@ -600,7 +594,6 @@ impl ControlPlaneStore for ObjectLogBackend {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             if let Some(existing) = g.queues.get(&key) {
                 if existing.group_co_residency != definition.group_co_residency
-                    || existing.shard_count != definition.shard_count
                 {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
@@ -609,7 +602,7 @@ impl ControlPlaneStore for ObjectLogBackend {
                     definition: existing.clone(),
                 });
             }
-            let shard = launch_shard(&key);
+            let shard = key.clone();
             let dir = g.shard_dir(&shard);
             fs::create_dir_all(&dir).map_err(store)?;
             fs::write(dir.join("queue.json"), to_json(&definition)?).map_err(store)?;
@@ -657,7 +650,7 @@ impl ControlPlaneStore for ObjectLogBackend {
 
     fn current_epoch(
         &self,
-        _shard: &ShardKey,
+        _shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         std::future::ready(Ok(0))
     }
@@ -666,7 +659,7 @@ impl ControlPlaneStore for ObjectLogBackend {
 impl LogRead for ObjectLogBackend {
     fn read_from(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
@@ -695,7 +688,7 @@ impl LogRead for ObjectLogBackend {
 impl ProjectionRead for ObjectLogBackend {
     fn select_eligible(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
@@ -709,7 +702,7 @@ impl ProjectionRead for ObjectLogBackend {
 
     fn peek(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
         let result = (|| {
@@ -722,7 +715,7 @@ impl ProjectionRead for ObjectLogBackend {
 
     fn pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
         let result = (|| {
             let g = self.inner.lock().expect("poisoned");
@@ -734,7 +727,7 @@ impl ProjectionRead for ObjectLogBackend {
 
     fn claimed_view(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         let result = (|| {
@@ -751,7 +744,7 @@ impl ProjectionRead for ObjectLogBackend {
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         let result = (|| {
             let g = self.inner.lock().expect("poisoned");
-            let shard = launch_shard(queue);
+            let shard = queue.clone();
             let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
             Ok(proj.metrics())
         })();
@@ -762,7 +755,7 @@ impl ProjectionRead for ObjectLogBackend {
 impl SnapshotStore for ObjectLogBackend {
     fn write_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
@@ -795,7 +788,7 @@ impl SnapshotStore for ObjectLogBackend {
             )
             .map_err(store)?;
             Ok(SnapshotRef {
-                shard_key: shard.clone(),
+                queue: shard.clone(),
                 position,
                 ref_id,
             })
@@ -805,7 +798,7 @@ impl SnapshotStore for ObjectLogBackend {
 
     fn latest_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
         let result = (|| {
             let g = self.inner.lock().expect("poisoned");
@@ -831,7 +824,7 @@ impl SnapshotStore for ObjectLogBackend {
                 }
             }
             Ok(best.map(|(_, obj, ref_id)| SnapshotRef {
-                shard_key: shard.clone(),
+                queue: shard.clone(),
                 position: CommandPosition::new(shard.clone(), obj.epoch, obj.seq),
                 ref_id,
             }))
@@ -846,7 +839,7 @@ impl SnapshotStore for ObjectLogBackend {
         let result = (|| {
             let g = self.inner.lock().expect("poisoned");
             let path = g
-                .shard_dir(&snapshot_ref.shard_key)
+                .shard_dir(&snapshot_ref.queue)
                 .join("snapshots")
                 .join(format!("{}.json", snapshot_ref.ref_id));
             if !path.exists() {
@@ -863,7 +856,7 @@ impl SnapshotStore for ObjectLogBackend {
 
     fn high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
         let g = self.inner.lock().expect("poisoned");
         let result = g.read_high_water(shard);
@@ -872,7 +865,7 @@ impl SnapshotStore for ObjectLogBackend {
 
     fn set_high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {

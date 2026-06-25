@@ -318,7 +318,6 @@ pub struct RetryPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QueueCreationPolicy {
-    pub deployment_max_shard_count: u32,
     pub default_max_gate_keys_per_item: u64,
     pub default_max_gates_per_request: u64,
 }
@@ -326,7 +325,6 @@ pub struct QueueCreationPolicy {
 impl Default for QueueCreationPolicy {
     fn default() -> Self {
         Self {
-            deployment_max_shard_count: 1,
             default_max_gate_keys_per_item: 1,
             default_max_gates_per_request: 1,
         }
@@ -459,7 +457,6 @@ pub struct CreateQueue {
     pub max_push_batch_size: u64,
     pub max_claim_batch_size: u64,
     pub max_eligible_group_size: Option<u64>,
-    pub shard_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -480,7 +477,6 @@ pub struct QueueDefinition {
     pub max_push_batch_size: u64,
     pub max_claim_batch_size: u64,
     pub max_eligible_group_size: Option<u64>,
-    pub shard_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -640,19 +636,6 @@ impl CreateQueue {
             }
         }
 
-        if self.shard_count == Some(0) {
-            return Err(CreateQueueError::invalid_request(
-                "shard_count must be greater than or equal to 1",
-            ));
-        }
-
-        let shard_count = self.shard_count.unwrap_or(1);
-        if shard_count > policy.deployment_max_shard_count {
-            return Err(CreateQueueError::invalid_request(
-                "shard_count exceeds deployment_max_shard_count",
-            ));
-        }
-
         let mut eligibility_policy = self.eligibility_policy;
         eligibility_policy = match eligibility_policy.gate_keys {
             GateKeyPolicy::None => {
@@ -714,7 +697,6 @@ impl CreateQueue {
             max_push_batch_size: self.max_push_batch_size,
             max_claim_batch_size: self.max_claim_batch_size,
             max_eligible_group_size: self.max_eligible_group_size,
-            shard_count,
         })
     }
 }
@@ -1066,7 +1048,7 @@ pub struct EligibilitySnapshot {
 pub struct QueueEligibilityRules {
     /// Keys in `metadata_blockers` map to sets of values that block eligibility.
     pub metadata_blockers: std::collections::BTreeMap<String, Vec<MetadataValue>>,
-    /// Gate keys that are currently in a `blocked` state for this shard.
+    /// Gate keys that are currently in a `blocked` state for this queue.
     pub blocked_gate_keys: std::collections::HashSet<String>,
 }
 

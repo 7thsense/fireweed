@@ -23,7 +23,7 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
     ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, RenewLeasePort,
-    ShardId, ShardKey, UpsertPort,
+     UpsertPort,
 };
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
@@ -71,10 +71,6 @@ fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
         total.rem_euclid(1_000_000_000) as u32,
     )
     .expect("valid ts")
-}
-
-fn shard_of(queue: &QueueKey) -> ShardKey {
-    ShardKey::new(queue.tenant_id.clone(), queue.queue_id.clone(), ShardId::ZERO)
 }
 
 /// How a `nack` returns an in-flight item: back to the queue for another attempt (`Retry`) or released
@@ -139,7 +135,7 @@ impl<B: LibBackend> Pqueue<B> {
             })
             .collect();
         self.backend
-            .push(&shard_of(queue), specs, self.clock.now())
+            .push(queue, specs, self.clock.now())
             .await
     }
 
@@ -153,7 +149,7 @@ impl<B: LibBackend> Pqueue<B> {
     ) -> EngineResult<UpsertOutcome> {
         self.backend
             .replace_if_pending(
-                &shard_of(queue),
+                queue,
                 &client_item_key,
                 item.priority,
                 item.group_key,
@@ -174,7 +170,7 @@ impl<B: LibBackend> Pqueue<B> {
         let now = self.clock.now();
         let n = self.next();
         let req = ClaimRequest {
-            shard: shard_of(queue),
+            shard: queue.clone(),
             worker_id: WorkerId::new("lib").expect("w"),
             max_items: max,
             lease_token: LeaseToken::new(format!("libL{n}")).expect("lease"),
@@ -215,13 +211,13 @@ impl<B: LibBackend> Pqueue<B> {
             .map(|item_id| FinalizeOutcome { item_id, kind })
             .collect();
         self.backend
-            .finalize(&shard_of(queue), outcomes, self.clock.now())
+            .finalize(queue, outcomes, self.clock.now())
             .await
     }
 
     /// Non-destructive priority-ordered view of eligible items.
     pub async fn peek(&self, queue: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
-        self.backend.peek(&shard_of(queue), limit).await
+        self.backend.peek(queue, limit).await
     }
 
     /// Dead-letter (terminal `fail`) the given leased items.
@@ -246,7 +242,7 @@ impl<B: LibBackend> Pqueue<B> {
         let now = self.clock.now();
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .renew(&shard_of(queue), ids, add_millis(now, lease_ms), now)
+            .renew(queue, ids, add_millis(now, lease_ms), now)
             .await
     }
 
@@ -264,7 +260,7 @@ impl<B: LibBackend> Pqueue<B> {
         let token = LeaseToken::new(format!("libL{n}")).expect("lease");
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .reassign(&shard_of(queue), ids, token, add_millis(now, lease_ms), now)
+            .reassign(queue, ids, token, add_millis(now, lease_ms), now)
             .await
     }
 
@@ -288,13 +284,13 @@ impl<B: LibBackend> Pqueue<B> {
     ) -> EngineResult<u64> {
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .purge(&shard_of(queue), ids, force, self.clock.now())
+            .purge(queue, ids, force, self.clock.now())
             .await
     }
 
     /// Rich view of specific in-flight (leased) items in the claimed-item shape (the read behind RESP
     /// `XCLAIM`'s reply). Ids that are absent or not currently leased are omitted.
     pub async fn claimed(&self, queue: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
-        self.backend.claimed_view(&shard_of(queue), ids).await
+        self.backend.claimed_view(queue, ids).await
     }
 }

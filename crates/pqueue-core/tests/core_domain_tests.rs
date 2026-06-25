@@ -26,13 +26,11 @@ fn valid_create_queue() -> CreateQueue {
         max_push_batch_size: 100,
         max_claim_batch_size: 50,
         max_eligible_group_size: Some(25),
-        shard_count: Some(4),
     }
 }
 
 fn policy() -> QueueCreationPolicy {
     QueueCreationPolicy {
-        deployment_max_shard_count: 8,
         default_max_gate_keys_per_item: 12,
         default_max_gates_per_request: 6,
     }
@@ -112,9 +110,8 @@ fn core_domain_tests_rejects_cohort_without_group_co_residency() {
 }
 
 #[test]
-fn core_domain_tests_applies_shard_count_policy_fields_and_defaults() {
+fn core_domain_tests_applies_policy_defaults() {
     let mut request = valid_create_queue();
-    request.shard_count = None;
     request.eligibility_policy = pqueue_core::EligibilityPolicy {
         metadata_blockers: Default::default(),
         gate_keys: GateKeyPolicy::Dynamic,
@@ -123,43 +120,8 @@ fn core_domain_tests_applies_shard_count_policy_fields_and_defaults() {
     };
 
     let queue = request.validate(&policy()).unwrap();
-    assert_eq!(queue.shard_count, 1);
     assert_eq!(queue.eligibility_policy.max_gate_keys_per_item, Some(12));
     assert_eq!(queue.eligibility_policy.max_gates_per_request, Some(6));
-}
-
-#[test]
-fn core_domain_tests_rejects_shard_count_above_deployment_cap() {
-    let mut request = valid_create_queue();
-    request.shard_count = Some(9);
-
-    let error = request.validate(&policy()).unwrap_err();
-    assert_eq!(
-        error.kind,
-        pqueue_core::CreateQueueErrorKind::InvalidRequest
-    );
-    assert!(
-        error.message.contains("deployment_max_shard_count"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
-#[test]
-fn core_domain_tests_rejects_zero_shard_count() {
-    let mut request = valid_create_queue();
-    request.shard_count = Some(0);
-
-    let error = request.validate(&policy()).unwrap_err();
-    assert_eq!(
-        error.kind,
-        pqueue_core::CreateQueueErrorKind::InvalidRequest
-    );
-    assert!(
-        error.message.contains("greater than or equal to 1"),
-        "unexpected error message: {}",
-        error.message
-    );
 }
 
 #[test]
@@ -225,7 +187,6 @@ fn core_domain_tests_create_queue_success_response_preserves_fields() {
     let queue = valid_create_queue().validate(&policy()).unwrap();
     assert_eq!(queue.tenant_id.as_str(), "tenant_acme");
     assert_eq!(queue.queue_id.as_str(), "scheduled_actions");
-    assert_eq!(queue.shard_count, 4);
     assert_eq!(queue.cohort_policy, None);
 
     let response = queue.create_response(true);

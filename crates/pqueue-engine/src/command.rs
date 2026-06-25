@@ -7,7 +7,6 @@ use pqueue_core::{
     UtcTimestamp,
 };
 
-use crate::types::ShardId;
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -185,7 +184,6 @@ pub struct PurgeItemsCommand {
 pub struct CommandEnvelope {
     pub command_id: CommandId,
     pub request_id: Option<RequestId>,
-    pub shard_id: ShardId,
     pub item_ids: Vec<ItemId>,
     pub command: QueueCommand,
     pub checksum: CommandChecksum,
@@ -223,7 +221,6 @@ mod serde_tests {
         CommandEnvelope {
             command_id: CommandId::new("c1"),
             request_id: Some(RequestId::new("r1").unwrap()),
-            shard_id: ShardId::ZERO,
             item_ids: vec![iid("a")],
             command,
             checksum: CommandChecksum(42),

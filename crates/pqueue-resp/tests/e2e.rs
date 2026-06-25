@@ -13,7 +13,7 @@ use pqueue_core::{
 use pqueue_engine::Clock;
 use pqueue_engine::{
     Backend, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore, FenceLeaseCommand,
-    LogWriter, ProjectionWriter, QueueCommand, ShardId, ShardKey,
+    LogWriter, ProjectionWriter, QueueCommand, QueueKey,
 };
 use pqueue_memory::{ManualClock, MemoryBackend};
 use pqueue_resp::{RespBackend, SystemClock, serve};
@@ -41,11 +41,10 @@ async fn serve_backend<B: RespBackend>(
     (con, addr)
 }
 
-fn shard() -> ShardKey {
-    ShardKey::new(
+fn shard() -> QueueKey {
+    QueueKey::new(
         TenantId::new("t1").unwrap(),
         QueueId::new("q1").unwrap(),
-        ShardId::ZERO,
     )
 }
 
@@ -56,7 +55,6 @@ async fn fence(backend: &MemoryBackend, id: &str) {
     let env = CommandEnvelope {
         command_id: CommandId::new("fence"),
         request_id: None,
-        shard_id: ShardId::ZERO,
         item_ids: vec![item.clone()],
         command: QueueCommand::FenceLease(FenceLeaseCommand {
             item_ids: vec![item],
@@ -99,7 +97,6 @@ fn qdef() -> QueueDefinition {
         max_push_batch_size: 100,
         max_claim_batch_size: 100,
         max_eligible_group_size: None,
-        shard_count: 1,
     }
 }
 

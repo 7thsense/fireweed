@@ -144,7 +144,7 @@ review → commit → `ddx bead close`.
   spec (small, reviewed) or escalate — don't silently diverge.
 
 ## 4. Progress
-- [ ] BQ-01 (P0, atomic; folds in the old BQ-02/03)
+- [x] BQ-01 (P0, atomic; folds in the old BQ-02/03)
 - [ ] BQ-10 · [ ] BQ-11a · [ ] BQ-11b · [ ] BQ-11c · [ ] BQ-11d · [ ] BQ-12 · [ ] BQ-13 · [ ] BQ-14   (P1)
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
 - [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)

@@ -33,7 +33,7 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
     ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem, QueueCommand,
-    QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, SnapshotStore,
+    QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort,  SnapshotStore,
     UpsertPort,
 };
 
@@ -86,8 +86,8 @@ pub fn queue() -> QueueId {
 pub fn qkey() -> QueueKey {
     QueueKey::new(tenant(), queue())
 }
-pub fn shard() -> ShardKey {
-    ShardKey::new(tenant(), queue(), ShardId::ZERO)
+pub fn shard() -> QueueKey {
+    QueueKey::new(tenant(), queue())
 }
 pub fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()
@@ -115,7 +115,6 @@ pub fn qdef() -> QueueDefinition {
         max_push_batch_size: 100,
         max_claim_batch_size: 100,
         max_eligible_group_size: None,
-        shard_count: 1,
     }
 }
 
@@ -140,7 +139,6 @@ pub fn envelope(command: QueueCommand, item_ids: Vec<ItemId>) -> CommandEnvelope
     CommandEnvelope {
         command_id: CommandId::new("c"),
         request_id: None,
-        shard_id: ShardId::ZERO,
         item_ids,
         command,
         checksum: CommandChecksum(0),

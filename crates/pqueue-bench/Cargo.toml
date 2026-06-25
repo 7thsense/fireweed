@@ -1,0 +1,28 @@
+[package]
+name = "pqueue-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pqueue-bench"
+path = "src/main.rs"
+
+# At-scale performance harness (TP-002 E0/E1/E3 substantiation): drives the four durable-log backends —
+# the realized "log store" axis; the projection is the single shared `pqueue-projection` materialization —
+# through ingest / claim+ack / recovery / queue-density workloads and reports throughput vs the E0 floor
+# (>=10M items/hr per queue), batch-op latency percentiles, and rebuild-from-log recovery time.
+#
+# A NON-tokio executor (`futures::executor::block_on`) drives every backend uniformly: the sync `postgres`
+# client panics under a tokio runtime, and all engine-port futures are already `ready`, so a plain executor
+# works for memory/sqlite/objectlog/postgres alike.
+[dependencies]
+pqueue = { path = "../pqueue" }
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+pqueue-memory = { path = "../pqueue-memory" }
+pqueue-sqlite = { path = "../pqueue-sqlite" }
+pqueue-objectlog = { path = "../pqueue-objectlog" }
+pqueue-postgres = { path = "../pqueue-postgres" }
+futures = "0.3"

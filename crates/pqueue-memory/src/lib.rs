@@ -22,7 +22,7 @@ use pqueue_engine::{
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LogRead,
     LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem,
-    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, ShardId, ShardKey,
+    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, 
     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
@@ -36,13 +36,13 @@ use pqueue_projection::{LogData, ProjectionData, commit};
 // ---------------------------------------------------------------------------
 
 struct LogWriterView<'a> {
-    logs: &'a mut HashMap<ShardKey, LogData>,
+    logs: &'a mut HashMap<QueueKey, LogData>,
 }
 
 impl LogWriter for LogWriterView<'_> {
     fn append(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         commands: &[CommandEnvelope],
     ) -> EngineResult<Vec<CommandPosition>> {
         self.logs
@@ -53,7 +53,7 @@ impl LogWriter for LogWriterView<'_> {
 }
 
 struct ProjectionWriterView<'a> {
-    projections: &'a mut HashMap<ShardKey, ProjectionData>,
+    projections: &'a mut HashMap<QueueKey, ProjectionData>,
 }
 
 impl ProjectionWriter for ProjectionWriterView<'_> {
@@ -64,7 +64,7 @@ impl ProjectionWriter for ProjectionWriterView<'_> {
     ) -> EngineResult<()> {
         for (pos, cmd) in positions.iter().zip(commands) {
             self.projections
-                .get_mut(&pos.shard_key)
+                .get_mut(&pos.queue)
                 .ok_or(EngineError::NotFound)?
                 .apply_command(&cmd.command)?;
         }
@@ -78,8 +78,8 @@ impl ProjectionWriter for ProjectionWriterView<'_> {
 
 #[derive(Default)]
 struct State {
-    logs: HashMap<ShardKey, LogData>,
-    projections: HashMap<ShardKey, ProjectionData>,
+    logs: HashMap<QueueKey, LogData>,
+    projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
 }
 
@@ -104,10 +104,6 @@ impl MemoryBackend {
         Self::default()
     }
 
-    fn launch_shard(key: &QueueKey) -> ShardKey {
-        ShardKey::new(key.tenant_id.clone(), key.queue_id.clone(), ShardId::ZERO)
-    }
-
     fn make_envelope(
         &self,
         command: QueueCommand,
@@ -118,7 +114,6 @@ impl MemoryBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("mem-{n}")),
             request_id: None,
-            shard_id: ShardId::ZERO,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -130,7 +125,7 @@ impl MemoryBackend {
     /// atomic append+apply unit of work the claim/upsert/reclaim ports rely on (shared `commit`).
     fn commit_locked(
         state: &mut State,
-        shard: &ShardKey,
+        shard: &QueueKey,
         env: CommandEnvelope,
     ) -> EngineResult<()> {
         let State {
@@ -183,7 +178,7 @@ impl ClaimPort for MemoryBackend {
 impl UpsertPort for MemoryBackend {
     fn replace_if_pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         client_item_key: &ClientItemKey,
         priority: Option<PriorityValue>,
         group_key: Option<GroupKey>,
@@ -199,7 +194,7 @@ impl UpsertPort for MemoryBackend {
             };
             let max_attempts = g
                 .queues
-                .get(&shard.queue_key())
+                .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
             // ONE command-sequence number stamps both the command id and the assigned item id
@@ -218,7 +213,6 @@ impl UpsertPort for MemoryBackend {
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("mem-{n}")),
                 request_id: None,
-                shard_id: ShardId::ZERO,
                 item_ids: vec![new_item_id.clone()],
                 command,
                 checksum: CommandChecksum(0),
@@ -267,7 +261,7 @@ impl UpsertPort for MemoryBackend {
 impl PushPort for MemoryBackend {
     fn push(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
@@ -275,7 +269,7 @@ impl PushPort for MemoryBackend {
             let mut g = self.state.lock().expect("poisoned");
             let max_attempts = g
                 .queues
-                .get(&shard.queue_key())
+                .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
             // ONE command-sequence number stamps the command id AND all item ids, so they are unique
@@ -285,7 +279,6 @@ impl PushPort for MemoryBackend {
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("mem-{n}")),
                 request_id: None,
-                shard_id: ShardId::ZERO,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),
@@ -303,7 +296,7 @@ impl PushPort for MemoryBackend {
 impl FinalizePort for MemoryBackend {
     fn finalize(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
@@ -328,7 +321,7 @@ impl FinalizePort for MemoryBackend {
 impl RenewLeasePort for MemoryBackend {
     fn renew(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
@@ -354,7 +347,7 @@ impl RenewLeasePort for MemoryBackend {
 impl ReassignLeasePort for MemoryBackend {
     fn reassign(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
@@ -382,7 +375,7 @@ impl ReassignLeasePort for MemoryBackend {
 impl PurgePort for MemoryBackend {
     fn purge(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
@@ -432,7 +425,7 @@ impl ReclaimDriver for MemoryBackend {
             let mut g = self.state.lock().expect("poisoned");
             // Collect expired leases per shard (read), then reclaim them (write) — no client traffic
             // required, closing the orphan-on-quiet-queue gap (TD-007 §3).
-            let expired: Vec<(ShardKey, Vec<ItemId>)> = g
+            let expired: Vec<(QueueKey, Vec<ItemId>)> = g
                 .projections
                 .iter()
                 .filter_map(|(shard, proj)| {
@@ -493,7 +486,6 @@ impl ControlPlaneStore for MemoryBackend {
             if let Some(existing) = g.queues.get(&key) {
                 // Idempotent create: compatible iff the placement-identity fields match (API-001).
                 if existing.group_co_residency != definition.group_co_residency
-                    || existing.shard_count != definition.shard_count
                 {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
@@ -502,7 +494,7 @@ impl ControlPlaneStore for MemoryBackend {
                     definition: existing.clone(),
                 });
             }
-            let shard = Self::launch_shard(&key);
+            let shard = key.clone();
             g.logs.entry(shard.clone()).or_default();
             g.projections
                 .entry(shard)
@@ -549,7 +541,7 @@ impl ControlPlaneStore for MemoryBackend {
 
     fn current_epoch(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = Ok(self
             .state
@@ -566,7 +558,7 @@ impl ControlPlaneStore for MemoryBackend {
 impl LogRead for MemoryBackend {
     fn read_from(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
@@ -582,7 +574,7 @@ impl LogRead for MemoryBackend {
 impl ProjectionRead for MemoryBackend {
     fn select_eligible(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
@@ -596,7 +588,7 @@ impl ProjectionRead for MemoryBackend {
 
     fn peek(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
         let result = (|| {
@@ -609,7 +601,7 @@ impl ProjectionRead for MemoryBackend {
 
     fn pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
         let result = (|| {
             let g = self.state.lock().expect("poisoned");
@@ -621,7 +613,7 @@ impl ProjectionRead for MemoryBackend {
 
     fn claimed_view(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         let result = (|| {
@@ -638,7 +630,7 @@ impl ProjectionRead for MemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         let result = (|| {
             let g = self.state.lock().expect("poisoned");
-            let shard = MemoryBackend::launch_shard(queue);
+            let shard = queue.clone();
             let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
             Ok(proj.metrics())
         })();
@@ -649,7 +641,7 @@ impl ProjectionRead for MemoryBackend {
 impl SnapshotStore for MemoryBackend {
     fn write_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
@@ -663,7 +655,7 @@ impl SnapshotStore for MemoryBackend {
 
     fn latest_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
         let result = Ok(self
             .state
@@ -683,7 +675,7 @@ impl SnapshotStore for MemoryBackend {
             let g = self.state.lock().expect("poisoned");
             let log = g
                 .logs
-                .get(&snapshot_ref.shard_key)
+                .get(&snapshot_ref.queue)
                 .ok_or(EngineError::NotFound)?;
             log.read_snapshot(snapshot_ref)
         })();
@@ -692,7 +684,7 @@ impl SnapshotStore for MemoryBackend {
 
     fn high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
         let result = Ok(self
             .state
@@ -706,7 +698,7 @@ impl SnapshotStore for MemoryBackend {
 
     fn set_high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {

@@ -11,7 +11,7 @@
 //! `LogData` and `ProjectionData` are kept SEPARATE (not bundled) so a backend can hold them in
 //! disjoint maps and hand out `&mut dyn LogWriter` + `&mut dyn ProjectionWriter` simultaneously for the
 //! two-writer unit of work. The free [`commit`] couples them for the orchestration ports. The owning
-//! backend supplies the [`ShardKey`] (to stamp positions) and constructs each [`CommandEnvelope`] (so
+//! backend supplies the [`QueueKey`] (to stamp positions) and constructs each [`CommandEnvelope`] (so
 //! each backend keeps its own command-id scheme); everything else is here.
 //!
 //! INVARIANT (TD-007 §1 / commit_locked): [`commit`] appends to the log BEFORE applying to the
@@ -29,7 +29,7 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
     FinalizeOutcome, ItemView, LeaseView, ProjectionSnapshot, PushItem, QueueCommand, QueueMetrics,
-    ShardKey, SnapshotRef,
+    QueueKey, SnapshotRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ impl LogData {
     /// returning the committed positions in order.
     pub fn append(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         commands: &[CommandEnvelope],
     ) -> EngineResult<Vec<CommandPosition>> {
         let mut positions = Vec::with_capacity(commands.len());
@@ -139,7 +139,7 @@ impl LogData {
     /// `LogRead::read_from` — a page of committed commands for replay/rebuild.
     pub fn read_from(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> pqueue_engine::CommandPage {
@@ -178,12 +178,12 @@ impl LogData {
 
     pub fn write_snapshot(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> SnapshotRef {
         let snap_ref = SnapshotRef {
-            shard_key: shard.clone(),
+            queue: shard.clone(),
             position,
             ref_id: format!("snap-{}", self.snapshots.len()),
         };
@@ -210,7 +210,7 @@ impl LogData {
 pub fn commit(
     log: &mut LogData,
     proj: &mut ProjectionData,
-    shard: &ShardKey,
+    shard: &QueueKey,
     env: CommandEnvelope,
 ) -> EngineResult<()> {
     log.append(shard, std::slice::from_ref(&env))?;
@@ -655,14 +655,12 @@ mod tests {
     };
     use pqueue_engine::{
         ClaimCommand, CommandChecksum, CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-        PushCommand, RenewLeaseCommand, ShardId,
-    };
+        PushCommand, RenewLeaseCommand, };
 
-    fn shard() -> ShardKey {
-        ShardKey::new(
+    fn shard() -> QueueKey {
+        QueueKey::new(
             TenantId::new("t1").unwrap(),
             QueueId::new("q1").unwrap(),
-            ShardId::ZERO,
         )
     }
     fn ts(s: i64) -> UtcTimestamp {
@@ -693,7 +691,6 @@ mod tests {
         CommandEnvelope {
             command_id: CommandId::new("c"),
             request_id: None,
-            shard_id: ShardId::ZERO,
             item_ids: vec![],
             command,
             checksum: CommandChecksum(0),

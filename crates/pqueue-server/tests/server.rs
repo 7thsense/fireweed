@@ -10,7 +10,7 @@ use pqueue_core::{
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, Clock, ProjectionRead, PushPort, PushSpec, QueueKey, ShardId, ShardKey,
+    ClaimPort, ClaimRequest, Clock, ProjectionRead, PushPort, PushSpec, QueueKey,
 };
 use pqueue_memory::{ManualClock, MemoryBackend};
 use pqueue_resp::SystemClock;
@@ -20,11 +20,10 @@ use redis::streams::StreamReadReply;
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
 }
-fn shard() -> ShardKey {
-    ShardKey::new(
+fn shard() -> QueueKey {
+    QueueKey::new(
         TenantId::new("t1").unwrap(),
         QueueId::new("q1").unwrap(),
-        ShardId::ZERO,
     )
 }
 fn ts(s: i64) -> UtcTimestamp {
@@ -53,7 +52,6 @@ fn qdef() -> QueueDefinition {
         max_push_batch_size: 100,
         max_claim_batch_size: 100,
         max_eligible_group_size: None,
-        shard_count: 1,
     }
 }
 

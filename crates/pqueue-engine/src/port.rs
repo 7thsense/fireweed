@@ -14,7 +14,7 @@ use pqueue_core::{
 
 use crate::command::{CommandEnvelope, CommandId, FinalizeOutcome};
 use crate::error::EngineResult;
-use crate::types::{CommandPosition, DurabilityClass, QueueKey, ShardKey};
+use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
 // ---------------------------------------------------------------------------
 // Write side (sync; runs inside a Backend unit of work)
@@ -25,7 +25,7 @@ pub trait LogWriter {
     /// Append `commands` to `shard`'s log, returning their committed positions in order.
     fn append(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         commands: &[CommandEnvelope],
     ) -> EngineResult<Vec<CommandPosition>>;
 }
@@ -73,7 +73,7 @@ pub struct CommandPage {
 pub trait LogRead: Send + Sync {
     fn read_from(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send;
@@ -111,20 +111,20 @@ pub trait ProjectionRead: Send + Sync {
     /// leases from these in the same unit of work (Invariant 1: per-item delivery, no cursor).
     fn select_eligible(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
 
     fn peek(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send;
 
     fn pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send;
 
     /// Render the rich claimed-item shape for specific (currently-leased) `ids` — the RESP `XCLAIM` reply
@@ -133,7 +133,7 @@ pub trait ProjectionRead: Send + Sync {
     /// just acted on).
     fn claimed_view(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send;
 
@@ -149,7 +149,7 @@ pub trait ProjectionRead: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct ClaimRequest {
-    pub shard: ShardKey,
+    pub shard: QueueKey,
     pub worker_id: WorkerId,
     pub max_items: usize,
     pub lease_token: LeaseToken,
@@ -213,7 +213,7 @@ pub trait UpsertPort: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         client_item_key: &ClientItemKey,
         priority: Option<PriorityValue>,
         group_key: Option<GroupKey>,
@@ -242,7 +242,7 @@ pub struct PushSpec {
 pub trait PushPort: Send + Sync {
     fn push(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
@@ -255,7 +255,7 @@ pub trait PushPort: Send + Sync {
 pub trait RenewLeasePort: Send + Sync {
     fn renew(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
@@ -269,7 +269,7 @@ pub trait RenewLeasePort: Send + Sync {
 pub trait ReassignLeasePort: Send + Sync {
     fn reassign(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
@@ -285,7 +285,7 @@ pub trait ReassignLeasePort: Send + Sync {
 pub trait PurgePort: Send + Sync {
     fn purge(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
@@ -300,7 +300,7 @@ pub trait PurgePort: Send + Sync {
 pub trait FinalizePort: Send + Sync {
     fn finalize(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
@@ -379,7 +379,7 @@ pub trait ControlPlaneStore: Send + Sync {
     /// The current assignment epoch for `shard` (the `backend_epoch` of new positions).
     fn current_epoch(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
 }
 
@@ -396,7 +396,7 @@ pub struct ProjectionSnapshot {
 /// A reference to a written snapshot.
 #[derive(Debug, Clone)]
 pub struct SnapshotRef {
-    pub shard_key: ShardKey,
+    pub queue: QueueKey,
     pub position: CommandPosition,
     pub ref_id: String,
 }
@@ -407,14 +407,14 @@ pub struct SnapshotRef {
 pub trait SnapshotStore: Send + Sync {
     fn write_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send;
 
     fn latest_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send;
 
     fn read_snapshot(
@@ -425,13 +425,13 @@ pub trait SnapshotStore: Send + Sync {
     /// The persisted monotonic `command_position` high-water for `shard` (TD-007 §4).
     fn high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send;
 
     /// Advance the persisted high-water mark. MUST be monotonic (reject a lower position).
     fn set_high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }

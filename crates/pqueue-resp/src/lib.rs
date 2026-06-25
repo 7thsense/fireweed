@@ -17,7 +17,7 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
     FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, PurgePort, PushPort,
-    PushSpec, ReassignLeasePort, ReclaimDriver, RenewLeasePort, ShardId, ShardKey, UpsertOutcome,
+    PushSpec, ReassignLeasePort, ReclaimDriver, RenewLeasePort, QueueKey, UpsertOutcome,
     UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -104,7 +104,7 @@ fn ts_ms(ts: UtcTimestamp) -> i64 {
 }
 
 /// Parse a stream key `tenant:queue` (or bare `queue` with a default tenant) into a launch shard key.
-fn parse_shard(key: &[u8]) -> Result<ShardKey, EngineError> {
+fn parse_shard(key: &[u8]) -> Result<QueueKey, EngineError> {
     let s = std::str::from_utf8(key).map_err(|_| EngineError::Invalid("non-utf8 key"))?;
     let (tenant, queue) = match s.split_once(':') {
         Some((t, q)) => (t, q),
@@ -112,7 +112,7 @@ fn parse_shard(key: &[u8]) -> Result<ShardKey, EngineError> {
     };
     let tenant = TenantId::new(tenant).map_err(|_| EngineError::Invalid("bad tenant"))?;
     let queue = QueueId::new(queue).map_err(|_| EngineError::Invalid("bad queue"))?;
-    Ok(ShardKey::new(tenant, queue, ShardId::ZERO))
+    Ok(QueueKey::new(tenant, queue))
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +435,7 @@ async fn xreadgroup<B: RespBackend>(
     // Lease TTL = the queue's `max_lease_duration_ms` from `now` — leases actually expire, so a crashed
     // worker's items are reclaimed by the ReclaimDriver / XAUTOCLAIM (TD-006 §3).
     let now = state.now();
-    let lease_ms = match backend.queue_definition(&shard.queue_key()).await {
+    let lease_ms = match backend.queue_definition(&shard.clone()).await {
         Ok(def) => def.max_lease_duration_ms,
         Err(e) => return err_reply(&e),
     };
@@ -600,7 +600,7 @@ async fn xpending<B: RespBackend>(
         .unwrap_or(usize::MAX);
     let now_ms = ts_ms(state.now());
     let lease_ms = backend
-        .queue_definition(&shard.queue_key())
+        .queue_definition(&shard.clone())
         .await
         .map(|d| d.max_lease_duration_ms as i64)
         .unwrap_or(0);
@@ -688,7 +688,7 @@ async fn xautoclaim<B: RespBackend>(
         return Resp::Error("ERR COUNT must be > 0".into());
     }
     let now = state.now();
-    let lease_ms = match backend.queue_definition(&shard.queue_key()).await {
+    let lease_ms = match backend.queue_definition(&shard.clone()).await {
         Ok(def) => def.max_lease_duration_ms,
         Err(e) => return err_reply(&e),
     };
@@ -828,7 +828,7 @@ async fn xclaim<B: RespBackend>(
     }
 
     let now = state.now();
-    let lease_ms = match backend.queue_definition(&shard.queue_key()).await {
+    let lease_ms = match backend.queue_definition(&shard.clone()).await {
         Ok(def) => def.max_lease_duration_ms,
         Err(e) => return err_reply(&e),
     };
@@ -871,7 +871,7 @@ async fn xlen<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
         Ok(s) => s,
         Err(e) => return err_reply(&e),
     };
-    match backend.metrics(&shard.queue_key()).await {
+    match backend.metrics(&shard.clone()).await {
         Ok(m) => Resp::Int((m.pending + m.leased) as i64),
         Err(e) => err_reply(&e),
     }
@@ -913,7 +913,7 @@ async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
         Ok(s) => s,
         Err(e) => return err_reply(&e),
     };
-    let m = match backend.metrics(&shard.queue_key()).await {
+    let m = match backend.metrics(&shard.clone()).await {
         Ok(m) => m,
         Err(e) => return err_reply(&e),
     };
