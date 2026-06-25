@@ -38,9 +38,14 @@ use pqueue_engine::{
 
 pub mod scenarios;
 
-/// The umbrella bound for a conformance-testable backend: every engine port the suite exercises.
-/// A blanket impl means any adapter implementing the listed ports is a `ConformanceBackend` for free.
-pub trait ConformanceBackend:
+/// The **core** conformance bound: the engine ports the substrate-independent scenarios exercise. Every
+/// projection family implements these — ordering, eligibility, claim atomicity, idempotency, lease/epoch
+/// fencing, and the per-queue progress bound (ADR-008 §2 / TD-001 capability classes). It does **not**
+/// require `LogRead`/`SnapshotStore`, so a **log-optional, DB-authoritative relational backend** qualifies
+/// and runs the core class (and the relational-reconnect class) without a command log.
+///
+/// A blanket impl means any adapter implementing the listed ports is a `ConformanceCore` for free.
+pub trait ConformanceCore:
     Backend
     + ControlPlaneStore
     + ProjectionRead
@@ -51,12 +56,10 @@ pub trait ConformanceBackend:
     + ReassignLeasePort
     + PurgePort
     + ReclaimDriver
-    + SnapshotStore
-    + LogRead
 {
 }
 
-impl<T> ConformanceBackend for T where
+impl<T> ConformanceCore for T where
     T: Backend
         + ControlPlaneStore
         + ProjectionRead
@@ -67,10 +70,16 @@ impl<T> ConformanceBackend for T where
         + ReassignLeasePort
         + PurgePort
         + ReclaimDriver
-        + SnapshotStore
-        + LogRead
 {
 }
+
+/// A **log-bearing** conformance backend: [`ConformanceCore`] plus the durable-log ports the log-replay
+/// class exercises — `LogRead` (replay reconstruction) and `SnapshotStore` (snapshots). The committed
+/// log-bearing backends (memory, sqlite, objectlog, and any log-bearing relational backend) run the
+/// `log_replay_suite!`; a truly log-less relational backend implements only `ConformanceCore`.
+pub trait ConformanceBackend: ConformanceCore + SnapshotStore + LogRead {}
+
+impl<T> ConformanceBackend for T where T: ConformanceCore + SnapshotStore + LogRead {}
 
 // ---------------------------------------------------------------------------
 // Shared fixtures (public so adapters' own white-box tests can reuse them too)
@@ -197,39 +206,111 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::peek_is_priority_ordered_and_nondestructive(&make).await;
     scenarios::pending_lists_leased_items(&make).await;
     scenarios::snapshots_write_read_latest(&make).await;
+    scenarios::rejected_mutations_do_not_append_commands(&make).await;
 }
 
-/// Generate one `#[tokio::test]` per conformance scenario for the backend built by `$make`. Invoke at
-/// module scope in an adapter's test target: `pqueue_conformance::conformance_suite!(MyBackend::new);`.
+// ---------------------------------------------------------------------------
+// Conformance classes (ADR-008 §2 / TD-001): core (every family) + log-replay
+// (log-bearing) + relational-reconnect (DB-authoritative). Backends compose the
+// classes that match their durability + recovery model.
+// ---------------------------------------------------------------------------
+
+/// **Core** scenario class — substrate-independent behavior every projection family must satisfy
+/// (ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, the per-queue progress
+/// bound). Two durability variants on the one upsert axis (TD-007 §2.3): `@atomic` includes the three
+/// `UpsertPort` scenarios + the raw `ReplacePending` command; `@eventual` substitutes
+/// `upsert_is_unavailable`. Bounded by [`ConformanceCore`] — no `LogRead`/`SnapshotStore` required.
 #[macro_export]
-macro_rules! conformance_suite {
-    ($make:expr) => {
+macro_rules! core_suite {
+    (@atomic $make:expr) => {
         $crate::conformance_suite!(@scenarios $make,
             push_then_select_eligible_in_priority_order,
             claim_then_complete_lifecycle,
-            replace_pending_supersedes_old,
-            high_water_is_monotonic,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
-            upsert_inserts_then_replaces_pending,
-            upsert_rejects_claimed_and_terminal,
-            upsert_preserves_group_delay_and_payload_in_claim_shape,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,
             paused_queue_yields_no_claims,
             fenced_lease_finalize_is_stale,
-            renew_extends_lease_and_rejects,
-            reassign_swaps_token_and_charges_attempt,
             claimed_view_renders_leased_items,
-            purge_removes_present_items_and_gates_leased,
             retry_beyond_max_attempts_goes_terminal,
-            finalize_of_nonleased_item_is_rejected_without_appending,
-            pause_and_fence_reconstruct_from_log,
-            high_water_advances_on_each_commit,
             peek_is_priority_ordered_and_nondestructive,
             pending_lists_leased_items,
-            snapshots_write_read_latest,
+            renew_extends_lease_and_rejects,
+            reassign_swaps_token_and_charges_attempt,
+            purge_removes_present_items_and_gates_leased,
+            finalize_of_nonleased_item_is_rejected_without_appending,
+            replace_pending_supersedes_old,
+            upsert_inserts_then_replaces_pending,
+            upsert_rejects_claimed_and_terminal,
+            upsert_preserves_group_delay_and_payload_in_claim_shape,
         );
+    };
+    (@eventual $make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            push_then_select_eligible_in_priority_order,
+            claim_then_complete_lifecycle,
+            claim_returns_priority_ordered_rich_items,
+            claim_empty_when_nothing_eligible,
+            tick_reclaims_expired_lease_with_no_client_traffic,
+            tick_lease_boundary_is_half_open,
+            paused_queue_yields_no_claims,
+            fenced_lease_finalize_is_stale,
+            claimed_view_renders_leased_items,
+            retry_beyond_max_attempts_goes_terminal,
+            peek_is_priority_ordered_and_nondestructive,
+            pending_lists_leased_items,
+            renew_extends_lease_and_rejects,
+            reassign_swaps_token_and_charges_attempt,
+            purge_removes_present_items_and_gates_leased,
+            finalize_of_nonleased_item_is_rejected_without_appending,
+            upsert_is_unavailable,
+        );
+    };
+}
+
+/// **Log-replay** scenario class — for log-bearing backends ([`ConformanceBackend`]). Replay
+/// reconstruction, snapshot round-trip, command-position high-water, and the log-tail "rejected mutation
+/// appends nothing" durability guarantee (`rejected_mutations_do_not_append_commands`).
+///
+/// The *behavioral* lease/purge/finalize obligations themselves — renew, reassign, purge, finalize, and
+/// their structured rejections — are **core** (TD-001: lease/epoch fencing is the core class, every
+/// family), asserted via projection-read ports in `core_suite!`. Only the log-tail no-append check (which
+/// needs `LogRead`) lives here.
+#[macro_export]
+macro_rules! log_replay_suite {
+    ($make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            high_water_is_monotonic,
+            high_water_advances_on_each_commit,
+            snapshots_write_read_latest,
+            pause_and_fence_reconstruct_from_log,
+            rejected_mutations_do_not_append_commands,
+        );
+    };
+}
+
+/// **Relational-reconnect** scenario class — the relational substitute for log-replay (ADR-008 §2): a
+/// DB-authoritative projection that survives a process restart via reopen-the-store, no log replay.
+/// Bounded by [`ConformanceCore`]; invoked only by a durable backend whose `make` reopens shared state.
+#[macro_export]
+macro_rules! relational_reconnect_suite {
+    ($make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            reconnect_after_crash_preserves_committed_state,
+        );
+    };
+}
+
+/// Generate one `#[tokio::test]` per conformance scenario for the backend built by `$make`. The atomic
+/// log-bearing suite = `core_suite!(@atomic)` + `log_replay_suite!`; this composes them so existing
+/// adapters invoke the same one-liner unchanged. Invoke at module scope:
+/// `pqueue_conformance::conformance_suite!(MyBackend::new);`.
+#[macro_export]
+macro_rules! conformance_suite {
+    ($make:expr) => {
+        $crate::core_suite!(@atomic $make);
+        $crate::log_replay_suite!($make);
     };
     (@scenarios $make:expr, $($name:ident),+ $(,)?) => {
         $(
@@ -241,37 +322,13 @@ macro_rules! conformance_suite {
     };
 }
 
-/// Generate the conformance suite for an **eventual-apply** backend (e.g. objectlog): the atomic-class
-/// scenarios MINUS the three `UpsertPort` scenarios and the raw `ReplacePending`-command scenario (the
-/// atomic XDEL+XADD upsert is not offered on this class), PLUS [`scenarios::upsert_is_unavailable`]
-/// asserting the refusal. Everything else (push/claim/finalize/reclaim/pause/fence/reads + log replay)
-/// is identical to the atomic suite. Invoke at module scope:
+/// The conformance suite for an **eventual-apply** log-bearing backend (e.g. objectlog):
+/// `core_suite!(@eventual)` (upsert refused) + `log_replay_suite!`. Invoke at module scope:
 /// `pqueue_conformance::eventual_apply_suite!(MyBackend::new);`.
 #[macro_export]
 macro_rules! eventual_apply_suite {
     ($make:expr) => {
-        $crate::conformance_suite!(@scenarios $make,
-            push_then_select_eligible_in_priority_order,
-            claim_then_complete_lifecycle,
-            high_water_is_monotonic,
-            claim_returns_priority_ordered_rich_items,
-            claim_empty_when_nothing_eligible,
-            upsert_is_unavailable,
-            tick_reclaims_expired_lease_with_no_client_traffic,
-            tick_lease_boundary_is_half_open,
-            paused_queue_yields_no_claims,
-            fenced_lease_finalize_is_stale,
-            renew_extends_lease_and_rejects,
-            reassign_swaps_token_and_charges_attempt,
-            claimed_view_renders_leased_items,
-            purge_removes_present_items_and_gates_leased,
-            retry_beyond_max_attempts_goes_terminal,
-            finalize_of_nonleased_item_is_rejected_without_appending,
-            pause_and_fence_reconstruct_from_log,
-            high_water_advances_on_each_commit,
-            peek_is_priority_ordered_and_nondestructive,
-            pending_lists_leased_items,
-            snapshots_write_read_latest,
-        );
+        $crate::core_suite!(@eventual $make);
+        $crate::log_replay_suite!($make);
     };
 }

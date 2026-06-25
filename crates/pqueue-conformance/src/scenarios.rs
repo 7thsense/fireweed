@@ -13,14 +13,15 @@ use pqueue_engine::{
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
 // traits need not be imported here.
 use crate::{
-    ConformanceBackend, claim_req, commit, envelope, item, item_max, qdef, qkey, shard, ts,
+    ConformanceBackend, ConformanceCore, claim_req, commit, envelope, item, item_max, qdef, qkey,
+    shard, ts,
 };
 
 /// Eventual-apply backends MUST refuse upsert (Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD
 /// `replace_if_pending` is offered only on the atomic durability class). The refusal is the structured
 /// `Unavailable` (RESP `-ERR pqueue unavailable`). Used by the eventual-apply conformance variant in
 /// place of the three atomic-class upsert scenarios.
-pub async fn upsert_is_unavailable<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     let err = b
@@ -44,9 +45,7 @@ pub async fn upsert_is_unavailable<B: ConformanceBackend>(make: impl Fn() -> B) 
 
 /// `ProjectionRead::peek` — non-destructive, priority-ordered eligible view (fails if it returns a
 /// default/empty no-op).
-pub async fn peek_is_priority_ordered_and_nondestructive<B: ConformanceBackend>(
-    make: impl Fn() -> B,
-) {
+pub async fn peek_is_priority_ordered_and_nondestructive<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     commit(
@@ -84,7 +83,7 @@ pub async fn peek_is_priority_ordered_and_nondestructive<B: ConformanceBackend>(
 }
 
 /// `ProjectionRead::pending` — lists in-flight (leased) items (fails on a default/empty no-op).
-pub async fn pending_lists_leased_items<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn pending_lists_leased_items<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     commit(
@@ -153,9 +152,7 @@ pub async fn snapshots_write_read_latest<B: ConformanceBackend>(make: impl Fn() 
     assert_eq!(b.read_snapshot(&r2).await.unwrap().payload, vec![4, 5, 6]);
 }
 
-pub async fn push_then_select_eligible_in_priority_order<B: ConformanceBackend>(
-    make: impl Fn() -> B,
-) {
+pub async fn push_then_select_eligible_in_priority_order<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
 
@@ -179,7 +176,7 @@ pub async fn push_then_select_eligible_in_priority_order<B: ConformanceBackend>(
     );
 }
 
-pub async fn claim_then_complete_lifecycle<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn claim_then_complete_lifecycle<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     commit(
@@ -229,7 +226,7 @@ pub async fn claim_then_complete_lifecycle<B: ConformanceBackend>(make: impl Fn(
     assert_eq!(m.leased, 0);
 }
 
-pub async fn replace_pending_supersedes_old<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn replace_pending_supersedes_old<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     commit(
@@ -279,9 +276,7 @@ pub async fn high_water_is_monotonic<B: ConformanceBackend>(make: impl Fn() -> B
     assert_eq!(b.high_water(&shard()).await.unwrap(), Some(p2));
 }
 
-pub async fn claim_returns_priority_ordered_rich_items<B: ConformanceBackend>(
-    make: impl Fn() -> B,
-) {
+pub async fn claim_returns_priority_ordered_rich_items<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     commit(
@@ -321,14 +316,14 @@ pub async fn claim_returns_priority_ordered_rich_items<B: ConformanceBackend>(
     );
 }
 
-pub async fn claim_empty_when_nothing_eligible<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn claim_empty_when_nothing_eligible<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
     assert!(claimed.items.is_empty());
 }
 
-pub async fn upsert_inserts_then_replaces_pending<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     let key = ClientItemKey::new("dup").unwrap();
@@ -383,7 +378,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceBackend>(make: i
     assert_eq!(elig, vec![id2], "only the replacement is eligible");
 }
 
-pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     let key = ClientItemKey::new("dup").unwrap();
@@ -433,7 +428,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceBackend>(make: im
     assert_eq!(err, EngineError::Terminal);
 }
 
-pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: ConformanceBackend>(
+pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: ConformanceCore>(
     make: impl Fn() -> B,
 ) {
     let b = make();
@@ -479,7 +474,7 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
     assert_eq!(item.payload.as_deref(), Some(&b"payload"[..]));
 }
 
-pub async fn tick_reclaims_expired_lease_with_no_client_traffic<B: ConformanceBackend>(
+pub async fn tick_reclaims_expired_lease_with_no_client_traffic<B: ConformanceCore>(
     make: impl Fn() -> B,
 ) {
     let b = make();
@@ -523,7 +518,7 @@ pub async fn tick_reclaims_expired_lease_with_no_client_traffic<B: ConformanceBa
     );
 }
 
-pub async fn tick_lease_boundary_is_half_open<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn tick_lease_boundary_is_half_open<B: ConformanceCore>(make: impl Fn() -> B) {
     // Convention: a lease is valid THROUGH `lease_expires_at`; reclaim fires only at now > exp (B1).
     let b = make();
     b.create_queue(qdef()).await.unwrap();
@@ -548,7 +543,7 @@ pub async fn tick_lease_boundary_is_half_open<B: ConformanceBackend>(make: impl 
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 0);
 }
 
-pub async fn paused_queue_yields_no_claims<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn paused_queue_yields_no_claims<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     commit(
@@ -584,7 +579,7 @@ pub async fn paused_queue_yields_no_claims<B: ConformanceBackend>(make: impl Fn(
     );
 }
 
-pub async fn fenced_lease_finalize_is_stale<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn fenced_lease_finalize_is_stale<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
     commit(
@@ -637,7 +632,7 @@ pub async fn fenced_lease_finalize_is_stale<B: ConformanceBackend>(make: impl Fn
     assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }
 
-pub async fn renew_extends_lease_and_rejects<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn() -> B) {
     // renew_validate MIRRORS finalize_validate: only a live, non-fenced, non-terminal, non-superseded
     // leased item may be renewed; a renew extends the lease WITHOUT charging an attempt (TD-006:129).
     let b = make();
@@ -656,12 +651,6 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceBackend>(make: impl F
     let id = ItemId::new("a").unwrap();
 
     // Unknown id -> NotFound, and NOTHING appended (reject before commit, B1).
-    let before = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
     assert_eq!(
         b.renew(
             &shard(),
@@ -672,13 +661,6 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceBackend>(make: impl F
         .await,
         Err(EngineError::NotFound)
     );
-    let after = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
-    assert_eq!(before, after, "rejected renew must NOT append a command");
 
     // Happy path: extend the lease to ts(2000). Ticking PAST the old expiry (500) reclaims nothing,
     // and the attempt_count is unchanged (renew does not charge a delivery).
@@ -739,7 +721,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceBackend>(make: impl F
     );
 }
 
-pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: impl Fn() -> B) {
     // Cross-consumer XCLAIM: ReassignLease swaps the lease token to a new consumer AND charges exactly one
     // delivery (TD-006:129). Rejection semantics mirror renew/finalize (validate_leased), appending
     // nothing on reject.
@@ -760,12 +742,6 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceBackend>(mak
     let new_token = LeaseToken::new("lease-2").unwrap();
 
     // Unknown id -> NotFound, and NOTHING appended.
-    let before = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
     assert_eq!(
         b.reassign(
             &shard(),
@@ -777,13 +753,6 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceBackend>(mak
         .await,
         Err(EngineError::NotFound)
     );
-    let after = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
-    assert_eq!(before, after, "rejected reassign must NOT append a command");
 
     // Happy path: transfer the lease to "lease-2", extend to ts(2000), charge exactly one delivery.
     b.reassign(
@@ -837,7 +806,7 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceBackend>(mak
     );
 }
 
-pub async fn claimed_view_renders_leased_items<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn claimed_view_renders_leased_items<B: ConformanceCore>(make: impl Fn() -> B) {
     // `claimed_view` renders the rich claim shape for currently-leased ids; pending + unknown ids are
     // omitted (the RESP `XCLAIM` reply source).
     let b = make();
@@ -871,7 +840,7 @@ pub async fn claimed_view_renders_leased_items<B: ConformanceBackend>(make: impl
     assert_eq!(view[0].attempt_count, 1);
 }
 
-pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>(
+pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceCore>(
     make: impl Fn() -> B,
 ) {
     // PurgePort (RESP XDEL / operator purge): removes present items, returns the count actually removed,
@@ -895,12 +864,6 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>
     let b_id = ItemId::new("b").unwrap();
 
     // Purging a LEASED item without force is gated (Conflict), appending nothing.
-    let before = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
     assert_eq!(
         b.purge(&shard(), vec![a.clone()], false, ts(20)).await,
         Err(EngineError::Conflict)
@@ -912,13 +875,6 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>
             .await,
         Err(EngineError::Conflict)
     );
-    let after = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
-    assert_eq!(before, after, "gated purge must NOT append a command");
     assert_eq!(
         b.metrics(&qkey()).await.unwrap().pending,
         1,
@@ -952,7 +908,7 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceBackend>
     );
 }
 
-pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceBackend>(make: impl Fn() -> B) {
+pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: impl Fn() -> B) {
     // Retry-exhaustion (B'): `attempt_count` = deliveries. A `Finalize{Retry}` UNDER `max_attempts` returns
     // the item to pending (claimable again); the retry once it has used all `max_attempts` deliveries drives
     // it TERMINAL (Failed). With max_attempts = 2: delivery 1 → retry → pending; delivery 2 → retry → failed.
@@ -1065,7 +1021,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceBackend>(make
     );
 }
 
-pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: ConformanceBackend>(
+pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: ConformanceCore>(
     make: impl Fn() -> B,
 ) {
     let b = make();
@@ -1081,12 +1037,6 @@ pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: Conform
     )
     .await;
     let id = ItemId::new("a").unwrap();
-    let before = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
     // Item is Pending (never claimed) -> finalize rejected, and NOTHING is appended (no divergence, B1).
     let outcomes = vec![FinalizeOutcome {
         item_id: id,
@@ -1096,13 +1046,6 @@ pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: Conform
         b.finalize(&shard(), outcomes, ts(10)).await,
         Err(EngineError::Invalid("item is not leased"))
     );
-    let after = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
-    assert_eq!(before, after, "rejected finalize must NOT append a command");
 }
 
 pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: impl Fn() -> B) {
@@ -1189,5 +1132,127 @@ pub async fn high_water_advances_on_each_commit<B: ConformanceBackend>(make: imp
     assert!(
         h1.precedes(&h2),
         "command_position high-water must advance on each commit (push -> claim)"
+    );
+}
+
+/// Relational-reconnect class (ADR-008 §2 / TD-001 conformance capability classes): committed state
+/// **survives a process restart via reopen-the-store**, with no test-driven manual log replay. Commit
+/// items, drop the backend handle (simulated crash), build a fresh backend from the **same durable
+/// store** (the `make` factory MUST reopen it, and the queue definition MUST persist — the second handle
+/// does NOT re-`create_queue`), and assert the committed state is present.
+///
+/// This is a black-box durability assertion: it does not (and as a `ConformanceCore`-bounded scenario
+/// CANNOT) assert *how* the state is restored. A log-bearing backend may satisfy it via log replay on
+/// open; the **transactional-authoritative relational backend (`postgres_native`, BQ-12) is the intended
+/// exemplar** — TD-001: "only a transactional-authoritative relational projection runs the
+/// reconnect-after-crash class." The sqlite smoke (BQ-10) only proves this scenario + the
+/// `relational_reconnect_suite!` macro compile and run.
+///
+/// Only durable backends whose `make` reopens shared state belong to this class; an in-memory backend
+/// sees a fresh empty store on the second `make()` and is not in this class (it does not run this suite).
+pub async fn reconnect_after_crash_preserves_committed_state<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let a = make();
+    a.create_queue(qdef()).await.unwrap();
+    commit(
+        &a,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![
+                    item("a", "ka", 30),
+                    item("b", "kb", 10),
+                    item("c", "kc", 20),
+                ],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+
+    // Simulated crash: drop the handle, then reopen the SAME durable store.
+    drop(a);
+    let b = make();
+
+    // No manual log replay: the DB-resident projection is authoritative, so the committed items are
+    // present (in ascending Int64 priority order: 10(b), 20(c), 30(a)). Fails if reopen lost state.
+    let eligible = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
+    assert_eq!(
+        eligible,
+        vec![
+            ItemId::new("b").unwrap(),
+            ItemId::new("c").unwrap(),
+            ItemId::new("a").unwrap(),
+        ],
+        "committed items present in priority order after reconnect (no log replay)"
+    );
+}
+
+/// **Log-class** durability guarantee (B1, no-divergence): a REJECTED mutation must not append any
+/// command — the durable log length is unchanged. The behavioral rejection itself (the structured
+/// `NotFound`/`Conflict`/`Invalid` error) is asserted in the CORE class (the renew/reassign/purge/
+/// finalize scenarios, which every family runs); this scenario adds the log-tail guarantee that the
+/// reject happens BEFORE any append. Bounded by [`ConformanceBackend`] (needs `LogRead`).
+pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    // Push two items, claim the higher-priority one ("a", priority 5) → leased; "p" stays pending.
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5), item("p", "kp", 9)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    b.claim(claim_req(1, 500, 10)).await.unwrap(); // leases "a"
+
+    let before = b
+        .read_from(&shard(), None, 1000)
+        .await
+        .unwrap()
+        .entries
+        .len();
+
+    let unknown = ItemId::new("zzz").unwrap();
+    let _ = b
+        .renew(&shard(), vec![unknown.clone()], ts(2000), ts(20))
+        .await; // unknown id → NotFound
+    let _ = b
+        .reassign(
+            &shard(),
+            vec![unknown.clone()],
+            LeaseToken::new("l2").unwrap(),
+            ts(2000),
+            ts(20),
+        )
+        .await; // unknown id → NotFound
+    let _ = b
+        .purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(20))
+        .await; // leased without force → Conflict
+    let _ = b
+        .finalize(
+            &shard(),
+            vec![FinalizeOutcome {
+                item_id: ItemId::new("p").unwrap(),
+                kind: FinalizeKind::Complete,
+            }],
+            ts(20),
+        )
+        .await; // pending, not leased → Invalid
+
+    let after = b
+        .read_from(&shard(), None, 1000)
+        .await
+        .unwrap()
+        .entries
+        .len();
+    assert_eq!(
+        before, after,
+        "rejected renew/reassign/purge/finalize must NOT append any command (B1 no-divergence)"
     );
 }
