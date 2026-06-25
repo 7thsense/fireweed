@@ -1,13 +1,15 @@
-//! BQ-11a — the sqlite **relational** projection family (`pqueue_items` DB-authoritative).
+//! Conformance for the sqlite **relational** projection family (`pqueue_items` DB-authoritative).
 //!
-//! Two layers of evidence, scoped to 11a (schema + the 14-arm apply-as-SQL):
+//! Three layers of evidence:
 //!
-//! 1. **Core conformance subset** — the claim-free core scenarios run against the relational backend at
-//!    parity with the in-memory family. The full claim/lease/eligibility core suite lands with the
-//!    serialized claim CTE in BQ-11b; idempotency/group/reconnect in 11c/11d.
-//! 2. **Lifecycle round-trip** — every command arm (incl. the leased-state arms the subset can't reach
-//!    without claim) applied as SQL and observed back through the read ports, proving the apply-UoW
-//!    round-trips item state through `pqueue_items`.
+//! 1. **Full `core_suite!(@atomic)`** (BQ-11b) — every core scenario (claim/lease/eligibility/upsert
+//!    included) runs against the relational backend at parity with the in-memory reference, now that the
+//!    serialized claim CTE is in place. (group/cohort/gate selection is BQ-14; dup-push idempotency +
+//!    tombstone is BQ-11c; the relational-reconnect class is BQ-11d.)
+//! 2. **Lifecycle round-trip** (BQ-11a) — each apply arm applied as SQL and observed back through the read
+//!    ports, proving the apply-UoW round-trips item state through `pqueue_items` (incl. CohortExpired,
+//!    which is not in the core class).
+//! 3. **Regression guards** — id-counter restore on reopen + stable-FIFO from the BQ-11a fresh-eyes review.
 
 use bytes::Bytes;
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
@@ -40,39 +42,10 @@ fn spec(priority: i64) -> PushSpec {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Core conformance subset (claim-free, at parity with the in-memory family)
+// 1. Full core conformance class — at parity with the in-memory reference (BQ-11b).
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn push_then_select_eligible_in_priority_order() {
-    pqueue_conformance::scenarios::push_then_select_eligible_in_priority_order(make).await;
-}
-
-#[tokio::test]
-async fn peek_is_priority_ordered_and_nondestructive() {
-    pqueue_conformance::scenarios::peek_is_priority_ordered_and_nondestructive(make).await;
-}
-
-#[tokio::test]
-async fn replace_pending_supersedes_old() {
-    pqueue_conformance::scenarios::replace_pending_supersedes_old(make).await;
-}
-
-#[tokio::test]
-async fn finalize_of_nonleased_item_is_rejected_without_appending() {
-    pqueue_conformance::scenarios::finalize_of_nonleased_item_is_rejected_without_appending(make)
-        .await;
-}
-
-#[tokio::test]
-async fn claim_empty_when_nothing_eligible() {
-    pqueue_conformance::scenarios::claim_empty_when_nothing_eligible(make).await;
-}
-
-#[tokio::test]
-async fn paused_queue_yields_no_claims() {
-    pqueue_conformance::scenarios::paused_queue_yields_no_claims(make).await;
-}
+pqueue_conformance::core_suite!(@atomic make);
 
 // ---------------------------------------------------------------------------
 // 2. Lifecycle round-trip — every apply arm observed back through the read ports

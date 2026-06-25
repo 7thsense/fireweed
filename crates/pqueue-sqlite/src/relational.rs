@@ -8,12 +8,13 @@
 //! command log — a reopen recovers committed state from the table itself (the relational-reconnect class,
 //! proven in BQ-11d), not by replaying a log.
 //!
-//! Scope of BQ-11a (plan §2): the schema + the 14-arm apply-UoW. The claim **selection** CTE +
-//! Eligibility-Precedence-in-SQL is BQ-11b; `pqueue_group_summary` + idempotency/tombstone is BQ-11c;
-//! the relational-reconnect suite wiring is BQ-11d. [`ClaimPort`]/[`UpsertPort`] are implemented here in
-//! their straightforward single-node form (real, not stubbed) so the type satisfies
-//! `ConformanceCore`; their hardening (the serialized CTE, group selection, dup-push idempotency,
-//! tombstones) lands in 11b/11c.
+//! Scope (plan §2): BQ-11a = the schema + the 14-arm apply-UoW. BQ-11b = the serialized claim CTE
+//! (candidate-select + lease in one transaction) + Eligibility Precedence in SQL, wiring the full
+//! `core_suite!(@atomic)` at parity with the in-memory reference. Still ahead: `pqueue_group_summary` +
+//! dup-push idempotency/tombstone (BQ-11c), the relational-reconnect suite (BQ-11d), and group/cohort/gate
+//! selection (BQ-14). [`UpsertPort`] is the basic insert/replace-pending form (its idempotency-replay +
+//! `client_item_key` tombstone hardening is BQ-11c); `progress_guard_sort` bounded-relaxed promotion is a
+//! cross-family enhancement deferred so the two projection families never diverge on the core class.
 //!
 //! ## Lease tokens (TD-004 §security / TD-002 parity)
 //! The durable projection stores only the lease token **hash** (`lease_token_hash`, never the cleartext
@@ -621,10 +622,17 @@ fn select_eligible_sql(
         return Ok(Vec::new());
     }
     let (t, q) = parts(shard);
+    // The TD-002 `BatchClaim` candidate predicate (owner-local, no shard filter): pending, due, eligible,
+    // ordered by the strict-claim key. `eligible_since IS NOT NULL` matches the CTE; `progress_guard_sort`
+    // is omitted — under `ordering_mode=strict` (TD-002:649 sanctions strict ordering as the valid first
+    // implementation) it reduces to this strict order, which is also exact parity with the in-memory
+    // reference (`eligible_candidates` has no at-risk promotion). `created_seq` is the stable analogue of
+    // the CTE's `created_at, item_id` FIFO tiebreak.
     let mut stmt = st(conn.prepare(
         "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
          AND lifecycle_state='Pending' AND superseded=0 \
          AND (not_before IS NULL OR not_before<=?3) \
+         AND eligible_since IS NOT NULL \
          ORDER BY priority_sort, created_seq LIMIT ?4",
     ))?;
     let mapped = st(
@@ -706,18 +714,20 @@ fn pending_sql(
     Ok(out)
 }
 
-/// Render the rich claimed-item shape for specific leased `ids` (the claim/XCLAIM reply). Ids absent or
-/// not currently leased-with-a-live-token are omitted (the caller knows the set it just acted on).
-fn claimed_view_sql(
+/// Render the rich claimed-item shape for specific leased `ids` (the claim/XCLAIM reply). The lease token
+/// for each id is supplied by `resolve` — the just-claimed token when rendering inside the claim txn, or
+/// the live-token map for the `claimed_view` read port. Ids absent / not leased / with no resolvable token
+/// are omitted (the caller knows the set it just acted on).
+fn render_claimed(
     conn: &Connection,
-    live_tokens: &HashMap<ItemId, LeaseToken>,
     shard: &QueueKey,
     ids: &[ItemId],
+    resolve: impl Fn(&ItemId) -> Option<LeaseToken>,
 ) -> EngineResult<Vec<ClaimedItem>> {
     let (t, q) = parts(shard);
     let mut out = Vec::new();
     for id in ids {
-        let Some(token) = live_tokens.get(id) else {
+        let Some(token) = resolve(id) else {
             continue;
         };
         let row = st(conn
@@ -755,7 +765,7 @@ fn claimed_view_sql(
                 .transpose()
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             not_before: not_before.map(nanos_ts),
-            lease_token: token.clone(),
+            lease_token: token,
             lease_expires_at: nanos_ts(exp),
             attempt_count: retry as u32,
             payload: payload.map(Bytes::from),
@@ -1089,7 +1099,7 @@ impl ProjectionRead for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         let result = {
             let g = self.inner.lock().expect("poisoned");
-            claimed_view_sql(&g.conn, &g.live_tokens, shard, ids)
+            render_claimed(&g.conn, shard, ids, |id| g.live_tokens.get(id).cloned())
         };
         std::future::ready(result)
     }
@@ -1135,28 +1145,79 @@ impl PushPort for SqliteRelationalBackend {
 }
 
 impl ClaimPort for SqliteRelationalBackend {
-    /// BQ-11a: straightforward priority-ordered select + lease (single-writer correct). BQ-11b replaces
-    /// the selection with the TD-002 serialized claim CTE + full Eligibility Precedence + group selection.
+    /// BQ-11b: the TD-002 serialized claim CTE — candidate selection and the lease land in **one**
+    /// transaction (`with candidates as (select … order by … limit … for update skip locked) update …
+    /// returning`), so there is no select-then-lease TOCTOU (unlike the BQ-11a two-transaction form).
+    ///
+    /// CONCURRENCY NOTE: the serialization that makes the in-one-transaction select+lease safe here comes
+    /// from the whole-backend `Mutex<Inner>` (one writer at a time), NOT from the sqlite transaction — a
+    /// deferred transaction takes no row lock at SELECT time. The transaction provides failure-atomicity
+    /// (rollback on error/crash). BQ-12 (postgres_native) has no such Mutex and MUST use a real `FOR UPDATE
+    /// SKIP LOCKED` candidate lock; it cannot inherit this pattern unchanged.
+    ///
+    /// Eligibility ordering is the strict-claim key (`priority_sort, created_seq`), exact parity with the
+    /// in-memory reference; `progress_guard_sort` bounded-relaxed promotion is a cross-family enhancement
+    /// deferred so the two families never diverge on the conformance core class (TD-002:649;
+    /// group/`same_group_key` selection is BQ-14).
     fn claim(
         &self,
         req: ClaimRequest,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            let candidates = select_eligible_sql(&g.conn, &req.shard, req.now, req.max_items)?;
+            let Inner {
+                conn,
+                queues,
+                live_tokens,
+                ..
+            } = &mut *g;
+            let (t, q) = parts(&req.shard);
+            let tx = st(conn.transaction())?;
+            // Candidate selection inside the claim transaction (the CTE's locked candidate set).
+            let candidates = select_eligible_sql(&tx, &req.shard, req.now, req.max_items)?;
             if candidates.is_empty() {
-                return Ok(Claimed::default());
+                return Ok(Claimed::default()); // tx dropped (rolled back) — nothing leased
             }
-            g.commit_command(
+            // Lease the selected candidates in the SAME transaction (the CTE's `update … returning`).
+            let seq: i64 = st(tx
+                .query_row(
+                    "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![t, q],
+                    |row| row.get(0),
+                )
+                .optional())?
+            .ok_or(EngineError::NotFound)?;
+            let mut token_ops = Vec::new();
+            apply_command_sql(
+                &tx,
+                queues,
+                &mut token_ops,
                 &req.shard,
-                QueueCommand::Claim(ClaimCommand {
+                seq as u64,
+                req.now,
+                &QueueCommand::Claim(ClaimCommand {
                     item_ids: candidates.clone(),
                     lease_token: req.lease_token.clone(),
                     lease_expires_at: req.lease_expires_at,
                 }),
-                req.now,
             )?;
-            let items = claimed_view_sql(&g.conn, &g.live_tokens, &req.shard, &candidates)?;
+            st(tx.execute(
+                "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
+                params![t, q, seq + 1],
+            ))?;
+            // Render the reply from the just-leased rows + the token we just minted (the CTE's RETURNING).
+            let items = render_claimed(&tx, &req.shard, &candidates, |_| {
+                Some(req.lease_token.clone())
+            })?;
+            // Every selected candidate was just leased in this txn, so it must render (parity guard the
+            // in-memory backend also carries) — a miss means an apply/render divergence, not a no-op.
+            debug_assert_eq!(
+                items.len(),
+                candidates.len(),
+                "every claimed candidate must render"
+            );
+            st(tx.commit())?;
+            apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
             Ok(Claimed { items })
         })();
         std::future::ready(result)
