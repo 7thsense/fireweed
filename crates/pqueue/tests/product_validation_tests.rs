@@ -9,6 +9,7 @@
 //! Implemented here:
 //!   - AC-E2E-9 downstream-pacing non-goal (`downstream_pacing_non_goal_e2e`).
 //!   - AC-E2E-8 generic priority + bounded-relaxed (`generic_priority_bounded_relaxed_e2e`).
+//!   - AC-E2E-1 scheduled-action delivery (`scheduled_action_delivery_e2e`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,9 +17,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pqueue::{NewItem, Pqueue};
 use pqueue_core::{
-    EligibilityPolicy, GroupKey, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
-    TenantId,
+    EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
+    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, MemoryBackend};
@@ -413,4 +414,238 @@ async fn generic_priority_bounded_relaxed_e2e() {
             ("seventh_sense_fields_used".into(), serde_json::json!(0)),
         ]),
     );
+}
+
+// ---------------------------------------------------------------------------
+// AC-E2E-1 — scheduled action delivery
+// ---------------------------------------------------------------------------
+
+fn ts(seconds: i64) -> UtcTimestamp {
+    UtcTimestamp::new(seconds, 0).unwrap()
+}
+
+/// AC-E2E-1 (TP-003): model `scheduled_actions` — a timestamp-ascending queue where items are pushed EARLY
+/// with a future send time (`not_before`), become eligible exactly when the clock reaches that time, are
+/// delivered in schedule order, and renew/finalize cleanly; with cross-tenant isolation and metrics matching
+/// the terminal state. (FR-1..3, FR-7, FR-18..28, FR-40..46.)
+///
+/// COVERED via the lib facade: not_before scheduling + eligibility gating by the clock; strict
+/// timestamp-ascending delivery order (INV: schedule order == timestamp); single delivery per item (INV-1);
+/// renew commits + preserves the lease; progress to terminal (INV-4); tenant NAMESPACING (same queue_id under
+/// two tenants are independent queues with no cross-tenant leakage); metrics match the terminal state.
+/// DEFERRED (tracked on pqueue-7a96f929 — facade lacks the seam): BatchUpdate reschedule (change
+/// priority/not_before after push), SetGates close+reopen gating (no gated item claimed while blocked),
+/// claim-by-group_key, and the expiry-REDELIVERY-vs-renew proof (needs a facade reclaim tick). Cross-tenant
+/// AUTHZ denial lives in the auth layer (ADR-002), not this trusted library facade. NOT claimed in the row.
+#[tokio::test]
+async fn scheduled_action_delivery_e2e() {
+    let (pq, clock) = deployment();
+    // Timestamp-ascending queue: priority == scheduled send time, ascending → earliest scheduled first.
+    let q = qk("sched", "campaign");
+    pq.create_queue(qdef(
+        "sched",
+        "campaign",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+
+    // Push 3 actions EARLY (clock is at 0), each scheduled for a future send time via not_before, priority ==
+    // the send time so schedule order == timestamp order.
+    let schedule = [10i64, 20, 30];
+    for &t in &schedule {
+        pq.push(
+            &q,
+            NewItem {
+                priority: Some(PriorityValue::Int64(t)),
+                not_before: Some(ts(t)),
+                payload: Some(Bytes::from(format!("send@{t}").into_bytes())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        pq.metrics(&q).await.unwrap().pending,
+        3,
+        "all scheduled, pending"
+    );
+
+    // BEFORE any send time (clock=0): nothing is eligible — a claim returns an empty batch (the actions are
+    // scheduled, not withheld; their not_before simply hasn't arrived).
+    assert!(
+        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
+        "no action is deliverable before its scheduled time"
+    );
+
+    // Delivery in schedule order as the clock advances; track ids to prove single delivery (INV-1).
+    let mut delivered_order = Vec::new();
+    let mut delivered_ids: Vec<ItemId> = Vec::new();
+
+    // clock=15 → only the action scheduled at 10 is eligible.
+    clock.set(15);
+    let batch = pq.claim(&q, 10, 60_000).await.unwrap();
+    assert_eq!(
+        batch.len(),
+        1,
+        "exactly the one due action is deliverable at t=15"
+    );
+    record(&batch, &mut delivered_order, &mut delivered_ids);
+    pq.ack(&q, batch.iter().map(|c| c.item_id.clone()))
+        .await
+        .unwrap();
+
+    // clock=100 → the remaining actions (20, 30) are eligible; delivered in ascending schedule order.
+    clock.set(100);
+    let batch = pq.claim(&q, 10, 50_000).await.unwrap(); // lease 50s → expiry at 150
+    assert_eq!(
+        batch.len(),
+        2,
+        "both remaining due actions are deliverable at t=100"
+    );
+    record(&batch, &mut delivered_order, &mut delivered_ids);
+
+    // RENEW the leases: the renew verb commits on the leased items and they remain leased + claimable for
+    // finalize. NOTE (honest scope): expiry-REDELIVERY suppression (an un-renewed lease would redeliver after
+    // its deadline, a renewed one would not) is NOT exercised here — the memory backend only returns an
+    // expired lease to Pending via a reclaim tick (ReclaimDriver), which the lib facade does not expose, so a
+    // claim never reclaims expired leases regardless of renew. The redelivery-vs-renew proof needs a facade
+    // reclaim-tick seam (deferred to pqueue-7a96f929). Here we prove only that renew succeeds and preserves
+    // the lease.
+    clock.set(140);
+    pq.renew(&q, batch.iter().map(|c| c.item_id.clone()), 50_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        pq.metrics(&q).await.unwrap().leased,
+        2,
+        "renew preserves the lease (items still leased, claimable for finalize)"
+    );
+    pq.ack(&q, batch.iter().map(|c| c.item_id.clone()))
+        .await
+        .unwrap();
+
+    // Schedule order == timestamp order (INV: ordering), and each action delivered exactly once (INV-1).
+    assert_eq!(
+        delivered_order, schedule,
+        "actions delivered in scheduled (timestamp) order"
+    );
+    delivered_ids.sort();
+    delivered_ids.dedup();
+    assert_eq!(
+        delivered_ids.len(),
+        3,
+        "each action delivered exactly once (INV-1: no duplicate delivery)"
+    );
+
+    // Metrics match the terminal state (INV-4 progress: everything reached complete).
+    let m = pq.metrics(&q).await.unwrap();
+    assert_eq!(
+        (m.complete, m.pending, m.leased),
+        (3, 0, 0),
+        "all actions terminal-complete"
+    );
+
+    // Tenant NAMESPACING: the SAME queue_id under two different tenants are independent queues with NO
+    // cross-tenant leakage. Push a distinct marker into each tenant's same-named queue and prove each claim
+    // sees ONLY its own tenant's item (bidirectional). (Cross-tenant AUTHZ denial — a principal of tenant A
+    // being refused tenant B's data plane — lives in the auth layer / RESP front per ADR-002, NOT in this
+    // trusted library facade; it is not exercised here.)
+    let qa = qk("iso-a", "shared");
+    let qb = qk("iso-b", "shared");
+    pq.create_queue(qdef(
+        "iso-a",
+        "shared",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    pq.create_queue(qdef(
+        "iso-b",
+        "shared",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    clock.set(0);
+    pq.push(
+        &qa,
+        NewItem {
+            payload: Some(Bytes::from_static(b"tenant-a")),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    pq.push(
+        &qb,
+        NewItem {
+            payload: Some(Bytes::from_static(b"tenant-b")),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let from_a = pq.claim(&qa, 10, 60_000).await.unwrap();
+    let from_b = pq.claim(&qb, 10, 60_000).await.unwrap();
+    assert_eq!(
+        from_a.len(),
+        1,
+        "tenant A's queue delivers exactly its own item"
+    );
+    assert_eq!(
+        from_b.len(),
+        1,
+        "tenant B's queue delivers exactly its own item"
+    );
+    assert_eq!(
+        from_a[0].payload.as_deref(),
+        Some(b"tenant-a".as_ref()),
+        "no cross-tenant leakage into A"
+    );
+    assert_eq!(
+        from_b[0].payload.as_deref(),
+        Some(b"tenant-b".as_ref()),
+        "no cross-tenant leakage into B"
+    );
+
+    emit_ac(
+        "AC-E2E-1",
+        &["INV-1", "INV-4"],
+        "scheduled actions become eligible at not_before, delivered in timestamp order, single delivery (INV-1), renew commits + preserves the lease, tenant-namespaced (no cross-tenant leakage), progress to terminal (INV-4), metrics match terminal [DEFERRED -> pqueue-7a96f929: BatchUpdate-reschedule, SetGates-gating, claim-by-group_key, expiry-redelivery-vs-renew (needs facade reclaim tick); cross-tenant AUTHZ denial is the auth layer]",
+        BTreeMap::from([
+            (
+                "scheduled_actions".into(),
+                serde_json::json!(schedule.len()),
+            ),
+            (
+                "delivered_in_schedule_order".into(),
+                serde_json::json!(delivered_order == schedule),
+            ),
+            (
+                "unique_deliveries".into(),
+                serde_json::json!(delivered_ids.len()),
+            ),
+            (
+                "deferred_subparts".into(),
+                serde_json::json!(
+                    "BatchUpdate-reschedule, SetGates-gating, claim-by-group_key -> pqueue-7a96f929"
+                ),
+            ),
+        ]),
+    );
+}
+
+/// Record a claimed batch's priorities (delivery order) + ids (for single-delivery checks).
+fn record(batch: &[pqueue::ClaimedItem], order: &mut Vec<i64>, ids: &mut Vec<ItemId>) {
+    for c in batch {
+        if let Some(PriorityValue::Int64(n)) = c.priority {
+            order.push(n);
+        }
+        ids.push(c.item_id.clone());
+    }
 }

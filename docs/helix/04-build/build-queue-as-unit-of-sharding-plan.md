@@ -190,8 +190,7 @@ review → commit → `ddx bead close`.
     applied). **BQ-43d.8 DONE** (pqueue-7e323937 — AC-E2E-8: strict int64-descending 0-inversions reordering
     proof + opaque payload/metadata round-trip + no-Seventh-Sense; bounded-relaxed accepted+progresses but
     selects strict-equivalently — rank-error-bound feature deferred to pqueue-b725d3ee; fresh-eyes
-    GO-with-conditions applied). TODO: .1 (pqueue-be7f8ea5 scheduled
-    delivery), .2 (pqueue-2919c2c5 Marketo group-batching), .3 (pqueue-d9efa9cd cohort), .4 (pqueue-cac31cd7
+    GO-with-conditions applied). **BQ-43d.1 DONE** (pqueue-be7f8ea5 — AC-E2E-1 scheduled-action delivery: not_before scheduling/eligibility gating, timestamp-ascending order, single delivery (INV-1), renew commits+preserves lease, bidirectional tenant no-leak, terminal metrics; reschedule/gating/group-claim/redelivery-vs-renew deferred to pqueue-7a96f929; fresh-eyes GO-with-conditions applied). TODO: .2 (pqueue-2919c2c5 Marketo group-batching), .3 (pqueue-d9efa9cd cohort), .4 (pqueue-cac31cd7
     recurring-singleton), .5 (pqueue-b7d3a803 crash-recovery — live-process subset deferred), .6 (pqueue-3e62f414
     noisy-neighbor — discovery/latency-at-scale deferred).
   - **BQ-43e** (pqueue-0ee83e73) — rewire `scripts/ci` gates to current crates + reconcile evidence sources; closes BQ-43.
