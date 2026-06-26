@@ -10,6 +10,7 @@ mod auth;
 mod claim_validation;
 mod command;
 mod control_plane;
+mod density;
 mod error;
 mod finalize_validation;
 mod idempotency;
@@ -33,6 +34,7 @@ pub use control_plane::{
     lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
     resolve_target,
 };
+pub use density::{RenewSweep, ResidentQueues, renew_all_resident};
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
