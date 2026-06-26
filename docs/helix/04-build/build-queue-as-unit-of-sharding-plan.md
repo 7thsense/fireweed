@@ -207,7 +207,14 @@ review → commit → `ddx bead close`.
     (stale-reject + post-advance/pre-segment) on all 6 backends. Fresh-eyes GO-with-conditions applied:
     hot-path owner-epoch stamping deferred to BQ-21 (documented at fast-path sites); `read_from` now carries
     true per-entry epoch (objectlog per-entry epoch + manifest-CAS tracked → pqueue-e5c6d6fc).
-- [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
+- [x] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
+  - **BQ-30** ✅ (pqueue-4fc67b83, 5edf87a) — Redis CRC16 + `hash_slot` (keyHashSlot hash-tag rule) +
+    `queue_routing_key`/`queue_slot` + `ClusterNode` + CLUSTER SLOTS/SHARDS/NODES/INFO/MYID/KEYSLOT
+    single-node bootstrap, wired into RESP dispatch. Proven by a real `redis::cluster::ClusterClient`
+    bootstrap+route e2e (+ unit tests vs Redis reference vectors). Fresh-eyes GO-with-conditions: CRC16
+    independently verified correct; the wire-key (`tenant:queue`) vs routing-key (`{tenant/queue}`)
+    slot-mismatch reconciliation is recorded as a **BQ-31 (pqueue-4cb0d507)** prerequisite for `-MOVED`.
+    Multi-node slot→owner view + per-queue `-MOVED` = BQ-31; live topology = server-runtime.
 - [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
 
 > Per-bead dependency edges live in ddx (`ddx bead ready` computes the next implementable bead). Phase
