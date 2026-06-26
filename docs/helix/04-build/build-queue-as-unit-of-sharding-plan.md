@@ -187,7 +187,10 @@ review → commit → `ddx bead close`.
     Decomposed per-workflow (all smoke-tier, ac_ids ledger rows): **BQ-43d.9 DONE** (pqueue-940190e6 — harness
     + AC-E2E-9 downstream-pacing non-goal: proves no rate/admission state by lifecycle accounting + claim
     returns min(max,eligible) across wall-clock pauses + payload round-trip; fresh-eyes GO-with-conditions
-    applied). TODO: BQ-43d.8 (pqueue-7e323937 generic-priority/bounded-relaxed), .1 (pqueue-be7f8ea5 scheduled
+    applied). **BQ-43d.8 DONE** (pqueue-7e323937 — AC-E2E-8: strict int64-descending 0-inversions reordering
+    proof + opaque payload/metadata round-trip + no-Seventh-Sense; bounded-relaxed accepted+progresses but
+    selects strict-equivalently — rank-error-bound feature deferred to pqueue-b725d3ee; fresh-eyes
+    GO-with-conditions applied). TODO: .1 (pqueue-be7f8ea5 scheduled
     delivery), .2 (pqueue-2919c2c5 Marketo group-batching), .3 (pqueue-d9efa9cd cohort), .4 (pqueue-cac31cd7
     recurring-singleton), .5 (pqueue-b7d3a803 crash-recovery — live-process subset deferred), .6 (pqueue-3e62f414
     noisy-neighbor — discovery/latency-at-scale deferred).
