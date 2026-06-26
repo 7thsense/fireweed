@@ -318,6 +318,42 @@ pub trait FinalizePort: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Active-scope discovery (BQ-14e)
+// ---------------------------------------------------------------------------
+
+/// Operator discovery of a queue's **active scopes** — the groups that currently hold eligible work,
+/// summarized for ranking (`DiscoverActiveScopes`, API-001 / TD-002 §Discovery). A read-only rollup over
+/// the per-group summary projection (`pqueue_group_summary`): each group with `oldest_eligible_at` set
+/// becomes one source [`ActiveScope`] (age from `now`, eligible count; at-risk is `None` while its
+/// derivation is deferred), then [`project_scopes`](crate::project_scopes) collapses to the requested
+/// granularity (per-group detail, or a single queue rollup). The returned list is ranked **owner-local,
+/// oldest-first** (most-starved scope first; deterministic group-key tiebreak) — the queue has one owner
+/// (ADR-008), so this ranking is authoritative for the queue without cross-owner merge.
+///
+/// LAYERING: this port performs the granularity projection (incl. the per-queue rollup) and the owner-local
+/// sort for ITS ONE queue. A tenant-wide adapter therefore CONCATENATES these per-queue results and
+/// re-ranks — it must NOT re-run [`project_scopes`](crate::project_scopes) at `Queue` granularity (the rows
+/// are already one-per-queue; a second rollup is a no-op but the contract is "roll up once, here"). The
+/// adapter still owns wire concerns the port does not: `tenant_id`/`as_of` stamping, `max_results`
+/// truncation, and any `queue_id`/`group_key` filtering.
+///
+/// PAUSE: discovery reports INTRINSIC eligibility and does not short-circuit on a paused queue (it shows
+/// pause-induced buildup, mirroring the pause-agnostic summary) — a deliberate divergence from the claim
+/// path. KNOWN LIMITATION (tracked pqueue-64351bdd): the summary's `oldest_eligible_at` lags a pure
+/// `not_before` crossing, so discovery can under-report time-triggered starvation until the next mutation.
+///
+/// RELATIONAL-ONLY: the in-memory log-replay family maintains no per-group summary, so it does not
+/// implement this port (a relational-class feature, kept out of the shared core suite — parity preserved).
+pub trait DiscoveryPort: Send + Sync {
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: crate::active_scope::DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::active_scope::ActiveScope>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // Clock, IdGen, ReclaimDriver
 // ---------------------------------------------------------------------------
 

@@ -18,10 +18,11 @@ use pqueue_core::{
     UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand, ControlPlaneStore,
-    FenceLeaseCommand, FinalizeKind, FinalizeOutcome, FinalizePort, GroupBatching, ProjectionRead,
-    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, ReassignLeasePort,
-    ReclaimDriver, RenewLeasePort, SetGatesCommand, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
+    ActiveScope, ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand,
+    ControlPlaneStore, DiscoveryGranularity, DiscoveryPort, FenceLeaseCommand, FinalizeKind,
+    FinalizeOutcome, FinalizePort, GroupBatching, ProjectionRead, PurgePort, PushCommand, PushItem,
+    PushPort, PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
+    SetGatesCommand, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -1306,4 +1307,169 @@ async fn blocked_gate_on_a_cohort_member_blocks_the_whole_cohort() {
         3,
         "clearing the gate restores the whole-cohort claim"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 7. ACTIVE-SCOPE DISCOVERY (BQ-14e) — DiscoveryPort rolls up pqueue_group_summary into ranked
+//    ActiveScopes (owner-local oldest-first; Queue granularity collapses to one queue rollup). A
+//    relational-class read (the in-memory family has no group summary), so it lives in this suite.
+// ---------------------------------------------------------------------------
+
+/// At Group granularity, discovery returns one scope per active group, ranked owner-local oldest-first
+/// (the most-aged group leads), with per-group eligible counts from the summary.
+#[tokio::test]
+async fn discover_group_granularity_ranks_oldest_first() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    // g1 (2 items) eligible since t=10, g2 since t=20, g3 since t=30 (later push = younger age).
+    b.push(&shard(), vec![gspec(10, "g1"), gspec(11, "g1")], ts(10))
+        .await
+        .unwrap();
+    b.push(&shard(), vec![gspec(20, "g2")], ts(20))
+        .await
+        .unwrap();
+    b.push(&shard(), vec![gspec(30, "g3")], ts(30))
+        .await
+        .unwrap();
+
+    let scopes = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000))
+        .await
+        .unwrap();
+    // Oldest-first: g1 (age 990s) → g2 (980s) → g3 (970s).
+    let order: Vec<&str> = scopes
+        .iter()
+        .map(|s| s.group_key.as_deref().unwrap())
+        .collect();
+    assert_eq!(order, vec!["g1", "g2", "g3"], "ranked most-aged first");
+    assert_eq!(scopes[0].oldest_eligible_age_ms, 990_000);
+    assert_eq!(scopes[1].oldest_eligible_age_ms, 980_000);
+    assert_eq!(scopes[2].oldest_eligible_age_ms, 970_000);
+    // Counts come from the per-group summary (g1 has 2 eligible items, g2/g3 one each).
+    assert_eq!(scopes[0].eligible_count, Some(2));
+    assert_eq!(scopes[1].eligible_count, Some(1));
+    // at-risk derivation is deferred → reported as None ("no signal"), NOT Some(0) (a measured zero).
+    assert!(
+        scopes.iter().all(|s| s.progress_bound_risk_count.is_none()),
+        "deferred at-risk is None, not a fabricated zero"
+    );
+    // Every scope carries this queue's id and (group granularity) a group key.
+    assert!(
+        scopes
+            .iter()
+            .all(|s| s.queue_id == shard().queue_id.as_str())
+    );
+}
+
+/// PAUSE divergence (intentional): discovery reports INTRINSIC eligibility — a paused queue still surfaces
+/// its active scopes (so an operator sees pause-induced buildup), even though a claim on it leases nothing.
+#[tokio::test]
+async fn discover_reports_scopes_on_a_paused_queue() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    b.push(&shard(), vec![gspec(10, "g1")], ts(10))
+        .await
+        .unwrap();
+    commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
+
+    // A claim on the paused queue leases nothing...
+    assert!(
+        b.claim(claim_req(10, 500, 100))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    // ...but discovery still reports the built-up scope.
+    let scopes = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000))
+        .await
+        .unwrap();
+    assert_eq!(
+        scopes.len(),
+        1,
+        "paused queue still surfaces its active scope"
+    );
+    assert_eq!(scopes[0].group_key.as_deref(), Some("g1"));
+    assert_eq!(scopes[0].eligible_count, Some(1));
+}
+
+/// Discovery of a queue that does not exist is an empty list, not an error (a read of an unknown queue
+/// simply has no active scopes — unlike the claim path, which would reject).
+#[tokio::test]
+async fn discover_unknown_queue_is_empty_not_error() {
+    let b = make();
+    // No create_queue.
+    let scopes = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Queue, ts(1000))
+        .await
+        .unwrap();
+    assert!(scopes.is_empty());
+}
+
+/// At Queue granularity, discovery collapses the queue's groups to ONE rollup scope: age = MAX across
+/// groups (worst-aged drives the queue), eligible_count = SUM, group_key cleared.
+#[tokio::test]
+async fn discover_queue_granularity_rolls_up_to_one_scope() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    b.push(&shard(), vec![gspec(10, "g1"), gspec(11, "g1")], ts(10))
+        .await
+        .unwrap();
+    b.push(&shard(), vec![gspec(20, "g2")], ts(20))
+        .await
+        .unwrap();
+
+    let scopes = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Queue, ts(1000))
+        .await
+        .unwrap();
+    assert_eq!(scopes.len(), 1, "one rolled-up scope for the queue");
+    let q = &scopes[0];
+    assert_eq!(q.group_key, None, "queue rollup clears group_key");
+    assert_eq!(q.oldest_eligible_age_ms, 990_000, "max age across groups");
+    assert_eq!(q.eligible_count, Some(3), "summed eligible counts (2 + 1)");
+}
+
+/// A group with no currently-eligible work (its only item is leased) drops out of discovery — the summary
+/// sets `oldest_eligible_at = NULL`, so it is not an active scope.
+#[tokio::test]
+async fn discover_excludes_groups_with_no_eligible_work() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    b.push(&shard(), vec![gspec(10, "g1")], ts(10))
+        .await
+        .unwrap();
+    b.push(&shard(), vec![gspec(20, "g2")], ts(20))
+        .await
+        .unwrap();
+
+    // Item-level claim leases g1's only item → g1 has no eligible work left.
+    b.claim(claim_req(1, 500, 100)).await.unwrap();
+
+    let scopes = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000))
+        .await
+        .unwrap();
+    let order: Vec<&str> = scopes
+        .iter()
+        .map(|s| s.group_key.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["g2"],
+        "the fully-leased group g1 is not an active scope"
+    );
+}
+
+/// An empty queue (no groups) discovers no active scopes.
+#[tokio::test]
+async fn discover_empty_queue_is_empty() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    let scopes: Vec<ActiveScope> = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Queue, ts(1000))
+        .await
+        .unwrap();
+    assert!(scopes.is_empty());
 }

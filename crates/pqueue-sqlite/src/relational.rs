@@ -57,14 +57,15 @@ use pqueue_core::{
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
-    CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
-    EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
-    ItemView, LeaseExpiredCommand, LeaseView, LogWriter, ProjectionRead, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport, UpsertOutcome,
-    UpsertPort, build_push_items, validate_claim_compatibility, validate_purge_force,
+    ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
+    ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
+    DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
+    LeaseView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort,
+    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
+    ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items, project_scopes,
+    validate_claim_compatibility, validate_purge_force,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -1190,6 +1191,67 @@ fn peek_sql(conn: &Connection, shard: &QueueKey, limit: usize) -> EngineResult<V
     Ok(out)
 }
 
+/// BQ-14e active-scope discovery: roll up `pqueue_group_summary` into ranked [`ActiveScope`]s. Each group
+/// that currently holds eligible work (`oldest_eligible_at IS NOT NULL`) becomes one source scope, ordered
+/// owner-local oldest-first (smallest `oldest_eligible_at` = most-aged group, group-key tiebreak for
+/// determinism); `eligible_item_count` carries through as the eligible signal. [`project_scopes`] then
+/// collapses to the requested granularity (Group = per-group detail in the oldest-first order; Queue = a
+/// single rollup row for the queue — see [`project_scopes`] arithmetic).
+///
+/// `progress_bound_risk_count` is reported as `None` ("no signal"), NOT `Some(0)`: the summary's
+/// `at_risk_count` is a hardcoded `0` placeholder while the progress-guard/at-risk derivation is deferred
+/// (see `refresh_group_summary`), and the [`ActiveScope`] contract reserves `None` for an uncomputed
+/// signal vs `Some(0)` for a measured zero. When at-risk becomes live, map it to `Some` here.
+///
+/// PAUSE (intentional divergence from the claim path): discovery reports a group's INTRINSIC eligibility
+/// and does NOT short-circuit on `queue_paused` (unlike `select_eligible_sql`/group selection). An operator
+/// hunting starvation wants to see work that has built up *because* a queue is paused; the summary itself
+/// is pause-agnostic, so discovery mirrors it. (A read of a queue that does not exist yields an empty list,
+/// not `NotFound` — a discovery read of an unknown queue simply has no active scopes.)
+///
+/// KNOWN LIMITATION (shared with the group-claim path, tracked pqueue-64351bdd): `oldest_eligible_at` is
+/// the BQ-11c mutation-time value (lagged across a pure `not_before` crossing). A group made eligible ONLY
+/// by time passing — with no subsequent mutation — keeps `oldest_eligible_at = NULL` and is NOT discovered
+/// until its next mutation or a due-sweep refresh. So discovery can UNDER-report time-triggered starvation;
+/// it never over-reports (an item present in the summary as eligible truly was at its last mutation).
+fn discover_active_scopes_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    granularity: DiscoveryGranularity,
+    now: UtcTimestamp,
+) -> EngineResult<Vec<ActiveScope>> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let mut stmt = st(conn.prepare(
+        "SELECT group_key, oldest_eligible_at, eligible_item_count \
+         FROM pqueue_group_summary \
+         WHERE tenant_id=?1 AND queue_id=?2 AND oldest_eligible_at IS NOT NULL \
+         ORDER BY oldest_eligible_at ASC, group_key ASC",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    }))?;
+    let mut source = Vec::new();
+    for r in rows {
+        let (group_key, oldest_eligible_at, eligible) = st(r)?;
+        // Age from `now`; a summary timestamp in the future (clock skew) clamps to 0, never underflows.
+        let age_ms = now_n.saturating_sub(oldest_eligible_at).max(0) as u64 / 1_000_000;
+        source.push(ActiveScope {
+            queue_id: q.clone(),
+            group_key: Some(group_key),
+            oldest_eligible_age_ms: age_ms,
+            eligible_count: Some(eligible as u64),
+            // Deferred at-risk derivation → no signal (not a measured zero). See the doc above.
+            progress_bound_risk_count: None,
+        });
+    }
+    Ok(project_scopes(source, granularity))
+}
+
 /// In-flight (leased) items. The lease token comes from the ephemeral live-token map (the durable table
 /// keeps only the hash); a leased item whose token was lost to a reopen is omitted.
 fn pending_sql(
@@ -1623,6 +1685,21 @@ impl ProjectionRead for SqliteRelationalBackend {
         let result = {
             let g = self.inner.lock().expect("poisoned");
             metrics_sql(&g.conn, queue)
+        };
+        std::future::ready(result)
+    }
+}
+
+impl DiscoveryPort for SqliteRelationalBackend {
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ActiveScope>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            discover_active_scopes_sql(&g.conn, shard, granularity, now)
         };
         std::future::ready(result)
     }

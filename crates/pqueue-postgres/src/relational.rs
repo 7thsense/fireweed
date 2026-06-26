@@ -55,14 +55,15 @@ use pqueue_core::{
     QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit, Claimed,
-    ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogWriter, ProjectionRead,
-    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
-    QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport, UpsertOutcome,
-    UpsertPort, build_push_items, validate_claim_compatibility, validate_purge_force,
+    ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit,
+    Claimed, ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
+    DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
+    LeaseView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort,
+    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
+    ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items, project_scopes,
+    validate_claim_compatibility, validate_purge_force,
 };
 use sha2::{Digest, Sha256};
 
@@ -1110,6 +1111,52 @@ fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult
     Ok(out)
 }
 
+/// BQ-14e active-scope discovery: roll up `pqueue_group_summary` into ranked [`ActiveScope`]s (mirror of
+/// the sqlite backend — see that helper for the full contract). Each group holding eligible work
+/// (`oldest_eligible_at IS NOT NULL`) becomes one source scope, owner-local oldest-first (group-key
+/// tiebreak); [`project_scopes`] collapses to the requested granularity.
+///
+/// `progress_bound_risk_count` is `None` ("no signal"), not `Some(0)`: the summary's `at_risk_count` is a
+/// deferred `0` placeholder (see `refresh_group_summary`), and the [`ActiveScope`] contract reserves `None`
+/// for an uncomputed signal. Discovery does NOT short-circuit on `queue_paused` (reports intrinsic
+/// eligibility — an operator wants to see pause-induced buildup; a read of an unknown queue → empty list).
+/// KNOWN LIMITATION (shared with group-claim, tracked pqueue-64351bdd): `oldest_eligible_at` is the
+/// mutation-time value, lagged across a pure `not_before` crossing — discovery can UNDER-report
+/// time-triggered starvation until the group's next mutation / a due-sweep refresh.
+fn discover_active_scopes_sql(
+    client: &mut Client,
+    shard: &QueueKey,
+    granularity: DiscoveryGranularity,
+    now: UtcTimestamp,
+) -> EngineResult<Vec<ActiveScope>> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let rows = st(client.query(
+        "SELECT group_key, oldest_eligible_at, eligible_item_count \
+         FROM pqueue_group_summary \
+         WHERE tenant_id=$1 AND queue_id=$2 AND oldest_eligible_at IS NOT NULL \
+         ORDER BY oldest_eligible_at ASC, group_key ASC",
+        &[&t, &q],
+    ))?;
+    let mut source = Vec::with_capacity(rows.len());
+    for row in rows {
+        let group_key: String = row.get(0);
+        let oldest_eligible_at: i64 = row.get(1);
+        let eligible: i64 = row.get(2);
+        // Age from `now`; a future summary timestamp (clock skew) clamps to 0.
+        let age_ms = now_n.saturating_sub(oldest_eligible_at).max(0) as u64 / 1_000_000;
+        source.push(ActiveScope {
+            queue_id: q.clone(),
+            group_key: Some(group_key),
+            oldest_eligible_age_ms: age_ms,
+            eligible_count: Some(eligible as u64),
+            // Deferred at-risk derivation → no signal (not a measured zero).
+            progress_bound_risk_count: None,
+        });
+    }
+    Ok(project_scopes(source, granularity))
+}
+
 fn pending_sql(
     client: &mut Client,
     live_tokens: &HashMap<ItemId, LeaseToken>,
@@ -1563,6 +1610,21 @@ impl ProjectionRead for PostgresRelationalBackend {
         let result = {
             let mut g = self.inner.lock().expect("poisoned");
             metrics_sql(&mut g.client, queue)
+        };
+        std::future::ready(result)
+    }
+}
+
+impl DiscoveryPort for PostgresRelationalBackend {
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ActiveScope>>> + Send {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            discover_active_scopes_sql(&mut g.client, shard, granularity, now)
         };
         std::future::ready(result)
     }
@@ -2240,5 +2302,85 @@ mod gated_group_summary_tests {
             "the whole complete cohort leases together"
         );
         assert_eq!(block_on(b.metrics(&shard())).unwrap().leased, 3);
+    }
+
+    /// BQ-14e: discover_active_scopes rolls up pqueue_group_summary, ranks oldest-first, reports deferred
+    /// at-risk as None, and drops fully-leased groups (env-gated; LOUD-skips without a DB).
+    #[test]
+    fn discover_active_scopes_rolls_up_group_summary() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (discover_active_scopes_rolls_up_group_summary) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_ds_{}", std::process::id());
+        let mut c = Client::connect(&url, NoTls).expect("connect");
+        c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(c);
+
+        let def = QueueDefinition {
+            max_eligible_group_size: Some(5),
+            ..qdef()
+        };
+        let g2 = |priority: i64, group: &str| PushSpec {
+            priority: Some(PriorityValue::Int64(priority)),
+            group_key: Some(GroupKey::new(group).unwrap()),
+            ..Default::default()
+        };
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
+        block_on(b.create_queue(def)).unwrap();
+        // g1 eligible since t=10 (2 items), g2 since t=20 (1 item).
+        block_on(b.push(&shard(), vec![g2(10, "g1"), g2(11, "g1")], ts(10))).unwrap();
+        block_on(b.push(&shard(), vec![g2(20, "g2")], ts(20))).unwrap();
+
+        // Group granularity: oldest-first (g1 then g2), per-group eligible counts, at-risk None.
+        let scopes =
+            block_on(b.discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000)))
+                .unwrap();
+        let order: Vec<&str> = scopes
+            .iter()
+            .map(|s| s.group_key.as_deref().unwrap())
+            .collect();
+        assert_eq!(order, vec!["g1", "g2"], "ranked most-aged first");
+        assert_eq!(scopes[0].oldest_eligible_age_ms, 990_000);
+        assert_eq!(scopes[0].eligible_count, Some(2));
+        assert_eq!(scopes[1].eligible_count, Some(1));
+        assert!(
+            scopes.iter().all(|s| s.progress_bound_risk_count.is_none()),
+            "deferred at-risk is None"
+        );
+
+        // Queue granularity: one rollup (max age, summed counts).
+        let rolled =
+            block_on(b.discover_active_scopes(&shard(), DiscoveryGranularity::Queue, ts(1000)))
+                .unwrap();
+        assert_eq!(rolled.len(), 1);
+        assert_eq!(rolled[0].group_key, None);
+        assert_eq!(rolled[0].oldest_eligible_age_ms, 990_000);
+        assert_eq!(rolled[0].eligible_count, Some(3));
+
+        // Leasing g1's whole group drops it from discovery (no eligible work left).
+        let req = ClaimRequest {
+            compatibility: ClaimCompatibility {
+                same_group_key: true,
+                ..Default::default()
+            },
+            ..claim_req(10, 500, 100)
+        };
+        block_on(b.claim(req)).unwrap();
+        let after =
+            block_on(b.discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000)))
+                .unwrap();
+        let after_order: Vec<&str> = after
+            .iter()
+            .map(|s| s.group_key.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            after_order,
+            vec!["g2"],
+            "fully-leased g1 is no longer active"
+        );
     }
 }
