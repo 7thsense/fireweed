@@ -14,8 +14,8 @@
 use bytes::Bytes;
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, UtcTimestamp,
-    WorkerId,
+    ClientItemKey, CohortPolicy, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition,
+    UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand, ControlPlaneStore,
@@ -40,6 +40,29 @@ fn gspec(priority: i64, group: &str) -> PushSpec {
         priority: Some(PriorityValue::Int64(priority)),
         group_key: Some(GroupKey::new(group).unwrap()),
         ..Default::default()
+    }
+}
+
+/// A cohort-member push spec (group_key + declared cohort_size).
+fn cspec(priority: i64, group: &str, cohort_size: u64) -> PushSpec {
+    PushSpec {
+        priority: Some(PriorityValue::Int64(priority)),
+        group_key: Some(GroupKey::new(group).unwrap()),
+        cohort_size: Some(cohort_size),
+        ..Default::default()
+    }
+}
+
+/// A queue definition with cohorts enabled (so `whole_cohort` validates).
+fn qdef_cohort() -> QueueDefinition {
+    QueueDefinition {
+        cohort_policy: Some(CohortPolicy {
+            enabled: true,
+            completion_bound_ms: Some(30_000),
+            on_incomplete: None,
+            max_cohort_size: Some(10),
+        }),
+        ..qdef()
     }
 }
 
@@ -409,6 +432,7 @@ async fn cohort_expired_fails_group_members() {
         group_key: Some(group.clone()),
         max_attempts: 3,
         payload: None,
+        cohort_size: None,
     };
     commit(
         &b,
@@ -954,4 +978,161 @@ async fn group_batching_oversized_group_is_batch_too_large() {
     );
     // Nothing leased — all 3 still pending.
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 3);
+}
+
+// ---------------------------------------------------------------------------
+// 5. BQ-14c whole_cohort claim (RELATIONAL-class). All-or-nothing: a COMPLETE cohort whose members are
+//    all eligible leases together; otherwise it is skipped.
+// ---------------------------------------------------------------------------
+
+fn whole_cohort_compat() -> ClaimCompatibility {
+    ClaimCompatibility {
+        whole_cohort: true,
+        ..Default::default()
+    }
+}
+
+/// A complete cohort (member_count == cohort_size) with all members eligible leases WHOLE.
+#[tokio::test]
+async fn whole_cohort_leases_a_complete_cohort() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    // Cohort "c1" of size 3 — all three members present + eligible.
+    let ids = b
+        .push(
+            &shard(),
+            vec![cspec(10, "c1", 3), cspec(11, "c1", 3), cspec(12, "c1", 3)],
+            ts(0),
+        )
+        .await
+        .unwrap();
+
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+        .await
+        .unwrap();
+    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    leased.sort();
+    let mut expect: Vec<&str> = ids.iter().map(|i| i.as_str()).collect();
+    expect.sort();
+    assert_eq!(leased, expect, "the whole complete cohort leases together");
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 3);
+}
+
+/// An INCOMPLETE cohort (fewer members present than the declared size) is NOT claimable → empty.
+#[tokio::test]
+async fn whole_cohort_skips_an_incomplete_cohort() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    // Declared size 3 but only 2 members pushed → incomplete.
+    b.push(
+        &shard(),
+        vec![cspec(10, "c1", 3), cspec(11, "c1", 3)],
+        ts(0),
+    )
+    .await
+    .unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+        .await
+        .unwrap();
+    assert!(
+        claimed.items.is_empty(),
+        "an incomplete cohort is not claimable"
+    );
+    // The members stay pending.
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 2);
+}
+
+/// A complete cohort with a member NOT currently eligible (already leased) is skipped (all-or-nothing).
+#[tokio::test]
+async fn whole_cohort_skips_when_a_member_is_not_eligible() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![cspec(10, "c1", 3), cspec(11, "c1", 3), cspec(12, "c1", 3)],
+            ts(0),
+        )
+        .await
+        .unwrap();
+    // Item-level claim one member → it is leased, so the cohort is no longer all-eligible.
+    b.claim(claim_req(1, 500, 50)).await.unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+        .await
+        .unwrap();
+    assert!(
+        claimed.items.is_empty(),
+        "a cohort with a non-eligible member is not claimable whole"
+    );
+    let _ = ids;
+}
+
+/// A complete cohort larger than `max_items` → `BatchTooLarge`, leasing nothing.
+#[tokio::test]
+async fn whole_cohort_oversized_is_batch_too_large() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    b.push(
+        &shard(),
+        vec![cspec(10, "c1", 3), cspec(11, "c1", 3), cspec(12, "c1", 3)],
+        ts(0),
+    )
+    .await
+    .unwrap();
+    // max_items=2 < cohort size 3.
+    assert!(
+        matches!(
+            b.claim(claim_req_compat(2, 500, 100, whole_cohort_compat()))
+                .await,
+            Err(pqueue_engine::EngineError::BatchTooLarge)
+        ),
+        "an oversized cohort → BatchTooLarge"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        3,
+        "nothing leased"
+    );
+}
+
+/// F1 (fresh-eyes): a plain (non-cohort) push to a cohort's group_key does NOT strand the cohort — only
+/// cohort-declared members (cohort_size set) count toward completeness.
+#[tokio::test]
+async fn whole_cohort_ignores_non_cohort_group_members() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    // 3 cohort members of "c1" (size 3) + one PLAIN group item sharing group_key "c1" (no cohort_size).
+    let ids = b
+        .push(
+            &shard(),
+            vec![
+                cspec(10, "c1", 3),
+                cspec(11, "c1", 3),
+                cspec(12, "c1", 3),
+                gspec(13, "c1"), // plain group member, not a cohort member
+            ],
+            ts(0),
+        )
+        .await
+        .unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+        .await
+        .unwrap();
+    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    leased.sort();
+    let mut expect = vec![ids[0].as_str(), ids[1].as_str(), ids[2].as_str()]; // the 3 cohort members
+    expect.sort();
+    assert_eq!(
+        leased, expect,
+        "only cohort-declared members lease; the plain group item is untouched"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "the plain group item stays pending"
+    );
 }

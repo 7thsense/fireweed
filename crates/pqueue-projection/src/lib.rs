@@ -683,6 +683,7 @@ mod tests {
             group_key: None,
             max_attempts: 3,
             payload: None,
+            cohort_size: None,
         }
     }
     fn env(command: QueueCommand) -> CommandEnvelope {

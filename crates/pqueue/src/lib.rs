@@ -88,6 +88,8 @@ pub struct NewItem {
     pub group_key: Option<GroupKey>,
     pub not_before: Option<UtcTimestamp>,
     pub payload: Option<Bytes>,
+    /// Declared cohort size (BQ-14c) — see [`ClaimCompatibility`]/`whole_cohort`. `None` for non-cohort items.
+    pub cohort_size: Option<u64>,
 }
 
 /// The ergonomic library handle. Holds an injected backend + clock; generates ids/lease tokens.
@@ -138,6 +140,7 @@ impl<B: LibBackend> Pqueue<B> {
                 not_before: it.not_before,
                 group_key: it.group_key,
                 payload: it.payload,
+                cohort_size: it.cohort_size,
             })
             .collect();
         self.backend.push(queue, specs, self.clock.now()).await

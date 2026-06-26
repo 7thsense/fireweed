@@ -152,6 +152,16 @@ CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
     item_id TEXT NOT NULL, expires_at INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, client_item_key)
 );
+-- BQ-14c: the cohort projection (TD-002 §cohort). The cohort key IS the group_key; `cohort_size` is the
+-- declared total member count (set by the first cohort member's push). Completeness + per-member
+-- eligibility are evaluated LIVE from pqueue_items at whole_cohort claim time (this row is the
+-- authoritative size + a discovery anchor). The richer lifecycle (cohort lease token, forming/leased/
+-- terminal state, retention, divergent-size conflict) is deferred — see pqueue-a162438c.
+CREATE TABLE IF NOT EXISTS pqueue_cohorts (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
+    cohort_size INTEGER NOT NULL, created_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, group_key)
+);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -372,10 +382,10 @@ fn insert_item(
     st(tx.execute(
         "INSERT INTO pqueue_items \
          (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-          not_before,eligible_since,group_key,payload,metadata,retry_count,item_version,\
+          not_before,eligible_since,group_key,cohort_size,payload,metadata,retry_count,item_version,\
           lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,updated_at,\
           terminal_at,fenced,superseded,max_attempts,created_seq) \
-         VALUES (?1,?2,?3,?4,'Pending',?5,?6,?7,?8,?9,?10,'{}',0,1,NULL,NULL,NULL,?11,?12,?12,NULL,0,0,?13,?14)",
+         VALUES (?1,?2,?3,?4,'Pending',?5,?6,?7,?8,?9,?15,?10,'{}',0,1,NULL,NULL,NULL,?11,?12,?12,NULL,0,0,?13,?14)",
         params![
             t,
             q,
@@ -391,7 +401,34 @@ fn insert_item(
             ts_nanos(now),
             item.max_attempts as i64,
             created_seq,
+            item.cohort_size.map(|s| s as i64),
         ],
+    ))?;
+    // BQ-14c: a cohort member (group_key + cohort_size) forms/updates its pqueue_cohorts row.
+    if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
+        upsert_cohort(tx, shard, group, size, now)?;
+    }
+    Ok(())
+}
+
+/// Maintain the `pqueue_cohorts` projection for a cohort member's push (BQ-14c). The cohort key IS the
+/// `group_key`; `cohort_size` is the declared total. First declaration sets the size; a later DIVERGENT
+/// `cohort_size` for the same key is recorded but does NOT overwrite (the first declaration is
+/// authoritative — divergent-push CONFLICT rejection is a documented follow-up, pqueue-a162438c).
+/// Completeness (`member_count == cohort_size`) is evaluated LIVE from `pqueue_items` at claim time (the
+/// row is the authoritative size + a discovery anchor, like `pqueue_group_summary`).
+fn upsert_cohort(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    group: &GroupKey,
+    cohort_size: u64,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    st(tx.execute(
+        "INSERT INTO pqueue_cohorts (tenant_id,queue_id,group_key,cohort_size,created_at) \
+         VALUES (?1,?2,?3,?4,?5) ON CONFLICT(tenant_id,queue_id,group_key) DO NOTHING",
+        params![t, q, group.as_str(), cohort_size as i64, ts_nanos(now)],
     ))?;
     Ok(())
 }
@@ -978,6 +1015,91 @@ fn select_same_group(
     Ok(Vec::new())
 }
 
+/// `whole_cohort` selection (API-001 G6, all-or-nothing): the oldest COMPLETE cohort whose members are ALL
+/// currently eligible. A cohort (group_key with a declared `cohort_size`) is complete when its live
+/// non-superseded member count equals `cohort_size`; it is claimable only when every member is also
+/// pending+due (no member leased/terminal). The whole cohort leases together, or the cohort is skipped.
+/// `BatchTooLarge` if the selected cohort exceeds `max_items`. Paused → empty.
+fn select_whole_cohort(
+    conn: &Connection,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max_items: usize,
+) -> EngineResult<Vec<ItemId>> {
+    if queue_paused(conn, shard)? {
+        return Ok(Vec::new());
+    }
+    let (t, q) = parts(shard);
+    // Declared cohorts, oldest-first.
+    let cohorts: Vec<(String, i64)> = {
+        let mut stmt = st(conn.prepare(
+            "SELECT group_key, cohort_size FROM pqueue_cohorts \
+             WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_at, group_key",
+        ))?;
+        let rows = st(stmt.query_map(params![t, q], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(st(r)?);
+        }
+        out
+    };
+    for (gk, size) in cohorts {
+        let size = size as usize;
+        let group = GroupKey::new(gk).map_err(|e| EngineError::Storage(e.to_string()))?;
+        // COHORT members are the items that DECLARED cohort membership (`cohort_size IS NOT NULL`), NOT all
+        // items sharing the group_key — so a plain (non-cohort) push to the same key neither inflates the
+        // count nor strands the cohort (fresh-eyes F1). Live non-superseded member count (any state).
+        let members: i64 = st(conn.query_row(
+            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL",
+            params![t, q, group.as_str()],
+            |row| row.get(0),
+        ))?;
+        if members as usize != size {
+            continue; // incomplete cohort (not all declared members present)
+        }
+        // All members must be currently eligible (pending+due). Fetch size+1 to detect any extra.
+        let elig = cohort_eligible_items(conn, shard, &group, now, size + 1)?;
+        if elig.len() != size {
+            continue; // some member is leased / terminal / not-due — the cohort is not claimable now
+        }
+        if size > max_items {
+            return Err(EngineError::BatchTooLarge); // the selected complete cohort exceeds the ceiling
+        }
+        return Ok(elig); // lease the whole cohort
+    }
+    Ok(Vec::new())
+}
+
+/// The live currently-eligible COHORT members of one group (`cohort_size IS NOT NULL`), in claim order,
+/// capped at `limit`. Like [`group_eligible_items`] but restricted to cohort-declared members (F1).
+fn cohort_eligible_items(
+    conn: &Connection,
+    shard: &QueueKey,
+    group: &GroupKey,
+    now: UtcTimestamp,
+    limit: usize,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let mut stmt = st(conn.prepare(
+        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+         AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NOT NULL \
+         AND (not_before IS NULL OR not_before<=?4) AND eligible_since IS NOT NULL \
+         ORDER BY priority_sort, created_seq LIMIT ?5",
+    ))?;
+    let mapped = st(stmt.query_map(
+        params![t, q, group.as_str(), ts_nanos(now), limit as i64],
+        |row| row.get::<_, String>(0),
+    ))?;
+    let mut out = Vec::new();
+    for r in mapped {
+        out.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(out)
+}
+
 /// Non-destructive eligible view (every pending non-superseded item in priority order; ignores
 /// `not_before`/pause exactly like the in-memory `peek`).
 fn peek_sql(conn: &Connection, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
@@ -1506,9 +1628,6 @@ impl ClaimPort for SqliteRelationalBackend {
             } else {
                 ClaimUnit::Item
             };
-            if matches!(unit, ClaimUnit::WholeCohort) {
-                return Err(EngineError::Unavailable); // whole_cohort selection lands in BQ-14c
-            }
             let Inner {
                 conn,
                 queues,
@@ -1518,7 +1637,7 @@ impl ClaimPort for SqliteRelationalBackend {
             let (t, q) = parts(&req.shard);
             let tx = st(conn.transaction())?;
             // Candidate selection inside the claim transaction (serialized under the backend Mutex). The
-            // item-level path is the strict-claim order; the group paths consume the group summary.
+            // item-level path is the strict-claim order; the group/cohort paths consume their projections.
             let candidates = match unit {
                 ClaimUnit::Item => select_eligible_sql(&tx, &req.shard, req.now, req.max_items)?,
                 ClaimUnit::WholeGroup => {
@@ -1533,7 +1652,9 @@ impl ClaimPort for SqliteRelationalBackend {
                 ClaimUnit::SameGroupKey => {
                     select_same_group(&tx, &req.shard, req.now, req.max_items)?
                 }
-                ClaimUnit::WholeCohort => unreachable!("whole_cohort gated to Unavailable above"),
+                ClaimUnit::WholeCohort => {
+                    select_whole_cohort(&tx, &req.shard, req.now, req.max_items)?
+                }
             };
             if candidates.is_empty() {
                 return Ok(Claimed::default()); // tx dropped (rolled back) — nothing leased
@@ -1630,6 +1751,7 @@ impl UpsertPort for SqliteRelationalBackend {
                 group_key,
                 max_attempts,
                 payload,
+                cohort_size: None,
             };
             match existing {
                 None => {

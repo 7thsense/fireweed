@@ -134,6 +134,14 @@ CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
     item_id TEXT NOT NULL, expires_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, client_item_key)
 );
+-- BQ-14c: the cohort projection (TD-002 §cohort). The cohort key IS the group_key; cohort_size is the
+-- declared total. Completeness + eligibility are evaluated live from pqueue_items at whole_cohort claim
+-- time. Rich lifecycle (cohort lease token, state, retention, divergent-size conflict) is deferred.
+CREATE TABLE IF NOT EXISTS pqueue_cohorts (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
+    cohort_size BIGINT NOT NULL, created_at BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, group_key)
+);
 "#;
 
 /// The serialized claim CTE (TD-002 `BatchClaim`): select the eligible candidates under a real
@@ -461,13 +469,14 @@ fn insert_item(
     let gk = item.group_key.as_ref().map(|g| g.as_str().to_string());
     let item_id = item.item_id.as_str().to_string();
     let key = item.client_item_key.as_str().to_string();
+    let cohort_size = item.cohort_size.map(|s| s as i64);
     st(tx.execute(
         "INSERT INTO pqueue_items \
          (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-          not_before,eligible_since,group_key,payload,metadata,retry_count,item_version,\
+          not_before,eligible_since,group_key,cohort_size,payload,metadata,retry_count,item_version,\
           lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,updated_at,\
           terminal_at,fenced,superseded,max_attempts,created_seq) \
-         VALUES ($1,$2,$3,$4,'Pending',$5,$6,$7,$8,$9,$10,'{}',0,1,NULL,NULL,NULL,$11,$12,$12,NULL,\
+         VALUES ($1,$2,$3,$4,'Pending',$5,$6,$7,$8,$9,$15,$10,'{}',0,1,NULL,NULL,NULL,$11,$12,$12,NULL,\
                  false,false,$13,$14)",
         &[
             &t,
@@ -484,6 +493,35 @@ fn insert_item(
             &now_n,
             &max_attempts,
             &created_seq,
+            &cohort_size,
+        ],
+    ))?;
+    // BQ-14c: a cohort member (group_key + cohort_size) forms/updates its pqueue_cohorts row.
+    if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
+        upsert_cohort(tx, shard, group, size, now)?;
+    }
+    Ok(())
+}
+
+/// Maintain `pqueue_cohorts` for a cohort member's push (BQ-14c). First declaration sets the authoritative
+/// `cohort_size`; a divergent later size does NOT overwrite (conflict rejection deferred — pqueue follow-up).
+fn upsert_cohort(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    group: &GroupKey,
+    cohort_size: u64,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    st(tx.execute(
+        "INSERT INTO pqueue_cohorts (tenant_id,queue_id,group_key,cohort_size,created_at) \
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,queue_id,group_key) DO NOTHING",
+        &[
+            &t,
+            &q,
+            &group.as_str(),
+            &(cohort_size as i64),
+            &ts_nanos(now),
         ],
     ))?;
     Ok(())
@@ -906,6 +944,78 @@ fn select_same_group(
         }
     }
     Ok(Vec::new())
+}
+
+/// `whole_cohort` selection (API-001 G6, all-or-nothing): the oldest COMPLETE cohort whose members are ALL
+/// currently eligible. The cohort summary row is locked `FOR UPDATE SKIP LOCKED`; completeness
+/// (`member_count == cohort_size`) + per-member eligibility are re-read live. `BatchTooLarge` if the
+/// selected cohort exceeds `max_items`. Pause is gated in `claim` before this.
+fn select_whole_cohort(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max_items: usize,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let cohorts: Vec<(String, i64)> = {
+        let rows = st(tx.query(
+            "SELECT group_key, cohort_size FROM pqueue_cohorts \
+             WHERE tenant_id=$1 AND queue_id=$2 ORDER BY created_at, group_key FOR UPDATE SKIP LOCKED",
+            &[&t, &q],
+        ))?;
+        rows.into_iter().map(|r| (r.get(0), r.get(1))).collect()
+    };
+    for (gk, size) in cohorts {
+        let size = size as usize;
+        let group = GroupKey::new(gk).map_err(|e| EngineError::Storage(e.to_string()))?;
+        // Cohort members = items that DECLARED cohort membership (cohort_size IS NOT NULL), not all items
+        // sharing the group_key (fresh-eyes F1: a plain push to the same key must not strand the cohort).
+        let members: i64 = st(tx.query_one(
+            "SELECT COUNT(*)::bigint FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+             AND group_key=$3 AND superseded=false AND cohort_size IS NOT NULL",
+            &[&t, &q, &group.as_str()],
+        ))?
+        .get(0);
+        if members as usize != size {
+            continue; // incomplete cohort
+        }
+        let elig = cohort_eligible_items(tx, shard, &group, now, size + 1)?;
+        if elig.len() != size {
+            continue; // a member is leased / terminal / not-due
+        }
+        if size > max_items {
+            return Err(EngineError::BatchTooLarge);
+        }
+        return Ok(elig);
+    }
+    Ok(Vec::new())
+}
+
+/// The live currently-eligible COHORT members of one group (`cohort_size IS NOT NULL`), capped at `limit`,
+/// `FOR UPDATE` (the whole locked cohort leases together). Restricted to cohort-declared members (F1).
+fn cohort_eligible_items(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    group: &GroupKey,
+    now: UtcTimestamp,
+    limit: usize,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let lim = limit as i64;
+    let rows = st(tx.query(
+        "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
+         AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NOT NULL \
+         AND (not_before IS NULL OR not_before<=$4) AND eligible_since IS NOT NULL \
+         ORDER BY priority_sort, created_seq LIMIT $5 FOR UPDATE",
+        &[&t, &q, &group.as_str(), &now_n, &lim],
+    ))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.get(0);
+        out.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(out)
 }
 
 fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
@@ -1445,10 +1555,7 @@ impl ClaimPort for PostgresRelationalBackend {
             } else {
                 ClaimUnit::Item
             };
-            if matches!(unit, ClaimUnit::WholeCohort) {
-                return Err(EngineError::Unavailable); // whole_cohort selection lands in BQ-14c
-            }
-            // Paused queues yield nothing (neither the CTE nor the group selection encodes pause).
+            // Paused queues yield nothing (neither the CTE nor the group/cohort selection encodes pause).
             if queue_paused(&mut g.client, &req.shard)? {
                 return Ok(Claimed::default());
             }
@@ -1524,7 +1631,10 @@ impl ClaimPort for PostgresRelationalBackend {
                 ClaimUnit::SameGroupKey => {
                     select_same_group(&mut tx, &req.shard, req.now, req.max_items)?
                 }
-                _ => unreachable!("Item handled above; WholeCohort gated to Unavailable"),
+                ClaimUnit::WholeCohort => {
+                    select_whole_cohort(&mut tx, &req.shard, req.now, req.max_items)?
+                }
+                ClaimUnit::Item => unreachable!("Item handled by the CTE path above"),
             };
             if candidates.is_empty() {
                 return Ok(Claimed::default()); // roll back — no sequence burned
@@ -1591,6 +1701,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 group_key,
                 max_attempts,
                 payload,
+                cohort_size: None,
             };
             match existing {
                 None => {
@@ -2006,5 +2117,54 @@ mod gated_group_summary_tests {
             1,
             "g3 (1 item) untouched"
         );
+    }
+
+    /// BQ-14c: whole_cohort leases a complete, all-eligible cohort (env-gated; LOUD-skips without a DB).
+    #[test]
+    fn whole_cohort_leases_complete_cohort() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (whole_cohort_leases_complete_cohort) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_wc_{}", std::process::id());
+        let mut c = Client::connect(&url, NoTls).expect("connect");
+        c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(c);
+
+        let def = QueueDefinition {
+            cohort_policy: Some(pqueue_core::CohortPolicy {
+                enabled: true,
+                completion_bound_ms: Some(30_000),
+                on_incomplete: None,
+                max_cohort_size: Some(10),
+            }),
+            ..qdef()
+        };
+        let cm = |priority: i64, size: u64| PushSpec {
+            priority: Some(PriorityValue::Int64(priority)),
+            group_key: Some(GroupKey::new("c1").unwrap()),
+            cohort_size: Some(size),
+            ..Default::default()
+        };
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
+        block_on(b.create_queue(def)).unwrap();
+        block_on(b.push(&shard(), vec![cm(10, 3), cm(11, 3), cm(12, 3)], ts(0))).unwrap();
+        let req = ClaimRequest {
+            compatibility: ClaimCompatibility {
+                whole_cohort: true,
+                ..Default::default()
+            },
+            ..claim_req(10, 500, 100)
+        };
+        let claimed = block_on(b.claim(req)).unwrap();
+        assert_eq!(
+            claimed.items.len(),
+            3,
+            "the whole complete cohort leases together"
+        );
+        assert_eq!(block_on(b.metrics(&shard())).unwrap().leased, 3);
     }
 }

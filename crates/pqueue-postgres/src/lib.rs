@@ -445,6 +445,7 @@ impl UpsertPort for PostgresBackend {
                 group_key,
                 max_attempts,
                 payload,
+                cohort_size: None,
             };
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("pg-{n}")),

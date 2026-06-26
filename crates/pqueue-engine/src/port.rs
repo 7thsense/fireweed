@@ -240,6 +240,8 @@ pub struct PushSpec {
     pub not_before: Option<UtcTimestamp>,
     pub group_key: Option<GroupKey>,
     pub payload: Option<Bytes>,
+    /// Declared cohort size (BQ-14c) — see [`crate::PushItem::cohort_size`]. `None` for non-cohort items.
+    pub cohort_size: Option<u64>,
 }
 
 /// Appends new items (server-assigned ids). The backend builds the envelope from its own command

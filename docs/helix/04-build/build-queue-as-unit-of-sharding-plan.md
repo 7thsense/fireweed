@@ -166,7 +166,7 @@ review → commit → `ddx bead close`.
 >    item-level claim unchanged at parity. *(foundational; everything claim-related depends on it)*
 >  - **BQ-14b** ✅ (pqueue-b3276967) — relational `group_batching` + `same_group_key` selection via
 >    `pqueue_group_summary`. *(dep 14a)*
->  - **BQ-14c** (pqueue-12eef939) — `pqueue_cohorts` projection + `whole_cohort` all-or-nothing claim. *(dep 14a)*
+>  - **BQ-14c** ✅ (pqueue-12eef939) — `pqueue_cohorts` projection + `whole_cohort` all-or-nothing claim. *(dep 14a)*
 >  - **BQ-14d** (pqueue-3c64d86e) — gates port + gate projection state + exact-on-read anti-join.
 >  - **BQ-14e** (pqueue-fde32048) — `DiscoverActiveScopes` port consuming `group_summary` + the `active_scope` rollup.
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
