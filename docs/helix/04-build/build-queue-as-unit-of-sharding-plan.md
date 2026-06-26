@@ -170,7 +170,14 @@ review → commit → `ddx bead close`.
     (TP-001/002/003; the 11 fields release-gate.sh validates) + JSONL `append_row` emitter + `pqueue-verify-ledger`
     binary (`--strict`/`--require-evidence`, rejects failed/untraceable/malformed/empty, asserts E0–E3 present).
     Fresh-eyes GO-with-conditions (atomic single-`write_all` append; `--require-evidence` implies `--strict`) applied.
-  - **BQ-43b** (pqueue-721d91b3) — E0/E1 postgres single-deployment evidence (env-gated live DB).
+  - **BQ-43b** (pqueue-721d91b3) **DONE** — `performance_single_deployment_baseline_tests` drives live
+    postgres_native, measures E0 throughput + E1 batch-op p95/p99, asserts correctness always, emits E0/E1
+    ledger rows (real measured values; LOUD-skips without a DB). Two lanes: SMOKE (default, smoke-tier rows,
+    no perf hard-fail — a bridge DB isn't a perf env) vs PERF (`PQUEUE_PERF_ENV`, hard-asserts + release-tier).
+    **MEASURED FINDING:** postgres_native is ~20-40× under the E0 floor on a non-provisioned DB (relational
+    per-item INSERT round-trips) → backend batch-write optimization + provisioned perf-env run tracked on
+    pqueue-d3371502. Fresh-eyes GO-with-conditions: the gate tier-enforcement (smoke must not green release;
+    current `release-gate.sh` ignores `evidence_tier`) is a BLOCKING **BQ-43e** condition.
   - **BQ-43c** (pqueue-28c704e2) **DONE** — the three measured suites emit a verification-ledger row from
     their REAL measured values (`<suite>.jsonl`) and assert it strict-validates. Rows are `evidence_tier=smoke`
     (in-process / file-backed reference) so they're recorded but do NOT satisfy a release E0–E3 gate;

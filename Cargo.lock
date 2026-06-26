@@ -976,6 +976,7 @@ dependencies = [
  "pqueue-core",
  "pqueue-engine",
  "pqueue-projection",
+ "pqueue-release",
  "serde",
  "serde_json",
  "sha2",
