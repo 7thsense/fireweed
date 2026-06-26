@@ -154,17 +154,21 @@ review → commit → `ddx bead close`.
 - [x] BQ-01 (P0, atomic; folds in the old BQ-02/03)
 - [x] BQ-10 · [x] BQ-11a · [x] BQ-11b · [x] BQ-11c · [x] BQ-11d · [x] BQ-12 (built; live-DB + contended-writer deferred, no PQUEUE_PG_TEST_URL) · [x] BQ-13 (matrix documented + head-to-head sqlite-relational-vs-in-memory parity test; postgres half live-DB-deferred) · [ ] **BQ-14 — BLOCKED** on a cross-cutting port-surface + API-001 decision (claim-compatibility / gate / discovery ports do not exist; see bead pqueue-2961924a) · [ ] BQ-11e (deferred: request-id idempotency, needs request_id port)   (P1)
 
-> **P1 CUT LINE REACHED (escalated to product owner).** The core P1 deliverable — the DB-authoritative
-> **relational projection family** (both sqlite + postgres backends), passing the full core conformance
-> class at parity with the in-memory family, with the relational-reconnect class and the
-> `group_summary`/`retention` substrate — is **COMPLETE and green** (BQ-01–13; the single-node RAM-ceiling
-> fix). **BQ-14** (group-batching/cohort/gate/discovery *consumers*) is **blocked**: every one of its
-> features needs a port that does not exist (`ClaimRequest` carries no `ClaimCompatibility`; there is no
-> gate port or gate projection state; the `DiscoverActiveScopes` rollup logic exists but is unconsumed —
-> no discovery port). These are cross-cutting (engine + all 5 backends + facade) and touch the frozen
-> API-001 claim shape — product/architecture decisions, not relational-backend build work. Building any on
-> the relational backend alone would be dead code. Tracked in **pqueue-2961924a**. P2 (ownership/fencing),
-> P3 (routing) and P4 (scale) are multi-node and even more cross-cutting; they sit beyond this cut line.
+> **P1 CUT LINE — product-owner decision: BUILD THE PORT-SURFACE EPIC.** The core P1 deliverable (the
+> DB-authoritative relational projection family, both backends, full core-class parity, relational-reconnect,
+> `group_summary`/`retention` substrate) is **COMPLETE and green** (BQ-01–13; the single-node RAM-ceiling
+> fix). **BQ-14** (group-batching/cohort/gate/discovery) was blocked on ports that don't exist; the product
+> owner chose to build that cross-cutting port surface (bringing the code up to what API-001 already
+> specifies for Batch Claim). **BQ-14 is decomposed into ordered build beads** (the original
+> pqueue-74155103 stays as the umbrella):
+>  - **BQ-14a** (pqueue-54b27fdd) — `ClaimRequest` carries `ClaimCompatibility` through `ClaimPort` + all 5
+>    backends + facade; engine resolves `ClaimUnit` via the existing `validate_claim_compatibility`;
+>    item-level claim unchanged at parity. *(foundational; everything claim-related depends on it)*
+>  - **BQ-14b** (pqueue-b3276967) — relational `group_batching` + `same_group_key` selection via
+>    `pqueue_group_summary`. *(dep 14a)*
+>  - **BQ-14c** (pqueue-12eef939) — `pqueue_cohorts` projection + `whole_cohort` all-or-nothing claim. *(dep 14a)*
+>  - **BQ-14d** (pqueue-3c64d86e) — gates port + gate projection state + exact-on-read anti-join.
+>  - **BQ-14e** (pqueue-fde32048) — `DiscoverActiveScopes` port consuming `group_summary` + the `active_scope` rollup.
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
 - [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
 - [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
