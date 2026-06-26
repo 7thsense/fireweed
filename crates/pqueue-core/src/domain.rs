@@ -92,6 +92,7 @@ identifier_type!(ItemId);
 identifier_type!(LeaseToken);
 identifier_type!(GroupKey);
 identifier_type!(WorkerId);
+identifier_type!(OwnerId);
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,

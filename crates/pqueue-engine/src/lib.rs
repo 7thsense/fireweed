@@ -9,6 +9,7 @@ mod active_scope;
 mod auth;
 mod claim_validation;
 mod command;
+mod control_plane;
 mod error;
 mod finalize_validation;
 mod idempotency;
@@ -24,6 +25,10 @@ pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
     validate_claim_compatibility,
+};
+pub use control_plane::{
+    AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState, OwnerResolution,
+    QueueControlPlane, QueueLease,
 };
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
