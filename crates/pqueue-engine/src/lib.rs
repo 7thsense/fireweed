@@ -14,6 +14,7 @@ mod error;
 mod finalize_validation;
 mod idempotency;
 mod operator;
+mod ownership;
 mod port;
 mod types;
 
@@ -34,6 +35,7 @@ pub use control_plane::{
 };
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
+pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
 pub use command::{
     ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
