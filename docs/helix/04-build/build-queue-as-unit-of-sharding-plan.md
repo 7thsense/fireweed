@@ -152,7 +152,19 @@ review → commit → `ddx bead close`.
 
 ## 4. Progress
 - [x] BQ-01 (P0, atomic; folds in the old BQ-02/03)
-- [x] BQ-10 · [x] BQ-11a · [x] BQ-11b · [x] BQ-11c · [x] BQ-11d · [x] BQ-12 (built; live-DB + contended-writer deferred, no PQUEUE_PG_TEST_URL) · [x] BQ-13 (matrix documented + head-to-head sqlite-relational-vs-in-memory parity test; postgres half live-DB-deferred) · [ ] BQ-14 · [ ] BQ-11e (deferred: request-id idempotency, needs request_id port)   (P1)
+- [x] BQ-10 · [x] BQ-11a · [x] BQ-11b · [x] BQ-11c · [x] BQ-11d · [x] BQ-12 (built; live-DB + contended-writer deferred, no PQUEUE_PG_TEST_URL) · [x] BQ-13 (matrix documented + head-to-head sqlite-relational-vs-in-memory parity test; postgres half live-DB-deferred) · [ ] **BQ-14 — BLOCKED** on a cross-cutting port-surface + API-001 decision (claim-compatibility / gate / discovery ports do not exist; see bead pqueue-2961924a) · [ ] BQ-11e (deferred: request-id idempotency, needs request_id port)   (P1)
+
+> **P1 CUT LINE REACHED (escalated to product owner).** The core P1 deliverable — the DB-authoritative
+> **relational projection family** (both sqlite + postgres backends), passing the full core conformance
+> class at parity with the in-memory family, with the relational-reconnect class and the
+> `group_summary`/`retention` substrate — is **COMPLETE and green** (BQ-01–13; the single-node RAM-ceiling
+> fix). **BQ-14** (group-batching/cohort/gate/discovery *consumers*) is **blocked**: every one of its
+> features needs a port that does not exist (`ClaimRequest` carries no `ClaimCompatibility`; there is no
+> gate port or gate projection state; the `DiscoverActiveScopes` rollup logic exists but is unconsumed —
+> no discovery port). These are cross-cutting (engine + all 5 backends + facade) and touch the frozen
+> API-001 claim shape — product/architecture decisions, not relational-backend build work. Building any on
+> the relational backend alone would be dead code. Tracked in **pqueue-2961924a**. P2 (ownership/fencing),
+> P3 (routing) and P4 (scale) are multi-node and even more cross-cutting; they sit beyond this cut line.
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
 - [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
 - [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
