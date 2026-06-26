@@ -1346,3 +1346,196 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
         "rejected renew/reassign/purge/finalize must NOT append any command (B1 no-divergence)"
     );
 }
+
+/// **Two-family CORE parity** (BQ-13, ADR-008 §2): drive the SAME arbitrary command sequence against two
+/// backends from DIFFERENT projection families and assert their observable read-state is identical at
+/// every step — a head-to-head differential proof of "behaviorally identical on the core class", stronger
+/// than each family passing fixed scenarios separately. Pushes use the write-UoW with EXPLICIT item ids
+/// (server-minted ids differ per backend by construction), so the compared state — metrics, eligibility
+/// order, peek, and the (token-bearing) pending set — is family-independent.
+pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
+    make_a: impl Fn() -> A,
+    make_b: impl Fn() -> B,
+) {
+    let a = make_a();
+    let b = make_b();
+    a.create_queue(qdef()).await.unwrap();
+    b.create_queue(qdef()).await.unwrap();
+
+    async fn commit_both<A: ConformanceCore, B: ConformanceCore>(a: &A, b: &B, cmd: QueueCommand) {
+        commit(a, envelope(cmd.clone(), vec![])).await;
+        commit(b, envelope(cmd, vec![])).await;
+    }
+
+    /// Assert the two backends present identical observable state. `select_eligible`/`peek` are compared in
+    /// order (both families order by the strict-claim key); `pending` is sorted first (it is unordered).
+    async fn parity<A: ConformanceCore, B: ConformanceCore>(a: &A, b: &B, now: i64, label: &str) {
+        assert_eq!(
+            a.metrics(&qkey()).await.unwrap(),
+            b.metrics(&qkey()).await.unwrap(),
+            "metrics diverge @ {label}"
+        );
+        assert_eq!(
+            a.select_eligible(&shard(), ts(now), 100).await.unwrap(),
+            b.select_eligible(&shard(), ts(now), 100).await.unwrap(),
+            "select_eligible diverge @ {label}"
+        );
+        let pa: Vec<(String, Option<PriorityValue>, u64)> = a
+            .peek(&shard(), 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.item_id.as_str().to_string(), v.priority, v.item_version))
+            .collect();
+        let pb: Vec<(String, Option<PriorityValue>, u64)> = b
+            .peek(&shard(), 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.item_id.as_str().to_string(), v.priority, v.item_version))
+            .collect();
+        assert_eq!(pa, pb, "peek diverge @ {label}");
+        let sort_pending = |v: Vec<pqueue_engine::LeaseView>| {
+            let mut s: Vec<(String, String, i64, u32)> = v
+                .into_iter()
+                .map(|l| {
+                    (
+                        l.item_id.as_str().to_string(),
+                        l.lease_token.as_str().to_string(),
+                        l.lease_expires_at.seconds,
+                        l.attempt_count,
+                    )
+                })
+                .collect();
+            s.sort();
+            s
+        };
+        assert_eq!(
+            sort_pending(a.pending(&shard()).await.unwrap()),
+            sort_pending(b.pending(&shard()).await.unwrap()),
+            "pending diverge @ {label}"
+        );
+    }
+
+    parity(&a, &b, 100, "empty").await;
+
+    // Push out of priority order (explicit ids so the families agree on identity).
+    commit_both(
+        &a,
+        &b,
+        QueueCommand::Push(PushCommand {
+            items: vec![
+                item("a", "ka", 30),
+                item("b", "kb", 10),
+                item("c", "kc", 20),
+            ],
+        }),
+    )
+    .await;
+    parity(&a, &b, 100, "after push").await;
+
+    // Claim the priority-10 head ("b") on both — identical request, identical selection + lease.
+    a.claim(claim_req(1, 500, 10)).await.unwrap();
+    b.claim(claim_req(1, 500, 10)).await.unwrap();
+    parity(&a, &b, 100, "after claim b").await;
+
+    // Renew, then complete "b".
+    a.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20))
+        .await
+        .unwrap();
+    b.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20))
+        .await
+        .unwrap();
+    parity(&a, &b, 100, "after renew b").await;
+    let fin_b = vec![FinalizeOutcome {
+        item_id: ItemId::new("b").unwrap(),
+        kind: FinalizeKind::Complete,
+    }];
+    a.finalize(&shard(), fin_b.clone(), ts(30)).await.unwrap();
+    b.finalize(&shard(), fin_b, ts(30)).await.unwrap();
+    parity(&a, &b, 100, "after complete b").await;
+
+    // Claim "c" (now the head), reassign it to a new consumer, then retry it back to pending.
+    a.claim(claim_req(1, 500, 40)).await.unwrap();
+    b.claim(claim_req(1, 500, 40)).await.unwrap();
+    parity(&a, &b, 100, "after claim c").await;
+    let l2 = LeaseToken::new("lease-2").unwrap();
+    a.reassign(
+        &shard(),
+        vec![ItemId::new("c").unwrap()],
+        l2.clone(),
+        ts(800),
+        ts(50),
+    )
+    .await
+    .unwrap();
+    b.reassign(
+        &shard(),
+        vec![ItemId::new("c").unwrap()],
+        l2,
+        ts(800),
+        ts(50),
+    )
+    .await
+    .unwrap();
+    parity(&a, &b, 100, "after reassign c").await;
+    let retry_c = vec![FinalizeOutcome {
+        item_id: ItemId::new("c").unwrap(),
+        kind: FinalizeKind::Retry,
+    }];
+    a.finalize(&shard(), retry_c.clone(), ts(60)).await.unwrap();
+    b.finalize(&shard(), retry_c, ts(60)).await.unwrap();
+    parity(&a, &b, 100, "after retry c").await;
+
+    // Fence-then-finalize "c" after a re-claim: both families reject the fenced finalize identically.
+    a.claim(claim_req(1, 500, 70)).await.unwrap();
+    b.claim(claim_req(1, 500, 70)).await.unwrap();
+    commit_both(
+        &a,
+        &b,
+        QueueCommand::FenceLease(FenceLeaseCommand {
+            item_ids: vec![ItemId::new("c").unwrap()],
+        }),
+    )
+    .await;
+    let fin_c = vec![FinalizeOutcome {
+        item_id: ItemId::new("c").unwrap(),
+        kind: FinalizeKind::Complete,
+    }];
+    assert!(a.finalize(&shard(), fin_c.clone(), ts(80)).await.is_err());
+    assert!(b.finalize(&shard(), fin_c, ts(80)).await.is_err());
+    parity(&a, &b, 100, "after fenced-finalize reject").await;
+
+    // Lease-expiry reclaim tick: "c" was leased through ts(500); tick past it returns it to pending.
+    a.tick(ts(501)).await.unwrap();
+    b.tick(ts(501)).await.unwrap();
+    parity(&a, &b, 600, "after reclaim tick").await;
+
+    // Purge the still-pending "a".
+    a.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90))
+        .await
+        .unwrap();
+    b.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90))
+        .await
+        .unwrap();
+    parity(&a, &b, 600, "after purge a").await;
+
+    // Pause hides eligibility on both; resume restores it.
+    commit_both(&a, &b, QueueCommand::PauseQueue).await;
+    parity(&a, &b, 600, "after pause").await;
+    commit_both(&a, &b, QueueCommand::ResumeQueue).await;
+    parity(&a, &b, 600, "after resume").await;
+
+    // ReplacePending (upsert via the write-UoW with explicit ids): supersede the pending "c" with "c2".
+    commit_both(
+        &a,
+        &b,
+        QueueCommand::ReplacePending(ReplacePendingCommand {
+            client_item_key: ClientItemKey::new("kc").unwrap(),
+            superseded_item_id: ItemId::new("c").unwrap(),
+            replacement: item("c2", "kc", 20),
+        }),
+    )
+    .await;
+    parity(&a, &b, 600, "after replace c->c2").await;
+}

@@ -24,6 +24,29 @@
 //! Scope: this harness exercises only the engine **ports** ([`ConformanceBackend`]); white-box tests
 //! that inspect an adapter's private state (e.g. item_version straight from the projection, or
 //! simulating log compaction) stay in that adapter's own crate.
+//!
+//! ## Conformance matrix (BQ-13 / ADR-008 §2 / TD-001 capability classes)
+//!
+//! Every backend runs the classes its durability + recovery model supports. The CORE class is the SAME
+//! scenario set for ALL backends (`core_suite!(@atomic)` or its `@eventual` upsert variant), which is what
+//! holds the two projection families behaviorally identical on core.
+//!
+//! | Backend | Projection family | Durability | Class wiring | Where |
+//! |---|---|---|---|---|
+//! | `pqueue_memory::MemoryBackend` | in-memory log-replay | atomic | `conformance_suite!` = core@atomic + log-replay | `pqueue-memory/src/tests.rs` |
+//! | `pqueue_sqlite::SqliteBackend` (log) | in-memory log-replay | atomic | `conformance_suite!` + `relational_reconnect_suite!` | `pqueue-sqlite/tests/{conformance,reconnect_smoke}.rs` |
+//! | `pqueue_postgres::PostgresBackend` (log) | in-memory log-replay | atomic | core@atomic + log (env-gated `pg_conformance!`) | `pqueue-postgres/tests/conformance.rs` |
+//! | `pqueue_objectlog` | log-bearing | eventual-apply | `eventual_apply_suite!` = core@eventual + log-replay | `pqueue-objectlog/tests/conformance.rs` |
+//! | `pqueue_sqlite::SqliteRelationalBackend` | relational (DB-authoritative) | atomic | `core_suite!(@atomic)` + `relational_reconnect_suite!` | `pqueue-sqlite/tests/relational_{conformance,reconnect}.rs` |
+//! | `pqueue_postgres::PostgresRelationalBackend` | relational (DB-authoritative) | atomic | core@atomic + relational-reconnect (env-gated) | `pqueue-postgres/tests/relational_conformance.rs` |
+//!
+//! Relational-only features (`pqueue_group_summary`, `pqueue_item_key_retention`) are deliberately OUT of
+//! the shared CORE class so the families stay identical on it. The two families are additionally held
+//! identical HEAD-TO-HEAD by [`scenarios::cross_family_core_parity`] (run sqlite-relational vs in-memory in
+//! `pqueue-sqlite/tests/cross_family_parity.rs`). PARITY EVIDENCE STATUS: sqlite-relational-vs-in-memory is
+//! validated locally; the postgres-relational half runs the identical class wiring but its live-DB
+//! evidence is env-gated on `PQUEUE_PG_TEST_URL` and deferred-with-reason where no database is present
+//! (convergence-review I3).
 
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection,
