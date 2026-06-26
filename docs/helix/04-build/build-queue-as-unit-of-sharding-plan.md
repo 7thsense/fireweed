@@ -190,8 +190,12 @@ review → commit → `ddx bead close`.
     applied). **BQ-43d.8 DONE** (pqueue-7e323937 — AC-E2E-8: strict int64-descending 0-inversions reordering
     proof + opaque payload/metadata round-trip + no-Seventh-Sense; bounded-relaxed accepted+progresses but
     selects strict-equivalently — rank-error-bound feature deferred to pqueue-b725d3ee; fresh-eyes
-    GO-with-conditions applied). **BQ-43d.1 DONE** (pqueue-be7f8ea5 — AC-E2E-1 scheduled-action delivery: not_before scheduling/eligibility gating, timestamp-ascending order, single delivery (INV-1), renew commits+preserves lease, bidirectional tenant no-leak, terminal metrics; reschedule/gating/group-claim/redelivery-vs-renew deferred to pqueue-7a96f929; fresh-eyes GO-with-conditions applied). TODO: .2 (pqueue-2919c2c5 Marketo group-batching), .3 (pqueue-d9efa9cd cohort), .4 (pqueue-cac31cd7
-    recurring-singleton), .5 (pqueue-b7d3a803 crash-recovery — live-process subset deferred), .6 (pqueue-3e62f414
+    GO-with-conditions applied). **BQ-43d.1 DONE** (pqueue-be7f8ea5 — AC-E2E-1 scheduled-action delivery: not_before scheduling/eligibility gating, timestamp-ascending order, single delivery (INV-1), renew commits+preserves lease, bidirectional tenant no-leak, terminal metrics; reschedule/gating/group-claim/redelivery-vs-renew deferred to pqueue-7a96f929; fresh-eyes GO-with-conditions applied). **BQ-43d.4 DONE** (pqueue-cac31cd7 — AC-E2E-4 recurring singleton:
+    one row cycles via claim→rearm with monotonic item_version; rearm RESETS the delivery count (does not consume
+    retry budget) proven by a biting counterfactual — a Retry-nack terminalizes at max_attempts=2 while the
+    rearmed item survives 5 cycles; PurgeItems idempotent + late finalize → not_found; rearm idle-period /
+    recurrence.until deferred to pqueue-8cbae731; fresh-eyes GO). TODO: .2 (pqueue-2919c2c5 Marketo
+    group-batching), .3 (pqueue-d9efa9cd cohort), .5 (pqueue-b7d3a803 crash-recovery — live-process subset deferred), .6 (pqueue-3e62f414
     noisy-neighbor — discovery/latency-at-scale deferred).
   - **BQ-43e** (pqueue-0ee83e73) — rewire `scripts/ci` gates to current crates + reconcile evidence sources; closes BQ-43.
 

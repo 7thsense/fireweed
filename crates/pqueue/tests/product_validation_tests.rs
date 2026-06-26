@@ -10,12 +10,13 @@
 //!   - AC-E2E-9 downstream-pacing non-goal (`downstream_pacing_non_goal_e2e`).
 //!   - AC-E2E-8 generic priority + bounded-relaxed (`generic_priority_bounded_relaxed_e2e`).
 //!   - AC-E2E-1 scheduled-action delivery (`scheduled_action_delivery_e2e`).
+//!   - AC-E2E-4 jobs/connectors recurring singleton (`jobs_connectors_recurring_e2e`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use pqueue::{NewItem, Pqueue};
+use pqueue::{EngineError, Nack, NewItem, Pqueue};
 use pqueue_core::{
     EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
@@ -43,6 +44,17 @@ fn qdef(
     direction: PriorityDirection,
     ordering: OrderingMode,
 ) -> QueueDefinition {
+    qdef_attempts(tenant, queue, direction, ordering, 1_000_000)
+}
+
+/// Like [`qdef`] but with an explicit `max_attempts` (for retry-exhaustion workflows).
+fn qdef_attempts(
+    tenant: &str,
+    queue: &str,
+    direction: PriorityDirection,
+    ordering: OrderingMode,
+    max_attempts: u32,
+) -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new(tenant).unwrap(),
         queue_id: QueueId::new(queue).unwrap(),
@@ -59,9 +71,7 @@ fn qdef(
         request_id_retention_ms: 600_000,
         client_item_key_retention_ms: 600_000,
         max_lease_duration_ms: 3_600_000,
-        retry_policy: RetryPolicy {
-            max_attempts: 1_000_000,
-        },
+        retry_policy: RetryPolicy { max_attempts },
         max_push_batch_size: 1_000_000,
         max_claim_batch_size: 1_000_000,
         max_eligible_group_size: None,
@@ -648,4 +658,165 @@ fn record(batch: &[pqueue::ClaimedItem], order: &mut Vec<i64>, ids: &mut Vec<Ite
         }
         ids.push(c.item_id.clone());
     }
+}
+
+// ---------------------------------------------------------------------------
+// AC-E2E-4 — jobs/connectors recurring singleton
+// ---------------------------------------------------------------------------
+
+/// AC-E2E-4 (TP-003): model `jobs_queue`/`connectors_queue` poll-cursor rows — ONE logical item per
+/// job/connector key, repeated claim→work→rearm cycles, per-cycle retry exhaustion, and PurgeItems teardown.
+///
+/// COVERED via the lib facade (each assertion's counterfactual bites):
+///   - recurring SINGLETON: one item cycles via claim→rearm; it is always the SAME id (no duplicate row),
+///     `item_version` increases monotonically across re-arms, and it survives MANY cycles (> max_attempts);
+///   - rearm does NOT consume the retry budget: each cycle is `attempt_count == 1` (rearm resets the delivery
+///     count). COUNTERFACTUAL with the SAME `max_attempts`: a `Retry`-nacked item terminalizes at the bound;
+///   - PurgeItems is idempotent (a second purge of the same id is a no-op) and a late finalize after purge
+///     returns `not_found`.
+/// DEFERRED (tracked on pqueue-8cbae731 — FinalizeRearm sets no new not_before, RecurrencePolicy.until is not
+/// enforced): rearm idle-period (new not_before each cycle), recurrence.until terminal cutoff, and the
+/// idle-recurring-doesn't-inflate-oldest-eligible-age check. NOT asserted, NOT claimed in the row.
+#[tokio::test]
+async fn jobs_connectors_recurring_e2e() {
+    let (pq, _clock) = deployment();
+
+    // max_attempts = 2 so the retry-exhaustion counterfactual bites in two cycles.
+    let rec_q = qk("jobs", "connectors");
+    pq.create_queue(qdef_attempts(
+        "jobs",
+        "connectors",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+        2,
+    ))
+    .await
+    .unwrap();
+
+    // --- recurring singleton: one logical poll-cursor item, repeated claim→rearm cycles ---
+    let job = pq
+        .push(
+            &rec_q,
+            NewItem {
+                payload: Some(Bytes::from_static(b"poll-cursor")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut versions = Vec::new();
+    let mut attempts_per_cycle = Vec::new();
+    let cycles = 5;
+    for _ in 0..cycles {
+        let got = pq.claim(&rec_q, 10, 60_000).await.unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "exactly one logical item cycles (no duplicate singleton rows)"
+        );
+        assert_eq!(
+            got[0].item_id, job,
+            "the SAME item recurs — rearm does not create a new row"
+        );
+        assert_eq!(
+            got[0].attempt_count, 1,
+            "rearm reset the delivery count: every cycle is attempt 1 (retry budget not consumed)"
+        );
+        attempts_per_cycle.push(got[0].attempt_count);
+        versions.push(got[0].item_version);
+        pq.rearm(&rec_q, [got[0].item_id.clone()]).await.unwrap();
+    }
+    assert!(
+        versions.windows(2).all(|w| w[1] > w[0]),
+        "item_version increases monotonically across re-arms: {versions:?}"
+    );
+    // Survived 5 cycles (> max_attempts=2): rearm never exhausted the budget; still exactly one item, pending.
+    let m = pq.metrics(&rec_q).await.unwrap();
+    assert_eq!(
+        (m.pending, m.failed),
+        (1, 0),
+        "the recurring singleton survives many cycles, never terminal"
+    );
+
+    // --- retry COUNTERFACTUAL (same max_attempts=2): nack(Retry) DOES consume the budget → terminal ---
+    let retry_q = qk("jobs", "retrying");
+    pq.create_queue(qdef_attempts(
+        "jobs",
+        "retrying",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+        2,
+    ))
+    .await
+    .unwrap();
+    let _ = pq.push(&retry_q, NewItem::default()).await.unwrap();
+    for _ in 0..2 {
+        let got = pq.claim(&retry_q, 1, 60_000).await.unwrap();
+        assert_eq!(got.len(), 1);
+        pq.nack(&retry_q, got.iter().map(|c| c.item_id.clone()), Nack::Retry)
+            .await
+            .unwrap();
+    }
+    let retry_terminal = pq.metrics(&retry_q).await.unwrap();
+    assert_eq!(
+        (retry_terminal.failed, retry_terminal.pending),
+        (1, 0),
+        "a Retry-nacked item terminalizes at max_attempts=2 — proving the recurring item's survival was rearm RESETTING the budget, not an absent bound"
+    );
+
+    // --- PurgeItems teardown: idempotent + late finalize → not_found ---
+    let purge_q = qk("jobs", "teardown");
+    pq.create_queue(qdef(
+        "jobs",
+        "teardown",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    let pid = pq.push(&purge_q, NewItem::default()).await.unwrap();
+    let claimed = pq.claim(&purge_q, 1, 60_000).await.unwrap();
+    assert_eq!(claimed.len(), 1, "item leased before operator teardown");
+    let n1 = pq.purge(&purge_q, [pid.clone()], true).await.unwrap(); // force: the item is leased
+    assert_eq!(n1, 1, "purge removes the leased item (force)");
+    let n2 = pq.purge(&purge_q, [pid.clone()], true).await.unwrap();
+    assert_eq!(
+        n2, 0,
+        "purge is IDEMPOTENT: a second purge of the same id is a no-op (0 removed)"
+    );
+    let late = pq.ack(&purge_q, [pid.clone()]).await;
+    let late_not_found = matches!(late, Err(EngineError::NotFound));
+    assert!(
+        late_not_found,
+        "a late finalize after purge returns not_found: {late:?}"
+    );
+
+    // Measured values (not literals): each field is the observed result of the asserted behavior above.
+    // NOTE: "approximate counter convergence under eventual consistency" (TP-003 AC-E2E-4) is a DURABLE-backend
+    // concern — the in-memory backend's metrics() counts are EXACT, so it is not separately exercised here.
+    emit_ac(
+        "AC-E2E-4",
+        &[],
+        "recurring singleton cycles as one row with monotonic item_version; rearm resets the delivery count (does NOT consume retry budget — counterfactual: a Retry-nack terminalizes at max_attempts); PurgeItems idempotent + late finalize -> not_found [DEFERRED -> pqueue-8cbae731: rearm idle-period, recurrence.until; approx-counter convergence is a durable-backend concern (exact here)]",
+        BTreeMap::from([
+            ("rearm_cycles".into(), serde_json::json!(cycles)),
+            ("item_versions".into(), serde_json::json!(versions)),
+            (
+                "attempt_count_per_cycle".into(),
+                serde_json::json!(attempts_per_cycle),
+            ),
+            (
+                "retry_counterfactual_failed_pending".into(),
+                serde_json::json!([retry_terminal.failed, retry_terminal.pending]),
+            ),
+            (
+                "purge_first_then_second".into(),
+                serde_json::json!([n1, n2]),
+            ),
+            (
+                "late_finalize_not_found".into(),
+                serde_json::json!(late_not_found),
+            ),
+        ]),
+    );
 }
