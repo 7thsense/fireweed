@@ -990,6 +990,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqueue-release"
+version = "0.2.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pqueue-resp"
 version = "0.2.4"
 dependencies = [

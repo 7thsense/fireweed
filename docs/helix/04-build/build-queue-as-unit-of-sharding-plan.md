@@ -161,7 +161,19 @@ review → commit → `ddx bead close`.
   group-commit ack/cost/snapshot+tail/SQLite-projection/10M-in-S3 → pqueue-2f9ebac3; manifest-CAS →
   pqueue-e5c6d6fc; E3 source-mapping + ledger-row → BQ-43 (gate stale). `#[ignore]` at-scale rebuild test added.
 - **BQ-43 release gate.** E0 floor preserved across all; TP-002 E0–E3 + TP-003 P0/core gates green from
-  source-backed evidence. *Acc:* `scripts/ci/release-gate.sh` (or its successor) green.
+  source-backed evidence. *Acc:* `scripts/ci/release-gate.sh` (or its successor) green. **IN PROGRESS** —
+  investigation found the entire release-evidence subsystem (ledger emitter, `pqueue-verify-ledger` binary,
+  E0/E1 postgres `product_validation_tests`) was DELETED with pqueue-service in the hexagonal migration; the
+  gate scripts still reference deleted crates. **Product-owner decision: rebuild the subsystem.** Decomposed
+  into sub-beads (build-q, P4):
+  - **BQ-43a** (pqueue-b5a49bd0) **DONE** — new `crates/pqueue-release` crate: verification-ledger row schema
+    (TP-001/002/003; the 11 fields release-gate.sh validates) + JSONL `append_row` emitter + `pqueue-verify-ledger`
+    binary (`--strict`/`--require-evidence`, rejects failed/untraceable/malformed/empty, asserts E0–E3 present).
+    Fresh-eyes GO-with-conditions (atomic single-`write_all` append; `--require-evidence` implies `--strict`) applied.
+  - **BQ-43b** (pqueue-721d91b3) — E0/E1 postgres single-deployment evidence (env-gated live DB).
+  - **BQ-43c** (pqueue-28c704e2) — E2/E3 ledger emission from the BQ-40/41/42 measured suites.
+  - **BQ-43d** (pqueue-f0dc083e) — `product_validation_tests` AC-E2E-1..9 rebuilt on the current interfaces.
+  - **BQ-43e** (pqueue-0ee83e73) — rewire `scripts/ci` gates to current crates + reconcile evidence sources; closes BQ-43.
 
 ## 3. Loop invariants
 - **Real code + tests.** Every bead lands compiling, `clippy -D warnings` clean, and its `cargo test`
