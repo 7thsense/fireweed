@@ -176,7 +176,13 @@ review → commit → `ddx bead close`.
 >    rollup) via the existing `active_scope` domain logic. Relational-only (parity preserved). Fresh-eyes
 >    GO-with-conditions: at-risk reported `None` (deferred, not a fabricated 0); pause-agnostic + lag caveat
 >    (pqueue-64351bdd) documented. **BQ-14 epic complete (a–e).**
-- [x] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
+- [x] BQ-20 · [x] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
+  - **BQ-21** ✅ (pqueue-3222f668, 041f032) — pluggable `QueueControlPlane` trait + `InMemoryControlPlane`
+    reference: `OwnerId`, lease lifecycle (register/heartbeat, HRW `resolve_queue_owner`, acquire/renew/
+    begin_drain/release) + the C4b seam invariants (single active lease, monotonic epoch, atomic
+    acquire→fence, fail-closed) with 14 tests incl. a threaded contention test. Fresh-eyes GO-with-conditions
+    applied (begin_drain expected_epoch, acquire non-idempotency contract, OwnerResolution Option-epoch, the
+    two-epoch separation documented). Postgres impl = BQ-22; server/hot-path epoch wiring = BQ-23.
   - **BQ-20** ✅ (pqueue-be15632d, 97f5828) — durable `assignment_epoch` (queues/relational_cursor columns,
     objectlog `epoch.json`, in-memory `LogData`) + `acquire_epoch` (strict durable advance) + the
     `LogWriter::append` epoch fence (reject non-current, both families) + 2 conformance scenarios
