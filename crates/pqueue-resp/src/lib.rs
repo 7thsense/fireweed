@@ -28,8 +28,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 mod cluster;
+mod drain;
 mod routing;
 pub use cluster::{ClusterNode, hash_slot, queue_routing_key, queue_slot};
+pub use drain::{DrainClass, drain_class, is_new_claim_on_drain};
 pub use routing::{RouteDecision, route};
 
 /// The backend capabilities the RESP front needs. A concrete backend (e.g. `MemoryBackend`) is
