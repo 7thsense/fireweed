@@ -1,6 +1,8 @@
 //! Engine-owned command model — the durable append unit of the log and the input to the
 //! projection. Commands are the only way state changes (CQRS write side, ADR-001).
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, RequestId,
@@ -88,6 +90,7 @@ pub fn build_push_items(
             group_key: s.group_key,
             max_attempts,
             payload: s.payload,
+            fields: s.fields,
             cohort_size: s.cohort_size,
             gate_keys: s.gate_keys,
         });
@@ -104,6 +107,10 @@ pub struct PushItem {
     pub group_key: Option<GroupKey>,
     pub max_attempts: u32,
     pub payload: Option<Bytes>,
+    /// Structured hot-storage fields for compound work records. Defaulted for backwards-compatible log
+    /// replay of commands written before structured fields existed.
+    #[serde(default)]
+    pub fields: BTreeMap<String, Bytes>,
     /// Declared cohort size (BQ-14c, TD-002 cohort formation): when set together with `group_key`, this
     /// item is a member of a cohort of `cohort_size` total members (the cohort key IS the `group_key`). The
     /// relational projection forms `pqueue_cohorts` from these declarations and a `whole_cohort` claim is
@@ -248,6 +255,7 @@ mod serde_tests {
             group_key: Some(GroupKey::new("g").unwrap()),
             max_attempts: 3,
             payload: Some(Bytes::from_static(b"payload")),
+            fields: BTreeMap::new(),
             cohort_size: Some(4),
             gate_keys: Vec::new(),
         }

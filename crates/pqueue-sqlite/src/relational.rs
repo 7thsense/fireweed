@@ -47,7 +47,7 @@
 //! which is why the relational-reconnect conformance scenario asserts only pending-item state. BQ-11d
 //! must keep its reconnect assertions within this contract (no post-reopen token claims).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
@@ -61,8 +61,8 @@ use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
-    LeaseView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort,
-    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
+    LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
+    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
     ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items, project_scopes,
     validate_claim_compatibility, validate_purge_force,
@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
     cohort_size INTEGER,
     recurrence_until INTEGER,
     payload BLOB,
+    fields TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}',
     retry_count INTEGER NOT NULL DEFAULT 0,
     item_version INTEGER NOT NULL,
@@ -188,6 +189,38 @@ fn st<T>(r: rusqlite::Result<T>) -> EngineResult<T> {
 
 fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+fn fields_to_json(fields: &BTreeMap<String, Bytes>) -> EngineResult<String> {
+    let raw: BTreeMap<&str, Vec<u8>> = fields
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.to_vec()))
+        .collect();
+    to_json(&raw)
+}
+
+fn fields_from_json(raw: String) -> EngineResult<BTreeMap<String, Bytes>> {
+    let decoded: BTreeMap<String, Vec<u8>> =
+        serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(decoded
+        .into_iter()
+        .map(|(k, v)| (k, Bytes::from(v)))
+        .collect())
+}
+
+fn ensure_item_fields_column(conn: &Connection) -> EngineResult<()> {
+    match conn.execute(
+        "ALTER TABLE pqueue_items ADD COLUMN fields TEXT NOT NULL DEFAULT '{}'",
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(EngineError::Storage(e.to_string())),
+    }
 }
 
 fn parts(shard: &QueueKey) -> (String, String) {
@@ -389,6 +422,7 @@ fn insert_item(
     let not_before = ts_nanos_opt(item.not_before);
     let eligible_since = not_before.unwrap_or_else(|| ts_nanos(now));
     let payload = item.payload.as_ref().map(|b| b.to_vec());
+    let fields = fields_to_json(&item.fields)?;
     // Allocate the stable FIFO position (monotonic per queue, never reused — matches in-memory next_seq).
     let created_seq: i64 = st(tx.query_row(
         "SELECT next_item_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
@@ -402,10 +436,10 @@ fn insert_item(
     st(tx.execute(
         "INSERT INTO pqueue_items \
          (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-          not_before,eligible_since,group_key,cohort_size,payload,metadata,retry_count,item_version,\
+          not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,retry_count,item_version,\
           lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,updated_at,\
           terminal_at,fenced,superseded,max_attempts,created_seq) \
-         VALUES (?1,?2,?3,?4,'Pending',?5,?6,?7,?8,?9,?15,?10,'{}',0,1,NULL,NULL,NULL,?11,?12,?12,NULL,0,0,?13,?14)",
+         VALUES (?1,?2,?3,?4,'Pending',?5,?6,?7,?8,?9,?16,?10,?15,'{}',0,1,NULL,NULL,NULL,?11,?12,?12,NULL,0,0,?13,?14)",
         params![
             t,
             q,
@@ -421,6 +455,7 @@ fn insert_item(
             ts_nanos(now),
             item.max_attempts as i64,
             created_seq,
+            fields,
             item.cohort_size.map(|s| s as i64),
         ],
     ))?;
@@ -1314,7 +1349,7 @@ fn render_claimed(
         let row = st(conn
             .query_row(
                 "SELECT client_item_key, item_version, priority, group_key, not_before, \
-                 lease_expires_at, retry_count, payload FROM pqueue_items \
+                 lease_expires_at, retry_count, payload, fields FROM pqueue_items \
                  WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND lifecycle_state='Leased'",
                 params![t, q, id.as_str()],
                 |row| {
@@ -1327,11 +1362,13 @@ fn render_claimed(
                         row.get::<_, Option<i64>>(5)?,
                         row.get::<_, i64>(6)?,
                         row.get::<_, Option<Vec<u8>>>(7)?,
+                        row.get::<_, String>(8)?,
                     ))
                 },
             )
             .optional())?;
-        let Some((key, version, priority, group, not_before, exp, retry, payload)) = row else {
+        let Some((key, version, priority, group, not_before, exp, retry, payload, fields)) = row
+        else {
             continue;
         };
         let Some(exp) = exp else { continue };
@@ -1350,6 +1387,61 @@ fn render_claimed(
             lease_expires_at: nanos_ts(exp),
             attempt_count: retry as u32,
             payload: payload.map(Bytes::from),
+            fields: fields_from_json(fields)?,
+        });
+    }
+    Ok(out)
+}
+
+fn live_items_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    keys: &[ClientItemKey],
+) -> EngineResult<Vec<Option<LiveItemView>>> {
+    let (t, q) = parts(shard);
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let row = st(conn
+            .query_row(
+                "SELECT item_id, item_version, lifecycle_state, priority, group_key, not_before, \
+                 retry_count, payload, fields FROM pqueue_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
+                   AND superseded=0 AND lifecycle_state IN ('Pending','Leased')",
+                params![t, q, key.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<Vec<u8>>>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional())?;
+        out.push(match row {
+            Some((id, version, state, priority, group, not_before, retry, payload, fields)) => {
+                Some(LiveItemView {
+                    item_id: ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?,
+                    client_item_key: key.clone(),
+                    item_version: version as u64,
+                    lifecycle_state: parse_state(&state)?,
+                    priority: parse_priority(priority)?,
+                    group_key: group
+                        .map(GroupKey::new)
+                        .transpose()
+                        .map_err(|e| EngineError::Storage(e.to_string()))?,
+                    not_before: not_before.map(nanos_ts),
+                    attempt_count: retry as u32,
+                    payload: payload.map(Bytes::from),
+                    fields: fields_from_json(fields)?,
+                })
+            }
+            None => None,
         });
     }
     Ok(out)
@@ -1445,6 +1537,7 @@ impl SqliteRelationalBackend {
 
     fn from_conn(conn: Connection) -> EngineResult<Self> {
         st(conn.execute_batch(RELATIONAL_SCHEMA))?;
+        ensure_item_fields_column(&conn)?;
         let mut inner = Inner {
             conn,
             queues: HashMap::new(),
@@ -1727,6 +1820,18 @@ impl ProjectionRead for SqliteRelationalBackend {
         std::future::ready(result)
     }
 
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            live_items_sql(&g.conn, shard, keys)
+        };
+        std::future::ready(result)
+    }
+
     fn metrics(
         &self,
         queue: &QueueKey,
@@ -1905,6 +2010,7 @@ impl UpsertPort for SqliteRelationalBackend {
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
+        fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
@@ -1936,6 +2042,7 @@ impl UpsertPort for SqliteRelationalBackend {
                 group_key,
                 max_attempts,
                 payload,
+                fields,
                 cohort_size: None,
                 gate_keys: Vec::new(),
             };
@@ -2365,6 +2472,7 @@ mod group_summary_tests {
                 None,
                 None,
                 None,
+                BTreeMap::new(),
                 ts(0),
             )
             .await
@@ -2377,9 +2485,18 @@ mod group_summary_tests {
         b.purge(&shard(), vec![id], false, ts(1)).await.unwrap();
         assert!(
             matches!(
-                b.replace_if_pending(&shard(), &key, None, None, None, None, ts(2))
-                    .await
-                    .unwrap(),
+                b.replace_if_pending(
+                    &shard(),
+                    &key,
+                    None,
+                    None,
+                    None,
+                    None,
+                    BTreeMap::new(),
+                    ts(2)
+                )
+                .await
+                .unwrap(),
                 UpsertOutcome::Inserted { .. }
             ),
             "a pending purge leaves no tombstone (parity with the log-replay family)"

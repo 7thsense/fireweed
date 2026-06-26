@@ -19,7 +19,7 @@
 //! collisions) MUST pre-validate via the provided helpers ([`ProjectionData::finalize_validate`],
 //! [`ProjectionData::item_state`]) so `apply_command` is infallible for the command they commit.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -28,8 +28,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
-    FinalizeOutcome, ItemView, LeaseView, ProjectionSnapshot, PushItem, QueueCommand, QueueKey,
-    QueueMetrics, SnapshotRef,
+    FinalizeOutcome, ItemView, LeaseView, LiveItemView, ProjectionSnapshot, PushItem, QueueCommand,
+    QueueKey, QueueMetrics, SnapshotRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +44,7 @@ struct ItemRecord {
     not_before: Option<UtcTimestamp>,
     group_key: Option<GroupKey>,
     payload: Option<Bytes>,
+    fields: BTreeMap<String, Bytes>,
     state: ItemState,
     item_version: u64,
     attempt_count: u32,
@@ -70,6 +71,25 @@ impl ItemRecord {
             lease_expires_at: self.lease_expires_at?,
             attempt_count: self.attempt_count,
             payload: self.payload.clone(),
+            fields: self.fields.clone(),
+        })
+    }
+
+    fn to_live(&self) -> Option<LiveItemView> {
+        if self.superseded || self.state.is_terminal() {
+            return None;
+        }
+        Some(LiveItemView {
+            item_id: self.item_id.clone(),
+            client_item_key: self.client_item_key.clone(),
+            item_version: self.item_version,
+            lifecycle_state: self.state,
+            priority: self.priority.clone(),
+            group_key: self.group_key.clone(),
+            not_before: self.not_before,
+            attempt_count: self.attempt_count,
+            payload: self.payload.clone(),
+            fields: self.fields.clone(),
         })
     }
 }
@@ -272,6 +292,7 @@ impl ProjectionData {
             not_before: item.not_before,
             group_key: item.group_key,
             payload: item.payload,
+            fields: item.fields,
             state: ItemState::Pending,
             item_version: 1,
             attempt_count: 0,
@@ -604,6 +625,18 @@ impl ProjectionData {
             .collect()
     }
 
+    /// Render live hot-storage items by client key, preserving input order.
+    pub fn live_items_by_key(&self, keys: &[ClientItemKey]) -> Vec<Option<LiveItemView>> {
+        keys.iter()
+            .map(|key| {
+                self.by_key
+                    .get(key)
+                    .and_then(|id| self.items.get(id))
+                    .and_then(ItemRecord::to_live)
+            })
+            .collect()
+    }
+
     /// The item id currently mapped to `client_item_key`, if any (upsert collision lookup).
     pub fn lookup_by_key(&self, client_item_key: &ClientItemKey) -> Option<ItemId> {
         self.by_key.get(client_item_key).cloned()
@@ -706,6 +739,7 @@ mod tests {
             group_key: None,
             max_attempts: 3,
             payload: None,
+            fields: BTreeMap::new(),
             cohort_size: None,
             gate_keys: Vec::new(),
         }

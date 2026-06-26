@@ -45,7 +45,7 @@
 //! shapes are unit-asserted (`sql_shape_tests`), and the sqlite-relational parity reference is unchanged.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
@@ -59,8 +59,8 @@ use pqueue_engine::{
     Claimed, ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
-    LeaseView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort,
-    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
+    LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
+    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
     ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items, project_scopes,
     validate_claim_compatibility, validate_purge_force,
@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
     cohort_size BIGINT,
     recurrence_until BIGINT,
     payload BYTEA,
+    fields TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}',
     retry_count BIGINT NOT NULL DEFAULT 0,
     item_version BIGINT NOT NULL,
@@ -181,7 +182,7 @@ SET lifecycle_state='Leased', lease_token_hash=$5, lease_expires_at=$6, \
 FROM candidates c \
 WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
 RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
-          i.lease_expires_at, i.retry_count, i.payload";
+          i.lease_expires_at, i.retry_count, i.payload, i.fields";
 
 // ---------------------------------------------------------------------------
 // small conversions / error mapping
@@ -193,6 +194,23 @@ fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
 
 fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+fn fields_to_json(fields: &BTreeMap<String, Bytes>) -> EngineResult<String> {
+    let raw: BTreeMap<&str, Vec<u8>> = fields
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.to_vec()))
+        .collect();
+    to_json(&raw)
+}
+
+fn fields_from_json(raw: String) -> EngineResult<BTreeMap<String, Bytes>> {
+    let decoded: BTreeMap<String, Vec<u8>> =
+        serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(decoded
+        .into_iter()
+        .map(|(k, v)| (k, Bytes::from(v)))
+        .collect())
 }
 
 fn parts(shard: &QueueKey) -> (String, String) {
@@ -485,6 +503,7 @@ fn insert_item(
     let not_before = ts_nanos_opt(item.not_before);
     let eligible_since = not_before.unwrap_or_else(|| ts_nanos(now));
     let payload = item.payload.as_ref().map(|b| b.to_vec());
+    let fields = fields_to_json(&item.fields)?;
     let created_seq = alloc_item_seq(tx, &t, &q)?;
     let now_n = ts_nanos(now);
     let seq = seq as i64;
@@ -496,10 +515,10 @@ fn insert_item(
     st(tx.execute(
         "INSERT INTO pqueue_items \
          (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-          not_before,eligible_since,group_key,cohort_size,payload,metadata,retry_count,item_version,\
+          not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,retry_count,item_version,\
           lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,updated_at,\
           terminal_at,fenced,superseded,max_attempts,created_seq) \
-         VALUES ($1,$2,$3,$4,'Pending',$5,$6,$7,$8,$9,$15,$10,'{}',0,1,NULL,NULL,NULL,$11,$12,$12,NULL,\
+         VALUES ($1,$2,$3,$4,'Pending',$5,$6,$7,$8,$9,$16,$10,$15,'{}',0,1,NULL,NULL,NULL,$11,$12,$12,NULL,\
                  false,false,$13,$14)",
         &[
             &t,
@@ -516,6 +535,7 @@ fn insert_item(
             &now_n,
             &max_attempts,
             &created_seq,
+            &fields,
             &cohort_size,
         ],
     ))?;
@@ -1194,8 +1214,8 @@ fn pending_sql(
 }
 
 /// Build a [`ClaimedItem`] from a row carrying (client_item_key, item_version, priority, group_key,
-/// not_before, lease_expires_at, retry_count, payload), pairing it with `token`. Shared by the claim CTE
-/// RETURNING and the `claimed_view` read port.
+/// not_before, lease_expires_at, retry_count, payload, fields), pairing it with `token`. Shared by the
+/// claim CTE RETURNING and the `claimed_view` read port.
 #[allow(clippy::too_many_arguments)]
 fn claimed_from_row(
     item_id: ItemId,
@@ -1208,6 +1228,7 @@ fn claimed_from_row(
     exp: i64,
     retry: i64,
     payload: Option<Vec<u8>>,
+    fields: String,
 ) -> EngineResult<ClaimedItem> {
     Ok(ClaimedItem {
         item_id,
@@ -1224,6 +1245,7 @@ fn claimed_from_row(
         lease_expires_at: nanos_ts(exp),
         attempt_count: retry as u32,
         payload: payload.map(Bytes::from),
+        fields: fields_from_json(fields)?,
     })
 }
 
@@ -1241,7 +1263,7 @@ fn render_claimed(
         };
         let row = st(client.query_opt(
             "SELECT client_item_key, item_version, priority, group_key, not_before, \
-             lease_expires_at, retry_count, payload FROM pqueue_items \
+             lease_expires_at, retry_count, payload, fields FROM pqueue_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 AND lifecycle_state='Leased'",
             &[&t, &q, &id.as_str()],
         ))?;
@@ -1259,7 +1281,53 @@ fn render_claimed(
             exp,
             row.get(6),
             row.get(7),
+            row.get(8),
         )?);
+    }
+    Ok(out)
+}
+
+fn live_items_sql(
+    client: &mut Client,
+    shard: &QueueKey,
+    keys: &[ClientItemKey],
+) -> EngineResult<Vec<Option<LiveItemView>>> {
+    let (t, q) = parts(shard);
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let row = st(client.query_opt(
+            "SELECT item_id, item_version, lifecycle_state, priority, group_key, not_before, \
+             retry_count, payload, fields FROM pqueue_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=$3 \
+               AND superseded=false AND lifecycle_state IN ('Pending','Leased')",
+            &[&t, &q, &key.as_str()],
+        ))?;
+        out.push(match row {
+            Some(row) => {
+                let id: String = row.get(0);
+                let state: String = row.get(2);
+                let group: Option<String> = row.get(4);
+                let not_before: Option<i64> = row.get(5);
+                let payload: Option<Vec<u8>> = row.get(7);
+                let fields: String = row.get(8);
+                Some(LiveItemView {
+                    item_id: ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?,
+                    client_item_key: key.clone(),
+                    item_version: row.get::<_, i64>(1) as u64,
+                    lifecycle_state: parse_state(&state)?,
+                    priority: parse_priority(row.get(3))?,
+                    group_key: group
+                        .map(GroupKey::new)
+                        .transpose()
+                        .map_err(|e| EngineError::Storage(e.to_string()))?,
+                    not_before: not_before.map(nanos_ts),
+                    attempt_count: row.get::<_, i64>(6) as u32,
+                    payload: payload.map(Bytes::from),
+                    fields: fields_from_json(fields)?,
+                })
+            }
+            None => None,
+        });
     }
     Ok(out)
 }
@@ -1359,6 +1427,9 @@ impl PostgresRelationalBackend {
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
         st(client.batch_execute(RELATIONAL_SCHEMA))?;
+        st(client.batch_execute(
+            "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';",
+        ))?;
         let mut inner = Inner {
             client,
             queues: HashMap::new(),
@@ -1655,6 +1726,18 @@ impl ProjectionRead for PostgresRelationalBackend {
         std::future::ready(result)
     }
 
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            live_items_sql(&mut g.client, shard, keys)
+        };
+        std::future::ready(result)
+    }
+
     fn metrics(
         &self,
         queue: &QueueKey,
@@ -1783,6 +1866,7 @@ impl ClaimPort for PostgresRelationalBackend {
                         exp_row,
                         row.get(7),
                         row.get(8),
+                        row.get(9),
                     )?);
                     token_ops.push(TokenOp::Set(item_id.clone(), req.lease_token.clone()));
                     claimed_ids.push(item_id);
@@ -1855,6 +1939,7 @@ impl UpsertPort for PostgresRelationalBackend {
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
+        fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
@@ -1881,6 +1966,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 group_key,
                 max_attempts,
                 payload,
+                fields,
                 cohort_size: None,
                 gate_keys: Vec::new(),
             };

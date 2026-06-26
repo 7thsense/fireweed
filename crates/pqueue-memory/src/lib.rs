@@ -7,7 +7,7 @@
 //! apply commit together (TD-007 §1 atomic class). All apply/eligibility/lease/metrics logic lives in
 //! `pqueue-projection` and is shared with the durable backends; this crate only locks and delegates.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
@@ -20,10 +20,10 @@ use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
     CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LogRead,
-    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem,
-    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, SnapshotRef,
-    SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView,
+    LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand,
+    PushItem, QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand,
+    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
     ClaimCompatibility, PurgeItemsCommand, PurgePort, PushPort, PushSpec, ReassignLeaseCommand,
@@ -193,6 +193,7 @@ impl UpsertPort for MemoryBackend {
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
+        fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
@@ -218,6 +219,7 @@ impl UpsertPort for MemoryBackend {
                 group_key,
                 max_attempts,
                 payload,
+                fields,
                 cohort_size: None,
                 gate_keys: Vec::new(),
             };
@@ -646,6 +648,19 @@ impl ProjectionRead for MemoryBackend {
             let g = self.state.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.render_claimed(ids))
+        })();
+        std::future::ready(result)
+    }
+
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.live_items_by_key(keys))
         })();
         std::future::ready(result)
     }

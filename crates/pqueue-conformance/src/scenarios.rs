@@ -2,8 +2,10 @@
 //! and takes a `make: impl Fn() -> B` factory (some build a second backend for replay reconstruction).
 //! Each fails if the port under test returns a default/no-op — the behavioral no-stub proof (plan §6).
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue};
+use pqueue_core::{ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue};
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, CommandPosition, EngineError, EngineResult,
     FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
@@ -33,6 +35,7 @@ pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
             None,
             None,
             None,
+            BTreeMap::new(),
             ts(1),
         )
         .await
@@ -324,6 +327,71 @@ pub async fn claim_empty_when_nothing_eligible<B: ConformanceCore>(make: impl Fn
     assert!(claimed.items.is_empty());
 }
 
+pub async fn structured_live_items_are_ordered_and_only_live<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let mut fields = BTreeMap::new();
+    fields.insert("recipient_ref".to_string(), Bytes::from_static(b"r-1"));
+    fields.insert("payload_ref".to_string(), Bytes::from_static(b"work-1"));
+    let mut pushed = item("hot-id", "hot-key", 5);
+    pushed.payload = Some(Bytes::from_static(b"opaque"));
+    pushed.fields = fields.clone();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![pushed],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+
+    let keys = vec![
+        ClientItemKey::new("missing").unwrap(),
+        ClientItemKey::new("hot-key").unwrap(),
+    ];
+    let live = b.live_items(&shard(), &keys).await.unwrap();
+    assert!(live[0].is_none(), "missing keys render as absent");
+    let Some(item) = &live[1] else {
+        panic!("hot-key should render while pending");
+    };
+    assert_eq!(item.lifecycle_state, ItemState::Pending);
+    assert_eq!(item.payload.as_deref(), Some(&b"opaque"[..]));
+    assert_eq!(item.fields, fields);
+
+    let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(claimed.items[0].fields, fields);
+    let live = b
+        .live_items(&shard(), &[ClientItemKey::new("hot-key").unwrap()])
+        .await
+        .unwrap();
+    assert_eq!(
+        live[0].as_ref().map(|i| i.lifecycle_state),
+        Some(ItemState::Leased),
+        "leased items are still live hot-storage records"
+    );
+
+    b.finalize(
+        &shard(),
+        vec![FinalizeOutcome {
+            item_id: claimed.items[0].item_id.clone(),
+            kind: FinalizeKind::Complete,
+        }],
+        ts(20),
+    )
+    .await
+    .unwrap();
+    let live = b
+        .live_items(&shard(), &[ClientItemKey::new("hot-key").unwrap()])
+        .await
+        .unwrap();
+    assert!(live[0].is_none(), "terminal items are no longer live");
+}
+
 pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
@@ -338,6 +406,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             None,
             None,
+            BTreeMap::new(),
             ts(1),
         )
         .await
@@ -356,6 +425,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             None,
             None,
+            BTreeMap::new(),
             ts(2),
         )
         .await
@@ -391,6 +461,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             None,
             None,
+            BTreeMap::new(),
             ts(1),
         )
         .await
@@ -403,7 +474,16 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
     // Claim it → leased. Upsert must be rejected with Invalid (no transition on in-flight work).
     b.claim(claim_req(10, 500, 10)).await.unwrap();
     let err = b
-        .replace_if_pending(&shard(), &key, None, None, None, None, ts(20))
+        .replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            ts(20),
+        )
         .await
         .unwrap_err();
     assert_eq!(err, EngineError::Invalid("collision with claimed item"));
@@ -423,7 +503,16 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
     )
     .await;
     let err = b
-        .replace_if_pending(&shard(), &key, None, None, None, None, ts(30))
+        .replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            ts(30),
+        )
         .await
         .unwrap_err();
     assert_eq!(err, EngineError::Terminal);
@@ -445,6 +534,7 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
             Some(group.clone()),
             Some(ts(250)),
             Some(Bytes::from_static(b"payload")),
+            BTreeMap::new(),
             ts(1),
         )
         .await

@@ -12,6 +12,7 @@
 //! never on a concrete backend (a backend is passed in). Errors are the engine's structured
 //! [`EngineError`]; nothing is stringly-typed.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,7 +29,7 @@ use pqueue_engine::{
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
     ClaimCompatibility, ClaimedItem, CreateQueueOutcome, EngineError, EngineResult, GroupBatching,
-    ItemView, QueueMetrics, UpsertOutcome,
+    ItemView, LiveItemView, QueueMetrics, UpsertOutcome,
 };
 
 /// The capabilities the library facade composes over (the worker + control-plane ports).
@@ -88,6 +89,7 @@ pub struct NewItem {
     pub group_key: Option<GroupKey>,
     pub not_before: Option<UtcTimestamp>,
     pub payload: Option<Bytes>,
+    pub fields: BTreeMap<String, Bytes>,
     /// Declared cohort size (BQ-14c) — see [`ClaimCompatibility`]/`whole_cohort`. `None` for non-cohort items.
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d). A blocked gate key makes the item ineligible. Empty = un-gated.
@@ -142,6 +144,7 @@ impl<B: LibBackend> Pqueue<B> {
                 not_before: it.not_before,
                 group_key: it.group_key,
                 payload: it.payload,
+                fields: it.fields,
                 cohort_size: it.cohort_size,
                 gate_keys: it.gate_keys,
             })
@@ -165,6 +168,7 @@ impl<B: LibBackend> Pqueue<B> {
                 item.group_key,
                 item.not_before,
                 item.payload,
+                item.fields,
                 self.clock.now(),
             )
             .await
@@ -249,6 +253,31 @@ impl<B: LibBackend> Pqueue<B> {
     /// Non-destructive priority-ordered view of eligible items.
     pub async fn peek(&self, queue: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
         self.backend.peek(queue, limit).await
+    }
+
+    /// Read one live hot-storage item by caller-supplied key. Returns `None` once the item is complete,
+    /// failed, purged, or superseded; leased items still count as live work and are returned.
+    pub async fn live_item(
+        &self,
+        queue: &QueueKey,
+        key: ClientItemKey,
+    ) -> EngineResult<Option<LiveItemView>> {
+        Ok(self
+            .backend
+            .live_items(queue, &[key])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or(None))
+    }
+
+    /// Read live hot-storage items by caller-supplied key, preserving input order.
+    pub async fn live_items(
+        &self,
+        queue: &QueueKey,
+        keys: Vec<ClientItemKey>,
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        self.backend.live_items(queue, &keys).await
     }
 
     /// Dead-letter (terminal `fail`) the given leased items.

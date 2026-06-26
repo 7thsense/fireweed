@@ -8,17 +8,19 @@
 //! layer land in later phases (TD-006; plan section 3/4). Unsupported
 //! commands return `-ERR`, never a silent stub.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{
-    ClientItemKey, ItemId, LeaseToken, PriorityValue, QueueId, TenantId, UtcTimestamp, WorkerId,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueId, TenantId, UtcTimestamp,
+    WorkerId,
 };
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
-    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, ProjectionRead, PurgePort, PushPort,
-    PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, UpsertOutcome,
-    UpsertPort,
+    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, LiveItemView, ProjectionRead,
+    PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
+    UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -103,6 +105,12 @@ fn ts_ms(ts: UtcTimestamp) -> i64 {
     ts.seconds * 1000 + (ts.nanoseconds / 1_000_000) as i64
 }
 
+fn ms_ts(ms: i64) -> Result<UtcTimestamp, EngineError> {
+    let seconds = ms.div_euclid(1000);
+    let nanos = (ms.rem_euclid(1000) as u32) * 1_000_000;
+    UtcTimestamp::new(seconds, nanos).map_err(|_| EngineError::Invalid("bad timestamp"))
+}
+
 /// Parse a stream key `tenant:queue` (or bare `queue` with a default tenant) into a launch shard key.
 fn parse_shard(key: &[u8]) -> Result<QueueKey, EngineError> {
     let s = std::str::from_utf8(key).map_err(|_| EngineError::Invalid("non-utf8 key"))?;
@@ -124,6 +132,7 @@ enum Resp {
     Error(String),
     Int(i64),
     Bulk(Vec<u8>),
+    NullBulk,
     Array(Vec<Resp>),
     NullArray,
 }
@@ -148,6 +157,7 @@ fn encode(r: &Resp, out: &mut Vec<u8>) {
             out.extend_from_slice(b);
             out.extend_from_slice(b"\r\n");
         }
+        Resp::NullBulk => out.extend_from_slice(b"$-1\r\n"),
         Resp::NullArray => out.extend_from_slice(b"*-1\r\n"),
         Resp::Array(items) => {
             out.extend_from_slice(format!("*{}\r\n", items.len()).as_bytes());
@@ -300,6 +310,23 @@ fn arg_eq(a: &[u8], s: &str) -> bool {
     a.eq_ignore_ascii_case(s.as_bytes())
 }
 
+fn is_read_reserved_field(field: &str) -> bool {
+    field.eq_ignore_ascii_case("item_id")
+        || field.eq_ignore_ascii_case("client_item_key")
+        || field.eq_ignore_ascii_case("item_version")
+        || field.eq_ignore_ascii_case("lifecycle_state")
+        || field.eq_ignore_ascii_case("priority")
+        || field.eq_ignore_ascii_case("attempt_count")
+        || field.eq_ignore_ascii_case("payload")
+        || field.eq_ignore_ascii_case("group_key")
+        || field.eq_ignore_ascii_case("not_before")
+        || field.eq_ignore_ascii_case("metadata")
+        || field.eq_ignore_ascii_case("max_attempts")
+        || field.eq_ignore_ascii_case("gate_keys")
+        || field.eq_ignore_ascii_case("cohort_id")
+        || field.eq_ignore_ascii_case("lease_expires_at")
+}
+
 async fn dispatch<B: RespBackend>(
     backend: &Arc<B>,
     state: &Arc<ServerState>,
@@ -322,6 +349,9 @@ async fn dispatch<B: RespBackend>(
         "XLEN" => xlen(backend, args).await,
         "XDEL" => xdel(backend, state, args).await,
         "XINFO" => xinfo(backend, args).await,
+        "PQ.MGET" => pq_mget(backend, args).await,
+        "PQ.HGETALL" => pq_hgetall(backend, args).await,
+        "PQ.HMGET" => pq_hmget(backend, args).await,
         other => Resp::Error(format!("ERR unknown command '{other}'")),
     }
 }
@@ -339,9 +369,16 @@ async fn xadd<B: RespBackend>(
         Ok(s) => s,
         Err(e) => return err_reply(&e),
     };
+    if !(args.len() - 3).is_multiple_of(2) {
+        return Resp::Error("ERR wrong number of field/value arguments for 'xadd'".into());
+    }
     // Reserved container fields (TD-006 section 2). Field/value pairs start at index 3.
     let mut priority: Option<PriorityValue> = None;
     let mut client_item_key: Option<String> = None;
+    let mut group_key: Option<GroupKey> = None;
+    let mut not_before: Option<UtcTimestamp> = None;
+    let mut payload: Option<bytes::Bytes> = None;
+    let mut fields: BTreeMap<String, bytes::Bytes> = BTreeMap::new();
     for pair in args[3..].chunks_exact(2) {
         if arg_eq(&pair[0], "priority")
             && let Ok(s) = std::str::from_utf8(&pair[1])
@@ -352,6 +389,33 @@ async fn xadd<B: RespBackend>(
             && let Ok(s) = std::str::from_utf8(&pair[1])
         {
             client_item_key = Some(s.to_string());
+        } else if arg_eq(&pair[0], "group_key")
+            && let Ok(s) = std::str::from_utf8(&pair[1])
+        {
+            let Ok(group) = GroupKey::new(s) else {
+                return Resp::Error("ERR invalid group_key".into());
+            };
+            group_key = Some(group);
+        } else if arg_eq(&pair[0], "not_before")
+            && let Ok(s) = std::str::from_utf8(&pair[1])
+        {
+            let Ok(ms) = s.parse::<i64>() else {
+                return Resp::Error("ERR invalid not_before".into());
+            };
+            let Ok(ts) = ms_ts(ms) else {
+                return Resp::Error("ERR invalid not_before".into());
+            };
+            not_before = Some(ts);
+        } else if arg_eq(&pair[0], "payload") {
+            payload = Some(bytes::Bytes::copy_from_slice(&pair[1]));
+        } else {
+            let Ok(field) = std::str::from_utf8(&pair[0]) else {
+                return Resp::Error("ERR field names must be utf-8".into());
+            };
+            if is_read_reserved_field(field) {
+                return Resp::Error(format!("ERR field '{field}' is reserved"));
+            }
+            fields.insert(field.to_string(), bytes::Bytes::copy_from_slice(&pair[1]));
         }
     }
     // The BACKEND assigns the item id in both paths (restart-safe, collision-free across servers — the
@@ -365,7 +429,16 @@ async fn xadd<B: RespBackend>(
                 Err(_) => return Resp::Error("ERR invalid client_item_key".into()),
             };
             match backend
-                .replace_if_pending(&shard, &key, priority, None, None, None, state.now())
+                .replace_if_pending(
+                    &shard,
+                    &key,
+                    priority,
+                    group_key,
+                    not_before,
+                    payload,
+                    fields,
+                    state.now(),
+                )
                 .await
             {
                 Ok(UpsertOutcome::Inserted { item_id })
@@ -380,9 +453,10 @@ async fn xadd<B: RespBackend>(
             let spec = PushSpec {
                 client_item_key: None,
                 priority,
-                not_before: None,
-                group_key: None,
-                payload: None,
+                not_before,
+                group_key,
+                payload,
+                fields,
                 cohort_size: None, // RESP XADD has no cohort declaration (library-only, plan §3)
                 gate_keys: Vec::new(), // RESP XADD carries no gate keys (library-only)
             };
@@ -468,23 +542,217 @@ async fn xreadgroup<B: RespBackend>(
 
 /// Render a claimed item as a Streams entry `[id, [field, value, ...]]`.
 fn claimed_to_entry(item: &ClaimedItem) -> Resp {
-    let mut fields: Vec<Resp> = Vec::new();
-    fields.push(Resp::Bulk(b"client_item_key".to_vec()));
-    fields.push(Resp::Bulk(
-        item.client_item_key.as_str().as_bytes().to_vec(),
-    ));
-    if let Some(PriorityValue::Int64(n)) = &item.priority {
-        fields.push(Resp::Bulk(b"priority".to_vec()));
-        fields.push(Resp::Bulk(n.to_string().into_bytes()));
-    }
-    fields.push(Resp::Bulk(b"item_version".to_vec()));
-    fields.push(Resp::Bulk(item.item_version.to_string().into_bytes()));
-    fields.push(Resp::Bulk(b"attempt_count".to_vec()));
-    fields.push(Resp::Bulk(item.attempt_count.to_string().into_bytes()));
+    let mut fields = base_fields(
+        item.item_id.as_str(),
+        item.client_item_key.as_str(),
+        item.item_version,
+        None,
+        &item.priority,
+        item.attempt_count,
+        item.payload.as_ref(),
+    );
+    append_user_fields(&mut fields, &item.fields);
     Resp::Array(vec![
         Resp::Bulk(item.item_id.as_str().as_bytes().to_vec()),
         Resp::Array(fields),
     ])
+}
+
+fn base_fields(
+    item_id: &str,
+    client_item_key: &str,
+    item_version: u64,
+    lifecycle_state: Option<&str>,
+    priority: &Option<PriorityValue>,
+    attempt_count: u32,
+    payload: Option<&bytes::Bytes>,
+) -> Vec<Resp> {
+    let mut fields = Vec::new();
+    fields.push(Resp::Bulk(b"item_id".to_vec()));
+    fields.push(Resp::Bulk(item_id.as_bytes().to_vec()));
+    fields.push(Resp::Bulk(b"client_item_key".to_vec()));
+    fields.push(Resp::Bulk(client_item_key.as_bytes().to_vec()));
+    fields.push(Resp::Bulk(b"item_version".to_vec()));
+    fields.push(Resp::Bulk(item_version.to_string().into_bytes()));
+    if let Some(state) = lifecycle_state {
+        fields.push(Resp::Bulk(b"lifecycle_state".to_vec()));
+        fields.push(Resp::Bulk(state.as_bytes().to_vec()));
+    }
+    if let Some(PriorityValue::Int64(n)) = priority {
+        fields.push(Resp::Bulk(b"priority".to_vec()));
+        fields.push(Resp::Bulk(n.to_string().into_bytes()));
+    }
+    fields.push(Resp::Bulk(b"attempt_count".to_vec()));
+    fields.push(Resp::Bulk(attempt_count.to_string().into_bytes()));
+    if let Some(payload) = payload {
+        fields.push(Resp::Bulk(b"payload".to_vec()));
+        fields.push(Resp::Bulk(payload.to_vec()));
+    }
+    fields
+}
+
+fn append_user_fields(fields: &mut Vec<Resp>, user_fields: &BTreeMap<String, bytes::Bytes>) {
+    for (name, value) in user_fields {
+        fields.push(Resp::Bulk(name.as_bytes().to_vec()));
+        fields.push(Resp::Bulk(value.to_vec()));
+    }
+}
+
+fn lifecycle_name(state: pqueue_core::ItemState) -> &'static str {
+    match state {
+        pqueue_core::ItemState::Pending => "Pending",
+        pqueue_core::ItemState::Leased => "Leased",
+        pqueue_core::ItemState::Complete => "Complete",
+        pqueue_core::ItemState::Failed => "Failed",
+    }
+}
+
+fn live_to_entry(item: &LiveItemView) -> Resp {
+    let mut fields = base_fields(
+        item.item_id.as_str(),
+        item.client_item_key.as_str(),
+        item.item_version,
+        Some(lifecycle_name(item.lifecycle_state)),
+        &item.priority,
+        item.attempt_count,
+        item.payload.as_ref(),
+    );
+    if let Some(group) = &item.group_key {
+        fields.push(Resp::Bulk(b"group_key".to_vec()));
+        fields.push(Resp::Bulk(group.as_str().as_bytes().to_vec()));
+    }
+    if let Some(not_before) = item.not_before {
+        fields.push(Resp::Bulk(b"not_before".to_vec()));
+        fields.push(Resp::Bulk(ts_ms(not_before).to_string().into_bytes()));
+    }
+    append_user_fields(&mut fields, &item.fields);
+    Resp::Array(vec![
+        Resp::Bulk(item.item_id.as_str().as_bytes().to_vec()),
+        Resp::Array(fields),
+    ])
+}
+
+fn live_field_value(item: &LiveItemView, field: &[u8]) -> Option<Vec<u8>> {
+    if arg_eq(field, "item_id") {
+        Some(item.item_id.as_str().as_bytes().to_vec())
+    } else if arg_eq(field, "client_item_key") {
+        Some(item.client_item_key.as_str().as_bytes().to_vec())
+    } else if arg_eq(field, "item_version") {
+        Some(item.item_version.to_string().into_bytes())
+    } else if arg_eq(field, "lifecycle_state") {
+        Some(lifecycle_name(item.lifecycle_state).as_bytes().to_vec())
+    } else if arg_eq(field, "priority") {
+        match &item.priority {
+            Some(PriorityValue::Int64(n)) => Some(n.to_string().into_bytes()),
+            _ => None,
+        }
+    } else if arg_eq(field, "attempt_count") {
+        Some(item.attempt_count.to_string().into_bytes())
+    } else if arg_eq(field, "payload") {
+        item.payload.as_ref().map(|p| p.to_vec())
+    } else if arg_eq(field, "group_key") {
+        item.group_key
+            .as_ref()
+            .map(|g| g.as_str().as_bytes().to_vec())
+    } else if arg_eq(field, "not_before") {
+        item.not_before.map(|ts| ts_ms(ts).to_string().into_bytes())
+    } else {
+        let name = std::str::from_utf8(field).ok()?;
+        item.fields.get(name).map(|v| v.to_vec())
+    }
+}
+
+async fn pq_mget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+    if args.len() < 3 {
+        return Resp::Error("ERR wrong number of arguments for 'pq.mget'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let mut keys = Vec::with_capacity(args.len() - 2);
+    for raw in &args[2..] {
+        let Ok(s) = std::str::from_utf8(raw) else {
+            return Resp::Error("ERR client_item_key must be utf-8".into());
+        };
+        let Ok(key) = ClientItemKey::new(s) else {
+            return Resp::Error("ERR invalid client_item_key".into());
+        };
+        keys.push(key);
+    }
+    match backend.live_items(&shard, &keys).await {
+        Ok(items) => Resp::Array(
+            items
+                .iter()
+                .map(|item| item.as_ref().map(live_to_entry).unwrap_or(Resp::NullArray))
+                .collect(),
+        ),
+        Err(e) => err_reply(&e),
+    }
+}
+
+async fn pq_hgetall<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+    if args.len() != 3 {
+        return Resp::Error("ERR wrong number of arguments for 'pq.hgetall'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let Ok(s) = std::str::from_utf8(&args[2]) else {
+        return Resp::Error("ERR client_item_key must be utf-8".into());
+    };
+    let key = match ClientItemKey::new(s) {
+        Ok(k) => k,
+        Err(_) => return Resp::Error("ERR invalid client_item_key".into()),
+    };
+    match backend.live_items(&shard, &[key]).await {
+        Ok(mut items) => match items.pop().flatten() {
+            Some(item) => match live_to_entry(&item) {
+                Resp::Array(mut entry) => match entry.pop() {
+                    Some(Resp::Array(fields)) => Resp::Array(fields),
+                    _ => Resp::Array(vec![]),
+                },
+                _ => Resp::Array(vec![]),
+            },
+            None => Resp::Array(vec![]),
+        },
+        Err(e) => err_reply(&e),
+    }
+}
+
+async fn pq_hmget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+    if args.len() < 4 {
+        return Resp::Error("ERR wrong number of arguments for 'pq.hmget'".into());
+    }
+    let shard = match parse_shard(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let Ok(s) = std::str::from_utf8(&args[2]) else {
+        return Resp::Error("ERR client_item_key must be utf-8".into());
+    };
+    let key = match ClientItemKey::new(s) {
+        Ok(k) => k,
+        Err(_) => return Resp::Error("ERR invalid client_item_key".into()),
+    };
+    match backend.live_items(&shard, &[key]).await {
+        Ok(mut items) => {
+            let item = items.pop().flatten();
+            Resp::Array(
+                args[3..]
+                    .iter()
+                    .map(|field| {
+                        item.as_ref()
+                            .and_then(|item| live_field_value(item, field))
+                            .map(Resp::Bulk)
+                            .unwrap_or(Resp::NullBulk)
+                    })
+                    .collect(),
+            )
+        }
+        Err(e) => err_reply(&e),
+    }
 }
 
 /// `XACK key group id [id ...]` - finalize-complete the acked entries.

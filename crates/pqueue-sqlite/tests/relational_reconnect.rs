@@ -11,6 +11,8 @@
 //!    `client_item_key` retention tombstone survives reopen, and a leased item survives as `Leased` but is
 //!    omitted from `pending()` after reopen (its live token is gone) yet remains reclaimable.
 
+use std::collections::BTreeMap;
+
 use pqueue_conformance::{qdef, shard};
 use pqueue_core::{ClientItemKey, LeaseToken, PriorityValue, UtcTimestamp, WorkerId};
 use pqueue_engine::{
@@ -100,6 +102,7 @@ async fn retention_tombstone_survives_reopen() {
                 None,
                 None,
                 None,
+                BTreeMap::new(),
                 ts(0),
             )
             .await
@@ -126,8 +129,17 @@ async fn retention_tombstone_survives_reopen() {
     // Within retention (now=10 << 3s + 60s): the recovered tombstone still rejects the re-push. Assert the
     // EXACT `Terminal` (a broken def-cache reload would surface as `NotFound`, which this rules out).
     assert_eq!(
-        b.replace_if_pending(&shard(), &key, None, None, None, None, ts(10))
-            .await,
+        b.replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            ts(10)
+        )
+        .await,
         Err(EngineError::Terminal),
         "the retention tombstone survives reopen and still blocks the duplicate as Terminal"
     );

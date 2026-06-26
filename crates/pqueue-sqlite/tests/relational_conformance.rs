@@ -11,6 +11,8 @@
 //!    which is not in the core class).
 //! 3. **Regression guards** — id-counter restore on reopen + stable-FIFO from the BQ-11a fresh-eyes review.
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
 use pqueue_core::{
@@ -433,6 +435,7 @@ async fn cohort_expired_fails_group_members() {
         group_key: Some(group.clone()),
         max_attempts: 3,
         payload: None,
+        fields: BTreeMap::new(),
         cohort_size: None,
         gate_keys: Vec::new(),
     };
@@ -521,6 +524,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             None,
             Some(Bytes::from_static(b"v1")),
+            BTreeMap::new(),
             ts(0),
         )
         .await
@@ -540,6 +544,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             None,
             Some(Bytes::from_static(b"v2")),
+            BTreeMap::new(),
             ts(1),
         )
         .await
@@ -557,9 +562,18 @@ async fn upsert_inserts_then_replaces_then_rejects() {
     // Claim the active item -> a further upsert collides with a claimed item.
     b.claim(claim_req(1, 500, 10)).await.unwrap();
     assert!(
-        b.replace_if_pending(&shard(), &key, None, None, None, None, ts(2))
-            .await
-            .is_err(),
+        b.replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            ts(2)
+        )
+        .await
+        .is_err(),
         "upsert collides with a claimed item"
     );
 }
@@ -582,6 +596,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             None,
+            BTreeMap::new(),
             ts(0),
         )
         .await
@@ -609,9 +624,18 @@ async fn purged_terminal_key_is_retained_against_repush() {
 
     // Re-push the SAME key within retention (now=10 << expiry 3s + 60s): still a duplicate, not a new item.
     assert!(
-        b.replace_if_pending(&shard(), &key, None, None, None, None, ts(10))
-            .await
-            .is_err(),
+        b.replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            ts(10)
+        )
+        .await
+        .is_err(),
         "purged terminal key is retained -> re-push rejected as a duplicate"
     );
 
@@ -624,6 +648,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             None,
+            BTreeMap::new(),
             ts(70),
         )
         .await

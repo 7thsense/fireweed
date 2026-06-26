@@ -48,6 +48,8 @@
 //! evidence is env-gated on `PQUEUE_PG_TEST_URL` and deferred-with-reason where no database is present
 //! (convergence-review I3).
 
+use std::collections::BTreeMap;
+
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
@@ -163,6 +165,7 @@ pub fn item_max(id: &str, key: &str, priority: i64, max_attempts: u32) -> PushIt
         group_key: None,
         max_attempts,
         payload: None,
+        fields: BTreeMap::new(),
         cohort_size: None,
         gate_keys: Vec::new(),
     }
@@ -220,6 +223,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::high_water_is_monotonic(&make).await;
     scenarios::claim_returns_priority_ordered_rich_items(&make).await;
     scenarios::claim_empty_when_nothing_eligible(&make).await;
+    scenarios::structured_live_items_are_ordered_and_only_live(&make).await;
     scenarios::upsert_inserts_then_replaces_pending(&make).await;
     scenarios::upsert_rejects_claimed_and_terminal(&make).await;
     scenarios::upsert_preserves_group_delay_and_payload_in_claim_shape(&make).await;
@@ -263,6 +267,7 @@ macro_rules! core_suite {
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
+            structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,
             paused_queue_yields_no_claims,
@@ -290,6 +295,7 @@ macro_rules! core_suite {
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
+            structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,
             paused_queue_yields_no_claims,

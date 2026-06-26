@@ -17,6 +17,7 @@ use pqueue_engine::{
 };
 use pqueue_memory::{ManualClock, MemoryBackend};
 use pqueue_resp::{RespBackend, SystemClock, serve};
+use redis::Value;
 use redis::streams::StreamReadReply;
 
 /// Boot the RESP front over a real ephemeral TCP port with a fresh memory backend + created queue, and
@@ -232,6 +233,142 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
     );
     let p: i64 = ids[0].get("priority").unwrap();
     assert_eq!(p, 20, "the upsert kept the replacement's priority");
+}
+
+fn value_array(value: Value) -> Vec<Value> {
+    match value {
+        Value::Array(items) => items,
+        other => panic!("expected RESP array, got {other:?}"),
+    }
+}
+
+fn bulk_string(value: &Value) -> Vec<u8> {
+    match value {
+        Value::BulkString(bytes) => bytes.clone(),
+        other => panic!("expected bulk string, got {other:?}"),
+    }
+}
+
+fn field_value(fields: &[Value], name: &str) -> Option<Vec<u8>> {
+    for pair in fields.chunks_exact(2) {
+        if bulk_string(&pair[0]) == name.as_bytes() {
+            return Some(bulk_string(&pair[1]));
+        }
+    }
+    None
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pq_live_hash_reads_return_structured_fields_until_ack() {
+    let (mut con, _backend) = setup().await;
+    let id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("work-1")
+        .arg("priority")
+        .arg(7)
+        .arg("payload")
+        .arg("opaque")
+        .arg("recipient_ref")
+        .arg("r-1")
+        .arg("payload_ref")
+        .arg("p-1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let hgetall = value_array(
+        redis::cmd("PQ.HGETALL")
+            .arg("t1:q1")
+            .arg("work-1")
+            .query_async::<Value>(&mut con)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        field_value(&hgetall, "recipient_ref").as_deref(),
+        Some(&b"r-1"[..])
+    );
+    assert_eq!(
+        field_value(&hgetall, "payload").as_deref(),
+        Some(&b"opaque"[..])
+    );
+    assert_eq!(
+        field_value(&hgetall, "lifecycle_state").as_deref(),
+        Some(&b"Pending"[..])
+    );
+
+    let hmget = value_array(
+        redis::cmd("PQ.HMGET")
+            .arg("t1:q1")
+            .arg("work-1")
+            .arg("recipient_ref")
+            .arg("payload_ref")
+            .arg("missing")
+            .query_async::<Value>(&mut con)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(bulk_string(&hmget[0]), b"r-1");
+    assert_eq!(bulk_string(&hmget[1]), b"p-1");
+    assert!(matches!(hmget[2], Value::Nil));
+
+    let mget = value_array(
+        redis::cmd("PQ.MGET")
+            .arg("t1:q1")
+            .arg("missing")
+            .arg("work-1")
+            .query_async::<Value>(&mut con)
+            .await
+            .unwrap(),
+    );
+    assert!(matches!(mget[0], Value::Nil));
+    let Value::Array(entry) = &mget[1] else {
+        panic!("live key should render as stream-entry-shaped array");
+    };
+    assert_eq!(bulk_string(&entry[0]), id.as_bytes());
+    let Value::Array(entry_fields) = &entry[1] else {
+        panic!("entry fields should be an array");
+    };
+    assert_eq!(
+        field_value(entry_fields, "recipient_ref").as_deref(),
+        Some(&b"r-1"[..])
+    );
+
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let claimed = &reply.keys[0].ids[0];
+    let recipient: String = claimed.get("recipient_ref").unwrap();
+    assert_eq!(recipient, "r-1");
+
+    let _acked: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&claimed.id)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let after_ack = value_array(
+        redis::cmd("PQ.HMGET")
+            .arg("t1:q1")
+            .arg("work-1")
+            .arg("recipient_ref")
+            .query_async::<Value>(&mut con)
+            .await
+            .unwrap(),
+    );
+    assert!(matches!(after_ack[0], Value::Nil));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

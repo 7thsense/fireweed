@@ -987,6 +987,7 @@ dependencies = [
 name = "pqueue-resp"
 version = "0.2.4"
 dependencies = [
+ "bytes",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-memory",

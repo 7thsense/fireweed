@@ -62,6 +62,7 @@ pg_relational!(
     claim_then_complete_lifecycle,
     claim_returns_priority_ordered_rich_items,
     claim_empty_when_nothing_eligible,
+    structured_live_items_are_ordered_and_only_live,
     tick_reclaims_expired_lease_with_no_client_traffic,
     tick_lease_boundary_is_half_open,
     paused_queue_yields_no_claims,

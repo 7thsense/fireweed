@@ -57,6 +57,7 @@ pg_conformance!(
     high_water_is_monotonic,
     claim_returns_priority_ordered_rich_items,
     claim_empty_when_nothing_eligible,
+    structured_live_items_are_ordered_and_only_live,
     upsert_inserts_then_replaces_pending,
     upsert_rejects_claimed_and_terminal,
     upsert_preserves_group_delay_and_payload_in_claim_shape,

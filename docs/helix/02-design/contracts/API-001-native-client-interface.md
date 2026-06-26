@@ -36,8 +36,9 @@ ddx:
 ## Purpose
 
 This contract defines the native pqueue client interface for queue definition,
-idempotent batch writes, mutable priority updates, batch claims, lease renewal,
-and batch finalization.
+idempotent batch writes, structured hot item storage, mutable priority updates,
+live item reads by caller key, batch claims, lease renewal, and batch
+finalization.
 
 The contract is transport-neutral. A Rust client, TypeScript client, HTTP API,
 or embedded library binding may expose idiomatic names, but MUST preserve these
@@ -57,7 +58,7 @@ mutable priority, mutable schedule, or pqueue's full batch/update semantics.
 ## Scope and Boundaries
 
 - In scope: native client operations for queue creation, item write/update,
-  claim, lease renewal, finalize, and basic queue metrics.
+  live hot-item read, claim, lease renewal, finalize, and basic queue metrics.
 - In scope: request/response fields, required identifiers, lifecycle outcomes,
   idempotency behavior, lease semantics, and batch error behavior.
 - In scope: first-class exposure surfaces and HTTP route shape.
@@ -84,6 +85,7 @@ message, endpoint, or payload element named here is part of the contract.
 | `priority` | tagged scalar | yes when item should be orderable | MUST match the queue's declared priority model. | Timestamp queues use RFC 3339 UTC timestamps. |
 | `not_before` | timestamp | no | If present, item MUST NOT be claimable before this timestamp. | Distinct from priority. |
 | `payload` | opaque bytes or JSON value | no | MUST be stored and returned to claimers without pqueue interpreting application meaning. | Transport adapters define encoding. |
+| `fields` | map string -> opaque bytes | no | MUST be stored as caller-defined structured item fields and returned to claimers and live-item reads without pqueue interpreting application meaning. Field names MUST be UTF-8 strings. Transport adapters MAY reserve field names for pqueue system fields; reserved names MUST be documented by the adapter. | This is the hot-storage field model for compound work records. It is distinct from `metadata`, which is for predicates/observability. |
 | `metadata` | JSON object / map | no | MUST be caller-defined and queryable only through supported predicates. | Used for gates, group keys, and observability dimensions. |
 | `group_key` | string | no (yes on cohort / group-batching queues) | MAY identify a claim compatibility / ordering partition within a queue. When a claim's effective domain is a single `group_key`, claim result order is the exact per-group priority order (ADR-004): because the queue is the unit of sharding (ADR-008), every item of a `group_key` is co-resident on the queue's single owner **by construction**, so per-group order always holds. On a queue with `cohort_policy.enabled` or group batching enabled, every item MUST carry `group_key`. `group_key` carries no progress-bound meaning; progress is queue-global. | Examples: job, callback/cohort, account, connector, campaign. |
 | `gate_keys` | array of strings | no | MAY declare zero or more opaque gate keys for the item. An item MUST be ineligible for claim while any of its gate keys is `blocked` in the queue's gate state (see Eligibility Precedence). pqueue MUST NOT interpret gate-key meaning. An item with no gate keys is never gate-blocked. Each key MUST match `^[A-Za-z0-9._:-]{1,256}$`; duplicates within one item MUST be collapsed to a set; the set size MUST NOT exceed the queue's `eligibility_policy.max_gate_keys_per_item`. Valid only when the queue's `eligibility_policy.gate_keys = dynamic`; otherwise the item fails per-item `invalid`. | Distinct from `group_key` (claim compatibility/ordering, not eligibility) and from downstream rate pacing (not modeled by pqueue). Gate keys are opaque and independent of whichever `group_key` topology a queue uses (ADR-004). |
@@ -120,6 +122,7 @@ transport contract explicitly defines another encoding.
 |---------|--------------|----------|-------|-------|
 | `POST /v1/tenants/{tenant_id}/queues` | HTTP operation | yes | MUST bind to `CreateQueue`. | Control-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:push` | HTTP operation | yes | MUST bind to `BatchPush`. | Data-plane route. |
+| `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:get` | HTTP operation | should | MUST bind to `BatchGetLiveItems` when the HTTP surface implements hot-item reads. | Data-plane read route; Rust and RESP bindings expose this capability first. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:update` | HTTP operation | yes | MUST bind to `BatchUpdate`. | Data-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/gates:set` | HTTP operation | yes | MUST bind to `SetGates`. | Eligibility-control-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:claim` | HTTP operation | yes | MUST bind to `BatchClaim`. | Data-plane route. |
@@ -199,6 +202,7 @@ deployment default, so neither cap is ever undefined.
 | `items[].priority` | tagged scalar | yes | MUST match queue priority model. | Invalid values fail per item. |
 | `items[].not_before` | timestamp | no | MUST make item ineligible until the timestamp. | `priority` still determines order once eligible. |
 | `items[].payload` | opaque bytes or JSON value | no | MUST be stored as caller data. | May be omitted for pointer-only queues. |
+| `items[].fields` | map string -> opaque bytes | no | MUST be stored as the item's structured hot record and returned by claims and live reads while the item remains live. | Preferred field model for compound work records. |
 | `items[].metadata` | JSON object / map | no | MUST be stored as caller metadata. | Size limits are deployment-defined. |
 | `items[].gate_keys` | array of strings | no | MUST be stored as the item's gate-key set after validation (charset, length, dedup, cardinality cap per Common Types / Queue Definition). Empty or absent means no dynamic gate applies. Present when the queue is `gate_keys = none` MUST fail that item with `invalid`. | Dynamic eligibility gate keys. |
 | `BatchPush.response.results[]` | array | yes | MUST preserve request item order. | Each result includes submitted `client_item_key`. |
@@ -210,6 +214,22 @@ or metadata after initial acceptance.
 Successful first acceptance MUST create `item_version=1`. Duplicate pushes MUST
 return the current `item_id` and `item_version` without incrementing
 `item_version`.
+
+### Batch Get Live Items
+
+| Element | Type / Shape | Required | Rules | Notes |
+|---------|--------------|----------|-------|-------|
+| `BatchGetLiveItems` | operation | should | MUST read one or more items by `client_item_key` without mutating lifecycle state. | Hot-storage read path. |
+| `keys[]` | array of `client_item_key` | yes | MUST preserve request order in the response. Duplicate keys MAY be repeated in the response. | Enables multi-key fan-in from one queue owner. |
+| `results[]` | array of nullable `LiveItemView` | yes | MUST be aligned with `keys[]`. A missing, purged, terminal, or superseded item MUST render as null/absent. | "Live" is the queue-resident hot-work set. |
+| `LiveItemView.lifecycle_state` | enum | yes | MUST be `pending` or `leased`. Leased items are still live because they are still in queue ownership until finalization or purge. | Claim ownership does not remove hot storage visibility. |
+| `LiveItemView.payload` | opaque bytes or JSON value | no | MUST equal the current item's stored payload. | Compatibility with existing opaque-payload clients. |
+| `LiveItemView.fields` | map string -> opaque bytes | no | MUST equal the current item's structured field map. | Primary compound-object access path. |
+
+`BatchGetLiveItems` MUST NOT resurrect or expose terminal history. Once an item is
+completed, failed, purged, or superseded by replacement, lookup by its
+`client_item_key` MUST return absent unless a newer live item under the same key
+exists.
 
 ### Batch Update
 

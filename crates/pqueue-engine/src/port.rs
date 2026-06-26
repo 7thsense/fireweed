@@ -6,10 +6,12 @@
 //! such as postgres is async). Atomicity for async backends is provided via `ClaimPort`/`UpsertPort`
 //! (TD-007 §2.3), so the sync UoW closure suffices for the atomic-sync backends (memory, sqlite).
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, QueueId, TenantId,
-    UtcTimestamp, WorkerId,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
+    QueueId, TenantId, UtcTimestamp, WorkerId,
 };
 
 use crate::claim_validation::ClaimCompatibility;
@@ -96,6 +98,26 @@ pub struct ItemView {
     pub item_version: u64,
 }
 
+/// A live item addressed by `client_item_key`.
+///
+/// "Live" means still owned by the queue as active work: pending or leased, not terminal and not
+/// superseded. The view intentionally includes the existing opaque payload plus the structured field map
+/// so pqueue can serve as hot storage for compound work records without forcing callers to maintain a
+/// second snapshot store.
+#[derive(Debug, Clone)]
+pub struct LiveItemView {
+    pub item_id: ItemId,
+    pub client_item_key: ClientItemKey,
+    pub item_version: u64,
+    pub lifecycle_state: ItemState,
+    pub priority: Option<PriorityValue>,
+    pub group_key: Option<GroupKey>,
+    pub not_before: Option<UtcTimestamp>,
+    pub attempt_count: u32,
+    pub payload: Option<Bytes>,
+    pub fields: BTreeMap<String, Bytes>,
+}
+
 /// A view of an in-flight (leased) item (RESP `XPENDING` / library read).
 #[derive(Debug, Clone)]
 pub struct LeaseView {
@@ -145,6 +167,14 @@ pub trait ProjectionRead: Send + Sync {
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send;
 
+    /// Render live hot-storage items by client key, preserving input order. A missing, terminal, purged,
+    /// or superseded item renders as `None`; leased items are still live and render normally.
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send;
+
     fn metrics(
         &self,
         queue: &QueueKey,
@@ -189,6 +219,7 @@ pub struct ClaimedItem {
     /// Delivery/reclaim count as of this claim (RESP delivery-count semantics; flavor-diff 7).
     pub attempt_count: u32,
     pub payload: Option<Bytes>,
+    pub fields: BTreeMap<String, Bytes>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -233,6 +264,7 @@ pub trait UpsertPort: Send + Sync {
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
+        fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
 }
@@ -247,6 +279,9 @@ pub struct PushSpec {
     pub not_before: Option<UtcTimestamp>,
     pub group_key: Option<GroupKey>,
     pub payload: Option<Bytes>,
+    /// Structured hot-storage fields for compound work records. These are item-local, mutable by
+    /// replacement/upsert, and exposed through Redis-hash-shaped live read commands.
+    pub fields: BTreeMap<String, Bytes>,
     /// Declared cohort size (BQ-14c) — see [`crate::PushItem::cohort_size`]. `None` for non-cohort items.
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d) — see [`crate::PushItem::gate_keys`]. Empty for un-gated items.

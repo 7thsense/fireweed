@@ -16,6 +16,7 @@
 //! pre-validate — see the INVARIANT). Object names are zero-padded sequence numbers so lexical order is
 //! replay order; the next sequence is `max(existing)+1`, compaction-safe.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,8 +31,8 @@ use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
+    FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
+    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
     PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand,
     ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, SnapshotRef,
     SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
@@ -433,6 +434,7 @@ impl UpsertPort for ObjectLogBackend {
         _group_key: Option<GroupKey>,
         _not_before: Option<UtcTimestamp>,
         _payload: Option<Bytes>,
+        _fields: BTreeMap<String, Bytes>,
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         // Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD upsert is not offered on the eventual-apply
@@ -807,6 +809,19 @@ impl ProjectionRead for ObjectLogBackend {
             let g = self.inner.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.render_claimed(ids))
+        })();
+        std::future::ready(result)
+    }
+
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.live_items_by_key(keys))
         })();
         std::future::ready(result)
     }

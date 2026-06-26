@@ -32,17 +32,22 @@ ddx:
 
 Define the launch RESP surface for pqueue after the hexagonal cutover.
 
-The launch decision is intentionally narrower than earlier drafts:
+The launch decision is intentionally narrower than earlier drafts, but no longer
+stock-only:
 
 - RESP is a pqueue-native server that speaks a **stock Redis Streams-compatible worker subset**.
+- RESP also exposes a small **pqueue-native live item read subset** (`PQ.MGET`, `PQ.HGETALL`,
+  `PQ.HMGET`) so clients can use pqueue as hot structured storage while work is still in queue
+  ownership.
 - The Rust library is the full-power interface for pqueue-specific control, inspection, filtered claim,
   gates, cohorts, rich finalize dispositions, and operator repair.
-- No `PQ*` command vocabulary is required for launch. Any custom RESP command, including a possible
-  `PQFIN`, is post-launch and must be justified by new evidence.
+- Custom RESP mutation commands remain out of scope for launch; finalize variants beyond `XACK`, gate
+  mutation, repair, and queue administration stay library-only.
 
 This TD exists to prevent accidental half-interfaces: every API-001/API-002 operation is classified
-as `RESP-stock`, `library-only-intentional`, or `n/a`, and the stock Redis-compatible behavior is
-specified enough for conformance tests.
+as `RESP-stock`, `RESP-pqueue-native-read`, `library-only-intentional`, or `n/a`, and both the stock
+Redis-compatible behavior and the pqueue-native live read behavior are specified enough for
+conformance tests.
 
 ## 1. Implementation Model
 
@@ -53,7 +58,7 @@ Consequences:
 - pqueue owns command semantics for the subset it implements.
 - pqueue owns authentication and authorization for RESP connections.
 - RESP compatibility means stock Redis Streams clients can run the unfiltered worker hot path without
-  custom commands.
+  custom commands; applications that need live hot-item reads use the explicit `PQ.*` command names.
 - Redis clients must treat returned batches as opaque work sets; pqueue delivery order is priority
   order, not stream-id order.
 
@@ -115,7 +120,8 @@ the drain command split.
 ## 2. Container Entry Contract
 
 RESP entries are flat field/value pairs. pqueue reserves fields used by API-001 and returns additional
-reserved fields in claim replies. Non-reserved fields are opaque payload.
+reserved fields in claim replies and `PQ.*` reads. Non-reserved `XADD` field/value pairs are stored as
+the item's structured field map.
 
 | Reserved field | Direction | Meaning |
 |---|---|---|
@@ -128,12 +134,18 @@ reserved fields in claim replies. Non-reserved fields are opaque payload.
 | `gate_keys` | request | JSON array of dynamic gate keys. Gate mutation is library-only. |
 | `metadata` | request | JSON object for predicates and audit. |
 | `payload` | request | Opaque application payload. |
+| `item_id` | reply/read | Server-assigned item id. Read-only; cannot be supplied as a user field. |
 | `item_version` | reply | Server-assigned monotonic item version. |
+| `lifecycle_state` | reply/read | `Pending` or `Leased` for live reads. |
 | `lease_expires_at` | reply | Server-computed lease expiry timestamp. |
 | `attempt_count` | reply | Delivery count (claims handed to a worker); a timed reclaim does not charge. |
 
 The RESP entry id is the wire `item_id`. `client_item_key` is not the entry id; it is the caller's
 logical replacement/idempotency key.
+
+`XADD` MUST reject non-reserved user fields whose names collide with read-only/system fields returned by
+`PQ.*` (`item_id`, `item_version`, `lifecycle_state`, `attempt_count`, `group_key`, `not_before`) or
+with parsed request fields (`client_item_key`, `priority`, `payload`). User field names MUST be UTF-8.
 
 ## 3. RESP Stock Command Surface
 
@@ -151,6 +163,8 @@ Rules:
   `-ERR pqueue invalid` (no lifecycle transition on in-flight work). If it collides with **terminal**
   work, the call returns `-ERR pqueue terminal`. (Mapping pinned in TD-007 §2.3.)
 - On eventual-apply backends, replacement is unavailable and returns `-ERR pqueue unavailable`.
+- Non-reserved field/value pairs are stored as structured item fields. `payload` is stored separately as
+  the existing opaque payload slot. Claims and `PQ.*` reads return both.
 
 ### `XREADGROUP ... STREAMS <queue> >`
 
@@ -204,6 +218,31 @@ Rules:
 - `XDEL` of active or terminal work follows the engine's lifecycle rules; invalid state returns
   `-ERR pqueue invalid` rather than silently violating delivery invariants.
 
+## 3A. pqueue-native Live Item Reads
+
+These commands intentionally emulate useful Redis hash read shapes without making pqueue a Redis hash
+keyspace. They read **live pqueue items** addressed by `client_item_key` within one queue. "Live" means
+the item is still queue-owned active work: `Pending` or `Leased`, not terminal, not purged, and not
+superseded. Leased items are returned because they are still in queue ownership until finalization.
+
+### `PQ.MGET <queue> <client_item_key> [client_item_key ...]`
+
+Returns an array aligned with the requested keys. Each live item is rendered as
+`[item_id, [field, value, ...]]`, the same entry-shaped body used by `XREADGROUP`; a missing,
+terminal, purged, or superseded key returns nil in that array position.
+
+### `PQ.HGETALL <queue> <client_item_key>`
+
+Returns a flat `[field, value, ...]` array for one live item. A non-live key returns an empty array,
+matching Redis `HGETALL`'s missing-key shape. Returned fields include pqueue system fields
+(`item_id`, `client_item_key`, `item_version`, `lifecycle_state`, `priority`, `attempt_count`,
+`payload` when present, `group_key`/`not_before` when present) followed by user fields.
+
+### `PQ.HMGET <queue> <client_item_key> <field> [field ...]`
+
+Returns an array aligned with requested field names. Missing fields, or a non-live item, return nil in
+the corresponding position. System fields and user fields are addressable by name.
+
 ## 4. Library-Only Surface
 
 These API-001/API-002 capabilities are intentionally not exposed over launch RESP:
@@ -213,7 +252,7 @@ These API-001/API-002 capabilities are intentionally not exposed over launch RES
 - explicit lease duration renewals;
 - finalize dispositions other than `complete`: `fail`, `retry`, `release`, `rearm`;
 - queue create/configure, mutable priority updates, gate mutation, pause/resume;
-- rich metrics, active scopes, queue admin state, item inspection, operation list/status/cancel;
+- rich metrics, active scopes, queue admin state beyond live item reads, operation list/status/cancel;
 - operator repair, redrive, force purge, archive, and retention operations;
 - request-id replay semantics for commands where stock Redis has no request-id slot.
 
@@ -234,6 +273,8 @@ interface. The RESP launch contract is the stock worker hot path.
 | Fail/retry/release/rearm | library-only-intentional | pass |
 | Reclaim expired | pass (`XCLAIM`/`XAUTOCLAIM`) | pass |
 | Pending/depth inspection | pass (`XPENDING`/`XLEN`/`XINFO`) | pass |
+| Live item multi-get by `client_item_key` | pass (`PQ.MGET`) | pass |
+| Live item field reads | pass (`PQ.HGETALL`/`PQ.HMGET`) | pass |
 | Rich metrics and active scopes | library-only-intentional | pass |
 | Basic delete | pass (`XDEL`) | pass |
 | Force purge | library-only-intentional | pass |
@@ -242,7 +283,7 @@ interface. The RESP launch contract is the stock worker hot path.
 | Operator repair/redrive/archive/retention | library-only-intentional | pass |
 | Operation status/cancel/list | library-only-intentional | pass |
 
-No launch operation is exposed through custom RESP commands.
+Launch custom RESP commands are read-only and scoped to live item access.
 
 ## 6. Redis Divergences
 
@@ -256,6 +297,9 @@ No launch operation is exposed through custom RESP commands.
    `-ERR pqueue superseded`.
 6. **Eventual-apply backends have weaker ordering guarantees.** Priority order is over applied state,
    and pending-item replacement returns `-ERR pqueue unavailable`.
+7. **`PQ.H*` commands are pqueue live-item reads, not Redis hashes.** They emulate Redis hash read
+   response shapes over pqueue's structured item fields. They do not create independent hash keys, and
+   data disappears from the live view when the queue item completes, fails, is purged, or is superseded.
 
 ## 7. Canonical Errors
 
