@@ -171,7 +171,11 @@ review → commit → `ddx bead close`.
     binary (`--strict`/`--require-evidence`, rejects failed/untraceable/malformed/empty, asserts E0–E3 present).
     Fresh-eyes GO-with-conditions (atomic single-`write_all` append; `--require-evidence` implies `--strict`) applied.
   - **BQ-43b** (pqueue-721d91b3) — E0/E1 postgres single-deployment evidence (env-gated live DB).
-  - **BQ-43c** (pqueue-28c704e2) — E2/E3 ledger emission from the BQ-40/41/42 measured suites.
+  - **BQ-43c** (pqueue-28c704e2) **DONE** — the three measured suites emit a verification-ledger row from
+    their REAL measured values (`<suite>.jsonl`) and assert it strict-validates. Rows are `evidence_tier=smoke`
+    (in-process / file-backed reference) so they're recorded but do NOT satisfy a release E0–E3 gate;
+    pqueue-release gained an `evidence_tier` field + tier-aware `verify_ledger` (fresh-eyes condition: smoke
+    must not green the headline). Live release-tier E2/E3 come from pqueue-f1d107de / pqueue-2f9ebac3.
   - **BQ-43d** (pqueue-f0dc083e) — `product_validation_tests` AC-E2E-1..9 rebuilt on the current interfaces.
   - **BQ-43e** (pqueue-0ee83e73) — rewire `scripts/ci` gates to current crates + reconcile evidence sources; closes BQ-43.
 

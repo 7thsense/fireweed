@@ -31,7 +31,7 @@ pub struct LedgerRow {
     pub backend_profile: String,
     /// Scale shape (`smoke` | `release` | a specific `S=…` descriptor).
     pub scale: String,
-    /// Deterministic seed for the run.
+    /// Deterministic seed for the run (`0` = no seed / wall-clock-timed run with no seeded randomness).
     pub seed: u64,
     /// Where it ran (host class / CI lane / `in-process`).
     pub environment: String,
@@ -45,8 +45,19 @@ pub struct LedgerRow {
     pub inv_ids: Vec<String>,
     /// The pass bar this row was judged against (human-readable).
     pub pass_bar: String,
+    /// Evidence tier: `release` (counts toward the headline E0–E3 requirement) or `smoke` (an in-process or
+    /// reduced-scale run — recorded and strict-validated for visibility, but NOT accepted as headline
+    /// evidence by the gate). Absent → `release` (a row is release evidence unless it says otherwise; the
+    /// new in-process suites set `smoke` explicitly). The gate's required-evidence assertion only counts
+    /// `tp002_evidence_ids` from non-smoke rows.
+    #[serde(default = "default_tier")]
+    pub evidence_tier: String,
     /// Measured values + the TP-002 evidence ids substantiated.
     pub measurements: Measurements,
+}
+
+fn default_tier() -> String {
+    "release".to_string()
 }
 
 /// Measured values for a row. [`tp002_evidence_ids`](Self::tp002_evidence_ids) names the E0–E3 records this
@@ -66,6 +77,19 @@ impl LedgerRow {
     pub fn to_jsonl(&self) -> String {
         serde_json::to_string(self).expect("LedgerRow serializes")
     }
+}
+
+/// The ledger file an evidence suite writes its row to: `<dir>/<suite>.jsonl`, where `<dir>` is
+/// `$PQUEUE_LEDGER_DIR` if set (the CI gate points every suite at one collection dir), else
+/// `<repo>/target/pqueue-ledger` derived from the caller's `manifest_dir` (pass `env!("CARGO_MANIFEST_DIR")`
+/// so this resolves to the repo-root `target/` regardless of which workspace the suite runs in).
+pub fn ledger_path(manifest_dir: &str, suite: &str) -> std::path::PathBuf {
+    let dir = match std::env::var("PQUEUE_LEDGER_DIR") {
+        Ok(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
+        // `..` resolves at IO time; crates/<x>/../../target == repo-root target.
+        _ => Path::new(manifest_dir).join("../../target/pqueue-ledger"),
+    };
+    dir.join(format!("{suite}.jsonl"))
 }
 
 /// Append one row to the ledger at `path`, creating the file (and parent dirs) if needed. The whole line —
@@ -90,11 +114,14 @@ impl std::fmt::Display for LedgerError {
     }
 }
 
-/// Outcome of validating a ledger: the rows seen and the union of evidence ids they substantiate.
+/// Outcome of validating a ledger: the rows seen, the union of evidence ids RELEASE-tier rows substantiate
+/// (`evidence_ids`, the only ones the headline requirement counts), and — for visibility — the evidence ids
+/// only seen on `smoke`-tier rows.
 #[derive(Debug, Clone, Default)]
 pub struct LedgerSummary {
     pub rows: usize,
     pub evidence_ids: std::collections::BTreeSet<String>,
+    pub smoke_evidence_ids: std::collections::BTreeSet<String>,
 }
 
 /// Validate a ledger file. In `strict` mode each row must be well-formed AND acceptable evidence (exit 0,
@@ -131,9 +158,14 @@ pub fn verify_ledger(path: &Path, strict: bool) -> Result<LedgerSummary, Vec<Led
             }
         };
         summary.rows += 1;
-        summary
-            .evidence_ids
-            .extend(row.measurements.tp002_evidence_ids.iter().cloned());
+        // Only RELEASE-tier rows count toward the headline E0–E3 requirement; smoke-tier rows are recorded
+        // separately so an in-process/reduced-scale run can never satisfy a release-evidence gate.
+        let ids = row.measurements.tp002_evidence_ids.iter().cloned();
+        if row.evidence_tier == "smoke" {
+            summary.smoke_evidence_ids.extend(ids);
+        } else {
+            summary.evidence_ids.extend(ids);
+        }
         if strict {
             for e in strict_row_errors(&row) {
                 errors.push(LedgerError(format!("line {lineno} ({}): {e}", row.suite)));
@@ -209,11 +241,39 @@ mod tests {
             ac_ids: vec!["AC-E2E-1".into()],
             inv_ids: vec!["INV-1".into()],
             pass_bar: "floor held".into(),
+            evidence_tier: "release".into(),
             measurements: Measurements {
                 tp002_evidence_ids: evidence.iter().map(|s| s.to_string()).collect(),
                 values: BTreeMap::from([("items_per_sec".into(), serde_json::json!(123456))]),
             },
         }
+    }
+
+    #[test]
+    fn smoke_tier_evidence_does_not_count_toward_the_headline() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("pq-tier-{}.jsonl", std::process::id()));
+        let _ = fs::remove_file(&path);
+        // A release E2 row and a SMOKE E3 row.
+        append_row(&path, &row("release_e2", 0, &["E2"])).unwrap();
+        let mut smoke = row("smoke_e3", 0, &["E3"]);
+        smoke.evidence_tier = "smoke".into();
+        append_row(&path, &smoke).unwrap();
+
+        let s = verify_ledger(&path, true).unwrap();
+        // Only the release E2 counts as headline evidence; the smoke E3 is tracked separately.
+        assert!(s.evidence_ids.contains("E2") && !s.evidence_ids.contains("E3"));
+        assert!(s.smoke_evidence_ids.contains("E3"));
+        // A gate requiring E3 is NOT satisfied by the smoke row.
+        assert_eq!(
+            missing_evidence(&s, &["E3".to_string()]),
+            vec!["E3".to_string()]
+        );
+        // A legacy row that OMITS evidence_tier deserializes as release (back-compat).
+        let legacy = r#"{"suite":"s","command":"c","backend_profile":"memory","scale":"release","seed":1,"environment":"ci","exit_status":0,"pass_bar":"p","measurements":{"tp002_evidence_ids":["E0"]}}"#;
+        let parsed: LedgerRow = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.evidence_tier, "release");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -245,6 +305,21 @@ mod tests {
             strict_row_errors(&untraceable)
                 .iter()
                 .any(|e| e.contains("untraceable"))
+        );
+    }
+
+    #[test]
+    fn ledger_path_honors_env_override_and_default() {
+        // SAFETY: single-threaded test; we set then clear the override around the assertions.
+        unsafe { std::env::set_var("PQUEUE_LEDGER_DIR", "/tmp/pq-ledger") };
+        assert_eq!(
+            ledger_path("/repo/crates/x", "suite_a"),
+            std::path::PathBuf::from("/tmp/pq-ledger/suite_a.jsonl")
+        );
+        unsafe { std::env::remove_var("PQUEUE_LEDGER_DIR") };
+        assert_eq!(
+            ledger_path("/repo/crates/x", "suite_a"),
+            std::path::PathBuf::from("/repo/crates/x/../../target/pqueue-ledger/suite_a.jsonl")
         );
     }
 

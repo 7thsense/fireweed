@@ -537,7 +537,9 @@ dependencies = [
  "pqueue-memory",
  "pqueue-objectlog",
  "pqueue-postgres",
+ "pqueue-release",
  "pqueue-sqlite",
+ "serde_json",
 ]
 
 [[package]]
@@ -600,6 +602,14 @@ dependencies = [
  "bytes",
  "pqueue-core",
  "pqueue-engine",
+]
+
+[[package]]
+name = "pqueue-release"
+version = "0.2.4"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

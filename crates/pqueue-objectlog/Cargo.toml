@@ -23,6 +23,7 @@ bytes = "1"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
 pqueue-conformance = { path = "../pqueue-conformance" }
+pqueue-release = { path = "../pqueue-release" }
 
 [[test]]
 name = "conformance"
@@ -31,3 +32,7 @@ path = "tests/conformance.rs"
 [[test]]
 name = "durability"
 path = "tests/durability.rs"
+
+[[test]]
+name = "object_log_commit_recovery_tests"
+path = "tests/object_log_commit_recovery_tests.rs"

@@ -277,4 +277,53 @@ fn performance_cross_queue_scale_out_tests() {
         "  in-memory single-node 8/2 aggregate ratio = {:.2}x  (NOT the cross-node E2 headline; that >=3.5x is the deferred live object-log multi-node run)",
         at(8).aggregate / at(2).aggregate
     );
+
+    // Emit a TP-002 E2 verification-ledger row from the REAL measured values (the gate source-validates it).
+    // Scale is `in-process-smoke`: this substantiates the ADR-008 owner-independence PROPERTY, not the
+    // >=3.5x cross-NODE headline (that is the deferred live run pqueue-f1d107de — recorded in `environment`).
+    let row = pqueue_release::LedgerRow {
+        suite: "performance_cross_queue_scale_out_tests".into(),
+        command: "cargo test --manifest-path crates/pqueue-bench/Cargo.toml --test performance_cross_queue_scale_out_tests".into(),
+        backend_profile: "memory".into(),
+        scale: "in-process-smoke".into(),
+        seed: 0,
+        environment: format!(
+            "in-process, {cores} cores; ADR-008 owner-independence smoke — the >=3.5x cross-NODE E2 headline is the deferred live object-log multi-node run (pqueue-f1d107de)"
+        ),
+        exit_status: 0,
+        ac_ids: vec![],
+        inv_ids: vec![],
+        pass_bar: "aggregate non-regressing across owner counts; scale-out >=60% of ideal vs the 2-owner baseline; worst per-queue >= E0 floor".into(),
+        evidence_tier: "smoke".into(),
+        measurements: pqueue_release::Measurements {
+            tp002_evidence_ids: vec!["E2".into()],
+            values: std::collections::BTreeMap::from([
+                ("owners_1_aggregate_per_s".into(), serde_json::json!(at(1).aggregate.round())),
+                ("owners_2_aggregate_per_s".into(), serde_json::json!(at(2).aggregate.round())),
+                ("owners_4_aggregate_per_s".into(), serde_json::json!(at(4).aggregate.round())),
+                ("owners_8_aggregate_per_s".into(), serde_json::json!(at(8).aggregate.round())),
+                ("scale_out_8_vs_2_multiple".into(), serde_json::json!((at(8).aggregate / at(2).aggregate * 100.0).round() / 100.0)),
+                ("worst_per_queue_per_s".into(), serde_json::json!(worst.round())),
+                ("e0_floor_per_s".into(), serde_json::json!(FLOOR_ITEMS_PER_SEC.round())),
+                ("cores".into(), serde_json::json!(cores)),
+            ]),
+        },
+    };
+    emit_and_verify("performance_cross_queue_scale_out_tests", &row, "E2");
+}
+
+/// Write `row` to its `<suite>.jsonl` ledger (one row per run) and assert it is WELL-FORMED — round-trips
+/// strict validation and carries `evidence_id`. (This checks the row's structure, not the measured values;
+/// the measurements are verified by the suite's own assertions above, which run before this emission.)
+fn emit_and_verify(suite: &str, row: &pqueue_release::LedgerRow, evidence_id: &str) {
+    let path = pqueue_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite);
+    let _ = std::fs::remove_file(&path);
+    pqueue_release::append_row(&path, row).expect("emit ledger row");
+    let summary = pqueue_release::verify_ledger(&path, true).expect("emitted row validates strict");
+    // These are SMOKE-tier rows: the id is recorded under smoke_evidence_ids (a release gate must NOT count
+    // it toward the headline E2/E3 requirement — the live runs supply release-tier evidence).
+    assert!(
+        summary.smoke_evidence_ids.contains(evidence_id),
+        "emitted smoke row must carry the {evidence_id} evidence id"
+    );
 }

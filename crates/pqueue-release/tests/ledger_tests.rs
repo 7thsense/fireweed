@@ -23,6 +23,7 @@ fn row(suite: &str, exit: i32, evidence: &[&str]) -> LedgerRow {
         ac_ids: vec![],
         inv_ids: vec![],
         pass_bar: "floor held".into(),
+        evidence_tier: "release".into(),
         measurements: Measurements {
             tp002_evidence_ids: evidence.iter().map(|s| s.to_string()).collect(),
             values: BTreeMap::from([("items_per_sec".into(), serde_json::json!(154598))]),

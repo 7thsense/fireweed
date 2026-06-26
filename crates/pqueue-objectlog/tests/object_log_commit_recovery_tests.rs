@@ -260,6 +260,52 @@ async fn object_log_e3_throughput_recovery_and_ack_latency() {
         "log replay rebuild rate must clear the E0 floor: {recovery_rate:.0}/s"
     );
 
+    // Emit a TP-002 E3 verification-ledger row from the REAL measured values. `backend_profile` is the
+    // FILE-BACKED reference (honest: not the SQLite-materialized production form); `environment`/`scale`
+    // carry the BQ-42 deferrals (full-genesis replay not snapshot+tail; group-commit ack / cost / SQLite
+    // projection / 10M-in-S3 → pqueue-2f9ebac3).
+    let row = pqueue_release::LedgerRow {
+        suite: "object_log_commit_recovery_tests".into(),
+        command: "cargo test -p pqueue-objectlog --test object_log_commit_recovery_tests".into(),
+        backend_profile: "object_log_file_reference".into(),
+        scale: "in-process-smoke".into(),
+        seed: 0,
+        environment:
+            "in-process file-backed object log + in-memory replay projection; full-genesis recovery (not snapshot+tail); group-commit ack / cost / SQLite-materialized projection / 10M-in-S3 deferred to pqueue-2f9ebac3"
+                .into(),
+        exit_status: 0,
+        ac_ids: vec![],
+        inv_ids: vec![],
+        pass_bar: "ingest & claim+ack >= E0 floor; recovery rebuilds full resident set from the durable log".into(),
+        evidence_tier: "smoke".into(),
+        measurements: pqueue_release::Measurements {
+            tp002_evidence_ids: vec!["E3".into()],
+            values: std::collections::BTreeMap::from([
+                ("ingest_per_s".into(), serde_json::json!(ingest_rate.round())),
+                ("claim_ack_per_s".into(), serde_json::json!(claim_rate.round())),
+                ("ack_p50_ms".into(), serde_json::json!((pct(&ack_latencies, 0.50) * 1000.0).round() / 1000.0)),
+                ("ack_p95_ms".into(), serde_json::json!((pct(&ack_latencies, 0.95) * 1000.0).round() / 1000.0)),
+                ("ack_p99_ms".into(), serde_json::json!((pct(&ack_latencies, 0.99) * 1000.0).round() / 1000.0)),
+                ("recovery_replay_per_s".into(), serde_json::json!(recovery_rate.round())),
+                ("recovered_items".into(), serde_json::json!(items)),
+                ("e0_floor_per_s".into(), serde_json::json!(FLOOR_ITEMS_PER_SEC.round())),
+            ]),
+        },
+    };
+    let path = pqueue_release::ledger_path(
+        env!("CARGO_MANIFEST_DIR"),
+        "object_log_commit_recovery_tests",
+    );
+    let _ = std::fs::remove_file(&path);
+    pqueue_release::append_row(&path, &row).expect("emit E3 ledger row");
+    let summary =
+        pqueue_release::verify_ledger(&path, true).expect("emitted E3 row validates strict");
+    // SMOKE-tier row: recorded under smoke_evidence_ids; a release gate must NOT count it toward headline E3.
+    assert!(
+        summary.smoke_evidence_ids.contains("E3"),
+        "row carries the E3 evidence id"
+    );
+
     let _ = std::fs::remove_dir_all(&root);
 }
 

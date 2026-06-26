@@ -381,4 +381,55 @@ fn queue_density_single_node_tests() {
         push_keep_load * 100.0,
         claim_keep_load * 100.0
     );
+
+    // Emit a TP-002 E2 (queue density) verification-ledger row from the REAL measured values. Scale is
+    // `in-process-smoke`: this is the in-memory single-node density property; bar (d) bounded shared pools,
+    // progress-bound-active under a live sweeper, and the durable-backend density point are deferred
+    // (pqueue-c33c367e) — recorded in `environment`.
+    let row = pqueue_release::LedgerRow {
+        suite: "queue_density_single_node_tests".into(),
+        command: "cargo test --manifest-path crates/pqueue-bench/Cargo.toml --test queue_density_single_node_tests".into(),
+        backend_profile: "memory".into(),
+        scale: "in-process-smoke".into(),
+        seed: 0,
+        environment: format!(
+            "in-process, {cores} cores, {workers} noisy workers; in-memory single-node density — bounded-shared-pool (bar d), progress-bound-active, and durable-backend density deferred to pqueue-c33c367e"
+        ),
+        exit_status: 0,
+        ac_ids: vec![],
+        inv_ids: vec![],
+        pass_bar: ">=1000 queues resident; hot-path per-op cost flat across density; hot holds E0 floor under concurrent noisy-neighbor load".into(),
+        evidence_tier: "smoke".into(),
+        measurements: pqueue_release::Measurements {
+            tp002_evidence_ids: vec!["E2".into()],
+            values: std::collections::BTreeMap::from([
+                ("resident_queues".into(), serde_json::json!(top.cold_resident_after)),
+                ("hot_push_at_1000_per_s".into(), serde_json::json!(top.hot_push_rate.round())),
+                ("hot_claim_at_1000_per_s".into(), serde_json::json!(top.hot_claim_rate.round())),
+                ("hot_push_under_load_per_s".into(), serde_json::json!(hot_push_load.round())),
+                ("hot_claim_under_load_per_s".into(), serde_json::json!(hot_claim_load.round())),
+                ("push_retained_under_load_pct".into(), serde_json::json!((push_keep_load * 100.0).round())),
+                ("claim_retained_under_load_pct".into(), serde_json::json!((claim_keep_load * 100.0).round())),
+                ("noisy_ops".into(), serde_json::json!(noisy_ops)),
+                ("e0_floor_per_s".into(), serde_json::json!(FLOOR_ITEMS_PER_SEC.round())),
+            ]),
+        },
+    };
+    emit_and_verify("queue_density_single_node_tests", &row, "E2");
+}
+
+/// Write `row` to its `<suite>.jsonl` ledger (one row per run) and assert it is WELL-FORMED — round-trips
+/// strict validation and carries `evidence_id`. (Structure only; the measured values are verified by the
+/// suite's own assertions above, which run before this emission.)
+fn emit_and_verify(suite: &str, row: &pqueue_release::LedgerRow, evidence_id: &str) {
+    let path = pqueue_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite);
+    let _ = std::fs::remove_file(&path);
+    pqueue_release::append_row(&path, row).expect("emit ledger row");
+    let summary = pqueue_release::verify_ledger(&path, true).expect("emitted row validates strict");
+    // SMOKE-tier row: the id is recorded under smoke_evidence_ids (a release gate must NOT count it toward
+    // the headline E2 requirement).
+    assert!(
+        summary.smoke_evidence_ids.contains(evidence_id),
+        "emitted smoke row must carry the {evidence_id} evidence id"
+    );
 }
