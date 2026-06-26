@@ -215,12 +215,64 @@ fn strict_row_errors(row: &LedgerRow) -> Vec<String> {
     e
 }
 
-/// Assert every id in `required` (e.g. `["E0","E1","E2","E3"]`) appears in some row's
+/// Validate EVERY `*.jsonl` ledger in `dir`, merging the per-file summaries (rows, release-tier
+/// `evidence_ids`, and `smoke_evidence_ids`). The gate emits one file per suite into a clean dir, so this
+/// aggregates the whole run. Returns the merged [`LedgerSummary`] or every [`LedgerError`] across all files.
+pub fn verify_ledger_dir(dir: &Path, strict: bool) -> Result<LedgerSummary, Vec<LedgerError>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return Err(vec![LedgerError(format!(
+                "cannot read ledger dir {dir:?}: {e}"
+            ))]);
+        }
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    paths.sort();
+    let mut merged = LedgerSummary::default();
+    let mut errors = Vec::new();
+    for p in &paths {
+        match verify_ledger(p, strict) {
+            Ok(s) => {
+                merged.rows += s.rows;
+                merged.evidence_ids.extend(s.evidence_ids);
+                merged.smoke_evidence_ids.extend(s.smoke_evidence_ids);
+            }
+            Err(es) => errors.extend(
+                es.into_iter()
+                    .map(|e| LedgerError(format!("{}: {}", p.display(), e.0))),
+            ),
+        }
+    }
+    if strict && paths.is_empty() {
+        errors.push(LedgerError(format!("no *.jsonl ledger files in {dir:?}")));
+    }
+    if errors.is_empty() {
+        Ok(merged)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Assert every id in `required` (e.g. `["E0","E1","E2","E3"]`) appears in some RELEASE-tier row's
 /// `measurements.tp002_evidence_ids`. Returns the missing ids (empty = satisfied).
 pub fn missing_evidence(summary: &LedgerSummary, required: &[String]) -> Vec<String> {
     required
         .iter()
         .filter(|id| !summary.evidence_ids.contains(*id))
+        .cloned()
+        .collect()
+}
+
+/// Like [`missing_evidence`] but against the SMOKE-tier evidence ids — for the gate's in-process smoke lane
+/// (which records evidence but cannot satisfy the release headline).
+pub fn missing_smoke_evidence(summary: &LedgerSummary, required: &[String]) -> Vec<String> {
+    required
+        .iter()
+        .filter(|id| !summary.smoke_evidence_ids.contains(*id))
         .cloned()
         .collect()
 }

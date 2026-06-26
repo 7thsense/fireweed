@@ -278,6 +278,20 @@ fn performance_cross_queue_scale_out_tests() {
         at(8).aggregate / at(2).aggregate
     );
 
+    // Whether the parallel scale-out efficiency bar (property 2) was actually asserted: it needs >=2 cores so
+    // at least two owners run on distinct cores. On 1 core the `else` branch above LOUD-skips it, so the row
+    // must NOT claim scale-out as verified — only the non-regression (1) and the E0 floor (3) were measured.
+    // Recording this in the row (and conditioning `pass_bar` on it) keeps a 1-core run from emitting an E2
+    // smoke row that silently overstates what was checked.
+    let scale_out_measured = max_unsub >= 2;
+    let pass_bar = if scale_out_measured {
+        "aggregate non-regressing across owner counts; scale-out >=60% of ideal vs the 2-owner baseline; worst per-queue >= E0 floor".to_string()
+    } else {
+        format!(
+            "aggregate non-regressing across owner counts; worst per-queue >= E0 floor (scale-out efficiency NOT measured — only {cores} core available; needs >=2)"
+        )
+    };
+
     // Emit a TP-002 E2 verification-ledger row from the REAL measured values (the gate source-validates it).
     // Scale is `in-process-smoke`: this substantiates the ADR-008 owner-independence PROPERTY, not the
     // >=3.5x cross-NODE headline (that is the deferred live run pqueue-f1d107de — recorded in `environment`).
@@ -288,12 +302,12 @@ fn performance_cross_queue_scale_out_tests() {
         scale: "in-process-smoke".into(),
         seed: 0,
         environment: format!(
-            "in-process, {cores} cores; ADR-008 owner-independence smoke — the >=3.5x cross-NODE E2 headline is the deferred live object-log multi-node run (pqueue-f1d107de)"
+            "in-process, {cores} cores (scale-out efficiency measured: {scale_out_measured}); ADR-008 owner-independence smoke — the >=3.5x cross-NODE E2 headline is the deferred live object-log multi-node run (pqueue-f1d107de)"
         ),
         exit_status: 0,
         ac_ids: vec![],
         inv_ids: vec![],
-        pass_bar: "aggregate non-regressing across owner counts; scale-out >=60% of ideal vs the 2-owner baseline; worst per-queue >= E0 floor".into(),
+        pass_bar,
         evidence_tier: "smoke".into(),
         measurements: pqueue_release::Measurements {
             tp002_evidence_ids: vec!["E2".into()],
@@ -306,6 +320,7 @@ fn performance_cross_queue_scale_out_tests() {
                 ("worst_per_queue_per_s".into(), serde_json::json!(worst.round())),
                 ("e0_floor_per_s".into(), serde_json::json!(FLOOR_ITEMS_PER_SEC.round())),
                 ("cores".into(), serde_json::json!(cores)),
+                ("scale_out_measured".into(), serde_json::json!(scale_out_measured)),
             ]),
         },
     };

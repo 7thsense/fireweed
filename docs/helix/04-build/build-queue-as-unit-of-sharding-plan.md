@@ -161,7 +161,8 @@ review → commit → `ddx bead close`.
   group-commit ack/cost/snapshot+tail/SQLite-projection/10M-in-S3 → pqueue-2f9ebac3; manifest-CAS →
   pqueue-e5c6d6fc; E3 source-mapping + ledger-row → BQ-43 (gate stale). `#[ignore]` at-scale rebuild test added.
 - **BQ-43 release gate.** E0 floor preserved across all; TP-002 E0–E3 + TP-003 P0/core gates green from
-  source-backed evidence. *Acc:* `scripts/ci/release-gate.sh` (or its successor) green. **IN PROGRESS** —
+  source-backed evidence. *Acc:* `scripts/ci/release-gate.sh` (or its successor) green. **DONE** (umbrella
+  closed; smoke lane green, release-tier E0–E3 honestly deferred to the live runs) —
   investigation found the entire release-evidence subsystem (ledger emitter, `pqueue-verify-ledger` binary,
   E0/E1 postgres `product_validation_tests`) was DELETED with pqueue-service in the hexagonal migration; the
   gate scripts still reference deleted crates. **Product-owner decision: rebuild the subsystem.** Decomposed
@@ -195,7 +196,19 @@ review → commit → `ddx bead close`.
     retry budget) proven by a biting counterfactual — a Retry-nack terminalizes at max_attempts=2 while the
     rearmed item survives 5 cycles; PurgeItems idempotent + late finalize → not_found; rearm idle-period /
     recurrence.until deferred to pqueue-8cbae731; fresh-eyes GO). **BQ-43d.2 DONE** (pqueue-2919c2c5 — AC-E2E-2 group-batching: loads >=1000 groups, item-level claim parity, and the group-batching claim-compatibility CONTRACT with 4 distinct biting errors — max_groups=0->Invalid, group-size>max_items->BatchTooLarge, missing max_eligible_group_size->Invalid, well-formed whole-group->Unavailable (selection unimplemented); whole-group SELECTION + INV-7/max_groups/ordering/concurrent/discovery deferred to BQ-14b/pqueue-7a96f929; fresh-eyes GO). **BQ-43d.3 DONE** (pqueue-d9efa9cd — AC-E2E-3 callback cohort: item-level parity on a cohort-enabled queue + the whole_cohort claim-compat CONTRACT with 5 distinct biting errors (non-cohort->Invalid(enabled=true); no completion_bound->Invalid(requires); completion>progress->Invalid(<=progress); combined-with-group_key->Invalid(combined); well-formed->Unavailable, selection unimplemented); whole-cohort SELECTION + incomplete-cohort-hiding + INV-7 + expiry->failed deferred to BQ-14c; fresh-eyes GO). **BQ-43d.6 DONE** (pqueue-3e62f414 — AC-E2E-6 noisy-neighbor: SINGLE-THREADED correctness-isolation — small/hot/K-queue claims each return only their own items (zero cross-queue leakage, non-empty), K queues independently claimable, small queue fully drains + clears the E0 floor at the in-memory operating point, hot backlog uncorrupted; DiscoverActiveScopes ranking/authz exclusion + AC-LAT-1 latency-at-release-scale deferred to pqueue-289c8d5a, CONCURRENT contention is BQ-41, bounded-per-node-pools pqueue-c33c367e; fresh-eyes GO-with-conditions applied — reframed from biting→correctness-isolation, non-empty asserts added, INV-4 tag dropped). **BQ-43d.5 DONE** (pqueue-b7d3a803 — AC-E2E-5 worker crash recovery: durable reopen of the file-backed object log (push N + ack some + drop the handle [crash] + reopen) recovers the state from disk — acknowledged commands survive the restart, every accepted item accounted (zero loss); biting counterfactual: a fresh empty backend recovers nothing; item-level lease reassign keeps the item leased; lease-expiry-redelivery/duplicate-replay/live-process+owner-epoch deferred to pqueue-7a96f929/BQ-11e/pqueue-c33c367e; fresh-eyes GO). **ALL 8 P0 product workflows (AC-E2E-1..6,8,9) DONE — umbrella BQ-43d closed.**
-  - **BQ-43e** (pqueue-0ee83e73) — rewire `scripts/ci` gates to current crates + reconcile evidence sources; closes BQ-43.
+  - **BQ-43e** (pqueue-0ee83e73) **DONE** — rewired `scripts/ci/{release,pr,nightly,coverage-report}-gate`
+    to the current crate map (dropped all pqueue-service/pqueue-storage refs + the stale --tp002-e*-source
+    bead citations + the now-dead concurrency-registry/service-lcov-fixture cruft). The gate runs the evidence
+    suites into a CLEAN PQUEUE_LEDGER_DIR and validates them with the tier-aware `pqueue-verify-ledger
+    --ledger-dir --require-smoke-evidence E2,E3` (replacing the old inline python that ignored `evidence_tier`
+    and let smoke rows / bead-text green a release gate). Coverage bars kept: pqueue-core 90/85, pqueue-engine
+    80 (successor to the deleted pqueue-service 80). All in-process evidence is SMOKE tier; the RELEASE-tier
+    E0–E3 headline stays LOUDLY deferred to pqueue-d3371502 (E0/E1) / pqueue-f1d107de (E2) / pqueue-2f9ebac3
+    (E3) — the gate can never claim it green (smoke rows are structurally excluded from `--require-evidence`).
+    Green locally (release+nightly exit 0). Fresh-eyes (sonnet) GO-with-conditions: both applied — the 1-core
+    E2 emitter now records `scale_out_measured` + conditions its pass_bar (no silent overstatement); pr-gate
+    enforcing deduped to one nightly-gate invocation (was running the heavy release gate twice). **Closes BQ-43
+    → ALL build-q beads closed.**
 
 ## 3. Loop invariants
 - **Real code + tests.** Every bead lands compiling, `clippy -D warnings` clean, and its `cargo test`
@@ -287,7 +300,7 @@ review → commit → `ddx bead close`.
     independently verified correct; the wire-key (`tenant:queue`) vs routing-key (`{tenant/queue}`)
     slot-mismatch reconciliation is recorded as a **BQ-31 (pqueue-4cb0d507)** prerequisite for `-MOVED`.
     Multi-node slot→owner view + per-queue `-MOVED` = BQ-31; live topology = server-runtime.
-- [x] BQ-40 · [x] BQ-41 · [x] BQ-42 · [ ] BQ-43   (P4)
+- [x] BQ-40 · [x] BQ-41 · [x] BQ-42 · [x] BQ-43   (P4)
 
 > Per-bead dependency edges live in ddx (`ddx bead ready` computes the next implementable bead). Phase
 > deps in §1 are the coarse view. Convergence review (2026-06-25): GO-WITH-CONDITIONS, all four must-fix
