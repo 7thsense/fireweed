@@ -151,7 +151,15 @@ review → commit → `ddx bead close`.
   claimed): bar (d) bounded shared per-node pools, progress-bound-active under a live sweeper, durable-backend
   density → recorded on BQ-c33c367e + the live run; bead acceptance reconciled to the in-process scope.
 - **BQ-42 object-log E3 + retire old suite.** Re-run object-log cost/ack/recovery (E3); delete
-  `performance_multi_shard_scale_out_tests`. *Acc:* E3 evidence row; old suite gone.
+  `performance_multi_shard_scale_out_tests`. *Acc:* E3 evidence row; old suite gone. **DONE** — recreated
+  the spec-named `object_log_commit_recovery_tests` (deleted with pqueue-service) in `crates/pqueue-objectlog/
+  tests/`, driving the real `ObjectLogBackend`: measured ingest 102k/s + claim+ack 151k/s (both ≫ E0 floor),
+  per-commit ack-latency distribution (reported), and recovery (drop+reopen rebuilds the full resident set
+  purely from the durable log — verified `pending==N` from disk). Old suite already gone (hexagonal migration;
+  TP-002 marks it retired). Fresh-eyes GO-with-conditions (prior BLOCKING: recovery is full-genesis replay
+  not snapshot+tail, and the projection is in-memory not SQLite — both now DISCLOSED, not papered). Deferred:
+  group-commit ack/cost/snapshot+tail/SQLite-projection/10M-in-S3 → pqueue-2f9ebac3; manifest-CAS →
+  pqueue-e5c6d6fc; E3 source-mapping + ledger-row → BQ-43 (gate stale). `#[ignore]` at-scale rebuild test added.
 - **BQ-43 release gate.** E0 floor preserved across all; TP-002 E0–E3 + TP-003 P0/core gates green from
   source-backed evidence. *Acc:* `scripts/ci/release-gate.sh` (or its successor) green.
 
@@ -245,7 +253,7 @@ review → commit → `ddx bead close`.
     independently verified correct; the wire-key (`tenant:queue`) vs routing-key (`{tenant/queue}`)
     slot-mismatch reconciliation is recorded as a **BQ-31 (pqueue-4cb0d507)** prerequisite for `-MOVED`.
     Multi-node slot→owner view + per-queue `-MOVED` = BQ-31; live topology = server-runtime.
-- [x] BQ-40 · [x] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
+- [x] BQ-40 · [x] BQ-41 · [x] BQ-42 · [ ] BQ-43   (P4)
 
 > Per-bead dependency edges live in ddx (`ddx bead ready` computes the next implementable bead). Phase
 > deps in §1 are the coarse view. Convergence review (2026-06-25): GO-WITH-CONDITIONS, all four must-fix
