@@ -13,9 +13,11 @@
 //!   - AC-E2E-4 jobs/connectors recurring singleton (`jobs_connectors_recurring_e2e`).
 //!   - AC-E2E-2 Marketo group-cardinality batching (`marketo_group_batching_e2e`).
 //!   - AC-E2E-3 callback cohort execution (`callback_cohort_e2e`).
+//!   - AC-E2E-6 noisy-neighbor + active-scope routing (`noisy_neighbor_scale_e2e`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use pqueue::{ClaimCompatibility, EngineError, GroupBatching, Nack, NewItem, Pqueue};
@@ -1154,6 +1156,215 @@ async fn callback_cohort_e2e() {
             (
                 "well_formed_whole_cohort".into(),
                 serde_json::json!(format!("{well_formed:?}")),
+            ),
+        ]),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-E2E-6 — noisy-neighbor + active-scope routing
+// ---------------------------------------------------------------------------
+
+const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0; // E0 per-queue floor: 2777.78/s.
+
+/// AC-E2E-6 (TP-003): one hot queue with a large resident backlog, one small eligible queue, and K active
+/// queues on ONE node. (FR-1, FR-12, FR-40..43, FR-48.)
+///
+/// SCOPE (honest): this is the SINGLE-THREADED, in-process CORRECTNESS-isolation slice of AC-E2E-6 — it shows
+/// that per-queue ownership keeps each queue's delivery + drain correct and independent with a large hot
+/// backlog + K queues co-resident. These are restatements of per-queue keying, NOT a contention proof; the
+/// real noisy-neighbor CONTENTION measurement (concurrent workers contending the shared node, throughput-
+/// flatness across a residency ladder) is BQ-41 (queue_density_single_node_tests), already committed.
+///
+/// COVERED via the lib facade:
+///   - a claim from the small queue returns ONLY the small queue's items (and the hot/active claims return
+///     only their own) — per-queue keying, zero cross-queue leakage, each claim verified NON-EMPTY;
+///   - K queues are INDEPENDENTLY claimable (each returns exactly its own 10 items);
+///   - the small queue drains FULLY (completeness) and, at this single in-memory operating point, its
+///     claim+ack rate is far above the E0 floor (high headroom — this is a sanity floor, NOT the algorithmic-
+///     cost ladder; that, and concurrent contention, are BQ-41);
+///   - the hot backlog is uncorrupted by the small queue's drain (no cross-queue mutation).
+/// DEFERRED (-> pqueue-289c8d5a / pqueue-c33c367e): DiscoverActiveScopes ranking authorized active scopes by
+/// oldest-eligible age, unauthorized-scope exclusion (auth layer per ADR-002), the AC-LAT-1 p95<250ms/
+/// p99<1000ms latency bars at release scale (provisioned perf env), bounded-per-node worker pools, and the
+/// CONCURRENT noisy-neighbor measurement (BQ-41). NOT claimed in the row.
+#[tokio::test]
+async fn noisy_neighbor_scale_e2e() {
+    let (pq, _clock) = deployment();
+
+    // Hot queue: a large resident backlog.
+    let hot = qk("nn", "hot");
+    pq.create_queue(qdef(
+        "nn",
+        "hot",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    let hot_backlog = 50_000u64;
+    let hot_items: Vec<NewItem> = (0..hot_backlog)
+        .map(|_| NewItem {
+            payload: Some(Bytes::from_static(b"hot")),
+            ..Default::default()
+        })
+        .collect();
+    pq.push_batch(&hot, hot_items).await.unwrap();
+
+    // K active queues, each with a small resident set.
+    let k = 50u64;
+    for i in 0..k {
+        let q = qk("nn", &format!("active{i}"));
+        pq.create_queue(qdef(
+            "nn",
+            &format!("active{i}"),
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+        let marker = format!("active{i}");
+        let items: Vec<NewItem> = (0..10)
+            .map(|_| NewItem {
+                payload: Some(Bytes::from(marker.clone().into_bytes())),
+                ..Default::default()
+            })
+            .collect();
+        pq.push_batch(&q, items).await.unwrap();
+    }
+
+    // Small eligible queue.
+    let small = qk("nn", "small");
+    pq.create_queue(qdef(
+        "nn",
+        "small",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    let small_n = 200u64;
+    let small_items: Vec<NewItem> = (0..small_n)
+        .map(|_| NewItem {
+            payload: Some(Bytes::from_static(b"small")),
+            ..Default::default()
+        })
+        .collect();
+    pq.push_batch(&small, small_items).await.unwrap();
+
+    // CORRECTNESS isolation: with the hot backlog + K queues all resident, a claim from the small queue
+    // returns ONLY the small queue's items (no hot/active leakage), and a claim from the hot queue returns
+    // only hot items. Per-queue keying ⇒ zero cross-queue leakage.
+    let from_small = pq.claim(&small, 10, 60_000).await.unwrap();
+    assert_eq!(
+        from_small.len(),
+        10,
+        "small queue claim returns items (not vacuously empty)"
+    );
+    assert!(
+        from_small
+            .iter()
+            .all(|c| c.payload.as_deref() == Some(b"small".as_ref())),
+        "the small queue delivers only its own items (no hot/active leakage)"
+    );
+    pq.nack(
+        &small,
+        from_small.iter().map(|c| c.item_id.clone()),
+        Nack::Release,
+    )
+    .await
+    .unwrap();
+    let from_hot = pq.claim(&hot, 10, 60_000).await.unwrap();
+    assert_eq!(
+        from_hot.len(),
+        10,
+        "hot queue claim returns items (not vacuously empty)"
+    );
+    assert!(
+        from_hot
+            .iter()
+            .all(|c| c.payload.as_deref() == Some(b"hot".as_ref())),
+        "the hot queue delivers only its own items"
+    );
+    pq.nack(
+        &hot,
+        from_hot.iter().map(|c| c.item_id.clone()),
+        Nack::Release,
+    )
+    .await
+    .unwrap();
+
+    // K queues independently claimable: each returns only its own marker.
+    for i in 0..k {
+        let q = qk("nn", &format!("active{i}"));
+        let got = pq.claim(&q, 100, 60_000).await.unwrap();
+        let marker = format!("active{i}");
+        assert_eq!(
+            got.len(),
+            10,
+            "active queue {i} returns exactly its own 10 items (not empty/leaked)"
+        );
+        assert!(
+            got.iter()
+                .all(|c| c.payload.as_deref() == Some(marker.as_bytes())),
+            "active queue {i} delivers only its own items"
+        );
+        pq.nack(&q, got.iter().map(|c| c.item_id.clone()), Nack::Release)
+            .await
+            .unwrap();
+    }
+
+    // COMPLETENESS + sanity throughput (measured): drain the small queue with the hot backlog + K queues
+    // resident; it fully drains and its claim+ack rate is far above the E0 floor at this single in-memory
+    // operating point. (High headroom — a SANITY floor, not the algorithmic-cost ladder or concurrent
+    // contention; those are BQ-41.)
+    let t = Instant::now();
+    let mut drained = 0u64;
+    loop {
+        let got = pq.claim(&small, 100, 60_000).await.unwrap();
+        if got.is_empty() {
+            break;
+        }
+        drained += got.len() as u64;
+        pq.ack(&small, got.iter().map(|c| c.item_id.clone()))
+            .await
+            .unwrap();
+    }
+    let small_rate = drained as f64 / t.elapsed().as_secs_f64();
+    assert_eq!(
+        drained, small_n,
+        "the small queue fully drains (completeness) with the hot backlog resident"
+    );
+    assert!(
+        small_rate >= FLOOR_ITEMS_PER_SEC,
+        "the small queue clears the E0 floor (>= {FLOOR_ITEMS_PER_SEC:.0}/s) with a {hot_backlog}-item hot backlog + {k} queues resident: {small_rate:.0}/s"
+    );
+    // The hot backlog is untouched by the small queue's drain (isolation): still fully resident.
+    let hot_pending_after = pq.metrics(&hot).await.unwrap().pending;
+    assert_eq!(
+        hot_pending_after, hot_backlog,
+        "hot backlog undisturbed by the small queue"
+    );
+
+    emit_ac(
+        "AC-E2E-6",
+        &[],
+        "SINGLE-THREADED correctness-isolation (per-queue ownership): small/hot/K-queue claims each return only their own items (zero cross-queue leakage, all non-empty); K queues independently claimable; small queue fully drains (completeness) and clears the E0 floor at this in-memory operating point (sanity, high headroom); hot backlog uncorrupted [DEFERRED -> pqueue-289c8d5a: DiscoverActiveScopes ranking + authz exclusion + AC-LAT-1 latency-at-release-scale; CONCURRENT noisy-neighbor contention + algorithmic-cost ladder is BQ-41; bounded-per-node-pools pqueue-c33c367e]",
+        BTreeMap::from([
+            ("hot_backlog".into(), serde_json::json!(hot_backlog)),
+            ("active_queues".into(), serde_json::json!(k)),
+            ("small_items".into(), serde_json::json!(small_n)),
+            (
+                "small_drain_rate_per_s".into(),
+                serde_json::json!(small_rate.round()),
+            ),
+            (
+                "e0_floor_per_s".into(),
+                serde_json::json!(FLOOR_ITEMS_PER_SEC.round()),
+            ),
+            (
+                "hot_pending_after_small_drain".into(),
+                serde_json::json!(hot_pending_after),
             ),
         ]),
     );
