@@ -14,6 +14,7 @@
 //!   - AC-E2E-2 Marketo group-cardinality batching (`marketo_group_batching_e2e`).
 //!   - AC-E2E-3 callback cohort execution (`callback_cohort_e2e`).
 //!   - AC-E2E-6 noisy-neighbor + active-scope routing (`noisy_neighbor_scale_e2e`).
+//!   - AC-E2E-5 worker crash recovery (`worker_crash_recovery_e2e`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use pqueue_core::{
 };
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_objectlog::ObjectLogBackend;
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -1368,4 +1370,146 @@ async fn noisy_neighbor_scale_e2e() {
             ),
         ]),
     );
+}
+
+// ---------------------------------------------------------------------------
+// AC-E2E-5 — worker crash recovery
+// ---------------------------------------------------------------------------
+
+/// AC-E2E-5 (TP-003): durable recovery — acknowledged commands survive a restart and no accepted item is
+/// lost. Driven via the lib facade over a FILE-BACKED durable backend (ObjectLogBackend): build durable
+/// state, DROP the handle (the process "crashes"), reopen a fresh handle on the same on-disk log, and verify
+/// the state was rebuilt from disk. (FR-23..28, FR-33..39; durability/recovery.)
+///
+/// COVERED via the lib facade (biting):
+///   - DURABLE REOPEN: push N + ack some + leave some pending/leased, drop the handle (only the on-disk
+///     object log remains), reopen → the projection is rebuilt from disk: acknowledged items stay complete
+///     and EVERY accepted item is accounted (pending+leased+complete+failed == N, zero loss). The
+///     COUNTERFACTUAL bites: a FRESH (empty) dir reopened sees 0 — recovery is genuinely from disk, not a
+///     surviving in-memory projection;
+///   - lease REASSIGN: a leased item's lease is reassigned to a new token and the item stays leased (no loss).
+/// DEFERRED (honest — the facade/in-memory family lacks the seam):
+///   - worker-crash lease-expiry REDELIVERY (expired leases redeliver without resetting eligible age) — needs
+///     a reclaim tick not on the facade (-> pqueue-7a96f929);
+///   - duplicate request replay convergence (replayed request_ids converge) — needs a request_id-carrying
+///     data-plane port; all envelopes are request_id:None today (-> BQ-11e / pqueue-e1b21208);
+///   - live multi-PROCESS service injection + owner reassignment/epoch-advance under load (TD-003 control
+///     plane) (-> pqueue-c33c367e server runtime). NOT asserted, NOT claimed in the row.
+#[tokio::test]
+async fn worker_crash_recovery_e2e() {
+    let dir = std::env::temp_dir().join(format!("pqueue-pv-e2e5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let q = qk("recovery", "jobs");
+    let n = 100u64;
+    let acked = 30u64;
+    let leased = 20u64;
+
+    // ----- build durable state, then "crash" (drop the handle) -----
+    let (complete_before, accounted_before) = {
+        let pq = Pqueue::new(
+            Arc::new(ObjectLogBackend::open(&dir).expect("open object log")),
+            Arc::new(ManualClock::at(0)),
+        );
+        pq.create_queue(qdef(
+            "recovery",
+            "jobs",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+        let items: Vec<NewItem> = (0..n).map(|_| NewItem::default()).collect();
+        pq.push_batch(&q, items).await.unwrap();
+        // Ack `acked` (acknowledged commands), leave `leased` leased, the rest pending.
+        let to_ack = pq.claim(&q, acked as usize, 3_600_000).await.unwrap();
+        pq.ack(&q, to_ack.iter().map(|c| c.item_id.clone()))
+            .await
+            .unwrap();
+        let _still_leased = pq.claim(&q, leased as usize, 3_600_000).await.unwrap(); // left leased
+        let m = pq.metrics(&q).await.unwrap();
+        assert_eq!(m.complete, acked, "acked items complete before crash");
+        let accounted = m.pending + m.leased + m.complete + m.failed;
+        assert_eq!(accounted, n, "every accepted item accounted before crash");
+        (m.complete, accounted)
+    }; // <- the Pqueue + ObjectLogBackend drop here; only the on-disk object log survives.
+
+    // ----- COUNTERFACTUAL: a FRESH dir recovers nothing (recovery is from disk, not a surviving projection) -----
+    let fresh_dir =
+        std::env::temp_dir().join(format!("pqueue-pv-e2e5-fresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fresh_dir);
+    {
+        let fresh = Pqueue::new(
+            Arc::new(ObjectLogBackend::open(&fresh_dir).expect("open fresh")),
+            Arc::new(ManualClock::at(0)),
+        );
+        // The queue itself isn't known to a fresh backend (no create_queue command in its empty log).
+        assert!(
+            fresh.metrics(&q).await.is_err(),
+            "a fresh empty backend has no record of the crashed node's queue"
+        );
+        let _ = std::fs::remove_dir_all(&fresh_dir);
+    }
+
+    // ----- RECOVERY: reopen the SAME on-disk log; the projection is rebuilt from disk -----
+    let pq = Pqueue::new(
+        Arc::new(ObjectLogBackend::open(&dir).expect("reopen object log")),
+        Arc::new(ManualClock::at(0)),
+    );
+    let m = pq
+        .metrics(&q)
+        .await
+        .expect("the crashed node's durable state is recovered");
+    assert_eq!(
+        m.complete, complete_before,
+        "acknowledged commands survived the restart"
+    );
+    let accounted_after = m.pending + m.leased + m.complete + m.failed;
+    assert_eq!(
+        accounted_after, n,
+        "no accepted item lost across the restart"
+    );
+    assert_eq!(
+        accounted_after, accounted_before,
+        "the full resident set was recovered"
+    );
+
+    // ----- lease REASSIGN (item-level, ReassignLeasePort): reassign a leased item's lease; it stays leased,
+    // not lost to pending/complete. (Only the leased COUNT is observed via metrics — the facade does not
+    // surface the post-reassign token, so token transfer itself is not asserted here.)
+    let leased_before = pq.metrics(&q).await.unwrap().leased;
+    // Claim a fresh pending item to reassign (it is now leased). Non-conditional so the proof can't be skipped.
+    let claimed = pq.claim(&q, 1, 3_600_000).await.unwrap();
+    assert_eq!(
+        claimed.len(),
+        1,
+        "a pending item is claimable on the recovered queue"
+    );
+    pq.reassign(&q, [claimed[0].item_id.clone()], 3_600_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        pq.metrics(&q).await.unwrap().leased,
+        leased_before + 1,
+        "the reassigned item remains leased (not lost to pending/complete)"
+    );
+
+    emit_ac(
+        "AC-E2E-5",
+        &[],
+        "[crash modeled as handle-drop + reopen of the file-backed object log] durable reopen recovers the crashed node's state from disk: acknowledged commands survive the restart and every accepted item is accounted (zero loss); a fresh empty backend recovers nothing (recovery is from disk); an item-level lease reassign keeps the item leased (not lost) [DEFERRED: lease-expiry REDELIVERY -> pqueue-7a96f929; duplicate-request-replay convergence -> BQ-11e/pqueue-e1b21208; live multi-process + owner/epoch reassignment -> pqueue-c33c367e]",
+        BTreeMap::from([
+            ("accepted_items".into(), serde_json::json!(n)),
+            ("acked_before_crash".into(), serde_json::json!(acked)),
+            (
+                "complete_after_recovery".into(),
+                serde_json::json!(m.complete),
+            ),
+            (
+                "accounted_after_recovery".into(),
+                serde_json::json!(accounted_after),
+            ),
+            ("lease_reassigned".into(), serde_json::json!(true)),
+        ]),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
