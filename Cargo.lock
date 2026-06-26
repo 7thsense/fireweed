@@ -906,6 +906,8 @@ dependencies = [
  "pqueue-engine",
  "pqueue-memory",
  "pqueue-objectlog",
+ "pqueue-release",
+ "serde_json",
  "tokio",
 ]
 

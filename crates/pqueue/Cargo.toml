@@ -20,3 +20,7 @@ bytes = "1"
 pqueue-memory = { path = "../pqueue-memory" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 tokio = { version = "1", features = ["rt", "macros"] }
+# product_validation_tests (AC-E2E-* product workflows) emit verification-ledger rows.
+pqueue-release = { path = "../pqueue-release" }
+serde_json = "1"
+bytes = "1"

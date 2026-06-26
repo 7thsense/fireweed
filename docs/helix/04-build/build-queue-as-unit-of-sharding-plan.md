@@ -183,7 +183,14 @@ review → commit → `ddx bead close`.
     (in-process / file-backed reference) so they're recorded but do NOT satisfy a release E0–E3 gate;
     pqueue-release gained an `evidence_tier` field + tier-aware `verify_ledger` (fresh-eyes condition: smoke
     must not green the headline). Live release-tier E2/E3 come from pqueue-f1d107de / pqueue-2f9ebac3.
-  - **BQ-43d** (pqueue-f0dc083e) — `product_validation_tests` AC-E2E-1..9 rebuilt on the current interfaces.
+  - **BQ-43d** (pqueue-f0dc083e) — `product_validation_tests` AC-E2E-1..9 rebuilt on the current lib facade.
+    Decomposed per-workflow (all smoke-tier, ac_ids ledger rows): **BQ-43d.9 DONE** (pqueue-940190e6 — harness
+    + AC-E2E-9 downstream-pacing non-goal: proves no rate/admission state by lifecycle accounting + claim
+    returns min(max,eligible) across wall-clock pauses + payload round-trip; fresh-eyes GO-with-conditions
+    applied). TODO: BQ-43d.8 (pqueue-7e323937 generic-priority/bounded-relaxed), .1 (pqueue-be7f8ea5 scheduled
+    delivery), .2 (pqueue-2919c2c5 Marketo group-batching), .3 (pqueue-d9efa9cd cohort), .4 (pqueue-cac31cd7
+    recurring-singleton), .5 (pqueue-b7d3a803 crash-recovery — live-process subset deferred), .6 (pqueue-3e62f414
+    noisy-neighbor — discovery/latency-at-scale deferred).
   - **BQ-43e** (pqueue-0ee83e73) — rewire `scripts/ci` gates to current crates + reconcile evidence sources; closes BQ-43.
 
 ## 3. Loop invariants
