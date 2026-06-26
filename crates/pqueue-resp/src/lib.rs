@@ -28,7 +28,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 mod cluster;
+mod routing;
 pub use cluster::{ClusterNode, hash_slot, queue_routing_key, queue_slot};
+pub use routing::{RouteDecision, route};
 
 /// The backend capabilities the RESP front needs. A concrete backend (e.g. `MemoryBackend`) is
 /// injected by the composition root / tests; the adapter never names one (hexagonal).

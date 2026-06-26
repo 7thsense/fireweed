@@ -83,15 +83,14 @@ pub fn queue_routing_key(shard: &QueueKey) -> String {
     )
 }
 
-/// The cluster slot a queue routes to under the canonical [`queue_routing_key`] — i.e.
-/// `crc16("tenant/queue") % 16384` (the hash-tag selects the content).
+/// The cluster slot for a queue's CANONICAL [`queue_routing_key`] (`{tenant/queue}`) — i.e.
+/// `crc16("tenant/queue") % 16384`. This is the slot a client gets ONLY if it addresses the queue with the
+/// hash-tagged key form.
 ///
-/// DO NOT use this to compute a `-MOVED` slot for a request that arrived under the colon wire form
-/// `tenant:queue`: a stock client keys its routing table by the slot it computed from the LITERAL key it
-/// sent, so a `-MOVED` MUST carry [`hash_slot`] of that same literal key (else the client updates the wrong
-/// slot and can loop). `queue_slot` is correct only once the wire form migrates to `{tenant/queue}` (so the
-/// literal key IS the routing key). Reconciling the wire form vs the routing key is BQ-31's prerequisite
-/// (see the module-doc NOTE).
+/// NOT used for `-MOVED`: BQ-31 resolved the wire-key tension by always echoing [`hash_slot`] of the LITERAL
+/// key the client sent (so the redirect slot matches whatever key form the client used — colon or
+/// hash-tag — and never loops). There is no planned migration of the wire form. `queue_slot` is retained for
+/// advertising / for a deployment that adopts the `{tenant/queue}` key form; routing does not call it.
 pub fn queue_slot(shard: &QueueKey) -> u16 {
     hash_slot(queue_routing_key(shard).as_bytes())
 }
