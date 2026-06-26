@@ -176,7 +176,13 @@ review → commit → `ddx bead close`.
 >    rollup) via the existing `active_scope` domain logic. Relational-only (parity preserved). Fresh-eyes
 >    GO-with-conditions: at-risk reported `None` (deferred, not a fabricated 0); pause-agnostic + lag caveat
 >    (pqueue-64351bdd) documented. **BQ-14 epic complete (a–e).**
-- [x] BQ-20 · [x] BQ-21 · [x] BQ-22 · [x] BQ-23 (core) · [ ] BQ-24   (P2)
+- [x] BQ-20 · [x] BQ-21 · [x] BQ-22 · [x] BQ-23 (core) · [x] BQ-24 (core)   (P2 ✅)
+  - **BQ-24** ✅-core (pqueue-981930d8, 6c76587) — engine density primitives: `ResidentQueues<H>`
+    (LRU-bounded hot working set — bounded as queue count → 1000) + `renew_all_resident` renewal sweep
+    (renewed/fenced/errored partition). Fresh-eyes GO-with-conditions: phantom acceptance test
+    (`queue_density_single_node_tests`, a retired multi-shard artifact) reconciled to the engine tests;
+    "bounded resources" qualified (cardinality + a release-proof test); "batched" honestly relabelled a
+    per-resident sweep; assignment-poll + shared-sweeper deferred to **pqueue-c33c367e**.
   - **BQ-23** ✅-core (pqueue-8e1ab4fc, a47e8fb) — engine ownership primitives: `acquire_and_fence`
     (lease↔storage-fence binding) + `owner_liveness_violation` stalled-queue guard predicate, with
     end-to-end seam tests. Fresh-eyes GO-with-conditions: the overclaim that it "closes the BQ-20/21/22
