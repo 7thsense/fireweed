@@ -1,0 +1,262 @@
+//! BQ-22 — the postgres [`PostgresControlPlane`] lease lifecycle + C4b seam invariants run against a LIVE
+//! database, **env-gated** on `PQUEUE_PG_TEST_URL`. Without it every scenario prints a LOUD skip — a green
+//! run is then VISIBLY partial (the durable control plane unverified against a real DB), never a hidden
+//! pass. Compiling this file already proves `PostgresControlPlane` implements `QueueControlPlane` and shares
+//! the engine's pure lease decisions. The single-connection scenarios mirror the in-memory reference's
+//! lifecycle + fail-closed tests; `genesis_concurrent_acquire_has_a_single_winner` adds the
+//! POSTGRES-SPECIFIC two-connection contention proof (the in-memory reference's mutex makes that race
+//! impossible, but two postgres owner-nodes are exactly the topology this backend exists for — it exercises
+//! the B1 genesis-row fix and would FAIL without it). Live-DB execution is deferred where no DB is present.
+//!
+//! To run live:
+//!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
+//!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres cargo test -p pqueue-postgres
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use postgres::{Client, NoTls};
+use pqueue_core::{OwnerId, QueueId, TenantId, UtcTimestamp};
+use pqueue_engine::{
+    AcquireOutcome, ControlPlaneConfig, EngineError, LeaseState, QueueControlPlane, QueueKey,
+};
+use pqueue_postgres::PostgresControlPlane;
+
+fn fresh_schema() -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "pq_cp_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    )
+}
+
+fn cfg() -> ControlPlaneConfig {
+    ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 15_000,
+    }
+}
+fn ts(s: i64) -> UtcTimestamp {
+    UtcTimestamp::new(s, 0).unwrap()
+}
+fn owner(s: &str) -> OwnerId {
+    OwnerId::new(s).unwrap()
+}
+fn qk(q: &str) -> QueueKey {
+    QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new(q).unwrap())
+}
+
+/// Run `body` against a fresh schema, or LOUD-skip when no live DB is configured.
+fn with_cp(name: &str, body: impl FnOnce(PostgresControlPlane)) {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!("POSTGRES CONTROL-PLANE SKIPPED ({name}) — set PQUEUE_PG_TEST_URL to a live DB");
+        return;
+    };
+    let schema = fresh_schema();
+    let mut c = Client::connect(&url, NoTls).expect("connect");
+    c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .expect("drop schema");
+    drop(c);
+    let cp = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("connect cp");
+    body(cp);
+}
+
+#[test]
+fn full_lifecycle_acquire_renew_drain_release_reacquire() {
+    with_cp("full_lifecycle", |cp| {
+        let (a, b, q) = (owner("a"), owner("b"), qk("q1"));
+        cp.register_owner(&a, ts(0)).unwrap();
+
+        let AcquireOutcome::Acquired(l1) = cp.acquire_queue_lease(&q, &a, ts(0)).unwrap() else {
+            panic!("expected Acquired");
+        };
+        assert_eq!(l1.assignment_epoch, 1);
+        assert_eq!(l1.state, LeaseState::Assigned);
+        assert_eq!(l1.active_owner_id.as_ref(), Some(&a));
+        assert_eq!(l1.lease_expires_at, Some(ts(15)));
+
+        let l2 = cp.renew_queue_lease(&q, &a, 1, ts(10)).unwrap();
+        assert_eq!(l2.assignment_epoch, 1, "renew never changes the epoch");
+        assert_eq!(l2.lease_expires_at, Some(ts(25)));
+
+        cp.register_owner(&b, ts(10)).unwrap();
+        let l3 = cp.begin_drain(&q, 1, &b, ts(11)).unwrap();
+        assert_eq!(l3.state, LeaseState::Draining);
+        assert_eq!(l3.target_owner_id.as_ref(), Some(&b));
+        assert_eq!(l3.active_owner_id.as_ref(), Some(&a));
+
+        cp.release_queue_lease(&q, &a, 1, ts(12)).unwrap();
+        let rel = cp.lease(&q).unwrap();
+        assert_eq!(rel.state, LeaseState::Unassigned);
+        assert_eq!(rel.active_owner_id, None);
+        assert_eq!(
+            rel.assignment_epoch, 1,
+            "epoch retained across release (durable)"
+        );
+
+        let AcquireOutcome::Acquired(l4) = cp.acquire_queue_lease(&q, &b, ts(13)).unwrap() else {
+            panic!("expected Acquired");
+        };
+        assert_eq!(l4.assignment_epoch, 2, "strictly-greater after release");
+    });
+}
+
+#[test]
+fn a_different_owners_live_lease_blocks_acquire() {
+    with_cp("single_lease", |cp| {
+        let (a, b, q) = (owner("a"), owner("b"), qk("q1"));
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.register_owner(&b, ts(0)).unwrap();
+        cp.acquire_queue_lease(&q, &a, ts(0)).unwrap();
+        cp.heartbeat(&b, ts(4)).unwrap();
+        let AcquireOutcome::Rejected(held) = cp.acquire_queue_lease(&q, &b, ts(4)).unwrap() else {
+            panic!("expected Rejected");
+        };
+        assert_eq!(held.active_owner_id.as_ref(), Some(&a));
+        assert_eq!(held.assignment_epoch, 1);
+        assert_eq!(
+            cp.lease(&q).unwrap().assignment_epoch,
+            1,
+            "a rejected acquire bumps nothing"
+        );
+    });
+}
+
+#[test]
+fn dead_or_unregistered_owner_cannot_acquire() {
+    with_cp("fail_closed_acquire", |cp| {
+        let (a, q) = (owner("a"), qk("q1"));
+        assert!(matches!(
+            cp.acquire_queue_lease(&q, &a, ts(0)),
+            Err(EngineError::Forbidden(_))
+        ));
+        cp.register_owner(&a, ts(0)).unwrap();
+        // heartbeat 5s TTL, acquire at 10s → dead.
+        assert!(matches!(
+            cp.acquire_queue_lease(&q, &a, ts(10)),
+            Err(EngineError::Forbidden(_))
+        ));
+    });
+}
+
+#[test]
+fn renew_fails_closed_on_stale_epoch_wrong_owner_or_expiry() {
+    with_cp("fail_closed_renew", |cp| {
+        let (a, b, q) = (owner("a"), owner("b"), qk("q1"));
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.acquire_queue_lease(&q, &a, ts(0)).unwrap();
+        assert_eq!(
+            cp.renew_queue_lease(&q, &a, 99, ts(1)),
+            Err(EngineError::EpochFenced)
+        );
+        assert_eq!(
+            cp.renew_queue_lease(&q, &b, 1, ts(1)),
+            Err(EngineError::EpochFenced)
+        );
+        assert_eq!(
+            cp.renew_queue_lease(&q, &a, 1, ts(100)),
+            Err(EngineError::EpochFenced)
+        );
+    });
+}
+
+#[test]
+fn expired_lease_is_reclaimable_at_a_strictly_greater_epoch() {
+    with_cp("expired_reclaim", |cp| {
+        let (a, b, q) = (owner("a"), owner("b"), qk("q1"));
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.acquire_queue_lease(&q, &a, ts(0)).unwrap(); // epoch 1, expires ts(15)
+        cp.register_owner(&b, ts(20)).unwrap();
+        let AcquireOutcome::Acquired(l2) = cp.acquire_queue_lease(&q, &b, ts(20)).unwrap() else {
+            panic!("expected Acquired (a's lease expired)");
+        };
+        assert_eq!(l2.assignment_epoch, 2);
+        assert_eq!(l2.active_owner_id.as_ref(), Some(&b));
+        // The superseded owner a is fenced on renew (queue-epoch-stale).
+        assert_eq!(
+            cp.renew_queue_lease(&q, &a, 1, ts(21)),
+            Err(EngineError::EpochFenced)
+        );
+    });
+}
+
+#[test]
+fn resolve_reports_deterministic_target_and_durable_epoch() {
+    with_cp("resolve", |cp| {
+        let q = qk("q1");
+        // No live owner → fail-closed.
+        assert_eq!(
+            cp.resolve_queue_owner(&q, ts(0)).unwrap().target_owner,
+            None
+        );
+        for o in ["a", "b", "c"] {
+            cp.register_owner(&owner(o), ts(0)).unwrap();
+        }
+        let r1 = cp.resolve_queue_owner(&q, ts(0)).unwrap();
+        let r2 = cp.resolve_queue_owner(&q, ts(1)).unwrap();
+        assert!(r1.target_owner.is_some());
+        assert_eq!(r1.target_owner, r2.target_owner, "HRW is deterministic");
+        assert_eq!(
+            r1.assignment_epoch, None,
+            "genesis epoch is None, not Some(0)"
+        );
+
+        // After an acquire by the target, resolve reports the durable epoch + active owner.
+        let target = r1.target_owner.clone().unwrap();
+        cp.acquire_queue_lease(&q, &target, ts(0)).unwrap();
+        let r3 = cp.resolve_queue_owner(&q, ts(0)).unwrap();
+        assert_eq!(r3.assignment_epoch, Some(1));
+        assert_eq!(r3.active_owner.as_ref(), Some(&target));
+        assert_eq!(r3.state, LeaseState::Assigned);
+    });
+}
+
+/// B1 (BQ-22 fresh-eyes BLOCKING regression): two owner NODES (separate connections to the same schema)
+/// concurrently first-acquire the SAME genesis queue. Exactly ONE must win at epoch 1 — `FOR UPDATE` on a
+/// missing row locks nothing, so without the genesis-materialization fix both would `Acquired` epoch 1
+/// (two live writers at one epoch). Env-gated; LOUD-skips without a DB.
+#[test]
+fn genesis_concurrent_acquire_has_a_single_winner() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "POSTGRES CONTROL-PLANE SKIPPED (genesis_concurrent_acquire_has_a_single_winner) — set PQUEUE_PG_TEST_URL"
+        );
+        return;
+    };
+    let schema = fresh_schema();
+    let mut c = Client::connect(&url, NoTls).expect("connect");
+    c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .expect("drop schema");
+    drop(c);
+
+    let (a, b, q) = (owner("a"), owner("b"), qk("q1"));
+    // Two independent owner nodes against the SAME durable schema.
+    let cp_a = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("connect a");
+    cp_a.register_owner(&a, ts(0)).unwrap();
+    cp_a.register_owner(&b, ts(0)).unwrap();
+    let cp_b = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("connect b");
+
+    // Race two first-acquires of the genesis queue (no authority row exists yet).
+    let (qa, qb) = (q.clone(), q.clone());
+    let h1 = std::thread::spawn(move || cp_a.acquire_queue_lease(&qa, &a, ts(0)).unwrap());
+    let h2 = std::thread::spawn(move || cp_b.acquire_queue_lease(&qb, &b, ts(0)).unwrap());
+    let r1 = h1.join().unwrap();
+    let r2 = h2.join().unwrap();
+
+    let acquired = [&r1, &r2]
+        .iter()
+        .filter(|r| matches!(r, AcquireOutcome::Acquired(_)))
+        .count();
+    assert_eq!(
+        acquired, 1,
+        "exactly one owner wins the genesis acquire — never two writers at epoch 1"
+    );
+    // The durable epoch advanced exactly once.
+    let verify =
+        PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("verify conn");
+    assert_eq!(
+        verify.lease(&q).unwrap().assignment_epoch,
+        1,
+        "the genesis acquire advanced the durable epoch exactly once"
+    );
+}

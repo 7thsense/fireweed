@@ -74,8 +74,9 @@ pub struct QueueLease {
 }
 
 impl QueueLease {
-    /// A queue with no owner yet (genesis): unassigned, epoch 0.
-    fn unassigned() -> Self {
+    /// A queue with no owner yet (genesis): unassigned, epoch 0. The durable stores (in-memory map /
+    /// postgres row) materialize a missing record as this.
+    pub fn unassigned() -> Self {
         QueueLease {
             state: LeaseState::Unassigned,
             active_owner_id: None,
@@ -87,9 +88,137 @@ impl QueueLease {
 
     /// Whether this lease is currently held by a live (non-expired) owner at `now`. An expired
     /// `lease_expires_at` makes the queue reclaimable regardless of recorded `state`.
-    fn is_live(&self, now: UtcTimestamp) -> bool {
+    pub fn is_live(&self, now: UtcTimestamp) -> bool {
         matches!(self.state, LeaseState::Assigned | LeaseState::Draining)
             && self.lease_expires_at.is_some_and(|exp| now < exp)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure lease decisions (TD-003 §Queue Lease Lifecycle). The state machine + the C4b seam invariants live
+// HERE so EVERY `QueueControlPlane` impl (in-memory, postgres BQ-22) shares one authority — a store only
+// reads the current record, applies the decision, and persists the next record. None of these consult the
+// owner set (owner-liveness is the caller's store-specific check); they reason purely about one record.
+// ---------------------------------------------------------------------------
+
+/// Whether an owner's heartbeat is still live at `now` (TD-003: `heartbeat_at + ttl > now`, strict).
+pub fn owner_heartbeat_live(heartbeat_at: UtcTimestamp, now: UtcTimestamp, ttl_ms: u64) -> bool {
+    elapsed_ms(heartbeat_at, now) < ttl_ms
+}
+
+/// Acquire decision over the `current` record (the caller has already confirmed the owner is LIVE). Rejects
+/// (carrying `current`) if a DIFFERENT owner holds a live lease; otherwise returns the new record at a
+/// strictly-greater epoch (atomic acquire→fence). See [`QueueControlPlane::acquire_queue_lease`] for the
+/// non-idempotency contract.
+pub fn lease_decide_acquire(
+    current: &QueueLease,
+    owner: &OwnerId,
+    now: UtcTimestamp,
+    lease_ttl_ms: u64,
+) -> AcquireOutcome {
+    if current.is_live(now) && current.active_owner_id.as_ref() != Some(owner) {
+        return AcquireOutcome::Rejected(current.clone());
+    }
+    AcquireOutcome::Acquired(QueueLease {
+        state: LeaseState::Assigned,
+        active_owner_id: Some(owner.clone()),
+        target_owner_id: Some(owner.clone()),
+        assignment_epoch: current.assignment_epoch + 1,
+        lease_expires_at: Some(add_millis(now, lease_ttl_ms)),
+    })
+}
+
+/// Renew decision: extend the deadline at the SAME epoch. `queue-epoch-stale` ([`EngineError::EpochFenced`])
+/// on wrong owner, wrong epoch, or an already-reclaimed (expired) lease.
+pub fn lease_decide_renew(
+    current: &QueueLease,
+    owner: &OwnerId,
+    expected_epoch: u64,
+    now: UtcTimestamp,
+    lease_ttl_ms: u64,
+) -> EngineResult<QueueLease> {
+    if current.active_owner_id.as_ref() != Some(owner)
+        || current.assignment_epoch != expected_epoch
+        || !current.is_live(now)
+    {
+        return Err(EngineError::EpochFenced);
+    }
+    Ok(QueueLease {
+        lease_expires_at: Some(add_millis(now, lease_ttl_ms)),
+        ..current.clone()
+    })
+}
+
+/// Begin-drain decision: optimistic-concurrency-checked against `expected_epoch` (stale → `EpochFenced`),
+/// valid only on a live `assigned` lease handed to a DIFFERENT target.
+pub fn lease_decide_begin_drain(
+    current: &QueueLease,
+    expected_epoch: u64,
+    target_owner: &OwnerId,
+    now: UtcTimestamp,
+) -> EngineResult<QueueLease> {
+    if current.assignment_epoch != expected_epoch || !current.is_live(now) {
+        return Err(EngineError::EpochFenced);
+    }
+    if current.state != LeaseState::Assigned {
+        return Err(EngineError::Conflict);
+    }
+    if current.active_owner_id.as_ref() == Some(target_owner) {
+        return Err(EngineError::Invalid("drain target is the active owner"));
+    }
+    Ok(QueueLease {
+        state: LeaseState::Draining,
+        target_owner_id: Some(target_owner.clone()),
+        ..current.clone()
+    })
+}
+
+/// Release decision: only the active owner at `expected_epoch` may release. Returns the unassigned record
+/// with the epoch RETAINED (the next acquire allocates a strictly-greater one, fencing this owner's
+/// stragglers). `queue-epoch-stale` otherwise.
+pub fn lease_decide_release(
+    current: &QueueLease,
+    owner: &OwnerId,
+    expected_epoch: u64,
+) -> EngineResult<QueueLease> {
+    if current.active_owner_id.as_ref() != Some(owner)
+        || current.assignment_epoch != expected_epoch
+        || !matches!(current.state, LeaseState::Assigned | LeaseState::Draining)
+    {
+        return Err(EngineError::EpochFenced);
+    }
+    Ok(QueueLease {
+        state: LeaseState::Unassigned,
+        active_owner_id: None,
+        target_owner_id: None,
+        lease_expires_at: None,
+        assignment_epoch: current.assignment_epoch,
+    })
+}
+
+/// Build the [`OwnerResolution`] a caller acts on: the deterministic `target` plus the `current` record,
+/// reported as `unassigned` when its lease has expired (lease liveness governs, not the stale stored flag).
+pub fn lease_resolution(
+    current: &QueueLease,
+    target: Option<OwnerId>,
+    now: UtcTimestamp,
+) -> OwnerResolution {
+    let (state, active, expires) = if current.is_live(now) {
+        (
+            current.state,
+            current.active_owner_id.clone(),
+            current.lease_expires_at,
+        )
+    } else {
+        (LeaseState::Unassigned, None, None)
+    };
+    OwnerResolution {
+        target_owner: target,
+        active_owner: active,
+        // epoch 0 == genesis (never granted) → None; a granted lease is always >= 1.
+        assignment_epoch: (current.assignment_epoch > 0).then_some(current.assignment_epoch),
+        lease_expires_at: expires,
+        state,
     }
 }
 
@@ -141,16 +270,24 @@ impl Default for ControlPlaneConfig {
 /// is one atomic mutation of the authority record. The production impl is transactional-postgres (BQ-22);
 /// [`InMemoryControlPlane`] is the reference + the default for single-node / tests.
 pub trait QueueControlPlane: Send + Sync {
-    /// Register (or refresh) an owner worker in the candidate set with a heartbeat at `now`.
-    fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp);
+    /// Register (or refresh) an owner worker in the candidate set with a heartbeat at `now`. Fallible: a
+    /// durable store (postgres) can fail the write — surfaced rather than silently swallowed (a swallowed
+    /// failure would leave the owner looking dead, which is fail-safe but must not be hidden).
+    fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()>;
 
     /// Refresh an owner's heartbeat. An owner whose heartbeat has expired leaves the live set (changing
     /// future `target_owner` computations) but its lease is reclaimed only via `lease_expires_at`.
-    fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp);
+    fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()>;
 
     /// The deterministic `target_owner` (rendezvous/HRW over the live owner set) plus the current authority
-    /// record. `target_owner` is `None` iff no owner is live (fail-closed).
-    fn resolve_queue_owner(&self, queue: &QueueKey, now: UtcTimestamp) -> OwnerResolution;
+    /// record. `target_owner` is `None` iff no owner is live (fail-closed). FALLIBLE: a durable store
+    /// (postgres) MUST surface a read failure rather than fabricate an `unassigned` record — a fabricated
+    /// "unowned" would invite a spurious acquire and hide a control-plane outage (TD-003 fail-closed).
+    fn resolve_queue_owner(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<OwnerResolution>;
 
     /// Acquire the queue at a strictly-greater, durably-recorded epoch (TD-003 acquire). Rejects if a
     /// DIFFERENT owner holds a live (`assigned`/`draining`, non-expired) lease. The caller MUST be a live
@@ -207,8 +344,21 @@ pub trait QueueControlPlane: Send + Sync {
         now: UtcTimestamp,
     ) -> EngineResult<()>;
 
-    /// Read the current authority record (defaulting to `unassigned`/epoch 0 for a never-owned queue).
-    fn lease(&self, queue: &QueueKey) -> QueueLease;
+    /// Read the current authority record (genesis `unassigned`/epoch 0 for a never-owned queue). FALLIBLE
+    /// for the same fail-closed reason as [`resolve_queue_owner`](Self::resolve_queue_owner): a fabricated
+    /// epoch-0 record on a DB error is the worst possible value to feed the append fence (BQ-23).
+    fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease>;
+}
+
+/// Milliseconds elapsed from `a` to `b` (0 if `b <= a`), for TTL comparisons.
+fn elapsed_ms(a: UtcTimestamp, b: UtcTimestamp) -> u64 {
+    if b <= a {
+        return 0;
+    }
+    let secs = (b.seconds - a.seconds) as i128;
+    let nanos = b.nanoseconds as i128 - a.nanoseconds as i128;
+    let total_ms = secs * 1000 + nanos.div_euclid(1_000_000);
+    total_ms.max(0) as u64
 }
 
 /// `now + ms` as a normalized [`UtcTimestamp`] (seconds saturate; nanos carry). Used for lease deadlines.
@@ -246,7 +396,7 @@ fn rendezvous_weight(queue: &QueueKey, owner: &OwnerId) -> u64 {
 /// Pick the deterministic target owner from a live set: the owner with the greatest rendezvous weight
 /// (owner-id breaks an astronomically-unlikely weight tie, keeping it a pure total function). Empty set →
 /// `None` (fail-closed).
-fn resolve_target<'a>(
+pub fn resolve_target<'a>(
     queue: &QueueKey,
     live: impl Iterator<Item = &'a OwnerId>,
 ) -> Option<OwnerId> {
@@ -278,17 +428,6 @@ impl InMemoryControlPlane {
         }
     }
 
-    /// Milliseconds elapsed from `a` to `b` (0 if `b <= a`), for TTL comparisons.
-    fn elapsed_ms(a: UtcTimestamp, b: UtcTimestamp) -> u64 {
-        if b <= a {
-            return 0;
-        }
-        let secs = (b.seconds - a.seconds) as i128;
-        let nanos = b.nanoseconds as i128 - a.nanoseconds as i128;
-        let total_ms = secs * 1000 + nanos.div_euclid(1_000_000);
-        total_ms.max(0) as u64
-    }
-
     fn is_owner_live(
         &self,
         owners: &HashMap<OwnerId, UtcTimestamp>,
@@ -297,7 +436,7 @@ impl InMemoryControlPlane {
     ) -> bool {
         owners
             .get(owner)
-            .is_some_and(|hb| Self::elapsed_ms(*hb, now) < self.config.heartbeat_ttl_ms)
+            .is_some_and(|hb| owner_heartbeat_live(*hb, now, self.config.heartbeat_ttl_ms))
     }
 
     fn live_owners<'a>(
@@ -307,7 +446,7 @@ impl InMemoryControlPlane {
     ) -> Vec<&'a OwnerId> {
         owners
             .iter()
-            .filter(|(_, hb)| Self::elapsed_ms(**hb, now) < self.config.heartbeat_ttl_ms)
+            .filter(|(_, hb)| owner_heartbeat_live(**hb, now, self.config.heartbeat_ttl_ms))
             .map(|(o, _)| o)
             .collect()
     }
@@ -320,15 +459,16 @@ impl Default for InMemoryControlPlane {
 }
 
 impl QueueControlPlane for InMemoryControlPlane {
-    fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) {
+    fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
         self.state
             .lock()
             .expect("poisoned")
             .owners
             .insert(owner.clone(), now);
+        Ok(())
     }
 
-    fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) {
+    fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
         // Register-on-heartbeat is intentional: a heartbeat from an unknown owner re-admits it (a node that
         // briefly fell out of the live set rejoins), matching the postgres upsert.
         self.state
@@ -336,35 +476,22 @@ impl QueueControlPlane for InMemoryControlPlane {
             .expect("poisoned")
             .owners
             .insert(owner.clone(), now);
+        Ok(())
     }
 
-    fn resolve_queue_owner(&self, queue: &QueueKey, now: UtcTimestamp) -> OwnerResolution {
+    fn resolve_queue_owner(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<OwnerResolution> {
         let g = self.state.lock().expect("poisoned");
         let target = resolve_target(queue, self.live_owners(&g.owners, now).into_iter());
-        let lease = g
+        let current = g
             .leases
             .get(queue)
             .cloned()
             .unwrap_or_else(QueueLease::unassigned);
-        // A lease whose `lease_expires_at` has passed is reported as `unassigned` (reclaimable), even if the
-        // stored state still reads assigned/draining — lease liveness, not the stale stored flag, governs.
-        let (state, active, expires) = if lease.is_live(now) {
-            (
-                lease.state,
-                lease.active_owner_id.clone(),
-                lease.lease_expires_at,
-            )
-        } else {
-            (LeaseState::Unassigned, None, None)
-        };
-        OwnerResolution {
-            target_owner: target,
-            active_owner: active,
-            // epoch 0 == genesis (never granted) → None; a granted lease is always >= 1.
-            assignment_epoch: (lease.assignment_epoch > 0).then_some(lease.assignment_epoch),
-            lease_expires_at: expires,
-            state,
-        }
+        Ok(lease_resolution(&current, target, now))
     }
 
     fn acquire_queue_lease(
@@ -374,7 +501,7 @@ impl QueueControlPlane for InMemoryControlPlane {
         now: UtcTimestamp,
     ) -> EngineResult<AcquireOutcome> {
         let mut g = self.state.lock().expect("poisoned");
-        // Fail-closed: only a live registered owner may acquire.
+        // Fail-closed: only a live registered owner may acquire (the store-specific liveness check).
         if !self.is_owner_live(&g.owners, owner, now) {
             return Err(EngineError::Forbidden(
                 "owner is not live (register + heartbeat first)",
@@ -385,22 +512,11 @@ impl QueueControlPlane for InMemoryControlPlane {
             .get(queue)
             .cloned()
             .unwrap_or_else(QueueLease::unassigned);
-        // Single active lease: a DIFFERENT owner's live lease blocks the acquire.
-        if current.is_live(now) && current.active_owner_id.as_ref() != Some(owner) {
-            return Ok(AcquireOutcome::Rejected(current));
+        let outcome = lease_decide_acquire(&current, owner, now, self.config.lease_ttl_ms);
+        if let AcquireOutcome::Acquired(ref acquired) = outcome {
+            g.leases.insert(queue.clone(), acquired.clone());
         }
-        // Atomic acquire→fence: strictly-greater epoch, recorded with the new owner before returning.
-        let new_epoch = current.assignment_epoch + 1;
-        let lease_expires_at = add_millis(now, self.config.lease_ttl_ms);
-        let acquired = QueueLease {
-            state: LeaseState::Assigned,
-            active_owner_id: Some(owner.clone()),
-            target_owner_id: Some(owner.clone()),
-            assignment_epoch: new_epoch,
-            lease_expires_at: Some(lease_expires_at),
-        };
-        g.leases.insert(queue.clone(), acquired.clone());
-        Ok(AcquireOutcome::Acquired(acquired))
+        Ok(outcome)
     }
 
     fn renew_queue_lease(
@@ -416,18 +532,13 @@ impl QueueControlPlane for InMemoryControlPlane {
             .get(queue)
             .cloned()
             .unwrap_or_else(QueueLease::unassigned);
-        // queue-epoch-stale: wrong owner, wrong epoch, or an already-reclaimed (expired) lease.
-        if current.active_owner_id.as_ref() != Some(owner)
-            || current.assignment_epoch != expected_epoch
-            || !current.is_live(now)
-        {
-            return Err(EngineError::EpochFenced);
-        }
-        // Renewal extends the deadline at the SAME epoch (never reallocates).
-        let renewed = QueueLease {
-            lease_expires_at: Some(add_millis(now, self.config.lease_ttl_ms)),
-            ..current
-        };
+        let renewed = lease_decide_renew(
+            &current,
+            owner,
+            expected_epoch,
+            now,
+            self.config.lease_ttl_ms,
+        )?;
         g.leases.insert(queue.clone(), renewed.clone());
         Ok(renewed)
     }
@@ -445,23 +556,7 @@ impl QueueControlPlane for InMemoryControlPlane {
             .get(queue)
             .cloned()
             .unwrap_or_else(QueueLease::unassigned);
-        // Optimistic concurrency: a drain computed against a superseded lease is queue-epoch-stale (so it
-        // can never flip a newer owner to draining).
-        if current.assignment_epoch != expected_epoch || !current.is_live(now) {
-            return Err(EngineError::EpochFenced);
-        }
-        // Drain only applies to a currently-assigned lease being handed to a DIFFERENT target.
-        if current.state != LeaseState::Assigned {
-            return Err(EngineError::Conflict);
-        }
-        if current.active_owner_id.as_ref() == Some(target_owner) {
-            return Err(EngineError::Invalid("drain target is the active owner"));
-        }
-        let draining = QueueLease {
-            state: LeaseState::Draining,
-            target_owner_id: Some(target_owner.clone()),
-            ..current
-        };
+        let draining = lease_decide_begin_drain(&current, expected_epoch, target_owner, now)?;
         g.leases.insert(queue.clone(), draining.clone());
         Ok(draining)
     }
@@ -479,35 +574,21 @@ impl QueueControlPlane for InMemoryControlPlane {
             .get(queue)
             .cloned()
             .unwrap_or_else(QueueLease::unassigned);
-        // Only the active owner at the current epoch may release; an expired lease is already reclaimable.
-        if current.active_owner_id.as_ref() != Some(owner)
-            || current.assignment_epoch != expected_epoch
-            || !matches!(current.state, LeaseState::Assigned | LeaseState::Draining)
-        {
-            return Err(EngineError::EpochFenced);
-        }
-        // Unassign but RETAIN the epoch — the next acquire allocates a strictly-greater one (fences
-        // stragglers from this owner). target_owner_id is cleared.
-        let released = QueueLease {
-            state: LeaseState::Unassigned,
-            active_owner_id: None,
-            target_owner_id: None,
-            lease_expires_at: None,
-            assignment_epoch: current.assignment_epoch,
-        };
+        let released = lease_decide_release(&current, owner, expected_epoch)?;
+        let _ = now; // release validates by epoch, not time (an expired lease is already reclaimable)
         g.leases.insert(queue.clone(), released);
-        let _ = now;
         Ok(())
     }
 
-    fn lease(&self, queue: &QueueKey) -> QueueLease {
-        self.state
+    fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
+        Ok(self
+            .state
             .lock()
             .expect("poisoned")
             .leases
             .get(queue)
             .cloned()
-            .unwrap_or_else(QueueLease::unassigned)
+            .unwrap_or_else(QueueLease::unassigned))
     }
 }
 
@@ -541,7 +622,7 @@ mod tests {
         let a = owner("a");
         let b = owner("b");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
 
         // Acquire: epoch 1, assigned, active=target=a, deadline now+15s.
         let AcquireOutcome::Acquired(l1) = cp.acquire_queue_lease(&q, &a, ts(0)).unwrap() else {
@@ -558,7 +639,7 @@ mod tests {
         assert_eq!(l2.lease_expires_at, Some(ts(25)));
 
         // begin_drain toward b: draining, target=b, still epoch 1.
-        cp.register_owner(&b, ts(10));
+        cp.register_owner(&b, ts(10)).unwrap();
         let l3 = cp.begin_drain(&q, 1, &b, ts(11)).unwrap();
         assert_eq!(l3.state, LeaseState::Draining);
         assert_eq!(l3.target_owner_id.as_ref(), Some(&b));
@@ -570,7 +651,7 @@ mod tests {
 
         // a releases: unassigned, epoch RETAINED (next acquire goes strictly higher).
         cp.release_queue_lease(&q, &a, 1, ts(12)).unwrap();
-        let rel = cp.lease(&q);
+        let rel = cp.lease(&q).unwrap();
         assert_eq!(rel.state, LeaseState::Unassigned);
         assert_eq!(rel.active_owner_id, None);
         assert_eq!(rel.assignment_epoch, 1, "epoch retained across release");
@@ -591,20 +672,20 @@ mod tests {
         let a = owner("a");
         let b = owner("b");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
-        cp.register_owner(&b, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.register_owner(&b, ts(0)).unwrap();
         cp.acquire_queue_lease(&q, &a, ts(0)).unwrap();
 
         // b acquires while a's lease is live → Rejected, carrying a's authority record (b heartbeats so it
         // is a live owner; a's LEASE — not a's heartbeat — is what blocks the acquire).
-        cp.heartbeat(&b, ts(4));
+        cp.heartbeat(&b, ts(4)).unwrap();
         let AcquireOutcome::Rejected(held) = cp.acquire_queue_lease(&q, &b, ts(4)).unwrap() else {
             panic!("expected Rejected");
         };
         assert_eq!(held.active_owner_id.as_ref(), Some(&a));
         assert_eq!(held.assignment_epoch, 1);
         // a's lease is untouched (no epoch bump from a rejected acquire).
-        assert_eq!(cp.lease(&q).assignment_epoch, 1);
+        assert_eq!(cp.lease(&q).unwrap().assignment_epoch, 1);
     }
 
     #[test]
@@ -614,7 +695,7 @@ mod tests {
         let cp = cp();
         let a = owner("a");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
         cp.acquire_queue_lease(&q, &a, ts(0)).unwrap();
         let AcquireOutcome::Acquired(l2) = cp.acquire_queue_lease(&q, &a, ts(1)).unwrap() else {
             panic!("expected Acquired");
@@ -630,11 +711,11 @@ mod tests {
         let a = owner("a");
         let b = owner("b");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
         cp.acquire_queue_lease(&q, &a, ts(0)).unwrap(); // epoch 1, expires ts(15)
 
         // After expiry (and a's heartbeat gone), b is live and acquires → epoch 2 (no rejection).
-        cp.register_owner(&b, ts(20));
+        cp.register_owner(&b, ts(20)).unwrap();
         let AcquireOutcome::Acquired(l2) = cp.acquire_queue_lease(&q, &b, ts(20)).unwrap() else {
             panic!("expected Acquired (a's lease expired)");
         };
@@ -647,12 +728,12 @@ mod tests {
         let cp = cp();
         let a = owner("a");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
         let mut prev = 0;
         // Acquire → release → acquire → release ... epoch must climb strictly each acquire.
         for i in 0..5 {
             let t = ts(i * 100);
-            cp.heartbeat(&a, t); // keep the owner live across the time jumps
+            cp.heartbeat(&a, t).unwrap(); // keep the owner live across the time jumps
             let AcquireOutcome::Acquired(l) = cp.acquire_queue_lease(&q, &a, t).unwrap() else {
                 panic!("acquire");
             };
@@ -671,14 +752,17 @@ mod tests {
         let cp = cp();
         let a = owner("a");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
         let AcquireOutcome::Acquired(l) = cp.acquire_queue_lease(&q, &a, ts(0)).unwrap() else {
             panic!("acquire");
         };
         // The durable record already reflects the new epoch the instant acquire returns (the fence is in
         // place before the owner serves) — resolve + lease both see epoch 1.
-        assert_eq!(cp.lease(&q).assignment_epoch, l.assignment_epoch);
-        assert_eq!(cp.resolve_queue_owner(&q, ts(0)).assignment_epoch, Some(1));
+        assert_eq!(cp.lease(&q).unwrap().assignment_epoch, l.assignment_epoch);
+        assert_eq!(
+            cp.resolve_queue_owner(&q, ts(0)).unwrap().assignment_epoch,
+            Some(1)
+        );
     }
 
     // ----- seam invariant: fail-closed -----
@@ -694,7 +778,7 @@ mod tests {
             Err(EngineError::Forbidden(_))
         ));
         // Registered, but heartbeat expired by acquire time (5s TTL, acquire at 10s).
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
         assert!(matches!(
             cp.acquire_queue_lease(&q, &a, ts(10)),
             Err(EngineError::Forbidden(_))
@@ -707,7 +791,7 @@ mod tests {
         let a = owner("a");
         let b = owner("b");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
         cp.acquire_queue_lease(&q, &a, ts(0)).unwrap(); // epoch 1
 
         // Wrong expected epoch.
@@ -735,9 +819,9 @@ mod tests {
         let a = owner("a");
         let b = owner("b");
         let q = qk("q1");
-        cp.register_owner(&a, ts(0));
+        cp.register_owner(&a, ts(0)).unwrap();
         cp.acquire_queue_lease(&q, &a, ts(0)).unwrap();
-        cp.register_owner(&b, ts(20));
+        cp.register_owner(&b, ts(20)).unwrap();
         cp.acquire_queue_lease(&q, &b, ts(20)).unwrap(); // epoch 2
         assert_eq!(
             cp.renew_queue_lease(&q, &a, 1, ts(21)),
@@ -751,10 +835,16 @@ mod tests {
         let cp = cp();
         let q = qk("q1");
         // No owners registered → fail-closed: nobody serves.
-        assert_eq!(cp.resolve_queue_owner(&q, ts(0)).target_owner, None);
+        assert_eq!(
+            cp.resolve_queue_owner(&q, ts(0)).unwrap().target_owner,
+            None
+        );
         // Registered then expired → still no target.
-        cp.register_owner(&owner("a"), ts(0));
-        assert_eq!(cp.resolve_queue_owner(&q, ts(100)).target_owner, None);
+        cp.register_owner(&owner("a"), ts(0)).unwrap();
+        assert_eq!(
+            cp.resolve_queue_owner(&q, ts(100)).unwrap().target_owner,
+            None
+        );
     }
 
     // ----- seam invariant: concurrent acquire linearizes (TD-003 "at most one succeeds vs a prior epoch") -----
@@ -769,7 +859,7 @@ mod tests {
         // 8 contending owners, all live, all racing to acquire the SAME queue at the SAME instant.
         let owners: Vec<OwnerId> = (0..8).map(|i| owner(&format!("o{i}"))).collect();
         for o in &owners {
-            cp.register_owner(o, ts(0));
+            cp.register_owner(o, ts(0)).unwrap();
         }
         let acquired_count = Arc::new(AtomicU64::new(0));
         let max_epoch = Arc::new(AtomicU64::new(0));
@@ -797,7 +887,7 @@ mod tests {
         let acquired = acquired_count.load(Ordering::SeqCst);
         assert_eq!(acquired, 1, "exactly one acquire wins the contended queue");
         assert_eq!(
-            cp.lease(&q).assignment_epoch,
+            cp.lease(&q).unwrap().assignment_epoch,
             1,
             "the epoch advanced exactly once under contention — linearized, no double-bump"
         );
@@ -811,14 +901,14 @@ mod tests {
         let cp1 = cp();
         let cp2 = cp();
         for o in ["a", "b", "c"] {
-            cp1.register_owner(&owner(o), ts(0));
-            cp2.register_owner(&owner(o), ts(0));
+            cp1.register_owner(&owner(o), ts(0)).unwrap();
+            cp2.register_owner(&owner(o), ts(0)).unwrap();
         }
         // Same live set + same queue → same target, on two independent control planes (no run-to-run
         // randomness), and stable across repeated calls.
         for q in ["q1", "q2", "q3", "q4", "q5"] {
-            let t1 = cp1.resolve_queue_owner(&qk(q), ts(0)).target_owner;
-            let t2 = cp2.resolve_queue_owner(&qk(q), ts(1)).target_owner;
+            let t1 = cp1.resolve_queue_owner(&qk(q), ts(0)).unwrap().target_owner;
+            let t2 = cp2.resolve_queue_owner(&qk(q), ts(1)).unwrap().target_owner;
             assert!(t1.is_some());
             assert_eq!(t1, t2, "HRW must be a pure function");
         }
@@ -828,12 +918,12 @@ mod tests {
     fn hrw_spreads_queues_and_moves_only_a_fraction_when_an_owner_leaves() {
         let cp = cp();
         for o in ["a", "b", "c"] {
-            cp.register_owner(&owner(o), ts(0));
+            cp.register_owner(&owner(o), ts(0)).unwrap();
         }
         let queues: Vec<QueueKey> = (0..60).map(|i| qk(&format!("q{i}"))).collect();
         let before: Vec<Option<OwnerId>> = queues
             .iter()
-            .map(|q| cp.resolve_queue_owner(q, ts(0)).target_owner)
+            .map(|q| cp.resolve_queue_owner(q, ts(0)).unwrap().target_owner)
             .collect();
         // All three owners get some queues (the assignment is spread, not all-to-one).
         for o in ["a", "b", "c"] {
@@ -845,11 +935,11 @@ mod tests {
             );
         }
         // Drop owner "c" (heartbeat expires); only c's queues move — a/b assignments are stable.
-        cp.register_owner(&owner("a"), ts(10));
-        cp.register_owner(&owner("b"), ts(10));
+        cp.register_owner(&owner("a"), ts(10)).unwrap();
+        cp.register_owner(&owner("b"), ts(10)).unwrap();
         let mut moved = 0;
         for (i, q) in queues.iter().enumerate() {
-            let after = cp.resolve_queue_owner(q, ts(10)).target_owner;
+            let after = cp.resolve_queue_owner(q, ts(10)).unwrap().target_owner;
             if after != before[i] {
                 moved += 1;
                 // A moved queue was previously c's (rendezvous only reshuffles the departed owner's share).

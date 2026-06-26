@@ -28,7 +28,9 @@ pub use claim_validation::{
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState, OwnerResolution,
-    QueueControlPlane, QueueLease,
+    QueueControlPlane, QueueLease, lease_decide_acquire, lease_decide_begin_drain,
+    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
+    resolve_target,
 };
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};

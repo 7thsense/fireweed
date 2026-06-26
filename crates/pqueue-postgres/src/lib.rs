@@ -64,7 +64,9 @@ use pqueue_engine::{
 };
 use pqueue_projection::ProjectionData;
 
+mod control_plane;
 mod relational;
+pub use control_plane::PostgresControlPlane;
 pub use relational::PostgresRelationalBackend;
 
 const SCHEMA: &str = r#"
