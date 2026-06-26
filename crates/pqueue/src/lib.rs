@@ -90,6 +90,8 @@ pub struct NewItem {
     pub payload: Option<Bytes>,
     /// Declared cohort size (BQ-14c) — see [`ClaimCompatibility`]/`whole_cohort`. `None` for non-cohort items.
     pub cohort_size: Option<u64>,
+    /// Gate keys this item carries (BQ-14d). A blocked gate key makes the item ineligible. Empty = un-gated.
+    pub gate_keys: Vec<String>,
 }
 
 /// The ergonomic library handle. Holds an injected backend + clock; generates ids/lease tokens.
@@ -141,6 +143,7 @@ impl<B: LibBackend> Pqueue<B> {
                 group_key: it.group_key,
                 payload: it.payload,
                 cohort_size: it.cohort_size,
+                gate_keys: it.gate_keys,
             })
             .collect();
         self.backend.push(queue, specs, self.clock.now()).await

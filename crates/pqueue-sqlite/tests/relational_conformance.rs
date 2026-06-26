@@ -21,7 +21,7 @@ use pqueue_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand, ControlPlaneStore,
     FenceLeaseCommand, FinalizeKind, FinalizeOutcome, FinalizePort, GroupBatching, ProjectionRead,
     PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, ReassignLeasePort,
-    ReclaimDriver, RenewLeasePort, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
+    ReclaimDriver, RenewLeasePort, SetGatesCommand, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -433,6 +433,7 @@ async fn cohort_expired_fails_group_members() {
         max_attempts: 3,
         payload: None,
         cohort_size: None,
+        gate_keys: Vec::new(),
     };
     commit(
         &b,
@@ -1134,5 +1135,175 @@ async fn whole_cohort_ignores_non_cohort_group_members() {
         b.metrics(&qkey()).await.unwrap().pending,
         1,
         "the plain group item stays pending"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. GATES (BQ-14d) — a blocked gate key makes every item carrying it INELIGIBLE via the eligibility
+//    anti-join; clearing the gate restores eligibility with no per-item rewrite (exact-on-read). Gates are
+//    a RELATIONAL-class feature (kept out of the shared core suite); item-level claim is unchanged when no
+//    gate is set (parity preserved by the anti-join being a no-op against an empty pqueue_gate_state).
+// ---------------------------------------------------------------------------
+
+/// A push spec carrying gate-key membership (priority + gate_keys).
+fn gatespec(priority: i64, gate_keys: &[&str]) -> PushSpec {
+    PushSpec {
+        priority: Some(PriorityValue::Int64(priority)),
+        gate_keys: gate_keys.iter().map(|g| g.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+/// Apply a SetGates command (block or clear the given gate keys) through the log/apply UoW.
+async fn set_gates(b: &SqliteRelationalBackend, gate_keys: &[&str], blocked: bool) {
+    commit(
+        b,
+        envelope(
+            QueueCommand::SetGates(SetGatesCommand {
+                gate_keys: gate_keys.iter().map(|g| g.to_string()).collect(),
+                blocked,
+            }),
+            vec![],
+        ),
+    )
+    .await;
+}
+
+/// A blocked gate hides every item carrying its key; clearing the gate restores them, with no per-item
+/// rewrite (the same items become claimable again on the next claim).
+#[tokio::test]
+async fn blocked_gate_hides_items_then_clear_restores() {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let ids = b
+        .push(&shard(), vec![gatespec(10, &["region-eu"])], ts(0))
+        .await
+        .unwrap();
+
+    // Block the gate → the item is ineligible (claim leases nothing), but stays pending (not consumed).
+    set_gates(&b, &["region-eu"], true).await;
+    let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
+    assert!(claimed.items.is_empty(), "a blocked gate hides its item");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "the gated item is still pending, just not eligible"
+    );
+
+    // Clear the gate → the SAME item is claimable again (exact-on-read; no rewrite happened).
+    set_gates(&b, &["region-eu"], false).await;
+    let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "clearing the gate restores the item"
+    );
+    assert_eq!(claimed.items[0].item_id.as_str(), ids[0].as_str());
+}
+
+/// CORE PARITY: an item with NO gate keys is unaffected by a blocked gate — and a blocked gate on one item
+/// does not stall claim of an ungated sibling (the anti-join only excludes the gated item).
+#[tokio::test]
+async fn ungated_items_are_unaffected_by_a_blocked_gate() {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![gatespec(10, &["g"]), spec(20)], // one gated (older), one ungated
+            ts(0),
+        )
+        .await
+        .unwrap();
+
+    set_gates(&b, &["g"], true).await;
+    // The gated item (priority 10, older) is hidden; claim skips straight to the ungated item.
+    let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
+    let leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    assert_eq!(
+        leased,
+        vec![ids[1].as_str()],
+        "only the ungated item leases; the gated one is hidden but does not block it"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "gated item pending"
+    );
+}
+
+/// A gate blocks an item even when several of its keys are clear — ANY blocked key on the item hides it.
+#[tokio::test]
+async fn any_blocked_key_hides_a_multi_gate_item() {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    b.push(&shard(), vec![gatespec(10, &["a", "b"])], ts(0))
+        .await
+        .unwrap();
+
+    // Block only "b" (one of the item's two keys) → the item is hidden.
+    set_gates(&b, &["b"], true).await;
+    assert!(
+        b.claim(claim_req(10, 500, 100))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "blocking any one of the item's keys hides it"
+    );
+    // Clearing "b" restores it even though "a" was never blocked.
+    set_gates(&b, &["b"], false).await;
+    assert_eq!(
+        b.claim(claim_req(10, 500, 100)).await.unwrap().items.len(),
+        1
+    );
+}
+
+/// A blocked gate on a single cohort member makes the WHOLE cohort un-claimable (all-or-nothing); clearing
+/// it restores the whole-cohort claim.
+#[tokio::test]
+async fn blocked_gate_on_a_cohort_member_blocks_the_whole_cohort() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    // Cohort "c1" size 3; the middle member also carries gate key "hold".
+    let gated_member = PushSpec {
+        priority: Some(PriorityValue::Int64(11)),
+        group_key: Some(GroupKey::new("c1").unwrap()),
+        cohort_size: Some(3),
+        gate_keys: vec!["hold".to_string()],
+        ..Default::default()
+    };
+    b.push(
+        &shard(),
+        vec![cspec(10, "c1", 3), gated_member, cspec(12, "c1", 3)],
+        ts(0),
+    )
+    .await
+    .unwrap();
+
+    set_gates(&b, &["hold"], true).await;
+    assert!(
+        b.claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "a gated cohort member makes the whole cohort un-claimable"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        3,
+        "nothing leased"
+    );
+
+    set_gates(&b, &["hold"], false).await;
+    assert_eq!(
+        b.claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+            .await
+            .unwrap()
+            .items
+            .len(),
+        3,
+        "clearing the gate restores the whole-cohort claim"
     );
 }

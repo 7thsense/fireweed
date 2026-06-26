@@ -1052,6 +1052,12 @@ pub enum IneligibilityReason {
 ///
 /// Returns `Ok(())` if eligible, or the first `IneligibilityReason` found
 /// following the Eligibility Precedence order.
+///
+/// NOTE (BQ-14d): this is the *reference* eligibility specification, not the live claim path of any
+/// backend. The relational family re-expresses this predicate in SQL (incl. the gate anti-join); the
+/// in-memory family re-expresses it inline in `ProjectionData::eligible_candidates` and does NOT consult
+/// gates (gates are relational-mode only). A passing `GateBlocked` test here does NOT imply the in-memory
+/// claim path enforces gates — see `PushItem.gate_keys` scope.
 pub fn evaluate_eligibility(
     snapshot: &EligibilitySnapshot,
     rules: &QueueEligibilityRules,

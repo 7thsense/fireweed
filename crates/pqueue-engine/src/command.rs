@@ -46,6 +46,11 @@ pub enum QueueCommand {
     PauseQueue,
     ResumeQueue,
     PurgeItems(PurgeItemsCommand),
+    /// Operator gate flip (BQ-14d, API-001 g2 `SetGates`): block or unblock the given gate keys for the
+    /// queue. A blocked gate key makes every item carrying it ineligible (relational anti-join against
+    /// `pqueue_gate_state`); unblocking restores eligibility. A relational-mode feature — the in-memory
+    /// family applies this as a no-op (it stores no gate state).
+    SetGates(SetGatesCommand),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -84,6 +89,7 @@ pub fn build_push_items(
             max_attempts,
             payload: s.payload,
             cohort_size: s.cohort_size,
+            gate_keys: s.gate_keys,
         });
     }
     (items, ids)
@@ -106,6 +112,18 @@ pub struct PushItem {
     /// `cohort_size` for the same `group_key` is a conflict (TD-002 §cohort).
     #[serde(default)]
     pub cohort_size: Option<u64>,
+    /// Gate keys this item carries (BQ-14d, TD-002 §gate / API-001 g2). When ANY of these keys is in a
+    /// `blocked` state for the queue (set via the `SetGates` command), the item is INELIGIBLE — the
+    /// relational eligibility predicate anti-joins item gate keys against `pqueue_gate_state`. Empty = no
+    /// gates (the common case).
+    ///
+    /// SCOPE: gates are a RELATIONAL-mode feature only (like cohorts/group batching). The in-memory
+    /// log-replay family does not store gate keys, does not enforce `SetGates`, and treats both as inert —
+    /// so carrying gate keys on a log-replay-backed queue is silently non-enforcing. Enforcing this at the
+    /// port (rejecting gate use on a non-gate-capable backend) is the operator-facing follow-up tracked by
+    /// the BQ-14d fresh-eyes review.
+    #[serde(default)]
+    pub gate_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -187,6 +205,14 @@ pub struct PurgeItemsCommand {
     pub force: bool,
 }
 
+/// Block or unblock gate keys for the queue (BQ-14d, API-001 g2 `SetGates`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SetGatesCommand {
+    pub gate_keys: Vec<String>,
+    /// `true` blocks the keys (items carrying them become ineligible); `false` unblocks them.
+    pub blocked: bool,
+}
+
 /// A durable command record — the append unit for the log.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommandEnvelope {
@@ -223,6 +249,7 @@ mod serde_tests {
             max_attempts: 3,
             payload: Some(Bytes::from_static(b"payload")),
             cohort_size: Some(4),
+            gate_keys: Vec::new(),
         }
     }
 

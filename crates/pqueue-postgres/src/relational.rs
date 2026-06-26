@@ -142,6 +142,18 @@ CREATE TABLE IF NOT EXISTS pqueue_cohorts (
     cohort_size BIGINT NOT NULL, created_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, group_key)
 );
+-- BQ-14d: gates (TD-002 §gate / API-001 g2). `pqueue_item_gates` is the item↔gate-key membership
+-- (inserted on Push); `pqueue_gate_state` is the queue's BLOCKED gate keys (one row per blocked key,
+-- maintained by SetGates). An item is gate-blocked (ineligible) iff any of its gate keys is in
+-- pqueue_gate_state — the eligibility predicate anti-joins these (exact-on-read, O(blocked keys)).
+CREATE TABLE IF NOT EXISTS pqueue_item_gates (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL, gate_key TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, item_id, gate_key)
+);
+CREATE TABLE IF NOT EXISTS pqueue_gate_state (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, gate_key TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, gate_key)
+);
 "#;
 
 /// The serialized claim CTE (TD-002 `BatchClaim`): select the eligible candidates under a real
@@ -153,6 +165,10 @@ WITH candidates AS ( \
     SELECT item_id FROM pqueue_items \
     WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' AND superseded=false \
       AND (not_before IS NULL OR not_before<=$3) AND eligible_since IS NOT NULL \
+      AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+          ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+          WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+          AND ig.item_id=pqueue_items.item_id) \
     ORDER BY priority_sort, created_seq \
     LIMIT $4 \
     FOR UPDATE SKIP LOCKED \
@@ -500,6 +516,15 @@ fn insert_item(
     if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
         upsert_cohort(tx, shard, group, size, now)?;
     }
+    // BQ-14d: record this item's gate-key membership (the anti-join source).
+    for gate_key in &item.gate_keys {
+        let gk_str = gate_key.as_str().to_string();
+        st(tx.execute(
+            "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES ($1,$2,$3,$4) \
+             ON CONFLICT (tenant_id,queue_id,item_id,gate_key) DO NOTHING",
+            &[&t, &q, &item_id, &gk_str],
+        ))?;
+    }
     Ok(())
 }
 
@@ -786,10 +811,39 @@ fn apply_command_sql(
                     "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                     &[&t, &q, &id.as_str()],
                 ))?;
+                // BQ-14d: drop the purged item's gate membership (the anti-join source).
+                st(tx.execute(
+                    "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                    &[&t, &q, &id.as_str()],
+                ))?;
                 token_ops.push(TokenOp::Clear(id.clone()));
             }
             for g in &groups {
                 refresh_group_summary(tx, shard, g, now)?;
+            }
+            Ok(())
+        }
+        QueueCommand::SetGates(c) => {
+            // BQ-14d (TD-002 §gate): set/clear queue gate-key block state. A blocked gate key makes every
+            // item carrying it ineligible (enforced by the eligibility anti-join). This is exact-on-read:
+            // toggling a gate flips eligibility on the next claim with no per-item rewrite.
+            if c.blocked {
+                for gate_key in &c.gate_keys {
+                    let gk_str = gate_key.as_str().to_string();
+                    st(tx.execute(
+                        "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) VALUES ($1,$2,$3) \
+                         ON CONFLICT (tenant_id,queue_id,gate_key) DO NOTHING",
+                        &[&t, &q, &gk_str],
+                    ))?;
+                }
+            } else {
+                for gate_key in &c.gate_keys {
+                    let gk_str = gate_key.as_str().to_string();
+                    st(tx.execute(
+                        "DELETE FROM pqueue_gate_state WHERE tenant_id=$1 AND queue_id=$2 AND gate_key=$3",
+                        &[&t, &q, &gk_str],
+                    ))?;
+                }
             }
             Ok(())
         }
@@ -826,6 +880,10 @@ fn select_eligible_sql(
         "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
          AND lifecycle_state='Pending' AND superseded=false \
          AND (not_before IS NULL OR not_before<=$3) AND eligible_since IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+             AND ig.item_id=pqueue_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT $4",
         &[&t, &q, &now_n, &lim],
     ))?;
@@ -884,6 +942,10 @@ fn group_eligible_items(
         "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
          AND lifecycle_state='Pending' AND superseded=false \
          AND (not_before IS NULL OR not_before<=$4) AND eligible_since IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+             AND ig.item_id=pqueue_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT $5 FOR UPDATE",
         &[&t, &q, &group.as_str(), &now_n, &lim],
     ))?;
@@ -1007,6 +1069,10 @@ fn cohort_eligible_items(
         "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
          AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NOT NULL \
          AND (not_before IS NULL OR not_before<=$4) AND eligible_since IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+             AND ig.item_id=pqueue_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT $5 FOR UPDATE",
         &[&t, &q, &group.as_str(), &now_n, &lim],
     ))?;
@@ -1702,6 +1768,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 max_attempts,
                 payload,
                 cohort_size: None,
+                gate_keys: Vec::new(),
             };
             match existing {
                 None => {
@@ -1938,6 +2005,10 @@ mod sql_shape_tests {
             CLAIM_CTE.contains("RETURNING"),
             "claim leases + returns the rich rows in one statement"
         );
+        assert!(
+            CLAIM_CTE.contains("pqueue_item_gates") && CLAIM_CTE.contains("pqueue_gate_state"),
+            "BQ-14d: item-level claim MUST anti-join blocked gates (a blocked gate hides its items)"
+        );
     }
 
     #[test]
@@ -1955,6 +2026,9 @@ mod sql_shape_tests {
             "pqueue_items",
             "pqueue_group_summary",
             "pqueue_item_key_retention",
+            "pqueue_cohorts",
+            "pqueue_item_gates",
+            "pqueue_gate_state",
         ] {
             assert!(RELATIONAL_SCHEMA.contains(table), "missing {table}");
         }

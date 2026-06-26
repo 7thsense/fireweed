@@ -242,6 +242,8 @@ pub struct PushSpec {
     pub payload: Option<Bytes>,
     /// Declared cohort size (BQ-14c) — see [`crate::PushItem::cohort_size`]. `None` for non-cohort items.
     pub cohort_size: Option<u64>,
+    /// Gate keys this item carries (BQ-14d) — see [`crate::PushItem::gate_keys`]. Empty for un-gated items.
+    pub gate_keys: Vec<String>,
 }
 
 /// Appends new items (server-assigned ids). The backend builds the envelope from its own command

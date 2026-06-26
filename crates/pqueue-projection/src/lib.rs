@@ -467,6 +467,9 @@ impl ProjectionData {
                 self.paused = false;
                 Ok(())
             }
+            // Gates (BQ-14d) are a relational-mode feature; the in-memory family stores no gate state and
+            // no item gate keys, so a gate flip is a no-op here (the log-replay backends replay it as such).
+            QueueCommand::SetGates(_) => Ok(()),
             QueueCommand::PurgeItems(c) => {
                 let model = self.priority_model;
                 for id in &c.item_ids {
@@ -684,6 +687,7 @@ mod tests {
             max_attempts: 3,
             payload: None,
             cohort_size: None,
+            gate_keys: Vec::new(),
         }
     }
     fn env(command: QueueCommand) -> CommandEnvelope {

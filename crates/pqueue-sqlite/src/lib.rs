@@ -414,6 +414,7 @@ impl UpsertPort for SqliteBackend {
                 max_attempts,
                 payload,
                 cohort_size: None,
+                gate_keys: Vec::new(),
             };
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("sql-{n}")),

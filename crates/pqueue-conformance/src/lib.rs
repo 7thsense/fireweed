@@ -163,6 +163,8 @@ pub fn item_max(id: &str, key: &str, priority: i64, max_attempts: u32) -> PushIt
         group_key: None,
         max_attempts,
         payload: None,
+        cohort_size: None,
+        gate_keys: Vec::new(),
     }
 }
 
