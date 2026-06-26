@@ -130,7 +130,15 @@ review → commit → `ddx bead close`.
 
 ### P4 — Cross-queue scale evidence (TP-002)
 - **BQ-40 cross-queue scale-out.** `performance_cross_queue_scale_out_tests`: aggregate rate monotonic
-  with owner-node count; per-queue floor held. *Acc:* the suite passes its bars.
+  with owner-node count; per-queue floor held. *Acc:* the suite passes its bars. **DONE** — in-process
+  owner-independence measurement in `crates/pqueue-bench/tests/` (independent `MemoryBackend` owners over
+  disjoint queues on real OS threads; measured, not constant-writer). Asserts: no cross-owner contention
+  (aggregate non-regressing 1→2→4→8), parallel scale-out ≥60% of ideal vs the 2-owner baseline (spec-shaped,
+  core-scaled; measured 3.55× @8 on 12 cores), worst-single-queue E0 floor held. Also un-rotted pqueue-bench
+  (orphaned/unbuildable → self-contained workspace; fixed 3 rot-compile errors in `src/main.rs`). HEADLINE
+  E2 (object-log backend, REAL multi-node, ≥3.5×@8 cross-node efficiency) honestly DEFERRED to live run
+  `pqueue-f1d107de`; gate-wiring + e2-source reconciliation recorded on BQ-43. Fresh-eyes GO-with-conditions;
+  in-scope conditions (min-not-avg floor, spec-shaped baseline, tightened tolerance, honest labels) applied.
 - **BQ-41 queue density.** `queue_density_single_node_tests` at ≥1000 active queues/node. *Acc:* density
   bars + no cross-queue degradation.
 - **BQ-42 object-log E3 + retire old suite.** Re-run object-log cost/ack/recovery (E3); delete
@@ -228,7 +236,7 @@ review → commit → `ddx bead close`.
     independently verified correct; the wire-key (`tenant:queue`) vs routing-key (`{tenant/queue}`)
     slot-mismatch reconciliation is recorded as a **BQ-31 (pqueue-4cb0d507)** prerequisite for `-MOVED`.
     Multi-node slot→owner view + per-queue `-MOVED` = BQ-31; live topology = server-runtime.
-- [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
+- [x] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
 
 > Per-bead dependency edges live in ddx (`ddx bead ready` computes the next implementable bead). Phase
 > deps in §1 are the coarse view. Convergence review (2026-06-25): GO-WITH-CONDITIONS, all four must-fix

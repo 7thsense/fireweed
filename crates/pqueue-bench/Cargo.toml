@@ -1,9 +1,16 @@
+# pqueue-bench is a SELF-CONTAINED workspace, deliberately separate from the root workspace: its
+# at-scale throughput harness + the cross-queue scale-out evidence suite (TP-002) take real wall-clock
+# measurements, which must run in ISOLATION — not interleaved with the root `cargo test --workspace` run
+# (cargo executes sibling test binaries concurrently, which would steal cores and make throughput-scaling
+# assertions flaky). Build/run it on its own: `cargo test --manifest-path crates/pqueue-bench/Cargo.toml`.
+[workspace]
+
 [package]
 name = "pqueue-bench"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+version = "0.2.4"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "pqueue-bench"

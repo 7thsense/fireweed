@@ -90,7 +90,14 @@ impl Config {
             }
             i += 2;
         }
-        Config { items, batch, backends, workloads, queues, pg_url }
+        Config {
+            items,
+            batch,
+            backends,
+            workloads,
+            queues,
+            pg_url,
+        }
     }
 
     fn has(&self, w: &str) -> bool {
@@ -148,7 +155,9 @@ fn bench_qdef(tenant: &str, queue: &str) -> QueueDefinition {
         request_id_retention_ms: 60_000,
         client_item_key_retention_ms: 60_000,
         max_lease_duration_ms: 3_600_000,
-        retry_policy: RetryPolicy { max_attempts: 1_000_000 },
+        retry_policy: RetryPolicy {
+            max_attempts: 1_000_000,
+        },
         max_push_batch_size: 10_000_000,
         max_claim_batch_size: 10_000_000,
         max_eligible_group_size: None,
@@ -186,7 +195,14 @@ impl OpStats {
     }
     fn report(&mut self, backend: &str) {
         let ips = self.items_per_sec();
-        let pass = if ips >= FLOOR_ITEMS_PER_SEC { "PASS" } else { "FAIL" };
+        let pass = if ips >= FLOOR_ITEMS_PER_SEC {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        // Compute the percentiles up front (each `pct` call mutably sorts `self.lat`) so the `println!`
+        // below holds only a shared borrow of `self`.
+        let (p50, p95, p99) = (self.pct(0.50), self.pct(0.95), self.pct(0.99));
         println!(
             "{:<10} {:<8} {:>10} {:>13} {:>8} {:>10} {:>10} {:>10}",
             backend,
@@ -194,9 +210,9 @@ impl OpStats {
             fmt_count(self.items),
             fmt_rate(self.items_per_hr()),
             pass,
-            fmt_dur(self.pct(0.50)),
-            fmt_dur(self.pct(0.95)),
-            fmt_dur(self.pct(0.99)),
+            fmt_dur(p50),
+            fmt_dur(p95),
+            fmt_dur(p99),
         );
     }
 }
@@ -227,7 +243,12 @@ async fn ingest<B: pqueue::LibBackend>(
         lat.push(t.elapsed());
         done += n as u64;
     }
-    OpStats { op: "ingest", items, wall: start.elapsed(), lat }
+    OpStats {
+        op: "ingest",
+        items,
+        wall: start.elapsed(),
+        lat,
+    }
 }
 
 /// Returns (claim stats, ack stats). Drains up to `items` already-pending records.
@@ -258,8 +279,18 @@ async fn claim_ack<B: pqueue::LibBackend>(
     }
     let wall = start.elapsed();
     (
-        OpStats { op: "claim", items: drained, wall, lat: claim_lat },
-        OpStats { op: "ack", items: drained, wall, lat: ack_lat },
+        OpStats {
+            op: "claim",
+            items: drained,
+            wall,
+            lat: claim_lat,
+        },
+        OpStats {
+            op: "ack",
+            items: drained,
+            wall,
+            lat: ack_lat,
+        },
     )
 }
 
@@ -288,7 +319,10 @@ async fn run_memory(cfg: &Config) {
     pq.create_queue(bench_qdef("bench", "hot")).await.unwrap();
     run_throughput(cfg, "memory", &pq, &q).await;
     if cfg.has("recovery") {
-        println!("{:<10} {:<8} {:>10} {:>13} {:>8}   (non-durable — no replay)", "memory", "recovery", "-", "-", "-");
+        println!(
+            "{:<10} {:<8} {:>10} {:>13} {:>8}   (non-durable — no replay)",
+            "memory", "recovery", "-", "-", "-"
+        );
     }
 }
 
@@ -297,7 +331,7 @@ async fn run_sqlite(cfg: &Config) {
     let _ = std::fs::remove_file(&path);
     {
         let pq = Pqueue::new(
-            Arc::new(SqliteBackend::open(&path).expect("open sqlite")),
+            Arc::new(SqliteBackend::open(path.to_str().expect("utf8 path")).expect("open sqlite")),
             Arc::new(SystemClock),
         );
         let q = qkey("hot");
@@ -307,7 +341,9 @@ async fn run_sqlite(cfg: &Config) {
     if cfg.has("recovery") {
         let t = Instant::now();
         let pq = Pqueue::new(
-            Arc::new(SqliteBackend::open(&path).expect("reopen sqlite")),
+            Arc::new(
+                SqliteBackend::open(path.to_str().expect("utf8 path")).expect("reopen sqlite"),
+            ),
             Arc::new(SystemClock),
         );
         report_recovery("sqlite", t.elapsed(), &pq, cfg).await;
@@ -340,7 +376,10 @@ async fn run_objectlog(cfg: &Config) {
 
 async fn run_postgres(cfg: &Config) {
     let Some(url) = cfg.pg_url.clone() else {
-        println!("{:<10} (SKIPPED — set --pg-url or PQUEUE_PG_TEST_URL to a live DB)", "postgres");
+        println!(
+            "{:<10} (SKIPPED — set --pg-url or PQUEUE_PG_TEST_URL to a live DB)",
+            "postgres"
+        );
         return;
     };
     let schema = format!("pq_bench_{}", std::process::id());
@@ -395,7 +434,11 @@ async fn report_recovery<B: pqueue::LibBackend>(
     // Sanity: the replayed projection must hold the resident set. (claim drained it on the same run only
     // if `claim` was requested; recovery reopens the durable log which still has every committed command,
     // so pending == ingested-minus-acked.)
-    let resident = pq.metrics(&qkey("hot")).await.map(|m| m.pending + m.leased).unwrap_or(0);
+    let resident = pq
+        .metrics(&qkey("hot"))
+        .await
+        .map(|m| m.pending + m.leased)
+        .unwrap_or(0);
     let ips = if elapsed.as_secs_f64() > 0.0 {
         cfg.items as f64 / elapsed.as_secs_f64()
     } else {
@@ -456,7 +499,10 @@ async fn density(cfg: &Config) {
 // ---------------------------------------------------------------------------
 
 fn qkey(queue: &str) -> QueueKey {
-    QueueKey::new(TenantId::new("bench").unwrap(), QueueId::new(queue).unwrap())
+    QueueKey::new(
+        TenantId::new("bench").unwrap(),
+        QueueId::new(queue).unwrap(),
+    )
 }
 
 fn tmp(tag: &str, ext: &str) -> std::path::PathBuf {
