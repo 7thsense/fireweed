@@ -176,7 +176,13 @@ review → commit → `ddx bead close`.
 >    rollup) via the existing `active_scope` domain logic. Relational-only (parity preserved). Fresh-eyes
 >    GO-with-conditions: at-risk reported `None` (deferred, not a fabricated 0); pause-agnostic + lag caveat
 >    (pqueue-64351bdd) documented. **BQ-14 epic complete (a–e).**
-- [x] BQ-20 · [x] BQ-21 · [x] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
+- [x] BQ-20 · [x] BQ-21 · [x] BQ-22 · [x] BQ-23 (core) · [ ] BQ-24   (P2)
+  - **BQ-23** ✅-core (pqueue-8e1ab4fc, a47e8fb) — engine ownership primitives: `acquire_and_fence`
+    (lease↔storage-fence binding) + `owner_liveness_violation` stalled-queue guard predicate, with
+    end-to-end seam tests. Fresh-eyes GO-with-conditions: the overclaim that it "closes the BQ-20/21/22
+    deferral" was corrected — only the raw append SEAM is fenced; the real claim/push hot-path stamping +
+    full pqueue-server wiring + the 6 TD-003 acceptance scenarios + FR-41 observability are HONESTLY DEFERRED
+    to **pqueue-c33c367e** (server ownership runtime). Two-counter acquire→fence non-atomicity documented.
   - **BQ-22** ✅ (pqueue-d09c9292, e1ac605) — transactional postgres `PostgresControlPlane` (durable
     `pqueue_workers` + `pqueue_queue_owner` authority record; each op one `FOR UPDATE` txn). Extracted the
     lease state machine into pure shared engine functions (one authority for both impls); made
