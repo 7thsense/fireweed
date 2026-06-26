@@ -11,12 +11,13 @@
 //!   - AC-E2E-8 generic priority + bounded-relaxed (`generic_priority_bounded_relaxed_e2e`).
 //!   - AC-E2E-1 scheduled-action delivery (`scheduled_action_delivery_e2e`).
 //!   - AC-E2E-4 jobs/connectors recurring singleton (`jobs_connectors_recurring_e2e`).
+//!   - AC-E2E-2 Marketo group-cardinality batching (`marketo_group_batching_e2e`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use pqueue::{EngineError, Nack, NewItem, Pqueue};
+use pqueue::{ClaimCompatibility, EngineError, GroupBatching, Nack, NewItem, Pqueue};
 use pqueue_core::{
     EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
@@ -816,6 +817,164 @@ async fn jobs_connectors_recurring_e2e() {
             (
                 "late_finalize_not_found".into(),
                 serde_json::json!(late_not_found),
+            ),
+        ]),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-E2E-2 — Marketo group-cardinality batching
+// ---------------------------------------------------------------------------
+
+/// A group-batching queue definition: `max_eligible_group_size` set (so `group_batching` claims validate).
+fn group_qdef(tenant: &str, queue: &str, max_eligible_group_size: u64) -> QueueDefinition {
+    let mut d = qdef(
+        tenant,
+        queue,
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    d.max_eligible_group_size = Some(max_eligible_group_size);
+    d
+}
+
+/// AC-E2E-2 (TP-003): model a downstream API that accepts up to N distinct lead groups — a group-batching
+/// queue. The whole-group SELECTION (claim/finalize whole eligible groups, under contention) is NOT yet
+/// implemented; this validates the group-batching claim-compatibility CONTRACT + item-level parity, and
+/// defers the selection. The cited FRs (FR-29..32, FR-35, FR-47, FR-48) are the full AC-E2E-2 scope — only
+/// the validation-contract subset is exercised here (the row's `inv_ids` is empty; nothing is overclaimed).
+///
+/// COVERED via the lib facade (each assertion bites):
+///   - the queue is loaded with >=1000 groups x multiple tasks, and item-level claim still works on it
+///     (parity — the group config does not break ordinary delivery);
+///   - the group-batching claim-compatibility CONTRACT (validate_claim_compatibility, which IS implemented):
+///       * `group_batching` on a queue WITHOUT max_eligible_group_size -> Invalid;
+///       * `group_batching.max_groups == 0` -> Invalid;
+///       * `max_eligible_group_size > max_items` -> BatchTooLarge (the "next whole group cannot fit" guard);
+///       * a well-formed WHOLE-GROUP claim unit is RECOGNIZED and refused with the structured `Unavailable`
+///         (the group selection is not yet implemented — NOT silently item-claimed or mis-rejected).
+/// DEFERRED (whole-group SELECTION not implemented -> BQ-14b / pqueue-7a96f929): atomic whole-group claim,
+/// INV-7 (0 partial groups), <=max_groups groups per claim, group-representative ordering, concurrent
+/// claimers do not duplicate groups, and active-group discovery. NOT asserted, NOT claimed in the row.
+#[tokio::test]
+async fn marketo_group_batching_e2e() {
+    let (pq, _clock) = deployment();
+    let max_group_size = 5u64;
+    let q = qk("marketo", "leads");
+    pq.create_queue(group_qdef("marketo", "leads", max_group_size))
+        .await
+        .unwrap();
+
+    // Load >=1000 lead groups, multiple tasks per lead (establishing a realistic group population).
+    let groups = 1000u64;
+    let tasks_per_group = 3u64;
+    let mut items = Vec::new();
+    for g in 0..groups {
+        for t in 0..tasks_per_group {
+            items.push(NewItem {
+                priority: Some(PriorityValue::Int64(((g * 7 + t) % 100) as i64)),
+                group_key: Some(GroupKey::new(format!("lead-{g}")).unwrap()),
+                ..Default::default()
+            });
+        }
+    }
+    let loaded = items.len() as u64;
+    pq.push_batch(&q, items).await.unwrap();
+    assert_eq!(
+        pq.metrics(&q).await.unwrap().pending,
+        loaded,
+        "all group tasks resident"
+    );
+
+    // Parity: ITEM-level claim (the default unit) still works on a group-batching queue — the group config
+    // does not disable ordinary delivery. (Counterfactual that the queue itself is healthy.)
+    let item_claim = pq.claim(&q, 10, 60_000).await.unwrap();
+    assert_eq!(
+        item_claim.len(),
+        10,
+        "item-level claim works on a group-batching queue"
+    );
+    pq.nack(
+        &q,
+        item_claim.iter().map(|c| c.item_id.clone()),
+        Nack::Release,
+    )
+    .await
+    .unwrap();
+
+    // --- group-batching claim-compatibility CONTRACT (implemented validation; each error is distinct) ---
+    let whole_group = |max_groups: u32| ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups }),
+        ..Default::default()
+    };
+
+    // (a) max_groups == 0 -> Invalid (pin the message so this is distinct from the missing-config Invalid (c)).
+    let zero = pq.claim_with(&q, 100, 60_000, whole_group(0)).await;
+    assert!(
+        matches!(&zero, Err(EngineError::Invalid(m)) if m.contains("max_groups")),
+        "max_groups=0 is Invalid(max_groups...): {zero:?}"
+    );
+
+    // (b) max_eligible_group_size (5) > max_items (3) -> BatchTooLarge (the whole group can't fit the batch).
+    let too_large = pq.claim_with(&q, 3, 60_000, whole_group(300)).await;
+    assert!(
+        matches!(too_large, Err(EngineError::BatchTooLarge)),
+        "a max_items below the group size fires BatchTooLarge (next whole group cannot fit): {too_large:?}"
+    );
+
+    // (c) group_batching on a queue WITHOUT max_eligible_group_size -> Invalid.
+    let plain_q = qk("marketo", "plain");
+    pq.create_queue(qdef(
+        "marketo",
+        "plain",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    let _ = pq.push(&plain_q, NewItem::default()).await.unwrap();
+    let unconfigured = pq.claim_with(&plain_q, 100, 60_000, whole_group(300)).await;
+    assert!(
+        matches!(&unconfigured, Err(EngineError::Invalid(m)) if m.contains("max_eligible_group_size")),
+        "group_batching requires max_eligible_group_size (distinct from the max_groups Invalid): {unconfigured:?}"
+    );
+
+    // (d) a WELL-FORMED whole-group claim (max_items >= group size) is RECOGNIZED and refused as Unavailable —
+    // the WholeGroup selection is not yet implemented (BQ-14b), NOT silently item-claimed. This is the biting
+    // contract: the unit is validated to WholeGroup, then the unimplemented selection returns the structured
+    // Unavailable (not Invalid, not a partial/item claim).
+    let well_formed = pq.claim_with(&q, 100, 60_000, whole_group(300)).await;
+    assert!(
+        matches!(well_formed, Err(EngineError::Unavailable)),
+        "a well-formed whole-group claim is refused with Unavailable (selection unimplemented -> BQ-14b): {well_formed:?}"
+    );
+
+    emit_ac(
+        "AC-E2E-2",
+        &[],
+        "group-batching queue loaded with >=1000 groups; item-level claim parity holds; the group-batching claim-compatibility contract is enforced (max_groups=0 -> Invalid; group-size>max_items -> BatchTooLarge; missing max_eligible_group_size -> Invalid; well-formed whole-group -> Unavailable, selection unimplemented). [DEFERRED -> BQ-14b/pqueue-7a96f929: atomic whole-group claim, INV-7 0-partial-groups, <=max_groups/claim, group-rep ordering, concurrent no-dup, discovery]",
+        BTreeMap::from([
+            ("groups_loaded".into(), serde_json::json!(groups)),
+            ("items_loaded".into(), serde_json::json!(loaded)),
+            (
+                "item_level_claim_len".into(),
+                serde_json::json!(item_claim.len()),
+            ),
+            (
+                "max_groups_zero".into(),
+                serde_json::json!(format!("{zero:?}")),
+            ),
+            (
+                "batch_too_large".into(),
+                serde_json::json!(format!("{too_large:?}")),
+            ),
+            (
+                "missing_group_size".into(),
+                serde_json::json!(format!("{unconfigured:?}")),
+            ),
+            (
+                "well_formed_whole_group".into(),
+                serde_json::json!(format!("{well_formed:?}")),
             ),
         ]),
     );
