@@ -27,6 +27,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+mod cluster;
+pub use cluster::{ClusterNode, hash_slot, queue_routing_key, queue_slot};
+
 /// The backend capabilities the RESP front needs. A concrete backend (e.g. `MemoryBackend`) is
 /// injected by the composition root / tests; the adapter never names one (hexagonal).
 pub trait RespBackend:
@@ -67,6 +70,9 @@ impl<T> RespBackend for T where
 struct ServerState {
     ids: AtomicU64,
     clock: Arc<dyn Clock>,
+    /// This node's advertised cluster identity (for the CLUSTER bootstrap replies). Single-node today: it
+    /// advertises owning all slots (BQ-30); the multi-node slot→owner view + `-MOVED` is BQ-31.
+    node: cluster::ClusterNode,
 }
 
 impl ServerState {
@@ -127,6 +133,7 @@ fn parse_shard(key: &[u8]) -> Result<QueueKey, EngineError> {
 // RESP encoding
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Resp {
     Simple(String),
     Error(String),
@@ -240,9 +247,24 @@ pub async fn serve_with_shutdown<B: RespBackend>(
     clock: Arc<dyn Clock>,
     cancel: CancellationToken,
 ) {
+    // Derive this node's advertised cluster identity from the bound address. An unspecified bind host
+    // (0.0.0.0/::) is not connectable, so advertise loopback for a stock client connecting locally.
+    let node = match listener.local_addr() {
+        Ok(addr) => {
+            let ip = addr.ip();
+            let host = if ip.is_unspecified() {
+                "127.0.0.1".to_string()
+            } else {
+                ip.to_string()
+            };
+            cluster::ClusterNode::new(host, addr.port())
+        }
+        Err(_) => cluster::ClusterNode::new("127.0.0.1", 0),
+    };
     let state = Arc::new(ServerState {
         ids: AtomicU64::new(1),
         clock,
+        node,
     });
     // The JoinSet OWNS the handler tasks (unlike a TaskTracker, which only observes them): dropping it
     // aborts every task, which is what makes the caller-bounded drain a hard bound.
@@ -339,6 +361,7 @@ async fn dispatch<B: RespBackend>(
         // created and HELLO returns +OK (not a RESP3 map). Enough for a stock client to connect.
         "CLIENT" | "HELLO" => Resp::Simple("OK".into()),
         "COMMAND" => Resp::Array(vec![]),
+        "CLUSTER" => cluster_cmd(state, args),
         "XGROUP" => Resp::Simple("OK".into()),
         "XADD" => xadd(backend, state, args).await,
         "XREADGROUP" => xreadgroup(backend, state, args).await,
@@ -353,6 +376,28 @@ async fn dispatch<B: RespBackend>(
         "PQ.HGETALL" => pq_hgetall(backend, args).await,
         "PQ.HMGET" => pq_hmget(backend, args).await,
         other => Resp::Error(format!("ERR unknown command '{other}'")),
+    }
+}
+
+/// `CLUSTER <subcommand>` — the bootstrap surface (TD-006 §1A) so a stock cluster-aware client discovers
+/// the topology and computes slots identically. SINGLE-NODE today: this node advertises owning all 16384
+/// slots; `KEYSLOT` computes the Redis slot of a key. The multi-node slot→owner view + per-queue `-MOVED`
+/// redirect to the recorded `active_owner` are BQ-31 / the server-runtime follow-up.
+fn cluster_cmd(state: &Arc<ServerState>, args: &[Vec<u8>]) -> Resp {
+    let Some(sub) = args.get(1) else {
+        return Resp::Error("ERR wrong number of arguments for 'cluster'".into());
+    };
+    match String::from_utf8_lossy(sub).to_ascii_uppercase().as_str() {
+        "SLOTS" => cluster::cluster_slots_single_node(&state.node),
+        "SHARDS" => cluster::cluster_shards_single_node(&state.node),
+        "NODES" => cluster::cluster_nodes_single_node(&state.node),
+        "INFO" => cluster::cluster_info_single_node(),
+        "MYID" => Resp::Bulk(state.node.id.clone().into_bytes()),
+        "KEYSLOT" => match args.get(2) {
+            Some(key) => Resp::Int(cluster::hash_slot(key) as i64),
+            None => Resp::Error("ERR wrong number of arguments for 'cluster|keyslot'".into()),
+        },
+        other => Resp::Error(format!("ERR unknown CLUSTER subcommand '{other}'")),
     }
 }
 

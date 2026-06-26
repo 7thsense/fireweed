@@ -1322,3 +1322,107 @@ async fn upsert_and_claim_race_stays_consistent() {
         "exactly one live entry survives the upsert↔claim race"
     );
 }
+
+/// BQ-30 — a stock redis client bootstraps the cluster surface over the real RESP wire: `CLUSTER KEYSLOT`
+/// returns the SAME slot the client itself would compute (the canonical Redis values), and `CLUSTER SLOTS`
+/// advertises this single node owning the whole 0..=16383 slot space so a cluster-aware client can route.
+#[tokio::test]
+async fn cluster_bootstrap_over_the_wire() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let (mut con, addr) = serve_backend(backend, Arc::new(SystemClock)).await;
+
+    // CLUSTER KEYSLOT matches Redis's own slot computation (so a stock cluster client agrees with us).
+    let foo: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg("foo")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(foo, 12182, "CLUSTER KEYSLOT foo must match the Redis value");
+    // The hash-tag rule is honored on the wire: {user1000}.x co-locates with user1000.
+    let tagged: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg("{user1000}.following")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let plain: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg("user1000")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(tagged, plain, "hash-tag {{user1000}} routes by its content");
+
+    // CLUSTER MYID is a 40-hex node id.
+    let myid: String = redis::cmd("CLUSTER")
+        .arg("MYID")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(myid.len(), 40);
+    assert!(myid.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // CLUSTER SLOTS: one range [0, 16383, [host, port, id]] — the full space owned by this node.
+    let slots: Value = redis::cmd("CLUSTER")
+        .arg("SLOTS")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let Value::Array(ranges) = slots else {
+        panic!("CLUSTER SLOTS must be an array, got {slots:?}");
+    };
+    assert_eq!(ranges.len(), 1, "single-node: exactly one slot range");
+    let Value::Array(r) = &ranges[0] else {
+        panic!("slot range must be an array");
+    };
+    assert_eq!(r[0], Value::Int(0));
+    assert_eq!(r[1], Value::Int(16383), "covers the full slot space");
+    let Value::Array(ep) = &r[2] else {
+        panic!("endpoint must be an array");
+    };
+    assert_eq!(
+        ep[1],
+        Value::Int(addr.port() as i64),
+        "advertises this node's bound port"
+    );
+    // The endpoint's node id matches MYID.
+    let Value::BulkString(id_bytes) = &ep[2] else {
+        panic!("node id must be a bulk string");
+    };
+    assert_eq!(String::from_utf8_lossy(id_bytes), myid);
+}
+
+/// BQ-30 — a REAL stock redis CLUSTER client bootstraps against the single pqueue node: `ClusterClient`
+/// reads `CLUSTER SLOTS`, builds its routing table, and routes a command by computed slot to this node.
+/// This is the definitive "a stock redis-cluster client bootstraps" evidence (the plain-client test above
+/// proves the reply shapes + slot constants).
+#[tokio::test]
+async fn real_cluster_client_bootstraps_and_routes() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(serve(listener, backend, Arc::new(SystemClock)));
+
+    // Build a cluster-aware client seeded with the single node; getting a connection triggers the bootstrap
+    // handshake (CLUSTER SLOTS → routing table).
+    let client = redis::cluster::ClusterClient::new(vec![format!("redis://{addr}")]).unwrap();
+    let mut con = client
+        .get_async_connection()
+        .await
+        .expect("cluster bootstrap");
+
+    // Route a real command by slot: CLUSTER KEYSLOT goes to the node owning that slot (the only node).
+    let slot: i64 = redis::cmd("CLUSTER")
+        .arg("KEYSLOT")
+        .arg("foo")
+        .query_async(&mut con)
+        .await
+        .expect("routed command");
+    assert_eq!(
+        slot, 12182,
+        "the bootstrapped cluster client routed to us and got the right slot"
+    );
+}

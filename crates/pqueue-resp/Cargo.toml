@@ -22,5 +22,5 @@ tokio-util = { version = "0.7" }
 [dev-dependencies]
 pqueue-memory = { path = "../pqueue-memory" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
-redis = { version = "1", features = ["tokio-comp"] }
+redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
