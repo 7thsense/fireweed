@@ -20,6 +20,8 @@ postgres = "0.19"
 serde = "1"
 serde_json = "1"
 bytes = "1"
+# Lease-token hashing for the relational projection (hash-only at rest; parity with pqueue-sqlite).
+sha2 = "0.11"
 
 [dev-dependencies]
 # A NON-tokio executor drives these tests: the sync `postgres` client runs its own internal tokio runtime
@@ -37,3 +39,8 @@ path = "tests/conformance.rs"
 [[test]]
 name = "durability"
 path = "tests/durability.rs"
+
+# BQ-12: the postgres RELATIONAL backend's core + relational-reconnect class (env-gated on PQUEUE_PG_TEST_URL).
+[[test]]
+name = "relational_conformance"
+path = "tests/relational_conformance.rs"

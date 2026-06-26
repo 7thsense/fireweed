@@ -152,7 +152,7 @@ review → commit → `ddx bead close`.
 
 ## 4. Progress
 - [x] BQ-01 (P0, atomic; folds in the old BQ-02/03)
-- [x] BQ-10 · [x] BQ-11a · [x] BQ-11b · [x] BQ-11c · [x] BQ-11d · [ ] BQ-12 · [ ] BQ-13 · [ ] BQ-14 · [ ] BQ-11e (deferred: request-id idempotency, needs request_id port)   (P1)
+- [x] BQ-10 · [x] BQ-11a · [x] BQ-11b · [x] BQ-11c · [x] BQ-11d · [x] BQ-12 (built; live-DB + contended-writer deferred, no PQUEUE_PG_TEST_URL) · [ ] BQ-13 · [ ] BQ-14 · [ ] BQ-11e (deferred: request-id idempotency, needs request_id port)   (P1)
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
 - [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
 - [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)

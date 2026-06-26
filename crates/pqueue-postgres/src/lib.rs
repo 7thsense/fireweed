@@ -64,6 +64,9 @@ use pqueue_engine::{
 };
 use pqueue_projection::ProjectionData;
 
+mod relational;
+pub use relational::PostgresRelationalBackend;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
