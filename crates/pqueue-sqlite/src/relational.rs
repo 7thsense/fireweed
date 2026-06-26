@@ -55,6 +55,7 @@ use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityModel, PriorityValue,
     QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
+use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
     CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
@@ -63,7 +64,7 @@ use pqueue_engine::{
     PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
     QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
     RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport, UpsertOutcome,
-    UpsertPort, build_push_items, require_item_level_claim, validate_purge_force,
+    UpsertPort, build_push_items, validate_claim_compatibility, validate_purge_force,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -859,6 +860,124 @@ fn select_eligible_sql(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// BQ-14b: group-aware claim selection (group_batching / same_group_key), owner-local, consuming
+// `pqueue_group_summary`. The queue has one owner, so every group is owner-local (ADR-008); the sqlite
+// relational backend serializes the whole claim under `Mutex<Inner>`, so two claims cannot split a group
+// (the postgres backend takes a real `FOR UPDATE SKIP LOCKED` group-summary lock for the same guarantee).
+// ---------------------------------------------------------------------------
+
+/// Candidate groups for the queue, ordered by each group's representative claim key (TD-002 g1:
+/// `rep_progress_guard_sort` NULL today → `rep_priority_sort, rep_created_at, rep_item_id`). Only groups
+/// with a current representative (`oldest_eligible_at IS NOT NULL`) are candidates; the live eligibility is
+/// re-read per group at claim time (the summary is the ordering hint; the items are the authority).
+/// KNOWN LIMITATION (tracked, pqueue-64351bdd): `oldest_eligible_at` is the BQ-11c mutation-time value
+/// (lagged across a `not_before` crossing), so a group made eligible ONLY by time passing — with no
+/// subsequent mutation — is not discovered by a group claim until its next mutation. Item-level claims read
+/// `pqueue_items` live and are unaffected.
+fn candidate_groups(conn: &Connection, shard: &QueueKey) -> EngineResult<Vec<GroupKey>> {
+    let (t, q) = parts(shard);
+    let mut stmt = st(conn.prepare(
+        "SELECT group_key FROM pqueue_group_summary \
+         WHERE tenant_id=?1 AND queue_id=?2 AND oldest_eligible_at IS NOT NULL \
+         ORDER BY rep_priority_sort, rep_created_at, rep_item_id",
+    ))?;
+    let mapped = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
+    let mut out = Vec::new();
+    for r in mapped {
+        out.push(GroupKey::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+/// The live currently-eligible items of one group (pending, not superseded, due at `now`), in claim order,
+/// capped at `limit`.
+fn group_eligible_items(
+    conn: &Connection,
+    shard: &QueueKey,
+    group: &GroupKey,
+    now: UtcTimestamp,
+    limit: usize,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let mut stmt = st(conn.prepare(
+        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+         AND lifecycle_state='Pending' AND superseded=0 \
+         AND (not_before IS NULL OR not_before<=?4) AND eligible_since IS NOT NULL \
+         ORDER BY priority_sort, created_seq LIMIT ?5",
+    ))?;
+    let mapped = st(stmt.query_map(
+        params![t, q, group.as_str(), ts_nanos(now), limit as i64],
+        |row| row.get::<_, String>(0),
+    ))?;
+    let mut out = Vec::new();
+    for r in mapped {
+        out.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+/// `group_batching` selection (API-001 whole-eligible-group, `max_groups=N`): accumulate the oldest-N
+/// candidate groups' WHOLE eligible sets, in rep order, stopping when adding the next group would exceed
+/// `max_items`. A group is fetched with one extra item (`max_items+1`) so an oversized group is detected:
+/// a single group that alone exceeds `max_items` cannot be delivered whole → `BatchTooLarge` (TD-002:711;
+/// `max_eligible_group_size` is only a config knob, NOT a hard cap on actual group size, so this guard is
+/// load-bearing). Empty groups (no live-eligible item) are skipped. Paused → empty.
+fn select_group_batching(
+    conn: &Connection,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max_items: usize,
+    max_groups: u32,
+) -> EngineResult<Vec<ItemId>> {
+    if queue_paused(conn, shard)? {
+        return Ok(Vec::new()); // a paused queue claims nothing (parity with item-level select_eligible)
+    }
+    let mut acc = Vec::new();
+    let mut used = 0u32;
+    for group in candidate_groups(conn, shard)? {
+        if used >= max_groups {
+            break;
+        }
+        // Fetch max_items+1 to distinguish "group of exactly max_items" from "group larger than max_items".
+        let elig = group_eligible_items(conn, shard, &group, now, max_items + 1)?;
+        if elig.is_empty() {
+            continue; // discard a group with no live-eligible item
+        }
+        if elig.len() > max_items {
+            // This single whole group alone exceeds the batch ceiling — a whole-group claim cannot deliver
+            // it. Roll back, lease nothing (TD-002 batch-too-large).
+            return Err(EngineError::BatchTooLarge);
+        }
+        if acc.len() + elig.len() > max_items {
+            break; // adding this whole group would exceed the ceiling — stop, keep the whole groups that fit
+        }
+        acc.extend(elig);
+        used += 1;
+    }
+    Ok(acc)
+}
+
+/// `same_group_key` selection (API-001): the server picks the single oldest eligible group and leases its
+/// eligible items capped at `max_items` (a partial group is allowed — no batch-too-large). Paused → empty.
+fn select_same_group(
+    conn: &Connection,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max_items: usize,
+) -> EngineResult<Vec<ItemId>> {
+    if queue_paused(conn, shard)? {
+        return Ok(Vec::new());
+    }
+    for group in candidate_groups(conn, shard)? {
+        let elig = group_eligible_items(conn, shard, &group, now, max_items)?;
+        if !elig.is_empty() {
+            return Ok(elig);
+        }
+    }
+    Ok(Vec::new())
+}
+
 /// Non-destructive eligible view (every pending non-superseded item in priority order; ignores
 /// `not_before`/pause exactly like the in-memory `peek`).
 fn peek_sql(conn: &Connection, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
@@ -1377,11 +1496,18 @@ impl ClaimPort for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            // BQ-14a: gate non-item compatibility (group/cohort selection lands in BQ-14b/c); the
-            // item-level CTE path below is unchanged.
-            if req.compatibility != ClaimCompatibility::default() {
+            // BQ-14a/b: resolve the claim unit from the compatibility options. Item-level (the default) is
+            // byte-identical; WholeGroup / SameGroupKey select group-aware from `pqueue_group_summary`;
+            // WholeCohort is gated to `Unavailable` until BQ-14c. An invalid combo propagates the
+            // structured validation error.
+            let unit = if req.compatibility != ClaimCompatibility::default() {
                 let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
-                require_item_level_claim(&req.compatibility, req.max_items as u64, def)?;
+                validate_claim_compatibility(&req.compatibility, req.max_items as u64, def)?
+            } else {
+                ClaimUnit::Item
+            };
+            if matches!(unit, ClaimUnit::WholeCohort) {
+                return Err(EngineError::Unavailable); // whole_cohort selection lands in BQ-14c
             }
             let Inner {
                 conn,
@@ -1391,8 +1517,24 @@ impl ClaimPort for SqliteRelationalBackend {
             } = &mut *g;
             let (t, q) = parts(&req.shard);
             let tx = st(conn.transaction())?;
-            // Candidate selection inside the claim transaction (the CTE's locked candidate set).
-            let candidates = select_eligible_sql(&tx, &req.shard, req.now, req.max_items)?;
+            // Candidate selection inside the claim transaction (serialized under the backend Mutex). The
+            // item-level path is the strict-claim order; the group paths consume the group summary.
+            let candidates = match unit {
+                ClaimUnit::Item => select_eligible_sql(&tx, &req.shard, req.now, req.max_items)?,
+                ClaimUnit::WholeGroup => {
+                    let max_groups = req
+                        .compatibility
+                        .group_batching
+                        .as_ref()
+                        .map(|gb| gb.max_groups)
+                        .unwrap_or(0);
+                    select_group_batching(&tx, &req.shard, req.now, req.max_items, max_groups)?
+                }
+                ClaimUnit::SameGroupKey => {
+                    select_same_group(&tx, &req.shard, req.now, req.max_items)?
+                }
+                ClaimUnit::WholeCohort => unreachable!("whole_cohort gated to Unavailable above"),
+            };
             if candidates.is_empty() {
                 return Ok(Claimed::default()); // tx dropped (rolled back) — nothing leased
             }

@@ -55,14 +55,14 @@ use pqueue_core::{
     QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
-    Backend, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandEnvelope,
-    CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
-    EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView,
-    LeaseExpiredCommand, LeaseView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
-    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items,
-    require_item_level_claim, validate_purge_force,
+    Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit, Claimed,
+    ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogWriter, ProjectionRead,
+    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
+    QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport, UpsertOutcome,
+    UpsertPort, build_push_items, validate_claim_compatibility, validate_purge_force,
 };
 use sha2::{Digest, Sha256};
 
@@ -799,6 +799,115 @@ fn select_eligible_sql(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// BQ-14b: group-aware claim selection (group_batching / same_group_key), owner-local, consuming
+// `pqueue_group_summary`. The candidate groups are locked with `FOR UPDATE SKIP LOCKED` on their summary
+// rows — TD-002's per-group lock that guarantees two concurrent claims never split a group (the real
+// row-lock the sqlite backend approximates with its process Mutex). Runs inside the claim transaction.
+// ---------------------------------------------------------------------------
+
+/// Candidate groups for the queue, ordered by representative claim key (`rep_priority_sort,
+/// rep_created_at, rep_item_id`; `rep_progress_guard_sort` deferred/NULL), LOCKED with `FOR UPDATE SKIP
+/// LOCKED` so a group held by a concurrent claim is skipped (contended), not split. Same lagged-summary
+/// caveat as the sqlite backend (BQ-11c: a `not_before` crossing without a mutation is not yet reflected).
+fn candidate_groups(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+) -> EngineResult<Vec<GroupKey>> {
+    let (t, q) = parts(shard);
+    let rows = st(tx.query(
+        "SELECT group_key FROM pqueue_group_summary \
+         WHERE tenant_id=$1 AND queue_id=$2 AND oldest_eligible_at IS NOT NULL \
+         ORDER BY rep_priority_sort, rep_created_at, rep_item_id \
+         FOR UPDATE SKIP LOCKED",
+        &[&t, &q],
+    ))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let g: String = row.get(0);
+        out.push(GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+/// The live currently-eligible items of one group (re-read under the live predicate, FOR UPDATE so the
+/// whole locked group leases together — no SKIP LOCKED inside a locked group), capped at `limit`.
+fn group_eligible_items(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    group: &GroupKey,
+    now: UtcTimestamp,
+    limit: usize,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let lim = limit as i64;
+    let rows = st(tx.query(
+        "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
+         AND lifecycle_state='Pending' AND superseded=false \
+         AND (not_before IS NULL OR not_before<=$4) AND eligible_since IS NOT NULL \
+         ORDER BY priority_sort, created_seq LIMIT $5 FOR UPDATE",
+        &[&t, &q, &group.as_str(), &now_n, &lim],
+    ))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.get(0);
+        out.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+/// `group_batching` selection (API-001 whole-eligible-group, `max_groups=N`): accumulate the oldest-N
+/// candidate groups' whole eligible sets in rep order, stopping when adding the next would exceed
+/// `max_items`. Fetches `max_items+1` per group so an oversized group (alone > `max_items`) is detected →
+/// `BatchTooLarge` (TD-002:711; `max_eligible_group_size` is a config knob, not a hard size cap). Pause is
+/// gated in `claim` before this is reached.
+fn select_group_batching(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max_items: usize,
+    max_groups: u32,
+) -> EngineResult<Vec<ItemId>> {
+    let groups = candidate_groups(tx, shard)?;
+    let mut acc = Vec::new();
+    let mut used = 0u32;
+    for group in groups {
+        if used >= max_groups {
+            break;
+        }
+        let elig = group_eligible_items(tx, shard, &group, now, max_items + 1)?;
+        if elig.is_empty() {
+            continue;
+        }
+        if elig.len() > max_items {
+            return Err(EngineError::BatchTooLarge); // a single group alone exceeds the ceiling
+        }
+        if acc.len() + elig.len() > max_items {
+            break;
+        }
+        acc.extend(elig);
+        used += 1;
+    }
+    Ok(acc)
+}
+
+/// `same_group_key` selection: the single oldest eligible group, capped at `max_items` (partial allowed).
+fn select_same_group(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    max_items: usize,
+) -> EngineResult<Vec<ItemId>> {
+    for group in candidate_groups(tx, shard)? {
+        let elig = group_eligible_items(tx, shard, &group, now, max_items)?;
+        if !elig.is_empty() {
+            return Ok(elig);
+        }
+    }
+    Ok(Vec::new())
+}
+
 fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
     let (t, q) = parts(shard);
     let lim = limit as i64;
@@ -1328,18 +1437,24 @@ impl ClaimPort for PostgresRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            // BQ-14a: gate non-item compatibility (group/cohort selection lands in BQ-14b/c); the
-            // item-level CTE path is unchanged.
-            if req.compatibility != ClaimCompatibility::default() {
+            // BQ-14a/b: resolve the claim unit. Item-level (default) keeps the CTE path; WholeGroup /
+            // SameGroupKey select group-aware from pqueue_group_summary; WholeCohort → Unavailable (BQ-14c).
+            let unit = if req.compatibility != ClaimCompatibility::default() {
                 let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
-                require_item_level_claim(&req.compatibility, req.max_items as u64, def)?;
+                validate_claim_compatibility(&req.compatibility, req.max_items as u64, def)?
+            } else {
+                ClaimUnit::Item
+            };
+            if matches!(unit, ClaimUnit::WholeCohort) {
+                return Err(EngineError::Unavailable); // whole_cohort selection lands in BQ-14c
             }
-            // Paused queues yield nothing (the CTE itself does not encode pause).
+            // Paused queues yield nothing (neither the CTE nor the group selection encodes pause).
             if queue_paused(&mut g.client, &req.shard)? {
                 return Ok(Claimed::default());
             }
             let Inner {
                 client,
+                queues,
                 live_tokens,
                 ..
             } = &mut *g;
@@ -1349,48 +1464,92 @@ impl ClaimPort for PostgresRelationalBackend {
             let now_n = ts_nanos(req.now);
             let exp = ts_nanos(req.lease_expires_at);
             let hash = lease_hash(&req.lease_token);
-            let lim = req.max_items as i64;
             let seqi = seq as i64;
-            let rows = st(tx.query(
-                CLAIM_CTE,
-                &[&t, &q, &now_n, &lim, &hash, &exp, &now_n, &seqi],
-            ))?;
-            if rows.is_empty() {
-                // Nothing eligible: roll back (drop tx) so the allocated sequence is NOT burned — parity
-                // with the sqlite reference's early return (no `last_command_sequence` gap on an empty claim).
-                return Ok(Claimed::default());
+
+            if matches!(unit, ClaimUnit::Item) {
+                // Item-level: the serialized FOR UPDATE SKIP LOCKED CTE (select + lease + RETURNING).
+                let lim = req.max_items as i64;
+                let rows = st(tx.query(
+                    CLAIM_CTE,
+                    &[&t, &q, &now_n, &lim, &hash, &exp, &now_n, &seqi],
+                ))?;
+                if rows.is_empty() {
+                    return Ok(Claimed::default()); // roll back — no sequence burned (sqlite parity)
+                }
+                let mut items = Vec::with_capacity(rows.len());
+                let mut token_ops = Vec::new();
+                let mut claimed_ids = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let id: String = row.get(0);
+                    let item_id =
+                        ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+                    let exp_row: Option<i64> = row.get(6);
+                    let exp_row = exp_row.unwrap_or(exp);
+                    items.push(claimed_from_row(
+                        item_id.clone(),
+                        req.lease_token.clone(),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get(4),
+                        row.get(5),
+                        exp_row,
+                        row.get(7),
+                        row.get(8),
+                    )?);
+                    token_ops.push(TokenOp::Set(item_id.clone(), req.lease_token.clone()));
+                    claimed_ids.push(item_id);
+                }
+                // The CTE bypasses apply_command_sql's Claim arm, so refresh the claimed groups here.
+                for grp in groups_of(&mut tx, &req.shard, &claimed_ids)? {
+                    refresh_group_summary(&mut tx, &req.shard, &grp, req.now)?;
+                }
+                st(tx.commit())?;
+                apply_token_ops(live_tokens, token_ops);
+                return Ok(Claimed { items });
             }
-            let mut items = Vec::with_capacity(rows.len());
+
+            // Group-aware: gather the candidate items under the per-group FOR UPDATE SKIP LOCKED lock, then
+            // lease them via apply_command_sql's Claim arm (which UPDATEs + refreshes the affected groups).
+            let candidates = match unit {
+                ClaimUnit::WholeGroup => {
+                    let max_groups = req
+                        .compatibility
+                        .group_batching
+                        .as_ref()
+                        .map(|gb| gb.max_groups)
+                        .unwrap_or(0);
+                    select_group_batching(&mut tx, &req.shard, req.now, req.max_items, max_groups)?
+                }
+                ClaimUnit::SameGroupKey => {
+                    select_same_group(&mut tx, &req.shard, req.now, req.max_items)?
+                }
+                _ => unreachable!("Item handled above; WholeCohort gated to Unavailable"),
+            };
+            if candidates.is_empty() {
+                return Ok(Claimed::default()); // roll back — no sequence burned
+            }
             let mut token_ops = Vec::new();
-            let mut claimed_ids = Vec::with_capacity(rows.len());
-            for row in rows {
-                let id: String = row.get(0);
-                let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
-                let exp_row: Option<i64> = row.get(6);
-                let exp_row = exp_row.unwrap_or(exp);
-                items.push(claimed_from_row(
-                    item_id.clone(),
-                    req.lease_token.clone(),
-                    row.get(1),
-                    row.get(2),
-                    row.get(3),
-                    row.get(4),
-                    row.get(5),
-                    exp_row,
-                    row.get(7),
-                    row.get(8),
-                )?);
-                token_ops.push(TokenOp::Set(item_id.clone(), req.lease_token.clone()));
-                claimed_ids.push(item_id);
-            }
-            // The CTE bypasses `apply_command_sql`'s Claim arm, so refresh the claimed items' group
-            // summaries HERE, in the same transaction — otherwise a leased item would stay stale-counted in
-            // `pqueue_group_summary` (parity with the sqlite reference, whose claim refreshes on the arm).
-            for grp in groups_of(&mut tx, &req.shard, &claimed_ids)? {
-                refresh_group_summary(&mut tx, &req.shard, &grp, req.now)?;
-            }
+            apply_command_sql(
+                &mut tx,
+                queues,
+                &mut token_ops,
+                &req.shard,
+                seq,
+                req.now,
+                &QueueCommand::Claim(ClaimCommand {
+                    item_ids: candidates.clone(),
+                    lease_token: req.lease_token.clone(),
+                    lease_expires_at: req.lease_expires_at,
+                }),
+            )?;
             st(tx.commit())?;
-            apply_token_ops(live_tokens, token_ops);
+            apply_token_ops(live_tokens, token_ops); // tokens live only after the durable commit
+            // Render from the now-committed leased rows (the tx released the client on commit); the live
+            // tokens we just applied resolve each id's token.
+            let items = render_claimed(client, &req.shard, &candidates, |id| {
+                live_tokens.get(id).cloned()
+            })?;
             Ok(Claimed { items })
         })();
         std::future::ready(result)
@@ -1791,6 +1950,61 @@ mod gated_group_summary_tests {
             group_count(&b),
             1,
             "claim must refresh pqueue_group_summary (leased item leaves the eligible count)"
+        );
+    }
+
+    /// BQ-14b: group_batching leases whole groups oldest-first (env-gated; LOUD-skips without a DB).
+    #[test]
+    fn group_batching_leases_whole_groups() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (group_batching_leases_whole_groups) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_gb_{}", std::process::id());
+        let mut c = Client::connect(&url, NoTls).expect("connect");
+        c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(c);
+
+        let def = QueueDefinition {
+            max_eligible_group_size: Some(5),
+            ..qdef()
+        };
+        let g2 = |priority: i64, group: &str| PushSpec {
+            priority: Some(PriorityValue::Int64(priority)),
+            group_key: Some(GroupKey::new(group).unwrap()),
+            ..Default::default()
+        };
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
+        block_on(b.create_queue(def)).unwrap();
+        block_on(b.push(
+            &shard(),
+            vec![
+                g2(11, "g1"),
+                g2(10, "g1"),
+                g2(21, "g2"),
+                g2(20, "g2"),
+                g2(30, "g3"),
+            ],
+            ts(0),
+        ))
+        .unwrap();
+        // group_batching max_groups=2 → the two oldest groups (g1, g2) leased whole (4 items); g3 stays.
+        let req = ClaimRequest {
+            compatibility: ClaimCompatibility {
+                group_batching: Some(pqueue_engine::GroupBatching { max_groups: 2 }),
+                ..Default::default()
+            },
+            ..claim_req(10, 500, 100)
+        };
+        let claimed = block_on(b.claim(req)).unwrap();
+        assert_eq!(claimed.items.len(), 4, "g1 + g2 leased whole");
+        assert_eq!(
+            block_on(b.metrics(&shard())).unwrap().pending,
+            1,
+            "g3 (1 item) untouched"
         );
     }
 }

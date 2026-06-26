@@ -13,14 +13,53 @@
 
 use bytes::Bytes;
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
-use pqueue_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, UtcTimestamp};
+use pqueue_core::{
+    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, UtcTimestamp,
+    WorkerId,
+};
 use pqueue_engine::{
-    ClaimPort, CohortExpiredCommand, ControlPlaneStore, FenceLeaseCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, ProjectionRead, PurgePort, PushCommand, PushItem, PushPort,
-    PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, UnfenceLeaseCommand,
-    UpsertOutcome, UpsertPort,
+    ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand, ControlPlaneStore,
+    FenceLeaseCommand, FinalizeKind, FinalizeOutcome, FinalizePort, GroupBatching, ProjectionRead,
+    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, ReassignLeasePort,
+    ReclaimDriver, RenewLeasePort, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
+
+/// A queue definition with a group-size bound (so `group_batching` validates) — clones the conformance
+/// default and sets `max_eligible_group_size`.
+fn qdef_groups(max_group_size: u64) -> QueueDefinition {
+    QueueDefinition {
+        max_eligible_group_size: Some(max_group_size),
+        ..qdef()
+    }
+}
+
+/// A grouped push spec (priority + group_key).
+fn gspec(priority: i64, group: &str) -> PushSpec {
+    PushSpec {
+        priority: Some(PriorityValue::Int64(priority)),
+        group_key: Some(GroupKey::new(group).unwrap()),
+        ..Default::default()
+    }
+}
+
+/// A claim request carrying compatibility options (group_batching / same_group_key).
+fn claim_req_compat(
+    max: usize,
+    exp: i64,
+    now: i64,
+    compatibility: ClaimCompatibility,
+) -> ClaimRequest {
+    ClaimRequest {
+        shard: shard(),
+        worker_id: WorkerId::new("w1").unwrap(),
+        max_items: max,
+        lease_token: LeaseToken::new("lease-1").unwrap(),
+        lease_expires_at: ts(exp),
+        now: ts(now),
+        compatibility,
+    }
+}
 
 fn make() -> SqliteRelationalBackend {
     SqliteRelationalBackend::in_memory().expect("open in-memory relational backend")
@@ -672,4 +711,247 @@ async fn released_item_keeps_its_fifo_slot() {
         after, order,
         "released item keeps its original FIFO position"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4. BQ-14b group-aware claim selection (RELATIONAL-class — the in-memory family lacks group_summary,
+//    so these are NOT in the shared core suite).
+// ---------------------------------------------------------------------------
+
+/// `group_batching` leases the oldest-N candidate groups' WHOLE eligible sets, ordered by each group's
+/// representative claim key, and skips the rest.
+#[tokio::test]
+async fn group_batching_leases_whole_groups_oldest_first() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    // g1 rep=10, g2 rep=20, g3 rep=30 (rep = each group's first-claimable item).
+    let ids = b
+        .push(
+            &shard(),
+            vec![
+                gspec(11, "g1"),
+                gspec(10, "g1"),
+                gspec(21, "g2"),
+                gspec(20, "g2"),
+                gspec(30, "g3"),
+            ],
+            ts(0),
+        )
+        .await
+        .unwrap();
+
+    // group_batching, max_groups=2 → the two oldest groups (g1, g2) leased WHOLE; g3 untouched.
+    let compat = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        ..Default::default()
+    };
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, compat))
+        .await
+        .unwrap();
+    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    leased.sort();
+    // g1 = ids[0],ids[1]; g2 = ids[2],ids[3]; g3 = ids[4].
+    let mut expect: Vec<&str> = vec![
+        ids[0].as_str(),
+        ids[1].as_str(),
+        ids[2].as_str(),
+        ids[3].as_str(),
+    ];
+    expect.sort();
+    assert_eq!(leased, expect, "g1 + g2 leased whole; g3 not leased");
+    // g3's item remains pending + claimable item-level.
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+    let rest = b.claim(claim_req(10, 500, 100)).await.unwrap();
+    assert_eq!(rest.items.len(), 1);
+    assert_eq!(rest.items[0].item_id.as_str(), ids[4].as_str());
+}
+
+/// `same_group_key` leases ONLY the single oldest eligible group (capped at `max_items`, partial allowed).
+#[tokio::test]
+async fn same_group_key_leases_one_server_selected_group() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![gspec(10, "g1"), gspec(11, "g1"), gspec(20, "g2")],
+            ts(0),
+        )
+        .await
+        .unwrap();
+
+    let compat = ClaimCompatibility {
+        same_group_key: true,
+        ..Default::default()
+    };
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, compat))
+        .await
+        .unwrap();
+    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    leased.sort();
+    let mut expect = vec![ids[0].as_str(), ids[1].as_str()]; // g1 only (the oldest group)
+    expect.sort();
+    assert_eq!(leased, expect, "only the oldest group g1 is leased");
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 2);
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "g2 still pending"
+    );
+}
+
+/// `group_batching` stops accumulating before exceeding `max_items` (whole-group granularity).
+#[tokio::test]
+async fn group_batching_respects_the_max_items_ceiling() {
+    let b = make();
+    b.create_queue(qdef_groups(3)).await.unwrap(); // group size <= 3 <= max_items, so validation passes
+    let ids = b
+        .push(
+            &shard(),
+            vec![
+                gspec(10, "g1"),
+                gspec(11, "g1"),
+                gspec(20, "g2"),
+                gspec(21, "g2"),
+            ],
+            ts(0),
+        )
+        .await
+        .unwrap();
+
+    // max_groups large, but max_items=3: g1 (2) fits; adding g2 (2 more → 4 > 3) would exceed → stop.
+    let compat = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 5 }),
+        ..Default::default()
+    };
+    let claimed = b
+        .claim(claim_req_compat(3, 500, 100, compat))
+        .await
+        .unwrap();
+    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    leased.sort();
+    let mut expect = vec![ids[0].as_str(), ids[1].as_str()]; // only g1 (whole), g2 would overflow
+    expect.sort();
+    assert_eq!(
+        leased, expect,
+        "only the whole group that fits within max_items is leased"
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 2, "g2 untouched");
+}
+
+/// A `group_batching` request with no eligible groups leases nothing (and an invalid combo still rejects).
+#[tokio::test]
+async fn group_batching_empty_and_invalid() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    // No grouped items pushed → no candidate groups → empty claim.
+    let compat = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        ..Default::default()
+    };
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, compat))
+        .await
+        .unwrap();
+    assert!(
+        claimed.items.is_empty(),
+        "no eligible groups → nothing leased"
+    );
+
+    // Invalid combo is still rejected with the structured error.
+    let bad = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        whole_cohort: true,
+        ..Default::default()
+    };
+    assert!(
+        b.claim(claim_req_compat(10, 500, 100, bad)).await.is_err(),
+        "group_batching + whole_cohort is an invalid combination"
+    );
+}
+
+/// B1 (fresh-eyes): a paused queue yields nothing for a GROUP claim too (parity with item-level + postgres).
+#[tokio::test]
+async fn group_claim_yields_nothing_while_paused() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    b.push(&shard(), vec![gspec(10, "g1"), gspec(11, "g1")], ts(0))
+        .await
+        .unwrap();
+    commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
+
+    let compat = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        ..Default::default()
+    };
+    assert!(
+        b.claim(claim_req_compat(10, 500, 100, compat))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "paused queue → group_batching leases nothing"
+    );
+    let same = ClaimCompatibility {
+        same_group_key: true,
+        ..Default::default()
+    };
+    assert!(
+        b.claim(claim_req_compat(10, 500, 100, same))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "paused queue → same_group_key leases nothing"
+    );
+    // Resume → the group is claimable again.
+    commit(&b, envelope(QueueCommand::ResumeQueue, vec![])).await;
+    let compat = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        ..Default::default()
+    };
+    assert_eq!(
+        b.claim(claim_req_compat(10, 500, 100, compat))
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2,
+        "resumed → the whole group leases"
+    );
+}
+
+/// I1 (fresh-eyes): a single group whose live-eligible set alone exceeds `max_items` cannot be delivered
+/// whole → `BatchTooLarge`, leasing nothing (`max_eligible_group_size` is not a hard size cap, so a group
+/// can grow past it). Item state is unchanged.
+#[tokio::test]
+async fn group_batching_oversized_group_is_batch_too_large() {
+    let b = make();
+    // max_eligible_group_size=5 passes validation against max_items=4 (5 > 4 is the CLAIM bound, but here
+    // we claim with max_items=2 so the live group of 3 exceeds it). Push a group of 3 eligible items.
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    b.push(
+        &shard(),
+        vec![gspec(10, "g1"), gspec(11, "g1"), gspec(12, "g1")],
+        ts(0),
+    )
+    .await
+    .unwrap();
+
+    // group_batching with max_items=2: the single group g1 (3 eligible) alone exceeds → BatchTooLarge.
+    let compat = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        ..Default::default()
+    };
+    assert!(
+        matches!(
+            b.claim(claim_req_compat(2, 500, 100, compat)).await,
+            Err(pqueue_engine::EngineError::BatchTooLarge)
+        ),
+        "an oversized whole group → BatchTooLarge"
+    );
+    // Nothing leased — all 3 still pending.
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 3);
 }

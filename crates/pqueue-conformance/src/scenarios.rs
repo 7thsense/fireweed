@@ -1560,19 +1560,8 @@ pub async fn claim_compatibility_is_resolved_and_gated<B: ConformanceCore>(make:
     )
     .await;
 
-    // `same_group_key` resolves to a unit whose selection is not yet implemented → Unavailable; the gate
-    // rejects BEFORE any selection/commit, so nothing is leased.
-    let mut req = claim_req(1, 500, 10);
-    req.compatibility = ClaimCompatibility {
-        same_group_key: true,
-        ..Default::default()
-    };
-    assert!(
-        matches!(b.claim(req).await, Err(EngineError::Unavailable)),
-        "a not-yet-implemented claim unit is refused with Unavailable, not silently item-claimed"
-    );
-
-    // An invalid combination (group_batching + whole_cohort) → the structured validation error.
+    // An invalid combination (group_batching + whole_cohort) is rejected with the structured validation
+    // error on EVERY backend — family-agnostic (no def fields read, no projection family difference).
     let mut bad = claim_req(1, 500, 10);
     bad.compatibility = ClaimCompatibility {
         group_batching: Some(GroupBatching { max_groups: 2 }),
@@ -1584,11 +1573,18 @@ pub async fn claim_compatibility_is_resolved_and_gated<B: ConformanceCore>(make:
         "an invalid compatibility combination is rejected with the structured error"
     );
 
-    // The rejected-compat claims changed nothing — an item-level (default) claim still leases "a".
+    // The rejected claim changed nothing — an item-level (default) claim still leases "a", proving the
+    // compatibility gate rejects BEFORE any selection/commit (no partial state).
     let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
     assert_eq!(
         claimed.items.len(),
         1,
         "item-level claim is unchanged by the compatibility gate"
     );
+
+    // NOTE: the behavior of a VALID compatibility unit (same_group_key / group_batching / whole_cohort) is
+    // family-specific — the relational family implements group/cohort selection (BQ-14b/c), the in-memory
+    // family does not maintain `group_summary` and refuses with `Unavailable`. That is RELATIONAL-class,
+    // deliberately NOT asserted here (it would diverge across families); see the relational backends'
+    // own `group_batching_*` / `same_group_key_*` tests.
 }

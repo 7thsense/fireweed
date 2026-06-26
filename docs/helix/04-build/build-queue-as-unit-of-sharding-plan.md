@@ -164,7 +164,7 @@ review → commit → `ddx bead close`.
 >  - **BQ-14a** ✅ (pqueue-54b27fdd) — `ClaimRequest` carries `ClaimCompatibility` through `ClaimPort` + all 5
 >    backends + facade; engine resolves `ClaimUnit` via the existing `validate_claim_compatibility`;
 >    item-level claim unchanged at parity. *(foundational; everything claim-related depends on it)*
->  - **BQ-14b** (pqueue-b3276967) — relational `group_batching` + `same_group_key` selection via
+>  - **BQ-14b** ✅ (pqueue-b3276967) — relational `group_batching` + `same_group_key` selection via
 >    `pqueue_group_summary`. *(dep 14a)*
 >  - **BQ-14c** (pqueue-12eef939) — `pqueue_cohorts` projection + `whole_cohort` all-or-nothing claim. *(dep 14a)*
 >  - **BQ-14d** (pqueue-3c64d86e) — gates port + gate projection state + exact-on-read anti-join.
