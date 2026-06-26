@@ -12,6 +12,7 @@
 //!   - AC-E2E-1 scheduled-action delivery (`scheduled_action_delivery_e2e`).
 //!   - AC-E2E-4 jobs/connectors recurring singleton (`jobs_connectors_recurring_e2e`).
 //!   - AC-E2E-2 Marketo group-cardinality batching (`marketo_group_batching_e2e`).
+//!   - AC-E2E-3 callback cohort execution (`callback_cohort_e2e`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,8 +20,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pqueue::{ClaimCompatibility, EngineError, GroupBatching, Nack, NewItem, Pqueue};
 use pqueue_core::{
-    EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
+    CohortPolicy, EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
@@ -974,6 +975,184 @@ async fn marketo_group_batching_e2e() {
             ),
             (
                 "well_formed_whole_group".into(),
+                serde_json::json!(format!("{well_formed:?}")),
+            ),
+        ]),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-E2E-3 — callback cohort execution
+// ---------------------------------------------------------------------------
+
+/// A cohort-enabled queue definition (cohort_policy with the given enable flag + completion_bound_ms). NOTE:
+/// this is a CLAIM-VALIDATION fixture — it sets only the fields `validate_claim_compatibility` inspects
+/// (`enabled`/`completion_bound_ms`); the fuller create-path cohort validator (which also requires
+/// on_incomplete + max_cohort_size) is not exercised here (whole-cohort selection is deferred to BQ-14c).
+fn cohort_qdef(
+    tenant: &str,
+    queue: &str,
+    enabled: bool,
+    completion_bound_ms: Option<u64>,
+) -> QueueDefinition {
+    let mut d = qdef(
+        tenant,
+        queue,
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    d.cohort_policy = Some(CohortPolicy {
+        enabled,
+        completion_bound_ms,
+        on_incomplete: None,
+        max_cohort_size: None,
+    });
+    d
+}
+
+/// AC-E2E-3 (TP-003): model `actions_scheduled` callback batches on a cohort-enabled queue. The whole-cohort
+/// SELECTION (claim/finalize complete cohorts atomically; incomplete cohorts hidden from claim/discovery;
+/// expiry-to-failed) is NOT yet implemented; this validates the whole_cohort claim-compatibility CONTRACT +
+/// item-level parity and defers the selection. (FR-32a..32c, FR-47a, FR-47c, FR-48.)
+///
+/// COVERED via the lib facade (each assertion bites a DISTINCT cause):
+///   - item-level claim still works on a cohort-enabled queue (parity);
+///   - whole_cohort on a NON-cohort queue -> Invalid("...enabled=true");
+///   - whole_cohort on a cohort queue with completion_bound_ms = None -> Invalid("requires cohort completion...");
+///   - whole_cohort with completion_bound_ms (90s) > progress_bound_ms (60s) -> Invalid("...<= progress_bound_ms");
+///   - whole_cohort COMBINED with group_key -> Invalid("cannot be combined...");
+///   - a well-formed whole_cohort claim is RECOGNIZED (ClaimUnit::WholeCohort) and refused with Unavailable
+///     (selection unimplemented -> BQ-14c), NOT silently item-claimed.
+/// DEFERRED (-> BQ-14c): atomic whole-cohort claim under one shared lease, incomplete-cohort hiding from
+/// claim/discovery (eligible_candidates ignores cohorts in the in-memory family), INV-7 (0 cohort leaks),
+/// and expired-incomplete -> terminal failed with reason. NOT asserted, NOT claimed in the row.
+#[tokio::test]
+async fn callback_cohort_e2e() {
+    let (pq, _clock) = deployment();
+
+    // A VALID cohort queue: enabled + completion_bound_ms (30s) <= progress_bound_ms (60s).
+    let cohort_q = qk("cohort", "callbacks");
+    pq.create_queue(cohort_qdef("cohort", "callbacks", true, Some(30_000)))
+        .await
+        .unwrap();
+
+    // Item-level parity: ordinary delivery still works on a cohort-enabled queue.
+    let _ = pq.push(&cohort_q, NewItem::default()).await.unwrap();
+    let item_claim = pq.claim(&cohort_q, 10, 60_000).await.unwrap();
+    assert_eq!(
+        item_claim.len(),
+        1,
+        "item-level claim works on a cohort-enabled queue"
+    );
+    pq.nack(
+        &cohort_q,
+        item_claim.iter().map(|c| c.item_id.clone()),
+        Nack::Release,
+    )
+    .await
+    .unwrap();
+
+    let whole_cohort = || ClaimCompatibility {
+        whole_cohort: true,
+        ..Default::default()
+    };
+
+    // (a) whole_cohort on a NON-cohort queue -> Invalid(enabled).
+    let plain_q = qk("cohort", "plain");
+    pq.create_queue(qdef(
+        "cohort",
+        "plain",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    let _ = pq.push(&plain_q, NewItem::default()).await.unwrap();
+    let not_cohort = pq.claim_with(&plain_q, 10, 60_000, whole_cohort()).await;
+    assert!(
+        matches!(&not_cohort, Err(EngineError::Invalid(m)) if m.contains("enabled=true")),
+        "whole_cohort on a non-cohort queue is Invalid(enabled=true): {not_cohort:?}"
+    );
+
+    // (b) whole_cohort on a cohort queue with completion_bound_ms = None -> Invalid(requires completion).
+    let no_bound_q = qk("cohort", "nobound");
+    pq.create_queue(cohort_qdef("cohort", "nobound", true, None))
+        .await
+        .unwrap();
+    let _ = pq.push(&no_bound_q, NewItem::default()).await.unwrap();
+    let no_bound = pq.claim_with(&no_bound_q, 10, 60_000, whole_cohort()).await;
+    assert!(
+        matches!(&no_bound, Err(EngineError::Invalid(m)) if m.contains("requires cohort completion")),
+        "whole_cohort requires completion_bound_ms: {no_bound:?}"
+    );
+
+    // (c) completion_bound_ms (90s) > progress_bound_ms (60s) -> Invalid(<= progress_bound_ms).
+    let bad_bound_q = qk("cohort", "badbound");
+    pq.create_queue(cohort_qdef("cohort", "badbound", true, Some(90_000)))
+        .await
+        .unwrap();
+    let _ = pq.push(&bad_bound_q, NewItem::default()).await.unwrap();
+    let bad_bound = pq
+        .claim_with(&bad_bound_q, 10, 60_000, whole_cohort())
+        .await;
+    assert!(
+        matches!(&bad_bound, Err(EngineError::Invalid(m)) if m.contains("<= progress_bound_ms")),
+        "completion_bound_ms must be <= progress_bound_ms: {bad_bound:?}"
+    );
+
+    // (d) whole_cohort COMBINED with group_key -> Invalid(cannot be combined).
+    let combined = pq
+        .claim_with(
+            &cohort_q,
+            10,
+            60_000,
+            ClaimCompatibility {
+                whole_cohort: true,
+                group_key: Some(GroupKey::new("g").unwrap()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(&combined, Err(EngineError::Invalid(m)) if m.contains("cannot be combined")),
+        "whole_cohort cannot be combined with group_key: {combined:?}"
+    );
+
+    // (e) a WELL-FORMED whole_cohort claim is recognized (ClaimUnit::WholeCohort) and refused with Unavailable
+    // (selection unimplemented -> BQ-14c), NOT silently item-claimed.
+    let well_formed = pq.claim_with(&cohort_q, 10, 60_000, whole_cohort()).await;
+    assert!(
+        matches!(well_formed, Err(EngineError::Unavailable)),
+        "a well-formed whole_cohort claim is refused with Unavailable (selection unimplemented -> BQ-14c): {well_formed:?}"
+    );
+
+    emit_ac(
+        "AC-E2E-3",
+        &[],
+        "item-level claim parity on a cohort-enabled queue; the whole_cohort claim-compatibility contract is enforced with distinct errors (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined); well-formed -> Unavailable, selection unimplemented). [DEFERRED -> BQ-14c: atomic whole-cohort claim, incomplete-cohort hiding, INV-7 0-cohort-leaks, expiry->failed]",
+        BTreeMap::from([
+            (
+                "item_level_claim_len".into(),
+                serde_json::json!(item_claim.len()),
+            ),
+            (
+                "non_cohort".into(),
+                serde_json::json!(format!("{not_cohort:?}")),
+            ),
+            (
+                "no_completion_bound".into(),
+                serde_json::json!(format!("{no_bound:?}")),
+            ),
+            (
+                "completion_gt_progress".into(),
+                serde_json::json!(format!("{bad_bound:?}")),
+            ),
+            (
+                "combined_with_group_key".into(),
+                serde_json::json!(format!("{combined:?}")),
+            ),
+            (
+                "well_formed_whole_cohort".into(),
                 serde_json::json!(format!("{well_formed:?}")),
             ),
         ]),
