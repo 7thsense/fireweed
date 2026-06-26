@@ -22,7 +22,8 @@ pub use active_scope::{
 };
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
-    ClaimCompatibility, ClaimUnit, GroupBatching, validate_claim_compatibility,
+    ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
+    validate_claim_compatibility,
 };
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};

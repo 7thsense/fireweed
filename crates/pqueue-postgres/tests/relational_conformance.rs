@@ -81,4 +81,5 @@ pg_relational!(
     reconnect_after_crash_preserves_committed_state,
     reconnect_preserves_terminal_and_pending_state,
     reconnect_preserves_leased_item_state,
+    claim_compatibility_is_resolved_and_gated,
 );

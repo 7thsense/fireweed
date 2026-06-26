@@ -56,14 +56,14 @@ use pqueue_core::{
     QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandEnvelope,
-    CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
-    EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView,
-    LeaseExpiredCommand, LeaseView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
-    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items,
-    validate_purge_force,
+    Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
+    CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+    ItemView, LeaseExpiredCommand, LeaseView, LogWriter, ProjectionRead, ProjectionWriter,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport, UpsertOutcome,
+    UpsertPort, build_push_items, require_item_level_claim, validate_purge_force,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -1377,6 +1377,12 @@ impl ClaimPort for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            // BQ-14a: gate non-item compatibility (group/cohort selection lands in BQ-14b/c); the
+            // item-level CTE path below is unchanged.
+            if req.compatibility != ClaimCompatibility::default() {
+                let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
+                require_item_level_claim(&req.compatibility, req.max_items as u64, def)?;
+            }
             let Inner {
                 conn,
                 queues,
@@ -1767,6 +1773,7 @@ mod group_summary_tests {
             lease_token: LeaseToken::new("lease-1").unwrap(),
             lease_expires_at: ts(exp),
             now: ts(now),
+            compatibility: ClaimCompatibility::default(),
         }
     }
 

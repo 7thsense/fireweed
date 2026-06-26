@@ -161,7 +161,7 @@ review → commit → `ddx bead close`.
 > owner chose to build that cross-cutting port surface (bringing the code up to what API-001 already
 > specifies for Batch Claim). **BQ-14 is decomposed into ordered build beads** (the original
 > pqueue-74155103 stays as the umbrella):
->  - **BQ-14a** (pqueue-54b27fdd) — `ClaimRequest` carries `ClaimCompatibility` through `ClaimPort` + all 5
+>  - **BQ-14a** ✅ (pqueue-54b27fdd) — `ClaimRequest` carries `ClaimCompatibility` through `ClaimPort` + all 5
 >    backends + facade; engine resolves `ClaimUnit` via the existing `validate_claim_compatibility`;
 >    item-level claim unchanged at parity. *(foundational; everything claim-related depends on it)*
 >  - **BQ-14b** (pqueue-b3276967) — relational `group_batching` + `same_group_key` selection via

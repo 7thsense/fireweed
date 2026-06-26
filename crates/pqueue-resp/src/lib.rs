@@ -447,6 +447,8 @@ async fn xreadgroup<B: RespBackend>(
         lease_token: LeaseToken::new(format!("L{lease}")).expect("lease"),
         lease_expires_at: add_millis(now, lease_ms),
         now,
+        // RESP XREADGROUP is an item-level claim; group/cohort compatibility is library-only (plan §3).
+        compatibility: pqueue_engine::ClaimCompatibility::default(),
     };
     match backend.claim(req).await {
         Ok(claimed) if claimed.items.is_empty() => Resp::NullArray, // Redis returns nil when none

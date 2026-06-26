@@ -54,9 +54,10 @@ use pqueue_core::{
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
-    ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem, QueueCommand,
-    QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotStore, UpsertPort,
+    Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
+    CommandId, ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem,
+    QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotStore,
+    UpsertPort,
 };
 
 pub mod scenarios;
@@ -184,6 +185,7 @@ pub fn claim_req(max_items: usize, lease_expires_at: i64, now: i64) -> ClaimRequ
         lease_token: LeaseToken::new("lease-1").unwrap(),
         lease_expires_at: ts(lease_expires_at),
         now: ts(now),
+        compatibility: ClaimCompatibility::default(),
     }
 }
 
@@ -230,6 +232,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::pending_lists_leased_items(&make).await;
     scenarios::snapshots_write_read_latest(&make).await;
     scenarios::rejected_mutations_do_not_append_commands(&make).await;
+    scenarios::claim_compatibility_is_resolved_and_gated(&make).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +270,7 @@ macro_rules! core_suite {
             upsert_inserts_then_replaces_pending,
             upsert_rejects_claimed_and_terminal,
             upsert_preserves_group_delay_and_payload_in_claim_shape,
+            claim_compatibility_is_resolved_and_gated,
         );
     };
     (@eventual $make:expr) => {
@@ -288,6 +292,7 @@ macro_rules! core_suite {
             purge_removes_present_items_and_gates_leased,
             finalize_of_nonleased_item_is_rejected_without_appending,
             upsert_is_unavailable,
+            claim_compatibility_is_resolved_and_gated,
         );
     };
 }

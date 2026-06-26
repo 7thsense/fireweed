@@ -12,6 +12,7 @@ use pqueue_core::{
     UtcTimestamp, WorkerId,
 };
 
+use crate::claim_validation::ClaimCompatibility;
 use crate::command::{CommandEnvelope, CommandId, FinalizeOutcome};
 use crate::error::EngineResult;
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -155,6 +156,12 @@ pub struct ClaimRequest {
     pub lease_token: LeaseToken,
     pub lease_expires_at: UtcTimestamp,
     pub now: UtcTimestamp,
+    /// API-001 Batch Claim compatibility options (group_key / same_group_key / metadata_equals /
+    /// group_batching / whole_cohort). `ClaimCompatibility::default()` is an item-level claim
+    /// ([`ClaimUnit::Item`](crate::ClaimUnit)) — backends resolve the unit via
+    /// [`require_item_level_claim`](crate::require_item_level_claim) and (BQ-14a) admit Item; the
+    /// group/cohort selection units land in BQ-14b/c.
+    pub compatibility: ClaimCompatibility,
 }
 
 /// A claimed item in the API-001 claimed-item shape (lease fields included).

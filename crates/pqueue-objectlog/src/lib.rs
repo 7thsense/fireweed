@@ -27,14 +27,15 @@ use pqueue_core::{
     QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
+    Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
+    CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LogRead, LogWriter,
     ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
     PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand,
     ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, SnapshotRef,
-    SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items, validate_purge_force,
+    SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -358,6 +359,11 @@ impl ClaimPort for ObjectLogBackend {
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            // BQ-14a: gate non-item compatibility (selection lands in BQ-14b/c); item-level path unchanged.
+            if req.compatibility != ClaimCompatibility::default() {
+                let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
+                require_item_level_claim(&req.compatibility, req.max_items as u64, def)?;
+            }
             let candidates: Vec<ItemId> = {
                 let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
                 proj.eligible_candidates(req.now, req.max_items)

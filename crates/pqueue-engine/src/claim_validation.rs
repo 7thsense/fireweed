@@ -119,6 +119,32 @@ pub fn validate_claim_compatibility(
     Ok(ClaimUnit::Item)
 }
 
+/// Gate for the **item-level** claim path (BQ-14a): resolve the [`ClaimUnit`] from the request's
+/// compatibility and either admit an item-level claim or reject.
+///
+/// - [`ClaimUnit::Item`] → `Ok(())` (the caller proceeds with the existing per-item claim).
+/// - A group / same-group / cohort unit is a VALID request, but its selection is not yet implemented
+///   (BQ-14b group_batching/same_group_key, BQ-14c whole_cohort), so it is refused with the structured
+///   [`EngineError::Unavailable`] — an honest "not-yet-implemented", NOT a silent no-op.
+/// - An invalid compatibility combination propagates the structured validation error from
+///   [`validate_claim_compatibility`] (`Invalid` / `BatchTooLarge`).
+///
+/// Backends call this at the top of `claim` when `compatibility != ClaimCompatibility::default()`, so the
+/// item-level hot path (the conformance CORE class) is byte-identical and a non-item request resolves
+/// identically across every backend.
+pub fn require_item_level_claim(
+    compat: &ClaimCompatibility,
+    max_items: u64,
+    queue: &QueueDefinition,
+) -> EngineResult<()> {
+    match validate_claim_compatibility(compat, max_items, queue)? {
+        ClaimUnit::Item => Ok(()),
+        ClaimUnit::SameGroupKey | ClaimUnit::WholeGroup | ClaimUnit::WholeCohort => {
+            Err(EngineError::Unavailable)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

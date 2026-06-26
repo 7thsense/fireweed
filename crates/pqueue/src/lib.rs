@@ -27,8 +27,8 @@ use pqueue_engine::{
 };
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
-    ClaimedItem, CreateQueueOutcome, EngineError, EngineResult, ItemView, QueueMetrics,
-    UpsertOutcome,
+    ClaimCompatibility, ClaimedItem, CreateQueueOutcome, EngineError, EngineResult, GroupBatching,
+    ItemView, QueueMetrics, UpsertOutcome,
 };
 
 /// The capabilities the library facade composes over (the worker + control-plane ports).
@@ -165,11 +165,27 @@ impl<B: LibBackend> Pqueue<B> {
     }
 
     /// Claim up to `max` eligible items in priority order, leasing them for `lease_ms` from now.
+    /// Item-level claim (no compatibility options).
     pub async fn claim(
         &self,
         queue: &QueueKey,
         max: usize,
         lease_ms: u64,
+    ) -> EngineResult<Vec<ClaimedItem>> {
+        self.claim_with(queue, max, lease_ms, ClaimCompatibility::default())
+            .await
+    }
+
+    /// Claim with API-001 compatibility options (group_batching / whole_cohort / same_group_key /
+    /// group_key / metadata_equals). `ClaimCompatibility::default()` is the item-level claim (see
+    /// [`claim`](Self::claim)); group/cohort selection units are honored once their backend selection
+    /// lands (BQ-14b/c) — until then a non-item unit is refused with the structured `Unavailable`.
+    pub async fn claim_with(
+        &self,
+        queue: &QueueKey,
+        max: usize,
+        lease_ms: u64,
+        compatibility: ClaimCompatibility,
     ) -> EngineResult<Vec<ClaimedItem>> {
         let now = self.clock.now();
         let n = self.next();
@@ -180,6 +196,7 @@ impl<B: LibBackend> Pqueue<B> {
             lease_token: LeaseToken::new(format!("libL{n}")).expect("lease"),
             lease_expires_at: add_millis(now, lease_ms),
             now,
+            compatibility,
         };
         Ok(self.backend.claim(req).await?.items)
     }

@@ -76,6 +76,7 @@ fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
         lease_token: LeaseToken::new("lease-1").unwrap(),
         lease_expires_at: ts(exp),
         now: ts(now),
+        compatibility: pqueue_engine::ClaimCompatibility::default(),
     }
 }
 

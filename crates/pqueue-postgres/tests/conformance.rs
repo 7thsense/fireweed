@@ -75,4 +75,5 @@ pg_conformance!(
     peek_is_priority_ordered_and_nondestructive,
     pending_lists_leased_items,
     snapshots_write_read_latest,
+    claim_compatibility_is_resolved_and_gated,
 );

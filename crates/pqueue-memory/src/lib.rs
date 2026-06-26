@@ -26,8 +26,9 @@ use pqueue_engine::{
     SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
-    PurgeItemsCommand, PurgePort, PushPort, PushSpec, ReassignLeaseCommand, ReassignLeasePort,
-    RenewLeaseCommand, RenewLeasePort, build_push_items, validate_purge_force,
+    ClaimCompatibility, PurgeItemsCommand, PurgePort, PushPort, PushSpec, ReassignLeaseCommand,
+    ReassignLeasePort, RenewLeaseCommand, RenewLeasePort, build_push_items,
+    require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::{LogData, ProjectionData, commit};
 
@@ -144,6 +145,13 @@ impl ClaimPort for MemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
+            // BQ-14a: resolve the claim unit from the compatibility options. Item-level (the default) is
+            // unchanged; a group/cohort/same-group unit is refused with `Unavailable` until its selection
+            // lands (BQ-14b/c). The item-level hot path skips this entirely (byte-identical).
+            if req.compatibility != ClaimCompatibility::default() {
+                let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
+                require_item_level_claim(&req.compatibility, req.max_items as u64, def)?;
+            }
             // Select priority-ordered eligible candidates (Invariant 1: per-item, in eligible order).
             let candidates: Vec<ItemId> = {
                 let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;

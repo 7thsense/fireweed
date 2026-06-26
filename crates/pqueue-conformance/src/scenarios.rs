@@ -5,9 +5,9 @@
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue};
 use pqueue_engine::{
-    ClaimCommand, CommandPosition, EngineError, FenceLeaseCommand, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, ProjectionSnapshot, PushCommand, QueueCommand, ReplacePendingCommand,
-    UnfenceLeaseCommand, UpsertOutcome,
+    ClaimCommand, ClaimCompatibility, CommandPosition, EngineError, FenceLeaseCommand,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching, ProjectionSnapshot, PushCommand,
+    QueueCommand, ReplacePendingCommand, UnfenceLeaseCommand, UpsertOutcome,
 };
 
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
@@ -1538,4 +1538,57 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     )
     .await;
     parity(&a, &b, 600, "after replace c->c2").await;
+}
+
+/// **BQ-14a — claim compatibility is resolved and gated.** The claim resolves its `ClaimUnit` from the
+/// request's compatibility options (API-001 Batch Claim) and gates non-item units. Item-level (the
+/// default) is byte-identical to the existing claim; a valid group/cohort/same-group unit is refused with
+/// the structured `Unavailable` (its selection lands in BQ-14b/c — an honest not-yet-implemented, not a
+/// silent item-claim); an invalid combination is rejected with the structured validation error. Every
+/// backend resolves identically (the shared `require_item_level_claim`).
+pub async fn claim_compatibility_is_resolved_and_gated<B: ConformanceCore>(make: impl Fn() -> B) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+
+    // `same_group_key` resolves to a unit whose selection is not yet implemented → Unavailable; the gate
+    // rejects BEFORE any selection/commit, so nothing is leased.
+    let mut req = claim_req(1, 500, 10);
+    req.compatibility = ClaimCompatibility {
+        same_group_key: true,
+        ..Default::default()
+    };
+    assert!(
+        matches!(b.claim(req).await, Err(EngineError::Unavailable)),
+        "a not-yet-implemented claim unit is refused with Unavailable, not silently item-claimed"
+    );
+
+    // An invalid combination (group_batching + whole_cohort) → the structured validation error.
+    let mut bad = claim_req(1, 500, 10);
+    bad.compatibility = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        whole_cohort: true,
+        ..Default::default()
+    };
+    assert!(
+        matches!(b.claim(bad).await, Err(EngineError::Invalid(_))),
+        "an invalid compatibility combination is rejected with the structured error"
+    );
+
+    // The rejected-compat claims changed nothing — an item-level (default) claim still leases "a".
+    let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "item-level claim is unchanged by the compatibility gate"
+    );
 }
