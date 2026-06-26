@@ -207,7 +207,13 @@ review → commit → `ddx bead close`.
     (stale-reject + post-advance/pre-segment) on all 6 backends. Fresh-eyes GO-with-conditions applied:
     hot-path owner-epoch stamping deferred to BQ-21 (documented at fast-path sites); `read_from` now carries
     true per-entry epoch (objectlog per-entry epoch + manifest-CAS tracked → pqueue-e5c6d6fc).
-- [x] BQ-30 · [x] BQ-31 (decision core) · [ ] BQ-32   (P3)
+- [x] BQ-30 · [x] BQ-31 (decision core) · [x] BQ-32 (classifier)   (P3 routing core ✅)
+  - **BQ-32** ✅-core (pqueue-ac3a5202, c4a3087) — drain command classifier `DrainClass`/`drain_class`/
+    `is_new_claim_on_drain` (TD-006 §1A): XREADGROUP `>`→NewClaim / explicit-id→InFlight, XACK/XADD/XDEL→
+    InFlight, XAUTOCLAIM→NewClaim (pqueue always re-delivers idle entries), XCLAIM→RuntimeConsumerDependent.
+    Fresh-eyes GO-with-conditions (no blocking; `>` wire-safety clears): misattributed quote fixed (TD-003 not
+    TD-006), XAUTOCLAIM reclassified, the mixed-XCLAIM per-entry-split interface gap documented + recorded on
+    **pqueue-c33c367e**; wired drain-redirect + no-mid-lease acceptance owned by the follow-up.
   - **BQ-31** ✅-core (pqueue-4cb0d507, 15bd8a7) — pure routing `RouteDecision`/`route` (TD-006 §1A): authz-
     first (`-NOPERM` before any placement reveal), serve-only-under-live-current-epoch-lease, `-MOVED` to the
     recorded `active_owner` with the LITERAL-key slot (closes the BQ-30 wire-key trap, no loop), drain split.
