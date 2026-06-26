@@ -140,7 +140,16 @@ review → commit → `ddx bead close`.
   `pqueue-f1d107de`; gate-wiring + e2-source reconciliation recorded on BQ-43. Fresh-eyes GO-with-conditions;
   in-scope conditions (min-not-avg floor, spec-shaped baseline, tightened tolerance, honest labels) applied.
 - **BQ-41 queue density.** `queue_density_single_node_tests` at ≥1000 active queues/node. *Acc:* density
-  bars + no cross-queue degradation.
+  bars + no cross-queue degradation. **DONE** — two-phase suite in `crates/pqueue-bench/tests/`. Phase 1
+  (single-threaded residency ladder 0→100→1000): ≥1000 queues concurrently resident (verified via
+  `metrics()`), hot-path per-op cost flat across resident count (rules out an O(total_queues) scan),
+  correctness isolation (neighbours undisturbed), hot clears the E0 floor. Phase 2 (bounded real-thread
+  pool driving 1000 queues concurrently on the **same** shared `Mutex<State>` node): the genuine FR-43 bar —
+  hot queue holds the E0 floor under real contention (measured claim 56% of unloaded baseline, still ~43×
+  the floor). Fresh-eyes: prior NO-GO (single-threaded idle neighbours made "no-degradation" structurally
+  trivial) → fixed by the concurrent phase + "active"→"resident" relabel; re-review **GO**. DEFERRED (not
+  claimed): bar (d) bounded shared per-node pools, progress-bound-active under a live sweeper, durable-backend
+  density → recorded on BQ-c33c367e + the live run; bead acceptance reconciled to the in-process scope.
 - **BQ-42 object-log E3 + retire old suite.** Re-run object-log cost/ack/recovery (E3); delete
   `performance_multi_shard_scale_out_tests`. *Acc:* E3 evidence row; old suite gone.
 - **BQ-43 release gate.** E0 floor preserved across all; TP-002 E0–E3 + TP-003 P0/core gates green from
@@ -236,7 +245,7 @@ review → commit → `ddx bead close`.
     independently verified correct; the wire-key (`tenant:queue`) vs routing-key (`{tenant/queue}`)
     slot-mismatch reconciliation is recorded as a **BQ-31 (pqueue-4cb0d507)** prerequisite for `-MOVED`.
     Multi-node slot→owner view + per-queue `-MOVED` = BQ-31; live topology = server-runtime.
-- [x] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
+- [x] BQ-40 · [x] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
 
 > Per-bead dependency edges live in ddx (`ddx bead ready` computes the next implementable bead). Phase
 > deps in §1 are the coarse view. Convergence review (2026-06-25): GO-WITH-CONDITIONS, all four must-fix
