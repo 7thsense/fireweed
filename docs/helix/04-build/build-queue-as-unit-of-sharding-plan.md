@@ -207,7 +207,14 @@ review → commit → `ddx bead close`.
     (stale-reject + post-advance/pre-segment) on all 6 backends. Fresh-eyes GO-with-conditions applied:
     hot-path owner-epoch stamping deferred to BQ-21 (documented at fast-path sites); `read_from` now carries
     true per-entry epoch (objectlog per-entry epoch + manifest-CAS tracked → pqueue-e5c6d6fc).
-- [x] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
+- [x] BQ-30 · [x] BQ-31 (decision core) · [ ] BQ-32   (P3)
+  - **BQ-31** ✅-core (pqueue-4cb0d507, 15bd8a7) — pure routing `RouteDecision`/`route` (TD-006 §1A): authz-
+    first (`-NOPERM` before any placement reveal), serve-only-under-live-current-epoch-lease, `-MOVED` to the
+    recorded `active_owner` with the LITERAL-key slot (closes the BQ-30 wire-key trap, no loop), drain split.
+    Fresh-eyes GO-with-conditions (no blocking — authz-before-reveal + slot-trap both sound); overclaim
+    corrected ("placement revealed" not "ownership consulted"), fresh-resolution precondition documented.
+    Live dispatch wiring + AC-ROUTE-1 integration (one-hop convergence + misrouted-write-fenced + bounded-
+    stale read) deferred to **pqueue-c33c367e**.
   - **BQ-30** ✅ (pqueue-4fc67b83, 5edf87a) — Redis CRC16 + `hash_slot` (keyHashSlot hash-tag rule) +
     `queue_routing_key`/`queue_slot` + `ClusterNode` + CLUSTER SLOTS/SHARDS/NODES/INFO/MYID/KEYSLOT
     single-node bootstrap, wired into RESP dispatch. Proven by a real `redis::cluster::ClusterClient`
