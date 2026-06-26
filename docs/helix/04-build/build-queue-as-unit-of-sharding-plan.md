@@ -171,7 +171,11 @@ review → commit → `ddx bead close`.
 >    + exact-on-read eligibility anti-join (item/group/cohort); `SetGates` command + `PushItem.gate_keys`.
 >    Relational-only (in-memory no-op, parity preserved). Fresh-eyes GO-with-conditions (Postgres
 >    `FOR UPDATE`+`NOT EXISTS` confirmed safe); operator-facing enforcement guard deferred → pqueue-d3ad4b22.
->  - **BQ-14e** (pqueue-fde32048) — `DiscoverActiveScopes` port consuming `group_summary` + the `active_scope` rollup.
+>  - **BQ-14e** ✅ (pqueue-fde32048) — `DiscoveryPort::discover_active_scopes` (relational) rolling up
+>    `pqueue_group_summary` into ranked `ActiveScope`s (owner-local oldest-first; Group detail / Queue
+>    rollup) via the existing `active_scope` domain logic. Relational-only (parity preserved). Fresh-eyes
+>    GO-with-conditions: at-risk reported `None` (deferred, not a fabricated 0); pause-agnostic + lag caveat
+>    (pqueue-64351bdd) documented. **BQ-14 epic complete (a–e).**
 - [ ] BQ-20 · [ ] BQ-21 · [ ] BQ-22 · [ ] BQ-23 · [ ] BQ-24   (P2)
 - [ ] BQ-30 · [ ] BQ-31 · [ ] BQ-32   (P3)
 - [ ] BQ-40 · [ ] BQ-41 · [ ] BQ-42 · [ ] BQ-43   (P4)
