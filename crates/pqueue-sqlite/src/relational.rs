@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     next_seq INTEGER NOT NULL,        -- command-position sequence (last_command_sequence source)
     next_item_seq INTEGER NOT NULL,   -- monotonic per-queue item insertion counter (created_seq source)
+    assignment_epoch INTEGER NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
 -- BQ-11c: the single per-group summary projection (TD-002 §Per-Group Summary Projection), maintained
@@ -321,6 +322,12 @@ impl Inner {
 
     /// Assign the next command sequence for `shard`, apply `command` to `pqueue_items`, and advance the
     /// cursor — all in one transaction (the atomic append+apply UoW the async ports rely on).
+    ///
+    /// BQ-20 NOTE: this is the data-plane fast path (every claim/push/finalize port routes here). It is the
+    /// in-process owner, so it is NOT epoch-fenced — the TD-003 `assignment_epoch` fence lives at the
+    /// [`RelLogWriter::append`] seam (`LogWriter::append`). Fencing a STALE owner's claim end-to-end needs
+    /// the owner to cache + pass its `expected_epoch` on every write, which arrives with the ownership/lease
+    /// identity layer (BQ-21); until then no second owner exists in-process, so the gap is theoretical.
     fn commit_command(
         &mut self,
         shard: &QueueKey,
@@ -1462,20 +1469,29 @@ impl LogWriter for RelLogWriter<'_> {
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
-        let mut next: i64 = st(self
+        let (mut next, epoch): (i64, i64) = st(self
             .tx
             .query_row(
-                "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
                 params![t, q],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional())?
         .ok_or(EngineError::NotFound)?;
+        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
+        if expected_epoch != epoch as u64 {
+            return Err(EngineError::EpochFenced);
+        }
         let mut positions = Vec::with_capacity(commands.len());
         for _ in commands {
-            positions.push(CommandPosition::new(shard.clone(), 0, next as u64));
+            positions.push(CommandPosition::new(
+                shard.clone(),
+                epoch as u64,
+                next as u64,
+            ));
             next += 1;
         }
         st(self.tx.execute(
@@ -1622,10 +1638,43 @@ impl ControlPlaneStore for SqliteRelationalBackend {
 
     fn current_epoch(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        // Single-node, single-epoch for launch (plan §2.5); epoch fencing is BQ-20.
-        std::future::ready(Ok(0))
+        let (t, q) = parts(shard);
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            st(g.conn
+                .query_row(
+                    "SELECT assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![t, q],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional())
+            .and_then(|opt| opt.ok_or(EngineError::NotFound).map(|e| e as u64))
+        };
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let (t, q) = parts(shard);
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            // TD-003 acquire: strictly-greater epoch, durably recorded (the fence authority advances).
+            let new_epoch: Option<i64> = st(g
+                .conn
+                .query_row(
+                    "UPDATE relational_cursor SET assignment_epoch = assignment_epoch + 1 \
+                     WHERE tenant=?1 AND queue=?2 RETURNING assignment_epoch",
+                    params![t, q],
+                    |row| row.get(0),
+                )
+                .optional())?;
+            new_epoch.ok_or(EngineError::NotFound).map(|e| e as u64)
+        })();
+        std::future::ready(result)
     }
 }
 
@@ -2349,8 +2398,9 @@ mod group_summary_tests {
             checksum: CommandChecksum(0),
             created_at: now,
         };
+        let epoch = b.current_epoch(&shard()).await.unwrap();
         b.write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
+            let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
             pw.apply(&pos, std::slice::from_ref(&env))?;
             Ok(())
         })

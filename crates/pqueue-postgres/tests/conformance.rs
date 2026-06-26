@@ -76,4 +76,6 @@ pg_conformance!(
     pending_lists_leased_items,
     snapshots_write_read_latest,
     claim_compatibility_is_resolved_and_gated,
+    stale_epoch_append_is_fenced,
+    epoch_fence_closes_pre_segment_window,
 );

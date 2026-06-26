@@ -5,9 +5,10 @@
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue};
 use pqueue_engine::{
-    ClaimCommand, ClaimCompatibility, CommandPosition, EngineError, FenceLeaseCommand,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching, ProjectionSnapshot, PushCommand,
-    QueueCommand, ReplacePendingCommand, UnfenceLeaseCommand, UpsertOutcome,
+    ClaimCommand, ClaimCompatibility, CommandPosition, EngineError, EngineResult,
+    FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
+    ProjectionSnapshot, PushCommand, QueueCommand, ReplacePendingCommand, UnfenceLeaseCommand,
+    UpsertOutcome,
 };
 
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
@@ -1080,10 +1081,11 @@ pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: i
     let page = a.read_from(&shard(), None, 1000).await.unwrap();
     let b = make();
     b.create_queue(qdef()).await.unwrap();
+    let b_epoch = b.current_epoch(&shard()).await.unwrap();
     for (_pos, env) in &page.entries {
         let env = env.clone();
         b.write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
+            let pos = lw.append(&shard(), std::slice::from_ref(&env), b_epoch)?;
             pw.apply(&pos, std::slice::from_ref(&env))?;
             Ok(())
         })
@@ -1587,4 +1589,99 @@ pub async fn claim_compatibility_is_resolved_and_gated<B: ConformanceCore>(make:
     // family does not maintain `group_summary` and refuses with `Unavailable`. That is RELATIONAL-class,
     // deliberately NOT asserted here (it would diverge across families); see the relational backends'
     // own `group_batching_*` / `same_group_key_*` tests.
+}
+
+// ---------------------------------------------------------------------------
+// BQ-20 — the Single Authoritative Fencing Rule (TD-003). The durable `assignment_epoch` is the one
+// fencing authority: `acquire_epoch` advances it strictly + durably (step 1, "durable fence before
+// use"), and `LogWriter::append` rejects any non-current `expected_epoch` (step 2). Both projection
+// families run these (a CORE guarantee; TD-001 lease/epoch fencing is the core class).
+// ---------------------------------------------------------------------------
+
+/// Append `command` to the queue under `expected_epoch` through the atomic write UoW, returning the
+/// fence outcome (`EpochFenced` when stale). Apply only runs if the append is admitted.
+async fn append_at_epoch<B: ConformanceCore>(
+    b: &B,
+    expected_epoch: u64,
+    command: QueueCommand,
+) -> EngineResult<()> {
+    let env = envelope(command, vec![]);
+    b.write(move |lw, pw| {
+        let pos = lw.append(&shard(), std::slice::from_ref(&env), expected_epoch)?;
+        pw.apply(&pos, std::slice::from_ref(&env))?;
+        Ok(())
+    })
+    .await
+}
+
+/// A stale (non-current) epoch is fenced at append; the current epoch is admitted; `acquire_epoch`
+/// advances the durable epoch strictly. Rejection is on "not equal to current", not "<= current" — a
+/// future epoch is rejected too.
+pub async fn stale_epoch_append_is_fenced<B: ConformanceCore>(make: impl Fn() -> B) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let e0 = b.current_epoch(&shard()).await.unwrap();
+
+    // An append at the current epoch is admitted.
+    append_at_epoch(&b, e0, QueueCommand::PauseQueue)
+        .await
+        .expect("append at the current epoch is admitted");
+
+    // Acquire allocates a strictly-greater, durably-recorded epoch (TD-003 monotonicity).
+    let e1 = b.acquire_epoch(&shard()).await.unwrap();
+    assert!(
+        e1 > e0,
+        "acquire_epoch must allocate a strictly-greater epoch"
+    );
+    assert_eq!(
+        b.current_epoch(&shard()).await.unwrap(),
+        e1,
+        "acquire durably advances the recorded current epoch"
+    );
+
+    // The superseded owner's old epoch is fenced...
+    assert_eq!(
+        append_at_epoch(&b, e0, QueueCommand::ResumeQueue).await,
+        Err(EngineError::EpochFenced),
+        "a stale (old) epoch is fenced"
+    );
+    // ...and a NON-current FUTURE epoch is also rejected (the rule is "not current", not "<= current").
+    assert_eq!(
+        append_at_epoch(&b, e1 + 1, QueueCommand::ResumeQueue).await,
+        Err(EngineError::EpochFenced),
+        "a future (non-current) epoch is fenced too"
+    );
+    // The current owner appends fine.
+    append_at_epoch(&b, e1, QueueCommand::ResumeQueue)
+        .await
+        .expect("the current-epoch owner is admitted");
+}
+
+/// The post-advance / pre-segment window is closed: the instant `acquire_epoch` advances to E+1 — before
+/// the new owner writes ANY E+1 segment — a stale epoch-E writer is already fenced (TD-003 step 2: reject
+/// against the recorded current epoch, which step 1 advanced at acquire, not lazily on first data write).
+pub async fn epoch_fence_closes_pre_segment_window<B: ConformanceCore>(make: impl Fn() -> B) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let e0 = b.current_epoch(&shard()).await.unwrap();
+    // An epoch-E segment exists (the previous owner wrote data at E).
+    append_at_epoch(&b, e0, QueueCommand::PauseQueue)
+        .await
+        .unwrap();
+
+    // The new owner acquires E+1 — durably fenced — but has NOT written any E+1 segment yet.
+    let e1 = b.acquire_epoch(&shard()).await.unwrap();
+    assert!(e1 > e0);
+
+    // The stale E writer's VERY NEXT append — in the window before any E+1 segment exists — is fenced.
+    assert_eq!(
+        append_at_epoch(&b, e0, QueueCommand::ResumeQueue).await,
+        Err(EngineError::EpochFenced),
+        "the pre-segment window is closed: a stale writer is fenced at handoff, not at first conflict"
+    );
+
+    // Only now does the new owner write the first E+1 segment.
+    append_at_epoch(&b, e1, QueueCommand::ResumeQueue)
+        .await
+        .expect("the new owner writes the first new-epoch segment");
 }

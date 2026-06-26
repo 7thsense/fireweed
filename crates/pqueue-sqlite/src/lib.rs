@@ -35,7 +35,7 @@ use pqueue_engine::{
     build_push_items, require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 mod relational;
 pub use relational::SqliteRelationalBackend;
@@ -43,6 +43,7 @@ pub use relational::SqliteRelationalBackend;
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
+    assignment_epoch INTEGER NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS log_entries (
@@ -89,6 +90,19 @@ fn parts(shard: &QueueKey) -> (String, String) {
     )
 }
 
+/// Read a queue's durable `assignment_epoch` (TD-003 fence authority). Missing queue → `NotFound`.
+fn read_epoch(conn: &Connection, shard: &QueueKey) -> EngineResult<u64> {
+    let (t, q) = parts(shard);
+    let epoch: Option<i64> = st(conn
+        .query_row(
+            "SELECT assignment_epoch FROM queues WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?;
+    Ok(epoch.ok_or(EngineError::NotFound)? as u64)
+}
+
 struct Inner {
     conn: Connection,
     projections: HashMap<QueueKey, ProjectionData>,
@@ -117,6 +131,10 @@ impl Inner {
 
     /// Durably append `env` to the shard's log + advance the persisted high-water in ONE transaction.
     /// Returns the committed position. Does NOT touch the projection (caller applies after, infallibly).
+    ///
+    /// BQ-20 NOTE: the data-plane fast path (every port commits here) is the in-process owner, so it STAMPS
+    /// the queue's current epoch but does NOT validate an `expected_epoch` — the TD-003 fence that REJECTS
+    /// a stale epoch lives at the [`SqlLogWriter::append`] seam. Owner-epoch caching on this path is BQ-21.
     fn append_durable(
         &mut self,
         shard: &QueueKey,
@@ -125,6 +143,15 @@ impl Inner {
         let (t, q) = parts(shard);
         let json = to_json(env)?;
         let tx = st(self.conn.transaction())?;
+        // In-process owner: stamp the queue's current durable epoch (TD-003); always-current, never fences.
+        let epoch: i64 = st(tx
+            .query_row(
+                "SELECT assignment_epoch FROM queues WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get(0),
+            )
+            .optional())?
+        .ok_or(EngineError::NotFound)?;
         // Next sequence is MAX(seq)+1, NOT COUNT(*): it must survive log compaction/retention so a
         // persisted position never collides or regresses (TD-007 §4). Empty log → -1+1 = 0.
         let seq: i64 = st(tx.query_row(
@@ -133,16 +160,20 @@ impl Inner {
             |row| row.get(0),
         ))?;
         st(tx.execute(
-            "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,0,?3,?4)",
-            params![t, q, seq, json],
+            "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,?3,?4,?5)",
+            params![t, q, epoch, seq, json],
         ))?;
         st(tx.execute(
-            "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,0,?3) \
+            "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
              ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
-            params![t, q, seq],
+            params![t, q, epoch, seq],
         ))?;
         st(tx.commit())?;
-        Ok(CommandPosition::new(shard.clone(), 0, seq as u64))
+        Ok(CommandPosition::new(
+            shard.clone(),
+            epoch as u64,
+            seq as u64,
+        ))
     }
 
     /// Durable append + in-memory apply (the atomic unit the orchestration ports rely on). The caller
@@ -269,10 +300,23 @@ impl LogWriter for SqlLogWriter<'_> {
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
         let mut positions = Vec::with_capacity(commands.len());
         let tx = st(self.conn.transaction())?;
+        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
+        let epoch: i64 = st(tx
+            .query_row(
+                "SELECT assignment_epoch FROM queues WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get(0),
+            )
+            .optional())?
+        .ok_or(EngineError::NotFound)?;
+        if expected_epoch != epoch as u64 {
+            return Err(EngineError::EpochFenced);
+        }
         for env in commands {
             let json = to_json(env)?;
             let seq: i64 = st(tx.query_row(
@@ -281,15 +325,19 @@ impl LogWriter for SqlLogWriter<'_> {
                 |row| row.get(0),
             ))?;
             st(tx.execute(
-                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,0,?3,?4)",
-                params![t, q, seq, json],
+                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,?3,?4,?5)",
+                params![t, q, epoch, seq, json],
             ))?;
             st(tx.execute(
-                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,0,?3) \
+                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
                  ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
-                params![t, q, seq],
+                params![t, q, epoch, seq],
             ))?;
-            positions.push(CommandPosition::new(shard.clone(), 0, seq as u64));
+            positions.push(CommandPosition::new(
+                shard.clone(),
+                epoch as u64,
+                seq as u64,
+            ));
         }
         st(tx.commit())?;
         Ok(positions)
@@ -718,10 +766,35 @@ impl ControlPlaneStore for SqliteBackend {
 
     fn current_epoch(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        // Single-node, single-epoch for launch (plan §2.5); epoch fencing is post-launch.
-        std::future::ready(Ok(0))
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            read_epoch(&g.conn, shard)
+        };
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let g = self.inner.lock().expect("poisoned");
+            // TD-003 acquire: strictly-greater epoch, durably recorded (the fence authority advances).
+            let new_epoch: Option<i64> = st(g
+                .conn
+                .query_row(
+                    "UPDATE queues SET assignment_epoch = assignment_epoch + 1 \
+                     WHERE tenant=?1 AND queue=?2 RETURNING assignment_epoch",
+                    params![t, q],
+                    |row| row.get(0),
+                )
+                .optional())?;
+            new_epoch.ok_or(EngineError::NotFound).map(|e| e as u64)
+        })();
+        std::future::ready(result)
     }
 }
 
@@ -745,24 +818,36 @@ impl LogRead for SqliteBackend {
                 |row| row.get(0),
             ))?;
             let mut stmt = st(g.conn.prepare(
-                "SELECT seq, envelope FROM log_entries \
+                "SELECT seq, epoch, envelope FROM log_entries \
                  WHERE tenant=?1 AND queue=?2 AND seq>=?3 ORDER BY seq LIMIT ?4",
             ))?;
             let mapped = st(
                 stmt.query_map(params![t, q, start as i64, limit as i64], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 }),
             )?;
             let mut entries = Vec::new();
+            // BQ-20: carry each entry's stored epoch (not a hardcoded 0) so a position replayed across an
+            // epoch boundary keeps its true `(epoch, seq)` and the high-water guard never false-regresses.
             for r in mapped {
-                let (seq, json) = st(r)?;
+                let (seq, epoch, json) = st(r)?;
                 let env: CommandEnvelope =
                     serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?;
-                entries.push((CommandPosition::new(shard.clone(), 0, seq as u64), env));
+                entries.push((
+                    CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
+                    env,
+                ));
             }
             let consumed = start + entries.len() as u64;
-            let next =
-                (consumed < total as u64).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            // The continuation cursor needs only a `seq` (read_from keys off `sequence`); its epoch is not
+            // load-bearing, so reuse the last returned entry's epoch (or 0 when the page is empty).
+            let cursor_epoch = entries.last().map(|(p, _)| p.backend_epoch).unwrap_or(0);
+            let next = (consumed < total as u64)
+                .then(|| CommandPosition::new(shard.clone(), cursor_epoch, consumed));
             Ok(CommandPage { entries, next })
         })();
         std::future::ready(result)

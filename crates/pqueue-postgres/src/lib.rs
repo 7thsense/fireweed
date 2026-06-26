@@ -70,6 +70,7 @@ pub use relational::PostgresRelationalBackend;
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
+    assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS log_entries (
@@ -134,6 +135,10 @@ impl Inner {
 
     /// Durably append `env` to the shard's log + advance the persisted high-water in ONE transaction.
     /// Returns the committed position. Does NOT touch the projection (caller applies after, infallibly).
+    ///
+    /// BQ-20 NOTE: the data-plane fast path (every port commits here) is the in-process owner, so it STAMPS
+    /// the queue's current epoch but does NOT validate an `expected_epoch` — the TD-003 fence that REJECTS
+    /// a stale epoch lives at the [`PgLogWriter::append`] seam. Owner-epoch caching on this path is BQ-21.
     fn append_durable(
         &mut self,
         shard: &QueueKey,
@@ -142,6 +147,13 @@ impl Inner {
         let (t, q) = parts(shard);
         let json = to_json(env)?;
         let mut tx = st(self.client.transaction())?;
+        // In-process owner: stamp the queue's current durable epoch (TD-003); always-current, never fences.
+        let epoch: i64 = st(tx.query_opt(
+            "SELECT assignment_epoch FROM queues WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?
+        .ok_or(EngineError::NotFound)?
+        .get(0);
         // Next sequence is MAX(seq)+1, NOT COUNT(*): it must survive log compaction/retention so a
         // persisted position never collides or regresses (TD-007 §4). Empty log → -1+1 = 0.
         let seq: i64 = st(tx.query_one(
@@ -150,16 +162,20 @@ impl Inner {
         ))?
         .get(0);
         st(tx.execute(
-            "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES($1,$2,0,$3,$4)",
-            &[&t, &q, &seq, &json],
+            "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES($1,$2,$3,$4,$5)",
+            &[&t, &q, &epoch, &seq, &json],
         ))?;
         st(tx.execute(
-            "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,0,$3) \
+            "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
              ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
-            &[&t, &q, &seq],
+            &[&t, &q, &epoch, &seq],
         ))?;
         st(tx.commit())?;
-        Ok(CommandPosition::new(shard.clone(), 0, seq as u64))
+        Ok(CommandPosition::new(
+            shard.clone(),
+            epoch as u64,
+            seq as u64,
+        ))
     }
 
     /// Durable append + in-memory apply (the atomic unit the orchestration ports rely on). The caller
@@ -299,10 +315,21 @@ impl LogWriter for PgLogWriter<'_> {
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
         let mut positions = Vec::with_capacity(commands.len());
         let mut tx = st(self.client.transaction())?;
+        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
+        let epoch: i64 = st(tx.query_opt(
+            "SELECT assignment_epoch FROM queues WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?
+        .ok_or(EngineError::NotFound)?
+        .get(0);
+        if expected_epoch != epoch as u64 {
+            return Err(EngineError::EpochFenced);
+        }
         for env in commands {
             let json = to_json(env)?;
             let seq: i64 = st(tx.query_one(
@@ -311,15 +338,19 @@ impl LogWriter for PgLogWriter<'_> {
             ))?
             .get(0);
             st(tx.execute(
-                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES($1,$2,0,$3,$4)",
-                &[&t, &q, &seq, &json],
+                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES($1,$2,$3,$4,$5)",
+                &[&t, &q, &epoch, &seq, &json],
             ))?;
             st(tx.execute(
-                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,0,$3) \
+                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
                  ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
-                &[&t, &q, &seq],
+                &[&t, &q, &epoch, &seq],
             ))?;
-            positions.push(CommandPosition::new(shard.clone(), 0, seq as u64));
+            positions.push(CommandPosition::new(
+                shard.clone(),
+                epoch as u64,
+                seq as u64,
+            ));
         }
         st(tx.commit())?;
         Ok(positions)
@@ -753,10 +784,40 @@ impl ControlPlaneStore for PostgresBackend {
 
     fn current_epoch(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        // Single-node, single-epoch for launch (plan §2.5); epoch fencing is post-launch.
-        std::future::ready(Ok(0))
+        let (t, q) = parts(shard);
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let epoch: i64 = st(g.client.query_opt(
+                "SELECT assignment_epoch FROM queues WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?
+            .ok_or(EngineError::NotFound)?
+            .get(0);
+            Ok(epoch as u64)
+        })();
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let (t, q) = parts(shard);
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            // TD-003 acquire: strictly-greater epoch, durably recorded (the fence authority advances).
+            let epoch: i64 = st(g.client.query_opt(
+                "UPDATE queues SET assignment_epoch = assignment_epoch + 1 \
+                 WHERE tenant=$1 AND queue=$2 RETURNING assignment_epoch",
+                &[&t, &q],
+            ))?
+            .ok_or(EngineError::NotFound)?
+            .get(0);
+            Ok(epoch as u64)
+        })();
+        std::future::ready(result)
     }
 }
 
@@ -780,21 +841,28 @@ impl LogRead for PostgresBackend {
             ))?
             .get(0);
             let rows = st(g.client.query(
-                "SELECT seq, envelope FROM log_entries \
+                "SELECT seq, epoch, envelope FROM log_entries \
                  WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT $4",
                 &[&t, &q, &(start as i64), &(limit as i64)],
             ))?;
             let mut entries = Vec::with_capacity(rows.len());
+            // BQ-20: carry each entry's stored epoch (not a hardcoded 0) so a position replayed across an
+            // epoch boundary keeps its true `(epoch, seq)` and the high-water guard never false-regresses.
             for row in rows {
                 let seq: i64 = row.get(0);
-                let json: String = row.get(1);
+                let epoch: i64 = row.get(1);
+                let json: String = row.get(2);
                 let env: CommandEnvelope =
                     serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?;
-                entries.push((CommandPosition::new(shard.clone(), 0, seq as u64), env));
+                entries.push((
+                    CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
+                    env,
+                ));
             }
             let consumed = start + entries.len() as u64;
-            let next =
-                (consumed < total as u64).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            let cursor_epoch = entries.last().map(|(p, _)| p.backend_epoch).unwrap_or(0);
+            let next = (consumed < total as u64)
+                .then(|| CommandPosition::new(shard.clone(), cursor_epoch, consumed));
             Ok(CommandPage { entries, next })
         })();
         std::future::ready(result)

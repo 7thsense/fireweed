@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     next_seq BIGINT NOT NULL,
     next_item_seq BIGINT NOT NULL,
+    assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS pqueue_group_summary (
@@ -304,6 +305,11 @@ impl Inner {
 
     /// Assign the next command sequence for `shard` (atomic increment-and-return — no TOCTOU), apply
     /// `command`, and commit. Token-map mutations apply post-commit (a commit failure cannot desync them).
+    ///
+    /// BQ-20 NOTE: the data-plane fast path (every port routes here) is the in-process owner and is NOT
+    /// epoch-fenced — the TD-003 `assignment_epoch` fence lives at the [`PgRelLogWriter::append`] seam.
+    /// Caching + stamping the owner's `expected_epoch` on the hot path (so a stale owner's claim is fenced
+    /// end-to-end) arrives with the ownership/lease identity layer (BQ-21).
     fn commit_command(
         &mut self,
         shard: &QueueKey,
@@ -1383,13 +1389,28 @@ impl LogWriter for PgRelLogWriter<'_, '_> {
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
+        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
+        let epoch = {
+            let mut tx = self.tx.borrow_mut();
+            let epoch: i64 = st(tx.query_opt(
+                "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?
+            .ok_or(EngineError::NotFound)?
+            .get(0);
+            epoch as u64
+        };
+        if expected_epoch != epoch {
+            return Err(EngineError::EpochFenced);
+        }
         let mut positions = Vec::with_capacity(commands.len());
         for _ in commands {
             let mut tx = self.tx.borrow_mut();
             let seq = alloc_seq(&mut tx, &t, &q)?;
-            positions.push(CommandPosition::new(shard.clone(), 0, seq));
+            positions.push(CommandPosition::new(shard.clone(), epoch, seq));
         }
         Ok(positions)
     }
@@ -1537,9 +1558,40 @@ impl ControlPlaneStore for PostgresRelationalBackend {
 
     fn current_epoch(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        std::future::ready(Ok(0))
+        let (t, q) = parts(shard);
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let epoch: i64 = st(g.client.query_opt(
+                "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?
+            .ok_or(EngineError::NotFound)?
+            .get(0);
+            Ok(epoch as u64)
+        })();
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let (t, q) = parts(shard);
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            // TD-003 acquire: strictly-greater epoch, durably recorded (the fence authority advances).
+            let epoch: i64 = st(g.client.query_opt(
+                "UPDATE relational_cursor SET assignment_epoch = assignment_epoch + 1 \
+                 WHERE tenant=$1 AND queue=$2 RETURNING assignment_epoch",
+                &[&t, &q],
+            ))?
+            .ok_or(EngineError::NotFound)?
+            .get(0);
+            Ok(epoch as u64)
+        })();
+        std::future::ready(result)
     }
 }
 
@@ -2080,6 +2132,8 @@ mod sql_shape_tests {
         assert!(RELATIONAL_SCHEMA.contains("relational_cursor"));
         assert!(RELATIONAL_SCHEMA.contains("next_seq BIGINT"));
         assert!(RELATIONAL_SCHEMA.contains("next_item_seq BIGINT"));
+        // BQ-20: the durable ownership epoch (TD-003 fence authority) lives on the per-queue cursor row.
+        assert!(RELATIONAL_SCHEMA.contains("assignment_epoch BIGINT"));
     }
 
     #[test]

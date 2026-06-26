@@ -65,6 +65,32 @@ fn shard_dir(root: &Path, shard: &QueueKey) -> PathBuf {
     root.join(hex(raw.as_bytes()))
 }
 
+/// Read a shard's durable `assignment_epoch` from its `epoch.json` manifest (TD-003 fence authority).
+/// Missing file → 0 (a never-acquired queue is at epoch 0, the genesis owner).
+fn read_epoch(root: &Path, shard: &QueueKey) -> u64 {
+    let path = shard_dir(root, shard).join("epoch.json");
+    fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<u64>(&b).ok())
+        .unwrap_or(0)
+}
+
+/// Durably advance a shard's `assignment_epoch` to a strictly-greater value (TD-003 acquire). Returns the
+/// new epoch.
+///
+/// SCOPE (BQ-20): this is a plain read-then-overwrite of `epoch.json`, made safe ONLY by the process-wide
+/// `inner` mutex that serializes acquire vs append within one owner. It is NOT yet the TD-004
+/// manifest-CAS epoch-fence entry the real multi-owner S3 model requires (compare-and-swap against the
+/// manifest's recorded epoch, committed before any data segment) — that pairs with the S3-CAS control
+/// plane and the per-entry-epoch object format (see `read_from`), tracked as a follow-up.
+fn advance_epoch_object(root: &Path, shard: &QueueKey) -> EngineResult<u64> {
+    let dir = shard_dir(root, shard);
+    fs::create_dir_all(&dir).map_err(store)?;
+    let next = read_epoch(root, shard) + 1;
+    fs::write(dir.join("epoch.json"), to_json(&next)?).map_err(store)?;
+    Ok(next)
+}
+
 /// The next durable sequence for a shard: `max(existing object index) + 1` (compaction-safe). Empty
 /// log → 0.
 fn next_seq(log_dir: &Path) -> EngineResult<u64> {
@@ -92,22 +118,23 @@ fn next_seq(log_dir: &Path) -> EngineResult<u64> {
 /// durable chokepoint both write paths funnel through (`commit_locked` and `Backend::write` →
 /// `ObjLogWriter`): a `ReplacePending` command is refused with `Unavailable` BEFORE any object is
 /// written, so the ban holds at the write path, not just the `replace_if_pending` port.
-fn append_object(root: &Path, shard: &QueueKey, env: &CommandEnvelope) -> EngineResult<u64> {
+fn append_object(root: &Path, shard: &QueueKey, env: &CommandEnvelope) -> EngineResult<(u64, u64)> {
     if matches!(env.command, QueueCommand::ReplacePending(_)) {
         return Err(EngineError::Unavailable);
     }
     let dir = shard_dir(root, shard);
     let log_dir = dir.join("log");
     fs::create_dir_all(&log_dir).map_err(store)?;
+    let epoch = read_epoch(root, shard); // in-process owner: stamp the queue's current durable epoch.
     let seq = next_seq(&log_dir)?;
     // Object name: zero-padded so lexical order == sequence order.
     fs::write(log_dir.join(format!("{seq:020}.json")), to_json(env)?).map_err(store)?;
     fs::write(
         dir.join("high_water.json"),
-        to_json(&HighWater { epoch: 0, seq })?,
+        to_json(&HighWater { epoch, seq })?,
     )
     .map_err(store)?;
-    Ok(seq)
+    Ok((epoch, seq))
 }
 
 /// The high-water object payload (a stored field, not recomputed from a possibly-compacted log).
@@ -156,6 +183,10 @@ impl Inner {
     }
 
     /// Durable append + infallible in-memory apply (the orchestration unit). Caller MUST pre-validate.
+    ///
+    /// BQ-20 NOTE: the data-plane fast path is the in-process owner — it STAMPS the queue's current epoch
+    /// (via `append_object`) but does NOT validate an `expected_epoch`; the TD-003 fence that REJECTS a
+    /// stale epoch lives at the [`ObjLogWriter::append`] seam. Owner-epoch caching on this path is BQ-21.
     fn commit_locked(&mut self, shard: &QueueKey, env: CommandEnvelope) -> EngineResult<()> {
         append_object(&self.root, shard, &env)?;
         self.projections
@@ -292,11 +323,16 @@ impl LogWriter for ObjLogWriter {
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
+        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
+        if expected_epoch != read_epoch(&self.root, shard) {
+            return Err(EngineError::EpochFenced);
+        }
         let mut positions = Vec::with_capacity(commands.len());
         for env in commands {
-            let seq = append_object(&self.root, shard, env)?;
-            positions.push(CommandPosition::new(shard.clone(), 0, seq));
+            let (epoch, seq) = append_object(&self.root, shard, env)?;
+            positions.push(CommandPosition::new(shard.clone(), epoch, seq));
         }
         Ok(positions)
     }
@@ -657,9 +693,32 @@ impl ControlPlaneStore for ObjectLogBackend {
 
     fn current_epoch(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        std::future::ready(Ok(0))
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            if g.queues.contains_key(shard) {
+                Ok(read_epoch(&g.root, shard))
+            } else {
+                Err(EngineError::NotFound)
+            }
+        };
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            if g.queues.contains_key(shard) {
+                advance_epoch_object(&g.root, shard)
+            } else {
+                Err(EngineError::NotFound)
+            }
+        };
+        std::future::ready(result)
     }
 }
 
@@ -678,6 +737,13 @@ impl LogRead for ObjectLogBackend {
             let g = self.inner.lock().expect("poisoned");
             let all = g.read_envelopes(shard)?;
             let total = all.len() as u64;
+            // BQ-20: replayed positions are SEQ-authoritative; the epoch label is non-authoritative here.
+            // The log object (`{seq}.json`) stores only the envelope, not the epoch it was written under, so
+            // a per-entry epoch is not recoverable from the object alone (unlike the sqlite/postgres
+            // `log_entries.epoch` column). Carrying the true per-entry epoch needs the object format to
+            // record it alongside the manifest-CAS epoch fence — tracked with that schema work (see the
+            // `advance_epoch_object` note). The high-water guard is seq-monotonic, and no recovery path
+            // re-derives high-water from a replayed cross-epoch position today, so this is latent.
             let entries: Vec<(CommandPosition, CommandEnvelope)> = all
                 .into_iter()
                 .filter(|(seq, _)| *seq >= start)

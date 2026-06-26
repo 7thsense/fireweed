@@ -23,11 +23,18 @@ use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
 /// Appends commands to the durable log within the current unit of work.
 pub trait LogWriter {
-    /// Append `commands` to `shard`'s log, returning their committed positions in order.
+    /// Append `commands` to `shard`'s log under the owner's `expected_epoch`, returning the committed
+    /// positions in order. Implements the TD-003 Single Authoritative Fencing Rule, step 2: the append
+    /// MUST reject any `expected_epoch` that is not the queue's current durable `assignment_epoch` (not
+    /// merely `<=`) with [`EngineError::EpochFenced`](crate::EngineError::EpochFenced) — a superseded
+    /// owner is fenced the instant a newer epoch is acquired, before any new-epoch segment exists. The
+    /// committed positions carry the current epoch as their `backend_epoch`. In-process owners pass their
+    /// current epoch (read via [`ControlPlaneStore::current_epoch`]); they never self-fence.
     fn append(
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>>;
 }
 
@@ -425,6 +432,18 @@ pub trait ControlPlaneStore: Send + Sync {
 
     /// The current assignment epoch for `shard` (the `backend_epoch` of new positions).
     fn current_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
+
+    /// Acquire the queue at a NEW, strictly-greater `assignment_epoch` and durably record it (TD-003
+    /// Single Authoritative Fencing Rule, step 1: "durable fence before use"). Returns the new epoch. This
+    /// is the ownership-handoff primitive: after it commits, the previous epoch's writers are fenced at
+    /// their next [`LogWriter::append`] (step 2), before any new-epoch segment exists. `assignment_epoch`
+    /// MUST increase strictly and MUST NOT decrease or repeat for a queue (TD-003 epoch monotonicity).
+    /// The lease/owner-identity layer that decides WHO calls this (and caches the epoch to stamp on its
+    /// writes) is the queue-ownership lifecycle (BQ-21); this is the durable epoch mechanism it builds on.
+    fn acquire_epoch(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;

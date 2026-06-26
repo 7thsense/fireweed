@@ -31,6 +31,10 @@ pub enum EngineError {
     /// A `request_id` replay arrived after its retention window (API-001 `request-expired`).
     /// Maps to `-ERR pqueue request_expired`.
     RequestExpired,
+    /// An append/claim carried an `expected_epoch` that is not the queue's current durable
+    /// `assignment_epoch` — a stale (superseded) owner was fenced (TD-003 Single Authoritative Fencing
+    /// Rule, `queue-epoch-stale`). Maps to `-ERR pqueue epoch_stale`.
+    EpochFenced,
     /// The principal is not authorized (cross-tenant or missing operator privilege). The RESP
     /// adapter maps this to `-NOPERM` (TD-006 section 2); not an `-ERR pqueue ...` reply.
     Forbidden(&'static str),
@@ -52,6 +56,7 @@ impl EngineError {
             EngineError::BatchTooLarge => Some("-ERR pqueue batch_too_large"),
             EngineError::RequestIdConflict => Some("-ERR pqueue request_id_conflict"),
             EngineError::RequestExpired => Some("-ERR pqueue request_expired"),
+            EngineError::EpochFenced => Some("-ERR pqueue epoch_stale"),
             // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR pqueue` mappings handled by the adapter.
             EngineError::NotFound
             | EngineError::QueueDefinitionConflict
@@ -75,6 +80,7 @@ impl std::fmt::Display for EngineError {
             EngineError::BatchTooLarge => write!(f, "batch too large"),
             EngineError::RequestIdConflict => write!(f, "request-id conflict"),
             EngineError::RequestExpired => write!(f, "request expired"),
+            EngineError::EpochFenced => write!(f, "epoch fenced (stale owner)"),
             EngineError::Forbidden(why) => write!(f, "forbidden: {why}"),
             EngineError::Storage(msg) => write!(f, "storage: {msg}"),
         }

@@ -66,10 +66,11 @@ async fn replace_pending_command_is_refused_at_the_write_path() {
         }),
         vec![],
     );
+    let epoch = b.current_epoch(&shard()).await.unwrap();
     let res = b
         .write(
             move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-                let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
+                let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
                 pw.apply(&pos, std::slice::from_ref(&env))?;
                 Ok(())
             },

@@ -92,6 +92,10 @@ mod tests {
             EngineError::RequestExpired.resp_token(),
             Some("-ERR pqueue request_expired")
         );
+        assert_eq!(
+            EngineError::EpochFenced.resp_token(),
+            Some("-ERR pqueue epoch_stale")
+        );
         // NotFound (to nil) and Forbidden (to -NOPERM) have non-`-ERR` mappings; no token here.
         assert_eq!(EngineError::NotFound.resp_token(), None);
         assert_eq!(EngineError::Forbidden("x").resp_token(), None);

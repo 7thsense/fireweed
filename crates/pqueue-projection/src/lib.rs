@@ -106,7 +106,9 @@ fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
 #[derive(Default)]
 pub struct LogData {
     epoch: u64,
-    entries: Vec<CommandEnvelope>,
+    /// Each entry is stored with the `assignment_epoch` it was appended under (BQ-20), so a position
+    /// replayed across an epoch boundary carries its true epoch — not a relabel to the current one.
+    entries: Vec<(u64, CommandEnvelope)>,
     /// Persisted command_position high-water — a stored field, NOT recomputed from `entries.len()`,
     /// so it survives log retention/compaction and `item_version` never regresses (TD-007 §4).
     high_water: Option<CommandPosition>,
@@ -114,17 +116,23 @@ pub struct LogData {
 }
 
 impl LogData {
-    /// `LogWriter::append` — append `commands` to this shard's log, advancing the persisted high-water,
-    /// returning the committed positions in order.
+    /// `LogWriter::append` — append `commands` to this shard's log under `expected_epoch`, advancing the
+    /// persisted high-water, returning the committed positions in order. TD-003 fencing rule: an
+    /// `expected_epoch` that is not the log's current epoch is rejected with [`EngineError::EpochFenced`]
+    /// (a stale owner), appending nothing.
     pub fn append(
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
+        if expected_epoch != self.epoch {
+            return Err(EngineError::EpochFenced);
+        }
         let mut positions = Vec::with_capacity(commands.len());
         for cmd in commands {
             let seq = self.entries.len() as u64;
-            self.entries.push(cmd.clone());
+            self.entries.push((self.epoch, cmd.clone()));
             let pos = CommandPosition::new(shard.clone(), self.epoch, seq);
             self.high_water = Some(pos.clone());
             positions.push(pos);
@@ -133,6 +141,15 @@ impl LogData {
     }
 
     pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Advance to a new, strictly-greater `assignment_epoch` (TD-003 acquire / "durable fence before
+    /// use"). Returns the new epoch. The seq counter is continuous across epochs (a new epoch fences who
+    /// may extend the log; it never rewinds it — TD-003 Recovery), so positions stay monotonic by
+    /// `(epoch, seq)`.
+    pub fn advance_epoch(&mut self) -> u64 {
+        self.epoch += 1;
         self.epoch
     }
 
@@ -148,14 +165,15 @@ impl LogData {
             None => 0,
         };
         let mut entries = Vec::new();
-        for (i, cmd) in self.entries.iter().enumerate().skip(start).take(limit) {
+        for (i, (entry_epoch, cmd)) in self.entries.iter().enumerate().skip(start).take(limit) {
             entries.push((
-                CommandPosition::new(shard.clone(), self.epoch, i as u64),
+                CommandPosition::new(shard.clone(), *entry_epoch, i as u64),
                 cmd.clone(),
             ));
         }
         let next = (start + entries.len() < self.entries.len()).then(|| {
-            CommandPosition::new(shard.clone(), self.epoch, (start + entries.len()) as u64)
+            let (next_epoch, _) = &self.entries[start + entries.len()];
+            CommandPosition::new(shard.clone(), *next_epoch, (start + entries.len()) as u64)
         });
         pqueue_engine::CommandPage { entries, next }
     }
@@ -213,7 +231,9 @@ pub fn commit(
     shard: &QueueKey,
     env: CommandEnvelope,
 ) -> EngineResult<()> {
-    log.append(shard, std::slice::from_ref(&env))?;
+    // In-process owner: stamp the log's current epoch (never self-fences).
+    let epoch = log.epoch();
+    log.append(shard, std::slice::from_ref(&env), epoch)?;
     proj.apply_command(&env.command)
 }
 
@@ -702,6 +722,50 @@ mod tests {
     }
     fn version_of(proj: &ProjectionData, id: &str) -> u64 {
         proj.items.get(&iid(id)).unwrap().item_version
+    }
+
+    /// BQ-20: an epoch advance fences future appends to the new epoch but does NOT rewind the log; a
+    /// position replayed across the boundary carries its TRUE per-entry epoch (not a relabel to the
+    /// current one), so `read_from` is consistent with the durably-stamped position and the high-water
+    /// guard never false-regresses.
+    #[test]
+    fn read_from_carries_true_per_entry_epoch_across_an_advance() {
+        let mut log = LogData::default();
+        // Two appends at epoch 0.
+        log.append(&shard(), &[env(QueueCommand::PauseQueue)], 0)
+            .unwrap();
+        log.append(&shard(), &[env(QueueCommand::ResumeQueue)], 0)
+            .unwrap();
+        // Acquire E+1 (durable fence), then one append at epoch 1.
+        assert_eq!(log.advance_epoch(), 1);
+        let pos = log
+            .append(&shard(), &[env(QueueCommand::PauseQueue)], 1)
+            .unwrap();
+        // A stale epoch-0 append is now fenced (the seq counter is unchanged — no rewind).
+        assert_eq!(
+            log.append(&shard(), &[env(QueueCommand::ResumeQueue)], 0),
+            Err(EngineError::EpochFenced)
+        );
+
+        // read_from labels each entry with the epoch it was written under, not the current epoch.
+        let page = log.read_from(&shard(), None, 10);
+        let epochs: Vec<u64> = page.entries.iter().map(|(p, _)| p.backend_epoch).collect();
+        let seqs: Vec<u64> = page.entries.iter().map(|(p, _)| p.sequence).collect();
+        assert_eq!(
+            epochs,
+            vec![0, 0, 1],
+            "historical entries keep their true epoch"
+        );
+        assert_eq!(
+            seqs,
+            vec![0, 1, 2],
+            "seq is continuous across the epoch boundary"
+        );
+        // The durably-returned append position matches what read_from reconstructs (epoch 1, seq 2).
+        assert_eq!((pos[0].backend_epoch, pos[0].sequence), (1, 2));
+        // The high-water (epoch 1, seq 2) does NOT regress against the replayed last position.
+        let last = &page.entries.last().unwrap().0;
+        assert_eq!(log.high_water().as_ref(), Some(last));
     }
 
     #[test]

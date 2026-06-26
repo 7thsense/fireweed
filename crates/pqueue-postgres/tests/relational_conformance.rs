@@ -82,4 +82,6 @@ pg_relational!(
     reconnect_preserves_terminal_and_pending_state,
     reconnect_preserves_leased_item_state,
     claim_compatibility_is_resolved_and_gated,
+    stale_epoch_append_is_fenced,
+    epoch_fence_closes_pre_segment_window,
 );

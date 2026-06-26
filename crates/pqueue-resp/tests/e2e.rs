@@ -60,10 +60,11 @@ async fn fence(backend: &MemoryBackend, id: &str) {
         created_at: UtcTimestamp::new(0, 0).unwrap(),
     };
     let sk = shard();
+    let epoch = backend.current_epoch(&sk).await.unwrap();
     backend
         .write(
             move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-                let pos = lw.append(&sk, std::slice::from_ref(&env))?;
+                let pos = lw.append(&sk, std::slice::from_ref(&env), epoch)?;
                 pw.apply(&pos, std::slice::from_ref(&env))?;
                 Ok(())
             },

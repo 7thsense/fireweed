@@ -191,11 +191,16 @@ pub fn claim_req(max_items: usize, lease_expires_at: i64, now: i64) -> ClaimRequ
     }
 }
 
-/// Apply a command through the atomic unit of work (append + apply together).
-pub async fn commit<B: Backend>(backend: &B, env: CommandEnvelope) {
+/// Apply a command through the atomic unit of work (append + apply together). Stamps the queue's current
+/// `assignment_epoch` (the in-process owner is always current — never self-fences; BQ-20).
+pub async fn commit<B: Backend + ControlPlaneStore>(backend: &B, env: CommandEnvelope) {
+    let epoch = backend
+        .current_epoch(&shard())
+        .await
+        .expect("current epoch");
     backend
         .write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
+            let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
             pw.apply(&pos, std::slice::from_ref(&env))?;
             Ok(())
         })
@@ -235,6 +240,8 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::snapshots_write_read_latest(&make).await;
     scenarios::rejected_mutations_do_not_append_commands(&make).await;
     scenarios::claim_compatibility_is_resolved_and_gated(&make).await;
+    scenarios::stale_epoch_append_is_fenced(&make).await;
+    scenarios::epoch_fence_closes_pre_segment_window(&make).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +280,8 @@ macro_rules! core_suite {
             upsert_rejects_claimed_and_terminal,
             upsert_preserves_group_delay_and_payload_in_claim_shape,
             claim_compatibility_is_resolved_and_gated,
+            stale_epoch_append_is_fenced,
+            epoch_fence_closes_pre_segment_window,
         );
     };
     (@eventual $make:expr) => {
@@ -295,6 +304,8 @@ macro_rules! core_suite {
             finalize_of_nonleased_item_is_rejected_without_appending,
             upsert_is_unavailable,
             claim_compatibility_is_resolved_and_gated,
+            stale_epoch_append_is_fenced,
+            epoch_fence_closes_pre_segment_window,
         );
     };
 }

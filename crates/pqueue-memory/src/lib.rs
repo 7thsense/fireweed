@@ -45,11 +45,12 @@ impl LogWriter for LogWriterView<'_> {
         &mut self,
         shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         self.logs
             .get_mut(shard)
             .ok_or(EngineError::NotFound)?
-            .append(shard, commands)
+            .append(shard, commands, expected_epoch)
     }
 }
 
@@ -562,6 +563,20 @@ impl ControlPlaneStore for MemoryBackend {
             .get(shard)
             .map(|l| l.epoch())
             .unwrap_or(0));
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = {
+            let mut g = self.state.lock().expect("poisoned");
+            g.logs
+                .get_mut(shard)
+                .map(|l| l.advance_epoch())
+                .ok_or(EngineError::NotFound)
+        };
         std::future::ready(result)
     }
 }
