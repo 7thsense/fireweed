@@ -567,13 +567,14 @@ fn base_fields(
     attempt_count: u32,
     payload: Option<&bytes::Bytes>,
 ) -> Vec<Resp> {
-    let mut fields = Vec::new();
-    fields.push(Resp::Bulk(b"item_id".to_vec()));
-    fields.push(Resp::Bulk(item_id.as_bytes().to_vec()));
-    fields.push(Resp::Bulk(b"client_item_key".to_vec()));
-    fields.push(Resp::Bulk(client_item_key.as_bytes().to_vec()));
-    fields.push(Resp::Bulk(b"item_version".to_vec()));
-    fields.push(Resp::Bulk(item_version.to_string().into_bytes()));
+    let mut fields = vec![
+        Resp::Bulk(b"item_id".to_vec()),
+        Resp::Bulk(item_id.as_bytes().to_vec()),
+        Resp::Bulk(b"client_item_key".to_vec()),
+        Resp::Bulk(client_item_key.as_bytes().to_vec()),
+        Resp::Bulk(b"item_version".to_vec()),
+        Resp::Bulk(item_version.to_string().into_bytes()),
+    ];
     if let Some(state) = lifecycle_state {
         fields.push(Resp::Bulk(b"lifecycle_state".to_vec()));
         fields.push(Resp::Bulk(state.as_bytes().to_vec()));
