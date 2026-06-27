@@ -75,6 +75,7 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
                 ..Default::default()
             }],
             clock.now(),
+            None,
         )
         .await
         .unwrap();

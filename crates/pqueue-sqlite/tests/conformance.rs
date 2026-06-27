@@ -53,3 +53,35 @@ async fn claim_fences_superseded_owner_epoch() {
     let claimed = b.claim(ok).await.unwrap();
     assert_eq!(claimed.items.len(), 1, "current-epoch owner claims the item");
 }
+
+/// B1b (ADR-009 / TD-003): the cached-epoch fence applies to `PushPort::push` on the sqlite log path too.
+#[tokio::test]
+async fn push_fences_superseded_owner_epoch() {
+    use pqueue_conformance::{qdef, qkey, shard, ts};
+    use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec};
+
+    let b = SqliteBackend::in_memory().expect("open :memory:");
+    b.create_queue(qdef()).await.unwrap();
+    let e1 = b.acquire_epoch(&shard()).await.unwrap();
+    assert!(e1 >= 1);
+
+    assert!(
+        matches!(
+            b.push(&shard(), vec![PushSpec::default()], ts(0), Some(0)).await,
+            Err(EngineError::EpochFenced)
+        ),
+        "a superseded owner's push must be EpochFenced"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        0,
+        "a fenced push must append nothing"
+    );
+
+    let ids = b
+        .push(&shard(), vec![PushSpec::default()], ts(1), Some(e1))
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+}

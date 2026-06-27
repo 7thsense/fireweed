@@ -1865,6 +1865,9 @@ impl PushPort for SqliteRelationalBackend {
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
+        // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
+        // contract so the owner fence is uniform once the relational/object write paths thread it.
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2359,7 +2362,7 @@ mod group_summary_tests {
 
         // Push two grouped items (priorities 10, 20) — rep is the priority-10 item, count 2.
         let ids = b
-            .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0))
+            .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0), None)
             .await
             .unwrap();
         let (oldest, count, rep) = summary(&b, "g").expect("summary row created on grouped push");
@@ -2401,7 +2404,7 @@ mod group_summary_tests {
         let b = SqliteRelationalBackend::in_memory().unwrap();
         b.create_queue(qdef()).await.unwrap();
         let ids = b
-            .push(&shard(), vec![grouped(5, "g")], ts(0))
+            .push(&shard(), vec![grouped(5, "g")], ts(0), None)
             .await
             .unwrap();
         b.claim(claim_req(1, 100, 10)).await.unwrap();
@@ -2419,7 +2422,7 @@ mod group_summary_tests {
         let b = SqliteRelationalBackend::in_memory().unwrap();
         b.create_queue(qdef()).await.unwrap();
         let ids = b
-            .push(&shard(), vec![grouped(5, "g")], ts(0))
+            .push(&shard(), vec![grouped(5, "g")], ts(0), None)
             .await
             .unwrap();
         b.claim(claim_req(1, 500, 10)).await.unwrap();
@@ -2445,7 +2448,7 @@ mod group_summary_tests {
     async fn cohort_expired_drains_the_group_summary() {
         let b = SqliteRelationalBackend::in_memory().unwrap();
         b.create_queue(qdef()).await.unwrap();
-        b.push(&shard(), vec![grouped(5, "g"), grouped(6, "g")], ts(0))
+        b.push(&shard(), vec![grouped(5, "g"), grouped(6, "g")], ts(0), None)
             .await
             .unwrap();
         assert_eq!(summary(&b, "g").unwrap().1, 2);
@@ -2542,7 +2545,7 @@ mod group_summary_tests {
             let a = SqliteRelationalBackend::open(&path).unwrap();
             a.create_queue(qdef()).await.unwrap();
             let ids = a
-                .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0))
+                .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0), None)
                 .await
                 .unwrap();
             let (_, count, rep) = summary(&a, "g").unwrap();

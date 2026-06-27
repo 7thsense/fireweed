@@ -81,3 +81,38 @@ async fn claim_fences_superseded_owner_epoch() {
     let claimed = b.claim(ok).await.unwrap();
     assert_eq!(claimed.items.len(), 1, "current-epoch owner claims the item");
 }
+
+/// B1b (ADR-009 / TD-003): the same cached-epoch fence applies to `PushPort::push` — a superseded owner's
+/// push is `EpochFenced` and appends nothing; the current-epoch owner appends normally.
+#[tokio::test]
+async fn push_fences_superseded_owner_epoch() {
+    use pqueue_conformance::{qdef, qkey, shard};
+    use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec};
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    let e1 = b.acquire_epoch(&shard()).await.unwrap(); // advance genesis 0 -> 1
+    assert!(e1 >= 1);
+
+    // Stale-epoch push is fenced and appends nothing.
+    assert!(
+        matches!(
+            b.push(&shard(), vec![PushSpec::default()], ts(0), Some(0)).await,
+            Err(EngineError::EpochFenced)
+        ),
+        "a superseded owner's push must be EpochFenced"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        0,
+        "a fenced push must append nothing"
+    );
+
+    // Current-epoch push succeeds.
+    let ids = b
+        .push(&shard(), vec![PushSpec::default()], ts(1), Some(e1))
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+}

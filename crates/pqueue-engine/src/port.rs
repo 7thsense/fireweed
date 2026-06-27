@@ -303,11 +303,15 @@ pub struct PushSpec {
 /// Push can never leave the log ahead of the projection (divergence-safe) and ids are unique across
 /// handles + restart. The library facade's `push` routes here rather than reaching for `Backend::write`.
 pub trait PushPort: Send + Sync {
+    /// `expected_epoch`: the owner's cached acquire-time fence epoch (ADR-009 / TD-003). `Some(e)` fences the
+    /// append at commit (a superseded owner → `EpochFenced`, nothing appended); `None` is the degenerate
+    /// sole-owner path (stamp current, never fence).
     fn push(
         &self,
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
 }
 

@@ -160,7 +160,7 @@ async fn reopened_queue_accepts_new_push_and_claim() {
         let a = SqliteRelationalBackend::open(&path).unwrap();
         a.create_queue(qdef()).await.unwrap();
         let ids = a
-            .push(&shard(), vec![PushSpec::default()], ts(0))
+            .push(&shard(), vec![PushSpec::default()], ts(0), None)
             .await
             .unwrap();
         pre_id = ids[0].clone();
@@ -181,7 +181,7 @@ async fn reopened_queue_accepts_new_push_and_claim() {
     let b = SqliteRelationalBackend::open(&path).unwrap();
     // A fresh push: the id must NOT collide with the pre-reopen id (cmd_seq restored from pqueue_items).
     let new_ids = b
-        .push(&shard(), vec![PushSpec::default()], ts(10))
+        .push(&shard(), vec![PushSpec::default()], ts(10), None)
         .await
         .unwrap();
     assert_eq!(new_ids.len(), 1);
@@ -207,7 +207,7 @@ async fn leased_item_survives_reopen_but_loses_its_live_token() {
     {
         let a = SqliteRelationalBackend::open(&path).unwrap();
         a.create_queue(qdef()).await.unwrap();
-        a.push(&shard(), vec![PushSpec::default()], ts(0))
+        a.push(&shard(), vec![PushSpec::default()], ts(0), None)
             .await
             .unwrap();
         let claimed = a.claim(claim_req(1, 500, 10)).await.unwrap();

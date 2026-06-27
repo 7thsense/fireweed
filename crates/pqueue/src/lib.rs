@@ -149,7 +149,7 @@ impl<B: LibBackend> Pqueue<B> {
                 gate_keys: it.gate_keys,
             })
             .collect();
-        self.backend.push(queue, specs, self.clock.now()).await
+        self.backend.push(queue, specs, self.clock.now(), None).await
     }
 
     /// Upsert on a caller-supplied `client_item_key` (Invariant 2). Replaces a pending item with the

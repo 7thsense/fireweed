@@ -509,7 +509,7 @@ async fn xadd<B: RespBackend>(
                 cohort_size: None, // RESP XADD has no cohort declaration (library-only, plan §3)
                 gate_keys: Vec::new(), // RESP XADD carries no gate keys (library-only)
             };
-            match backend.push(&shard, vec![spec], state.now()).await {
+            match backend.push(&shard, vec![spec], state.now(), None).await {
                 Ok(ids) => Resp::Bulk(ids[0].as_str().as_bytes().to_vec()),
                 Err(e) => err_reply(&e),
             }

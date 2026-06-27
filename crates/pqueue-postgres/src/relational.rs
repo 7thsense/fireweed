@@ -1771,6 +1771,9 @@ impl PushPort for PostgresRelationalBackend {
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
+        // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
+        // contract so the owner fence is uniform once the relational/object write paths thread it.
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2330,7 +2333,7 @@ mod gated_group_summary_tests {
 
         let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
         block_on(b.create_queue(qdef())).unwrap();
-        block_on(b.push(&shard(), vec![grouped(10), grouped(20)], ts(0))).unwrap();
+        block_on(b.push(&shard(), vec![grouped(10), grouped(20)], ts(0), None)).unwrap();
         assert_eq!(group_count(&b), 2, "two grouped items eligible");
         // Claim the rep (priority 10) — the claim path MUST refresh the summary (count -> 1).
         block_on(b.claim(claim_req(1, 500, 10))).unwrap();
@@ -2377,7 +2380,7 @@ mod gated_group_summary_tests {
                 g2(30, "g3"),
             ],
             ts(0),
-        ))
+        None))
         .unwrap();
         // group_batching max_groups=2 → the two oldest groups (g1, g2) leased whole (4 items); g3 stays.
         let req = ClaimRequest {
@@ -2428,7 +2431,7 @@ mod gated_group_summary_tests {
         };
         let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
         block_on(b.create_queue(def)).unwrap();
-        block_on(b.push(&shard(), vec![cm(10, 3), cm(11, 3), cm(12, 3)], ts(0))).unwrap();
+        block_on(b.push(&shard(), vec![cm(10, 3), cm(11, 3), cm(12, 3)], ts(0), None)).unwrap();
         let req = ClaimRequest {
             compatibility: ClaimCompatibility {
                 whole_cohort: true,
@@ -2473,8 +2476,8 @@ mod gated_group_summary_tests {
         let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
         block_on(b.create_queue(def)).unwrap();
         // g1 eligible since t=10 (2 items), g2 since t=20 (1 item).
-        block_on(b.push(&shard(), vec![g2(10, "g1"), g2(11, "g1")], ts(10))).unwrap();
-        block_on(b.push(&shard(), vec![g2(20, "g2")], ts(20))).unwrap();
+        block_on(b.push(&shard(), vec![g2(10, "g1"), g2(11, "g1")], ts(10), None)).unwrap();
+        block_on(b.push(&shard(), vec![g2(20, "g2")], ts(20), None)).unwrap();
 
         // Group granularity: oldest-first (g1 then g2), per-group eligible counts, at-risk None.
         let scopes =

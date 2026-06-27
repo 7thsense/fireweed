@@ -449,6 +449,9 @@ impl PushPort for ObjectLogBackend {
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
+        // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
+        // contract so the owner fence is uniform once the relational/object write paths thread it.
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");

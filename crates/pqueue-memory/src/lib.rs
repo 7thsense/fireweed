@@ -278,6 +278,7 @@ impl PushPort for MemoryBackend {
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
@@ -300,7 +301,7 @@ impl PushPort for MemoryBackend {
             };
             // commit_locked fetches the shard's projection first (NotFound if absent) BEFORE appending,
             // and Push apply is infallible, so the log can never lead the projection.
-            Self::commit_locked(&mut g, shard, env, None)?;
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             Ok(ids)
         })();
         std::future::ready(result)

@@ -529,6 +529,7 @@ impl PushPort for SqliteBackend {
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -553,7 +554,7 @@ impl PushPort for SqliteBackend {
                 checksum: CommandChecksum(0),
                 created_at: now,
             };
-            g.commit_locked(shard, env, None)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(ids)
         })();
         std::future::ready(result)
