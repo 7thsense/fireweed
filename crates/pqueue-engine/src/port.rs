@@ -239,6 +239,7 @@ pub struct Claimed {
 
 /// A backend that leases candidates atomically with selection (TD-007 §2.2). The engine is the
 /// single *logical* claim authority; a backend MAY implement claim in one transaction.
+#[doc(hidden)]
 pub trait ClaimPort: Send + Sync {
     fn claim(
         &self,
@@ -261,6 +262,7 @@ pub enum UpsertOutcome {
 /// Pending-item replacement, executed in the **same unit of work as claim** so upsert and claim on
 /// one item mutually exclude (TD-007 §2.3). Atomic class only; on eventual-apply the engine returns
 /// `EngineError::Unavailable` without calling this port.
+#[doc(hidden)]
 pub trait UpsertPort: Send + Sync {
     /// Upsert on `client_item_key`. The backend ASSIGNS the new item id from its own command sequence
     /// (restart-safe, unique across handles — like [`PushPort`]) and returns it in the `UpsertOutcome`;
@@ -303,6 +305,7 @@ pub struct PushSpec {
 /// sequence and commits through its atomic append+apply UoW after confirming the shard exists, so a
 /// Push can never leave the log ahead of the projection (divergence-safe) and ids are unique across
 /// handles + restart. The library facade's `push` routes here rather than reaching for `Backend::write`.
+#[doc(hidden)]
 pub trait PushPort: Send + Sync {
     /// `expected_epoch`: the owner's cached acquire-time fence epoch (ADR-009 / TD-003). `Some(e)` fences the
     /// append at commit (a superseded owner → `EpochFenced`, nothing appended); `None` is the degenerate
@@ -320,6 +323,7 @@ pub trait PushPort: Send + Sync {
 /// fenced lease → `StaleLease`, a superseded id → `Superseded`, terminal → `Terminal`, non-leased →
 /// `Invalid`, and the `RenewLease` command is NOT appended on rejection (no divergence). Lets a long-
 /// running worker extend its lease without surrendering the claim.
+#[doc(hidden)]
 pub trait RenewLeasePort: Send + Sync {
     fn renew(
         &self,
@@ -335,6 +339,7 @@ pub trait RenewLeasePort: Send + Sync {
 /// charge exactly one delivery. Pre-validated identically to renew (`reassign_validate`): the items must
 /// be Leased + not fenced/superseded/terminal, else a structured rejection with NOTHING appended. The
 /// same-consumer case (token unchanged) is a no-charge [`RenewLeasePort::renew`] instead.
+#[doc(hidden)]
 pub trait ReassignLeasePort: Send + Sync {
     fn reassign(
         &self,
@@ -352,6 +357,7 @@ pub trait ReassignLeasePort: Send + Sync {
 /// (remove-if-present), so the only pre-commit check is the API-001 force gate: purging a **leased** item
 /// requires `force` (else `EngineError::Conflict`, nothing appended). `XDEL` passes `force = true`
 /// (Redis deletes unconditionally); a library purge may pass `force = false` to honor the gate.
+#[doc(hidden)]
 pub trait PurgePort: Send + Sync {
     fn purge(
         &self,
@@ -368,6 +374,7 @@ pub trait PurgePort: Send + Sync {
 /// Finalize command is NOT appended (no log/projection divergence; the fencing check is pre-commit).
 /// Batch is all-or-nothing in this launch slice: any fenced item fails the whole call (per-item
 /// results are a later refinement).
+#[doc(hidden)]
 pub trait FinalizePort: Send + Sync {
     /// `expected_epoch`: the owner's cached acquire-time fence epoch (ADR-009 / TD-003). `Some(e)` fences
     /// the commit (a superseded owner → `EpochFenced`, nothing appended); `None` = degenerate sole-owner.

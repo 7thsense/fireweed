@@ -133,8 +133,11 @@ pub struct Pqueue<B> {
 }
 
 impl<B: LibBackend> Pqueue<B> {
-    /// A **sole-owner** handle (the common embedded case): no control plane, never fences. Behaviour is
-    /// identical to pre-coordination pqueue.
+    /// Low-level backend-injection constructor for a **sole-owner** handle. Hidden from the published
+    /// surface (ADR-009 §4a / L6): external clients build via [`open_memory`]/[`open_sqlite`]/
+    /// [`open_objectlog`], which construct the backend internally so a port-bearing handle is never named.
+    /// First-party crates/tests that inject a concrete backend use this.
+    #[doc(hidden)]
     pub fn new(backend: Arc<B>, clock: Arc<dyn Clock>) -> Self {
         Self {
             backend,
