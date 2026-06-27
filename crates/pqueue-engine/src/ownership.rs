@@ -84,8 +84,8 @@ pub async fn acquire_and_fence<CP, S>(
     now: UtcTimestamp,
 ) -> EngineResult<OwnershipOutcome>
 where
-    CP: QueueControlPlane,
-    S: ControlPlaneStore,
+    CP: QueueControlPlane + ?Sized,
+    S: ControlPlaneStore + ?Sized,
 {
     match control_plane.acquire_queue_lease(queue, owner, now)? {
         AcquireOutcome::Rejected(held) => Ok(OwnershipOutcome::Rejected(held)),

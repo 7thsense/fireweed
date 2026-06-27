@@ -12,19 +12,19 @@
 //! never on a concrete backend (a backend is passed in). Errors are the engine's structured
 //! [`EngineError`]; nothing is stringly-typed.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, UtcTimestamp,
-    WorkerId,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, OwnerId, PriorityValue, QueueDefinition,
+    UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
-    ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, RenewLeasePort,
-    UpsertPort,
+    OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec, QueueControlPlane,
+    QueueKey, ReassignLeasePort, RenewLeasePort, UpsertPort, acquire_and_fence,
 };
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
@@ -96,24 +96,101 @@ pub struct NewItem {
     pub gate_keys: Vec<String>,
 }
 
+/// How a [`Pqueue`] handle coordinates ownership (ADR-009 / TD-003 In-Process Library Owner-Runtime).
+enum Coordination {
+    /// Degenerate sole-owner: no control plane, constant ownership, never fences (`expected_epoch = None`).
+    /// This is the default and keeps single-instance behaviour byte-identical.
+    Sole,
+    /// A coordinated owner over a shared control plane. Each queue-addressed op operates under an acquired,
+    /// epoch-fenced [`OwnedSession`] (cached per queue), so a superseded instance self-fences on the data
+    /// path. `acquire_and_fence` advances the storage fence epoch the op stamps.
+    Owner {
+        owner_id: OwnerId,
+        control_plane: Arc<dyn QueueControlPlane>,
+        sessions: Mutex<HashMap<QueueKey, OwnedSession>>,
+    },
+}
+
 /// The ergonomic library handle. Holds an injected backend + clock; generates ids/lease tokens.
 pub struct Pqueue<B> {
     backend: Arc<B>,
     clock: Arc<dyn Clock>,
     ids: AtomicU64,
+    coordination: Coordination,
 }
 
 impl<B: LibBackend> Pqueue<B> {
+    /// A **sole-owner** handle (the common embedded case): no control plane, never fences. Behaviour is
+    /// identical to pre-coordination pqueue.
     pub fn new(backend: Arc<B>, clock: Arc<dyn Clock>) -> Self {
         Self {
             backend,
             clock,
             ids: AtomicU64::new(0),
+            coordination: Coordination::Sole,
+        }
+    }
+
+    /// A **coordinated owner** over a shared control plane (ADR-009 / TD-003). Every queue-addressed op
+    /// resolves ownership and operates under an acquired, epoch-fenced session, so when multiple instances
+    /// share one durable backend a superseded instance is rejected `EpochFenced` at commit. The owner is
+    /// runtime-refused on a backend without an atomic acquire→fence epoch in a later step (B5/OD-2).
+    pub fn with_control_plane(
+        backend: Arc<B>,
+        clock: Arc<dyn Clock>,
+        owner_id: OwnerId,
+        control_plane: Arc<dyn QueueControlPlane>,
+    ) -> Self {
+        Self {
+            backend,
+            clock,
+            ids: AtomicU64::new(0),
+            coordination: Coordination::Owner {
+                owner_id,
+                control_plane,
+                sessions: Mutex::new(HashMap::new()),
+            },
         }
     }
 
     fn next(&self) -> u64 {
         self.ids.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// The fence epoch to stamp for `queue`: `None` for a sole-owner handle; `Some(cached fence_epoch)` for
+    /// a coordinated owner — acquiring-and-fencing on first use and caching the [`OwnedSession`]. Returns
+    /// `Forbidden` when a different live owner holds the queue (the explicit owned-elsewhere value form is
+    /// added in a later step). A superseded owner keeps its cached (now-stale) epoch, so its next data-plane
+    /// op self-fences `EpochFenced` — fail-closed on the data path independent of the control-plane loop.
+    async fn session_epoch(&self, queue: &QueueKey) -> EngineResult<Option<u64>> {
+        let Coordination::Owner {
+            owner_id,
+            control_plane,
+            sessions,
+        } = &self.coordination
+        else {
+            return Ok(None);
+        };
+        if let Some(s) = sessions.lock().expect("poisoned").get(queue) {
+            return Ok(Some(s.fence_epoch));
+        }
+        let now = self.clock.now();
+        control_plane.register_owner(owner_id, now)?;
+        match acquire_and_fence(control_plane.as_ref(), self.backend.as_ref(), queue, owner_id, now)
+            .await?
+        {
+            OwnershipOutcome::Owned(session) => {
+                let epoch = session.fence_epoch;
+                sessions
+                    .lock()
+                    .expect("poisoned")
+                    .insert(queue.clone(), session);
+                Ok(Some(epoch))
+            }
+            OwnershipOutcome::Rejected(_) => {
+                Err(EngineError::Forbidden("queue owned by another live owner"))
+            }
+        }
     }
 
     pub async fn create_queue(
@@ -149,7 +226,8 @@ impl<B: LibBackend> Pqueue<B> {
                 gate_keys: it.gate_keys,
             })
             .collect();
-        self.backend.push(queue, specs, self.clock.now(), None).await
+        let epoch = self.session_epoch(queue).await?;
+        self.backend.push(queue, specs, self.clock.now(), epoch).await
     }
 
     /// Upsert on a caller-supplied `client_item_key` (Invariant 2). Replaces a pending item with the
@@ -160,6 +238,7 @@ impl<B: LibBackend> Pqueue<B> {
         client_item_key: ClientItemKey,
         item: NewItem,
     ) -> EngineResult<UpsertOutcome> {
+        let epoch = self.session_epoch(queue).await?;
         self.backend
             .replace_if_pending(
                 queue,
@@ -169,7 +248,8 @@ impl<B: LibBackend> Pqueue<B> {
                 item.not_before,
                 item.payload,
                 item.fields,
-                self.clock.now(), None
+                self.clock.now(),
+                epoch,
             )
             .await
     }
@@ -197,6 +277,7 @@ impl<B: LibBackend> Pqueue<B> {
         lease_ms: u64,
         compatibility: ClaimCompatibility,
     ) -> EngineResult<Vec<ClaimedItem>> {
+        let expected_epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let n = self.next();
         let req = ClaimRequest {
@@ -207,8 +288,8 @@ impl<B: LibBackend> Pqueue<B> {
             lease_expires_at: add_millis(now, lease_ms),
             now,
             compatibility,
-            // B1a: sole-owner / degenerate path (no fence). The owner session supplies Some(epoch) in B2.
-            expected_epoch: None,
+            // Sole-owner: None (never fences). Coordinated owner: the cached acquire-time fence epoch.
+            expected_epoch,
         };
         Ok(self.backend.claim(req).await?.items)
     }
@@ -247,8 +328,9 @@ impl<B: LibBackend> Pqueue<B> {
             .into_iter()
             .map(|item_id| FinalizeOutcome { item_id, kind })
             .collect();
+        let epoch = self.session_epoch(queue).await?;
         self.backend
-            .finalize(queue, outcomes, self.clock.now(), None)
+            .finalize(queue, outcomes, self.clock.now(), epoch)
             .await
     }
 
@@ -305,10 +387,11 @@ impl<B: LibBackend> Pqueue<B> {
         ids: impl IntoIterator<Item = ItemId>,
         lease_ms: u64,
     ) -> EngineResult<()> {
+        let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .renew(queue, ids, add_millis(now, lease_ms), now, None)
+            .renew(queue, ids, add_millis(now, lease_ms), now, epoch)
             .await
     }
 
@@ -321,12 +404,13 @@ impl<B: LibBackend> Pqueue<B> {
         ids: impl IntoIterator<Item = ItemId>,
         lease_ms: u64,
     ) -> EngineResult<()> {
+        let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let n = self.next();
         let token = LeaseToken::new(format!("libL{n}")).expect("lease");
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .reassign(queue, ids, token, add_millis(now, lease_ms), now, None)
+            .reassign(queue, ids, token, add_millis(now, lease_ms), now, epoch)
             .await
     }
 
@@ -348,9 +432,10 @@ impl<B: LibBackend> Pqueue<B> {
         ids: impl IntoIterator<Item = ItemId>,
         force: bool,
     ) -> EngineResult<u64> {
+        let epoch = self.session_epoch(queue).await?;
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .purge(queue, ids, force, self.clock.now(), None)
+            .purge(queue, ids, force, self.clock.now(), epoch)
             .await
     }
 
