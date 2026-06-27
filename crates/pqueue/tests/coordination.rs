@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use pqueue::{NewItem, Pqueue};
+use pqueue::{NewItem, Ownership, Pqueue};
 use pqueue_core::{
     EligibilityPolicy, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
@@ -121,6 +121,51 @@ async fn superseded_owner_is_fenced_on_data_path() {
         matches!(a.push(&qkey(), item(8)).await, Err(EngineError::EpochFenced)),
         "a superseded owner must self-fence on the data path"
     );
+    // The fence dropped A's stale session; A's NEXT op re-resolves and discovers the queue is owned
+    // elsewhere (target-affinity: A is no longer the rendezvous target), and `ownership` names B.
+    assert!(
+        matches!(
+            a.push(&qkey(), item(10)).await,
+            Err(EngineError::Forbidden(_))
+        ),
+        "a fenced owner re-resolves to owned-elsewhere"
+    );
+    assert!(
+        matches!(a.ownership(&qkey()).await.unwrap(), Ownership::Elsewhere { owner, .. } if owner.as_str() == "owner-B"),
+        "ownership names the current owner B as the redirect target"
+    );
     // B (the current owner) keeps operating.
     b.push(&qkey(), item(9)).await.unwrap();
+}
+
+/// `ownership` is the value form of the redirect (ADR-009 L5): a sole-owner handle is always `Mine`; a
+/// coordinated handle reports `Mine` for the queues it owns and `Unowned` before any acquire.
+#[tokio::test]
+async fn ownership_value_form() {
+    let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(0));
+
+    // Sole-owner handle: always Mine.
+    let sole = Pqueue::new(backend.clone(), clock.clone());
+    assert_eq!(
+        sole.ownership(&qkey()).await.unwrap(),
+        Ownership::Mine { epoch: None }
+    );
+
+    // Coordinated handle: Unowned before any op, Mine after acquiring.
+    let cp: Arc<dyn QueueControlPlane> =
+        Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
+    let a = Pqueue::with_control_plane(
+        backend.clone(),
+        clock.clone(),
+        OwnerId::new("owner-A").unwrap(),
+        cp.clone(),
+    );
+    a.create_queue(qdef()).await.unwrap();
+    assert_eq!(a.ownership(&qkey()).await.unwrap(), Ownership::Unowned);
+    a.push(&qkey(), item(5)).await.unwrap();
+    assert!(matches!(
+        a.ownership(&qkey()).await.unwrap(),
+        Ownership::Mine { epoch: Some(e) } if e >= 1
+    ));
 }

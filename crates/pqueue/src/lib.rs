@@ -81,6 +81,19 @@ pub enum Nack {
     Release,
 }
 
+/// Who currently owns a queue, from a coordinated handle's view (ADR-009 L5 — the value form of the RESP
+/// `-MOVED` redirect). A sole-owner handle is always [`Ownership::Mine`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ownership {
+    /// This instance is the live owner (or a sole-owner handle). `epoch` is the current assignment epoch
+    /// (`None` for a sole-owner handle, or a coordinated owner whose queue has no granted lease yet).
+    Mine { epoch: Option<u64> },
+    /// A DIFFERENT live instance owns the queue — route there (the value form of `-MOVED`).
+    Elsewhere { owner: OwnerId, epoch: Option<u64> },
+    /// No live owner holds the queue right now (unassigned / expired).
+    Unowned,
+}
+
 /// An item to enqueue. The id and dedup key are server-assigned for [`Pqueue::push`]; for
 /// [`Pqueue::upsert`] the caller supplies the dedup `client_item_key`.
 #[derive(Debug, Clone, Default)]
@@ -176,6 +189,18 @@ impl<B: LibBackend> Pqueue<B> {
         }
         let now = self.clock.now();
         control_plane.register_owner(owner_id, now)?;
+        let res = control_plane.resolve_queue_owner(queue, now)?;
+        // A DIFFERENT live owner holds the queue → owned elsewhere; never contend a live lease (TD-003:
+        // online handoff is begin_drain, not a contended acquire). Surface it (callers inspect via
+        // `ownership`); the explicit redirect is the RESP server's `-MOVED`.
+        if res.active_owner.as_ref().is_some_and(|active| active != owner_id) {
+            return Err(EngineError::Forbidden("queue owned by another live owner"));
+        }
+        // Target-affinity (ADR-009 / TD-003): only the rendezvous `target_owner` acquires an unowned/expired
+        // queue, so two instances never ping-pong a queue's epoch. A non-target surfaces owned-elsewhere.
+        if res.target_owner.as_ref() != Some(owner_id) {
+            return Err(EngineError::Forbidden("queue targets another owner"));
+        }
         match acquire_and_fence(control_plane.as_ref(), self.backend.as_ref(), queue, owner_id, now)
             .await?
         {
@@ -191,6 +216,82 @@ impl<B: LibBackend> Pqueue<B> {
                 Err(EngineError::Forbidden("queue owned by another live owner"))
             }
         }
+    }
+
+    /// Drop the cached session for `queue` so the next op re-resolves ownership. Called when a data-plane op
+    /// is `EpochFenced` — a fenced owner has been superseded, so its stale session must not be reused (it
+    /// will re-resolve and discover it is owned elsewhere). Sole-owner is a no-op.
+    fn invalidate_session(&self, queue: &QueueKey) {
+        if let Coordination::Owner { sessions, .. } = &self.coordination {
+            sessions.lock().expect("poisoned").remove(queue);
+        }
+    }
+
+    /// Drop the cached session on `EpochFenced` (re-resolve next op), then return the result unchanged.
+    fn note<T>(&self, queue: &QueueKey, r: EngineResult<T>) -> EngineResult<T> {
+        if matches!(r, Err(EngineError::EpochFenced)) {
+            self.invalidate_session(queue);
+        }
+        r
+    }
+
+    /// Who currently owns `queue` (ADR-009 L5). A sole-owner handle always returns [`Ownership::Mine`]; a
+    /// coordinated handle resolves the live owner — [`Ownership::Mine`] if it is the active owner,
+    /// [`Ownership::Elsewhere`] (the redirect target) for a different live owner, or [`Ownership::Unowned`].
+    /// This is a read; it does not register the handle or acquire.
+    pub async fn ownership(&self, queue: &QueueKey) -> EngineResult<Ownership> {
+        let Coordination::Owner {
+            owner_id,
+            control_plane,
+            ..
+        } = &self.coordination
+        else {
+            return Ok(Ownership::Mine { epoch: None });
+        };
+        let res = control_plane.resolve_queue_owner(queue, self.clock.now())?;
+        Ok(match res.active_owner {
+            Some(o) if &o == owner_id => Ownership::Mine {
+                epoch: res.assignment_epoch,
+            },
+            Some(o) => Ownership::Elsewhere {
+                owner: o,
+                epoch: res.assignment_epoch,
+            },
+            None => Ownership::Unowned,
+        })
+    }
+
+    /// Renew this handle's leases for all queues it currently owns + refresh its heartbeat (coordinated
+    /// handles only; sole-owner is a no-op). The host spawns this on a bounded cadence — one call per node,
+    /// never one task per queue (ADR-002 density / TD-003 §Queue density). A queue whose renewal is rejected
+    /// (the handle was superseded) has its cached session dropped, so its next op re-resolves.
+    pub fn renew_owned(&self) -> EngineResult<()> {
+        let Coordination::Owner {
+            owner_id,
+            control_plane,
+            sessions,
+        } = &self.coordination
+        else {
+            return Ok(());
+        };
+        let now = self.clock.now();
+        control_plane.heartbeat(owner_id, now)?;
+        let owned: Vec<(QueueKey, u64)> = sessions
+            .lock()
+            .expect("poisoned")
+            .iter()
+            .map(|(q, s)| (q.clone(), s.lease_epoch))
+            .collect();
+        for (queue, lease_epoch) in owned {
+            if control_plane
+                .renew_queue_lease(&queue, owner_id, lease_epoch, now)
+                .is_err()
+            {
+                // Superseded (or epoch-stale): drop the stale session so the next op re-resolves.
+                self.invalidate_session(&queue);
+            }
+        }
+        Ok(())
     }
 
     pub async fn create_queue(
@@ -227,7 +328,8 @@ impl<B: LibBackend> Pqueue<B> {
             })
             .collect();
         let epoch = self.session_epoch(queue).await?;
-        self.backend.push(queue, specs, self.clock.now(), epoch).await
+        let r = self.backend.push(queue, specs, self.clock.now(), epoch).await;
+        self.note(queue, r)
     }
 
     /// Upsert on a caller-supplied `client_item_key` (Invariant 2). Replaces a pending item with the
@@ -239,7 +341,8 @@ impl<B: LibBackend> Pqueue<B> {
         item: NewItem,
     ) -> EngineResult<UpsertOutcome> {
         let epoch = self.session_epoch(queue).await?;
-        self.backend
+        let r = self
+            .backend
             .replace_if_pending(
                 queue,
                 &client_item_key,
@@ -251,7 +354,8 @@ impl<B: LibBackend> Pqueue<B> {
                 self.clock.now(),
                 epoch,
             )
-            .await
+            .await;
+        self.note(queue, r)
     }
 
     /// Claim up to `max` eligible items in priority order, leasing them for `lease_ms` from now.
@@ -291,7 +395,8 @@ impl<B: LibBackend> Pqueue<B> {
             // Sole-owner: None (never fences). Coordinated owner: the cached acquire-time fence epoch.
             expected_epoch,
         };
-        Ok(self.backend.claim(req).await?.items)
+        let r = self.backend.claim(req).await;
+        Ok(self.note(queue, r)?.items)
     }
 
     /// Complete (ack) the given leased items. All-or-nothing (a fenced/superseded/non-leased id rejects
@@ -329,9 +434,11 @@ impl<B: LibBackend> Pqueue<B> {
             .map(|item_id| FinalizeOutcome { item_id, kind })
             .collect();
         let epoch = self.session_epoch(queue).await?;
-        self.backend
+        let r = self
+            .backend
             .finalize(queue, outcomes, self.clock.now(), epoch)
-            .await
+            .await;
+        self.note(queue, r)
     }
 
     /// Non-destructive priority-ordered view of eligible items.
@@ -390,9 +497,11 @@ impl<B: LibBackend> Pqueue<B> {
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let ids: Vec<ItemId> = ids.into_iter().collect();
-        self.backend
+        let r = self
+            .backend
             .renew(queue, ids, add_millis(now, lease_ms), now, epoch)
-            .await
+            .await;
+        self.note(queue, r)
     }
 
     /// Transfer the given in-flight items to a FRESH lease (a re-delivery to a new worker — charges one
@@ -409,9 +518,11 @@ impl<B: LibBackend> Pqueue<B> {
         let n = self.next();
         let token = LeaseToken::new(format!("libL{n}")).expect("lease");
         let ids: Vec<ItemId> = ids.into_iter().collect();
-        self.backend
+        let r = self
+            .backend
             .reassign(queue, ids, token, add_millis(now, lease_ms), now, epoch)
-            .await
+            .await;
+        self.note(queue, r)
     }
 
     /// Re-arm a recurring item: complete this delivery and re-arm it for its next occurrence, RESETTING
@@ -434,9 +545,11 @@ impl<B: LibBackend> Pqueue<B> {
     ) -> EngineResult<u64> {
         let epoch = self.session_epoch(queue).await?;
         let ids: Vec<ItemId> = ids.into_iter().collect();
-        self.backend
+        let r = self
+            .backend
             .purge(queue, ids, force, self.clock.now(), epoch)
-            .await
+            .await;
+        self.note(queue, r)
     }
 
     /// Rich view of specific in-flight (leased) items in the claimed-item shape (the read behind RESP
