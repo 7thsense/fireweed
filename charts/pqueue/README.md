@@ -1,7 +1,7 @@
 # pqueue Helm Chart
 
 This chart deploys the `pqueue-service` RESP runtime. Storage is configured with
-separate log and projection axes, not a collapsed backend profile.
+separate log and projection axes.
 
 ## Storage Axes
 
@@ -18,7 +18,7 @@ Projection backend:
 
 The current `pqueue-server` binary only wires a subset of those combinations.
 Unsupported combinations fail loudly at startup instead of being hidden behind a
-synthetic profile name.
+synthetic combined backend name.
 
 ## Default Values
 

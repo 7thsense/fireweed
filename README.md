@@ -3,22 +3,21 @@
 ## Documentation
 
 - [Operator microsite](docs/operator/index.html) is a static, openable
-  first-screen console for install commands, backend profile choice, release
+  first-screen console for install commands, storage backend choice, release
   artifact links, and production-readiness status.
 - [Operator deployment guide](docs/deployment/operator-guide.md) covers
-  `helm install`, upgrade, uninstall, values, `postgres_native`,
-  `object_log_sqlite_projection`, S3/MinIO, `kind` smoke tests, release
+  `helm install`, upgrade, uninstall, values, log and projection storage axes,
+  object-log storage, `kind` smoke tests, release
   artifacts, troubleshooting, and known production gaps.
 - [Operator release artifacts](docs/deployment/operator-release-artifacts.md)
   states where to obtain published images, Helm chart packages, binary
   archives, checksums, and the commands to verify them before deployment.
 - [Production deployment readiness](docs/helix/04-build/DEPLOYMENT-READINESS.md)
-  defines the Helm, kind, `postgres_native`,
-  `object_log_sqlite_projection`, MinIO, and S3/object-log release-readiness
+  defines the Helm, kind, storage-axis, and object-log release-readiness
   contract.
 - [Container image and runtime config contract](docs/deployment/container-runtime-contract.md)
   defines the `pqueue-service` image entrypoint, environment/config keys, health
-  endpoint/port, and backend-profile settings consumed by Helm.
+  endpoint/port, and storage backend settings consumed by Helm.
 
 ## Release Artifacts
 
@@ -47,4 +46,4 @@ docker run --rm pqueue:dev --help
 
 See the
 [container runtime config contract](docs/deployment/container-runtime-contract.md)
-for the full environment, health-probe, and backend-profile contract.
+for the full environment, health-probe, and storage backend contract.

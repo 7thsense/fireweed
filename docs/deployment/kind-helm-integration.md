@@ -3,7 +3,7 @@
 `scripts/ci/kind-helm-test.sh` installs the pqueue Helm chart into a disposable
 `kind` cluster and exercises the RESP runtime.
 
-Use storage axes, not a backend profile:
+Use storage axes:
 
 ```sh
 bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory

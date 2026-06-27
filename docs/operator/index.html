@@ -187,7 +187,7 @@
           "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
       }
 
-      .profile-list,
+      .storage-axis-list,
       .status-list,
       .doc-list {
         display: grid;
@@ -195,7 +195,7 @@
         padding: 16px;
       }
 
-      .profile,
+      .storage-axis,
       .status-row,
       .doc-row {
         border: 1px solid var(--line);
@@ -204,14 +204,14 @@
         background: var(--panel);
       }
 
-      .profile h3,
+      .storage-axis h3,
       .status-row h3,
       .doc-row h3 {
         margin: 0 0 7px;
         font-size: 16px;
       }
 
-      .profile p,
+      .storage-axis p,
       .status-row p,
       .doc-row p,
       .note p {
@@ -366,20 +366,20 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
         </section>
 
         <div>
-          <section aria-labelledby="profiles-title">
+          <section aria-labelledby="storage-axes-title">
             <div class="panel-heading">
-              <h2 id="profiles-title">Storage Axes</h2>
+              <h2 id="storage-axes-title">Storage Axes</h2>
               <span class="badge ok">BUILD-001 scope</span>
             </div>
-            <div class="profile-list">
-              <article class="profile">
+            <div class="storage-axis-list">
+              <article class="storage-axis">
                 <h3>log backend</h3>
                 <p>
                   Chart values expose <code>objectlog</code> and
-                  <code>postgres</code> without collapsing them into profiles.
+                  <code>postgres</code>.
                 </p>
               </article>
-              <article class="profile">
+              <article class="storage-axis">
                 <h3>projection backend</h3>
                 <p>
                   Chart values expose <code>inmemory</code>,
