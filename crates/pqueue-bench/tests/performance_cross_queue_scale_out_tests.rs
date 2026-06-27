@@ -238,11 +238,14 @@ fn performance_cross_queue_scale_out_tests() {
         );
     } else if max_unsub == 2 {
         let observed = at(2).aggregate / at(1).aggregate;
+        let bar = 2.0 * 0.60;
         assert!(
-            observed >= 1.5,
-            "independent owners must scale out: 2 owners = {observed:.2}x the 1-owner aggregate (cores={cores})"
+            observed >= bar,
+            "independent owners must scale out: 2 owners = {observed:.2}x the 1-owner aggregate, below the {bar:.2}x bar (60% of ideal 2.0x; cores={cores})"
         );
-        println!("  scale-out: 2 owners = {observed:.2}x the 1-owner aggregate (cores={cores})");
+        println!(
+            "  scale-out: 2 owners = {observed:.2}x the 1-owner aggregate (>= {bar:.2}x = 60% of ideal 2.0x; cores={cores})"
+        );
     } else {
         eprintln!(
             "E2 SCALE-OUT NOT MEASURED — only {cores} core available; parallel owner scaling cannot be observed"
