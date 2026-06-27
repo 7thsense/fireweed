@@ -348,6 +348,18 @@ pub trait QueueControlPlane: Send + Sync {
     /// for the same fail-closed reason as [`resolve_queue_owner`](Self::resolve_queue_owner): a fabricated
     /// epoch-0 record on a DB error is the worst possible value to feed the append fence (BQ-23).
     fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease>;
+
+    /// Whether this control plane **transactionally binds the storage fence epoch** to the lease epoch
+    /// inside [`acquire_queue_lease`](Self::acquire_queue_lease) — i.e. the acquire transaction advances the
+    /// storage backend's durable append-fence epoch to the new lease epoch atomically (BQ-23: one durable
+    /// value advanced at acquire). When `true`, [`acquire_and_fence`](crate::acquire_and_fence) uses the
+    /// lease epoch directly as the owner's `fence_epoch` and does NOT issue a separate, non-transactional
+    /// storage `acquire_epoch` (which would re-introduce the two-counter crash window, ownership.rs HAZARD).
+    /// The default is `false` — the in-memory reference plane keeps two separately-advanced counters; only
+    /// the transactional postgres plane binds them.
+    fn binds_storage_epoch(&self) -> bool {
+        false
+    }
 }
 
 /// Milliseconds elapsed from `a` to `b` (0 if `b <= a`), for TTL comparisons.

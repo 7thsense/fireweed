@@ -311,9 +311,31 @@ impl QueueControlPlane for PostgresControlPlane {
         let outcome = lease_decide_acquire(&current, owner, now, self.config.lease_ttl_ms);
         if let AcquireOutcome::Acquired(ref acquired) = outcome {
             upsert_lease(&mut tx, &t, &q, acquired)?;
+            // BQ-23: bind the storage append-fence epoch to the lease epoch in the SAME transaction, so the
+            // single durable epoch advances ATOMICALLY at acquire (closing the two-counter crash window).
+            // The `queues` row is the PostgresBackend storage fence authority on this search_path when the
+            // CP is paired with PostgresBackend in the same DB; the control-plane-only test harness runs in
+            // an isolated schema with no `queues` table, where this is a guarded no-op.
+            let queues_present: bool = st(tx.query_one(
+                "SELECT to_regclass('queues') IS NOT NULL",
+                &[],
+            ))?
+            .get(0);
+            if queues_present {
+                st(tx.execute(
+                    "UPDATE queues SET assignment_epoch = $3 WHERE tenant = $1 AND queue = $2",
+                    &[&t, &q, &(acquired.assignment_epoch as i64)],
+                ))?;
+            }
         }
         st(tx.commit())?;
         Ok(outcome)
+    }
+
+    fn binds_storage_epoch(&self) -> bool {
+        // BQ-23: the acquire transaction advances `queues.assignment_epoch` to the lease epoch atomically,
+        // so the lease epoch IS the storage fence epoch — no separate, non-atomic storage `acquire_epoch`.
+        true
     }
 
     fn renew_queue_lease(
