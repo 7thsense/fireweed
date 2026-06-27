@@ -138,6 +138,7 @@ async fn claim(b: &PostgresRelationalBackend, shard: &QueueKey, n: usize) -> Vec
             lease_expires_at: ts(3_600_000),
             now: ts(1),
             compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
         })
         .await
         .expect("claim");

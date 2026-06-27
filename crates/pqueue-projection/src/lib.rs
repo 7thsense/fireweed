@@ -250,9 +250,15 @@ pub fn commit(
     proj: &mut ProjectionData,
     shard: &QueueKey,
     env: CommandEnvelope,
+    expected_epoch: Option<u64>,
 ) -> EngineResult<()> {
-    // In-process owner: stamp the log's current epoch (never self-fences).
+    // The append is stamped with the queue's current epoch. An owner that supplies its cached acquire-time
+    // epoch (`Some`) is fenced here if it has been superseded (ADR-009 / TD-003); `None` is the degenerate
+    // sole-owner path (stamp current, never fence).
     let epoch = log.epoch();
+    if expected_epoch.is_some_and(|e| e != epoch) {
+        return Err(EngineError::EpochFenced);
+    }
     log.append(shard, std::slice::from_ref(&env), epoch)?;
     proj.apply_command(&env.command)
 }
@@ -815,6 +821,7 @@ mod tests {
             env(QueueCommand::Push(PushCommand {
                 items: vec![push_item("a", "ka", 5)],
             })),
+            None,
         )
         .unwrap();
         let v0 = version_of(&proj, "a"); // push -> 1
@@ -828,6 +835,7 @@ mod tests {
                 lease_token: LeaseToken::new("lease-1").unwrap(),
                 lease_expires_at: ts(500),
             })),
+            None,
         )
         .unwrap();
         let v1 = version_of(&proj, "a"); // claim -> 2
@@ -840,6 +848,7 @@ mod tests {
                 item_ids: vec![iid("a")],
                 lease_expires_at: ts(600),
             })),
+            None,
         )
         .unwrap();
         let v2 = version_of(&proj, "a"); // renew -> 3
@@ -854,6 +863,7 @@ mod tests {
                     kind: FinalizeKind::Complete,
                 }],
             })),
+            None,
         )
         .unwrap();
         let v3 = version_of(&proj, "a"); // finalize -> 4
@@ -878,6 +888,7 @@ mod tests {
                 env(QueueCommand::Push(PushCommand {
                     items: vec![push_item(&format!("i{p}"), &format!("k{p}"), p)],
                 })),
+                None,
             )
             .unwrap();
         }

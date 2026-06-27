@@ -192,6 +192,7 @@ async fn object_log_e3_throughput_recovery_and_ack_latency() {
                 lease_expires_at: UtcTimestamp::new(3_600_000, 0).unwrap(),
                 now: UtcTimestamp::new(1, 0).unwrap(),
                 compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
             })
             .await
             .unwrap();

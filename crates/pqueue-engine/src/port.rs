@@ -30,8 +30,11 @@ pub trait LogWriter {
     /// MUST reject any `expected_epoch` that is not the queue's current durable `assignment_epoch` (not
     /// merely `<=`) with [`EngineError::EpochFenced`](crate::EngineError::EpochFenced) — a superseded
     /// owner is fenced the instant a newer epoch is acquired, before any new-epoch segment exists. The
-    /// committed positions carry the current epoch as their `backend_epoch`. In-process owners pass their
-    /// current epoch (read via [`ControlPlaneStore::current_epoch`]); they never self-fence.
+    /// committed positions carry the current epoch as their `backend_epoch`. An in-process owner passes the
+    /// epoch it **cached at `acquire_queue_lease`** (ADR-009 / TD-003 In-Process Library Owner-Runtime), so a
+    /// superseded owner self-fences here; a sole-owner / degenerate caller passes the current epoch and never
+    /// fences. (The cached epoch is threaded from the data-plane ports as `expected_epoch: Option<u64>`, where
+    /// `None` selects the always-current degenerate path.)
     fn append(
         &mut self,
         shard: &QueueKey,
@@ -199,6 +202,13 @@ pub struct ClaimRequest {
     /// [`require_item_level_claim`](crate::require_item_level_claim) and (BQ-14a) admit Item; the
     /// group/cohort selection units land in BQ-14b/c.
     pub compatibility: ClaimCompatibility,
+    /// The owner's cached acquire-time fence epoch (ADR-009 / TD-003 In-Process Library Owner-Runtime).
+    /// `Some(e)` ⇒ the claim's atomic commit is fenced against `e`: if `e` is not the queue's current
+    /// durable epoch (the owner has been superseded), the claim is rejected `EpochFenced` at commit and
+    /// NOTHING is leased. `None` ⇒ the degenerate sole-owner path: stamp the current epoch, never fence
+    /// (behaviour-preserving). The epoch MUST be the value cached at `acquire_queue_lease`, never re-read
+    /// from `current_epoch` (re-reading defeats the fence).
+    pub expected_epoch: Option<u64>,
 }
 
 /// A claimed item in the API-001 claimed-item shape (lease fields included).

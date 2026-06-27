@@ -132,18 +132,21 @@ impl Inner {
     /// Durably append `env` to the shard's log + advance the persisted high-water in ONE transaction.
     /// Returns the committed position. Does NOT touch the projection (caller applies after, infallibly).
     ///
-    /// BQ-20 NOTE: the data-plane fast path (every port commits here) is the in-process owner, so it STAMPS
-    /// the queue's current epoch but does NOT validate an `expected_epoch` — the TD-003 fence that REJECTS
-    /// a stale epoch lives at the [`SqlLogWriter::append`] seam. Owner-epoch caching on this path is BQ-21.
+    /// ADR-009 / TD-003 In-Process Library Owner-Runtime: the data-plane fast path stamps the queue's
+    /// current durable epoch, and — when the owner supplies its cached acquire-time epoch (`Some`) — fences
+    /// against it (a superseded owner whose cached epoch is not current is rejected `EpochFenced` and NOTHING
+    /// is written). `None` is the degenerate sole-owner path (stamp current, never fence). This brings the
+    /// fast path to parity with the [`SqlLogWriter::append`] seam.
     fn append_durable(
         &mut self,
         shard: &QueueKey,
         env: &CommandEnvelope,
+        expected_epoch: Option<u64>,
     ) -> EngineResult<CommandPosition> {
         let (t, q) = parts(shard);
         let json = to_json(env)?;
         let tx = st(self.conn.transaction())?;
-        // In-process owner: stamp the queue's current durable epoch (TD-003); always-current, never fences.
+        // Stamp the queue's current durable epoch (TD-003); fence against the owner's cached epoch if given.
         let epoch: i64 = st(tx
             .query_row(
                 "SELECT assignment_epoch FROM queues WHERE tenant=?1 AND queue=?2",
@@ -152,6 +155,9 @@ impl Inner {
             )
             .optional())?
         .ok_or(EngineError::NotFound)?;
+        if expected_epoch.is_some_and(|e| e != epoch as u64) {
+            return Err(EngineError::EpochFenced);
+        }
         // Next sequence is MAX(seq)+1, NOT COUNT(*): it must survive log compaction/retention so a
         // persisted position never collides or regresses (TD-007 §4). Empty log → -1+1 = 0.
         let seq: i64 = st(tx.query_row(
@@ -184,8 +190,13 @@ impl Inner {
     /// it doesn't, the durable log has advanced past the live projection — a silent in-process
     /// divergence. We refuse to return that as an ordinary `Err` (indistinguishable from a clean
     /// pre-commit rejection); we panic, which is the correct "rebuild the projection" signal (B2).
-    fn commit_locked(&mut self, shard: &QueueKey, env: CommandEnvelope) -> EngineResult<()> {
-        self.append_durable(shard, &env)?;
+    fn commit_locked(
+        &mut self,
+        shard: &QueueKey,
+        env: CommandEnvelope,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        self.append_durable(shard, &env, expected_epoch)?;
         self.projections
             .get_mut(shard)
             .expect("projection exists for a shard that just accepted a durable commit")
@@ -416,7 +427,7 @@ impl ClaimPort for SqliteBackend {
                 lease_expires_at: req.lease_expires_at,
             });
             let env = g.make_envelope(cmd, candidates.clone(), req.now);
-            g.commit_locked(&req.shard, env)?;
+            g.commit_locked(&req.shard, env, req.expected_epoch)?;
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
             Ok(Claimed {
                 items: proj.render_claimed(&candidates),
@@ -477,7 +488,7 @@ impl UpsertPort for SqliteBackend {
             match existing {
                 None => {
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
-                    g.commit_locked(shard, env)?;
+                    g.commit_locked(shard, env, None)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
                     })
@@ -494,7 +505,7 @@ impl UpsertPort for SqliteBackend {
                                 superseded_item_id: existing_id.clone(),
                                 replacement: item,
                             }));
-                            g.commit_locked(shard, env)?;
+                            g.commit_locked(shard, env, None)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
                                 superseded_item_id: existing_id,
@@ -542,7 +553,7 @@ impl PushPort for SqliteBackend {
                 checksum: CommandChecksum(0),
                 created_at: now,
             };
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, None)?;
             Ok(ids)
         })();
         std::future::ready(result)
@@ -565,7 +576,7 @@ impl FinalizePort for SqliteBackend {
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, None)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -591,7 +602,7 @@ impl RenewLeasePort for SqliteBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, None)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -619,7 +630,7 @@ impl ReassignLeasePort for SqliteBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, None)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -661,7 +672,7 @@ impl PurgePort for SqliteBackend {
                 force,
             });
             let env = g.make_envelope(cmd, present, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, None)?;
             Ok(count)
         })();
         std::future::ready(result)
@@ -689,7 +700,7 @@ impl ReclaimDriver for SqliteBackend {
                     item_ids: ids.clone(),
                 });
                 let env = g.make_envelope(cmd, ids.clone(), now);
-                g.commit_locked(&shard, env)?;
+                g.commit_locked(&shard, env, None)?;
                 report.leases_reclaimed += ids.len() as u64;
             }
             Ok(report)

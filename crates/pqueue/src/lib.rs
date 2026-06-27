@@ -207,6 +207,8 @@ impl<B: LibBackend> Pqueue<B> {
             lease_expires_at: add_millis(now, lease_ms),
             now,
             compatibility,
+            // B1a: sole-owner / degenerate path (no fence). The owner session supplies Some(epoch) in B2.
+            expected_epoch: None,
         };
         Ok(self.backend.claim(req).await?.items)
     }

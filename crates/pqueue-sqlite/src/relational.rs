@@ -2331,6 +2331,7 @@ mod group_summary_tests {
             lease_expires_at: ts(exp),
             now: ts(now),
             compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
         }
     }
 

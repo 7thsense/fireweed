@@ -191,6 +191,7 @@ pub fn claim_req(max_items: usize, lease_expires_at: i64, now: i64) -> ClaimRequ
         lease_expires_at: ts(lease_expires_at),
         now: ts(now),
         compatibility: ClaimCompatibility::default(),
+        expected_epoch: None,
     }
 }
 

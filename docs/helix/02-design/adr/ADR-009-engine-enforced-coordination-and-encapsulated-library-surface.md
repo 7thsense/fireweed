@@ -15,8 +15,8 @@ ddx:
       adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
       adr-hexagonal-architecture-and-two-interfaces: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
       adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
-      td-sharding-and-shard-ownership: 6bf3dcc75c94fefa35af4ed9f1859e76b76df3f171a89622fcb24888d92c93e4
-    reviewed_at: "2026-06-27T19:02:57Z"
+      td-sharding-and-shard-ownership: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
+    reviewed_at: "2026-06-27T19:08:47Z"
 ---
 
 # Architecture Decision Record

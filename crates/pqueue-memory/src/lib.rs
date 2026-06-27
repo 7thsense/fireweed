@@ -129,13 +129,14 @@ impl MemoryBackend {
         state: &mut State,
         shard: &QueueKey,
         env: CommandEnvelope,
+        expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
         let State {
             logs, projections, ..
         } = state;
         let log = logs.get_mut(shard).ok_or(EngineError::NotFound)?;
         let proj = projections.get_mut(shard).ok_or(EngineError::NotFound)?;
-        commit(log, proj, shard, env)
+        commit(log, proj, shard, env, expected_epoch)
     }
 }
 
@@ -168,7 +169,7 @@ impl ClaimPort for MemoryBackend {
                 lease_expires_at: req.lease_expires_at,
             });
             let env = self.make_envelope(cmd, candidates.clone(), req.now);
-            Self::commit_locked(&mut g, &req.shard, env)?;
+            Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
             // Render the now-leased records into the rich claimed-item shape.
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
             let items: Vec<ClaimedItem> = proj.render_claimed(&candidates);
@@ -234,7 +235,7 @@ impl UpsertPort for MemoryBackend {
             match existing {
                 None => {
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
-                    Self::commit_locked(&mut g, shard, env)?;
+                    Self::commit_locked(&mut g, shard, env, None)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
                     })
@@ -251,7 +252,7 @@ impl UpsertPort for MemoryBackend {
                                 superseded_item_id: existing_id.clone(),
                                 replacement: item,
                             }));
-                            Self::commit_locked(&mut g, shard, env)?;
+                            Self::commit_locked(&mut g, shard, env, None)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
                                 superseded_item_id: existing_id,
@@ -299,7 +300,7 @@ impl PushPort for MemoryBackend {
             };
             // commit_locked fetches the shard's projection first (NotFound if absent) BEFORE appending,
             // and Push apply is infallible, so the log can never lead the projection.
-            Self::commit_locked(&mut g, shard, env)?;
+            Self::commit_locked(&mut g, shard, env, None)?;
             Ok(ids)
         })();
         std::future::ready(result)
@@ -324,7 +325,7 @@ impl FinalizePort for MemoryBackend {
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = self.make_envelope(cmd, item_ids, now);
-            Self::commit_locked(&mut g, shard, env)?;
+            Self::commit_locked(&mut g, shard, env, None)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -350,7 +351,7 @@ impl RenewLeasePort for MemoryBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = self.make_envelope(cmd, item_ids, now);
-            Self::commit_locked(&mut g, shard, env)?;
+            Self::commit_locked(&mut g, shard, env, None)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -378,7 +379,7 @@ impl ReassignLeasePort for MemoryBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = self.make_envelope(cmd, item_ids, now);
-            Self::commit_locked(&mut g, shard, env)?;
+            Self::commit_locked(&mut g, shard, env, None)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -422,7 +423,7 @@ impl PurgePort for MemoryBackend {
                 force,
             });
             let env = self.make_envelope(cmd, present, now);
-            Self::commit_locked(&mut g, shard, env)?;
+            Self::commit_locked(&mut g, shard, env, None)?;
             Ok(count)
         })();
         std::future::ready(result)
@@ -452,7 +453,7 @@ impl ReclaimDriver for MemoryBackend {
                     item_ids: ids.clone(),
                 });
                 let env = self.make_envelope(cmd, ids.clone(), now);
-                Self::commit_locked(&mut g, &shard, env)?;
+                Self::commit_locked(&mut g, &shard, env, None)?;
                 report.leases_reclaimed += ids.len() as u64;
             }
             // Cohort-timeout firing and progress-bound metering need state not yet modeled; reported as

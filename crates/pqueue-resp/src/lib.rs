@@ -574,6 +574,7 @@ async fn xreadgroup<B: RespBackend>(
         now,
         // RESP XREADGROUP is an item-level claim; group/cohort compatibility is library-only (plan §3).
         compatibility: pqueue_engine::ClaimCompatibility::default(),
+        expected_epoch: None,
     };
     match backend.claim(req).await {
         Ok(claimed) if claimed.items.is_empty() => Resp::NullArray, // Redis returns nil when none

@@ -87,6 +87,7 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
             lease_expires_at: ts(1_060),
             now: clock.now(),
             compatibility: pqueue_engine::ClaimCompatibility::default(),
+            expected_epoch: None,
         })
         .await
         .unwrap();

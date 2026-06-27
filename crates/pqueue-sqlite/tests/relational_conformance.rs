@@ -84,6 +84,7 @@ fn claim_req_compat(
         lease_expires_at: ts(exp),
         now: ts(now),
         compatibility,
+        expected_epoch: None,
     }
 }
 
