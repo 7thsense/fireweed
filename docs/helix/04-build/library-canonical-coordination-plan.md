@@ -8,13 +8,13 @@ ddx:
     - adr-embedded-engine-integration-and-public-surface
   status: draft
   review:
-    self_hash: fbdf7b18bd5c1a3e66cbd620b9faa24739fdc6551a0e2ee0881c7206ffc76769
+    self_hash: aba8b07892cbfc73213491ef0285e2b6851da283824a3987c090d52b956e287b
     deps:
       adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
       adr-engine-enforced-coordination-and-encapsulated-library-surface: f5795719c029efc047debaac97e0bfc86274b6f0c70b0b23c3df8c86bf519b68
       adr-hexagonal-architecture-and-two-interfaces: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
       td-sharding-and-shard-ownership: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
-    reviewed_at: "2026-06-27T21:06:17Z"
+    reviewed_at: "2026-06-27T23:47:34Z"
 ---
 
 # Library Canonical Coordination — Implementation Plan
@@ -241,18 +241,18 @@ A grounded final-alignment review confirmed: **no correctness bugs**; every ADR-
 single-durable-epoch, data-path-fail-closed, target-affinity, bounded-per-node) is **implemented and
 tested**. Decision 2 (encapsulation) is enforced as far as feasible — see OWED-1.
 
-### OWED (accepted deferrals — refinements, not correctness gaps)
+### OWED — resolution status
 
-1. **`publish=false` hard wall is infeasible** (pqueue depends on pqueue-engine), so encapsulation is
-   strong-by-default (curated surface + doc-hidden `new`/ports + `open_*` + guard), not absolute (OD-6).
-2. **Runtime-refuse multi-owner on a non-atomic-acquire backend (N4a / OD-2)** — not implemented; needs a
-   capability predicate that distinguishes "durable multi-process" from the admissible in-process logic
-   pair. Highest-risk OWED; the supported configs (single-process; postgres multi-instance) are safe.
-3. **Drain split** (serve in-flight / refuse new claim) — liveness only; single-writer safety rests on
-   lease expiry + the implemented epoch fence.
-4. **Relational postgres fence threading** — only the log-replay `PostgresBackend` fences; full
-   `postgres_native` (relational) cross-instance item visibility is deferred.
-5. **RESP server acquire-runtime** (`pqueue-c33c367e`) — pre-existing, out of this library-only plan;
-   unblocked by B1+B4.
-6. **B3b coordinated `open_*_owned` variant** — external coordinated construction still needs
-   `with_control_plane` (which takes a backend); a coordinated builder is a follow-up.
+| # | Item | Status |
+|---|---|---|
+| OWED-1 | `publish=false` hard wall | **INFEASIBLE (documented)** — pqueue depends on pqueue-engine, so cargo can't publish pqueue with an unpublishable dep. Encapsulation is strong-by-default (curated surface + doc-hidden `new`/ports + `open_*` + guard), not absolute (OD-6). `B3b` (`51490af`). |
+| OWED-2 | Runtime-refuse multi-owner on a non-atomic backend (N4a/OD-2) | **RESOLVED** (`0abb398`) — `with_control_plane(.., instance_id, ..)` returns `Result` and refuses a control plane whose `binds_storage_epoch()` is false; `with_control_plane_in_process` (doc-hidden) for in-process logic. The instance-id signals a durable multi-instance deployment. |
+| OWED-3 | Drain split (serve in-flight / refuse new claim) | **RESOLVED** (`24b01fb`) — `renew_owned` observes a `Draining` lease; `claim` then refuses with retryable `Unavailable` while finalize/renew/push continue. |
+| OWED-4 | Relational backend fence threading | **RESOLVED** (`0959645`) — both relational backends fence at `commit_command` + the claim CTE; the BQ-23 binding generalizes to bind whichever epoch column the paired backend uses; relational multi-instance test proves cross-instance visibility + claim handoff + durable fence. |
+| OWED-5 | RESP server acquire-runtime (`pqueue-c33c367e`) | **OUT OF SCOPE (pre-existing)** — this was a library-only plan; the engine `route` decision exists and B1+B4 unblock the server-runtime follow-up, tracked separately. |
+| OWED-6 | Coordinated `open_*` / `open_postgres` | **RESOLVED** (`2e7414b`) — `open_postgres` (sole-owner) + `open_postgres_coordinated` (builds backend + binding control plane internally) behind the opt-in `postgres` feature; no dependency cycle. |
+
+**Remaining (newly-found, tracked):** the relational backend mints item ids from a per-connection sequence,
+so two connections each *pushing* a fresh item can collide on `pqueue_items_pkey`; full concurrent
+multi-writer push needs a DB-sequence-based globally-unique id (the fence, cross-instance visibility, and
+claim handoff are unaffected — proven). And OWED-1/OWED-5 above (infeasible / pre-existing-out-of-scope).
