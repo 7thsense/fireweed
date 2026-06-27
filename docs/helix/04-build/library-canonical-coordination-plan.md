@@ -8,13 +8,13 @@ ddx:
     - adr-embedded-engine-integration-and-public-surface
   status: draft
   review:
-    self_hash: 9dfc4a6c31c886f6b42bb36e6f5632880037f137588fe18f11cda8056044af93
+    self_hash: fbdf7b18bd5c1a3e66cbd620b9faa24739fdc6551a0e2ee0881c7206ffc76769
     deps:
       adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
       adr-engine-enforced-coordination-and-encapsulated-library-surface: f5795719c029efc047debaac97e0bfc86274b6f0c70b0b23c3df8c86bf519b68
       adr-hexagonal-architecture-and-two-interfaces: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
       td-sharding-and-shard-ownership: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
-    reviewed_at: "2026-06-27T19:23:46Z"
+    reviewed_at: "2026-06-27T21:06:17Z"
 ---
 
 # Library Canonical Coordination — Implementation Plan
@@ -219,3 +219,40 @@ task complete → next step. Never advance on red.
 3. A final alignment review confirms the code satisfies every MUST in TD-003 §In-Process Library
    Owner-Runtime and ADR-009 Decisions 1-6 (Decision 6 verified as a deliberate no-change, N6), with no
    overstated guarantee.
+
+## 7. Execution status — COMPLETE (with accepted deferrals)
+
+All B-steps landed green (full-workspace build + `clippy -D warnings` + step gate at each commit):
+
+| Step | Commit | Result |
+|---|---|---|
+| B1a claim fence | `b5fce9b` | claim fenced at commit (memory+sqlite), tested |
+| B1b push fence | `cdcf94d` | push fenced |
+| B1b rest | `0ee2b83` | finalize/upsert/renew/reassign/purge threaded; finalize fenced |
+| B2a library session | `c3727e8` | coordinated owner; superseded instance fenced on the data path |
+| B2b policy | `7ebf7ec` | target-affinity, `Ownership` value, fence-recovery, bounded `renew_owned` |
+| B3a encapsulation | `ff1d867` | `open_*` constructors + feature-gated adapters + guard test |
+| B4 BQ-23 | `267f21e` | lease+storage epoch bound into one durable value on postgres, tested |
+| B5 multi-instance | `11666ac` | durable two-instance fence over shared postgres (B1+B2+B4 end-to-end) |
+| B3b hardening | `51490af` | doc-hidden injection ctor + ports; guard locks it |
+
+A grounded final-alignment review confirmed: **no correctness bugs**; every ADR-009 coordination Decision
+(1, 3, 4, 6) and every TD-003 In-Process Library Owner-Runtime MUST (library-is-owner, cached-acquire-epoch,
+single-durable-epoch, data-path-fail-closed, target-affinity, bounded-per-node) is **implemented and
+tested**. Decision 2 (encapsulation) is enforced as far as feasible — see OWED-1.
+
+### OWED (accepted deferrals — refinements, not correctness gaps)
+
+1. **`publish=false` hard wall is infeasible** (pqueue depends on pqueue-engine), so encapsulation is
+   strong-by-default (curated surface + doc-hidden `new`/ports + `open_*` + guard), not absolute (OD-6).
+2. **Runtime-refuse multi-owner on a non-atomic-acquire backend (N4a / OD-2)** — not implemented; needs a
+   capability predicate that distinguishes "durable multi-process" from the admissible in-process logic
+   pair. Highest-risk OWED; the supported configs (single-process; postgres multi-instance) are safe.
+3. **Drain split** (serve in-flight / refuse new claim) — liveness only; single-writer safety rests on
+   lease expiry + the implemented epoch fence.
+4. **Relational postgres fence threading** — only the log-replay `PostgresBackend` fences; full
+   `postgres_native` (relational) cross-instance item visibility is deferred.
+5. **RESP server acquire-runtime** (`pqueue-c33c367e`) — pre-existing, out of this library-only plan;
+   unblocked by B1+B4.
+6. **B3b coordinated `open_*_owned` variant** — external coordinated construction still needs
+   `with_control_plane` (which takes a backend); a coordinated builder is a follow-up.
