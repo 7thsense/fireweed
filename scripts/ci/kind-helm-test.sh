@@ -426,7 +426,7 @@ smoke_object_log_runtime() {
     start_resp_port_forward
     smoke_resp_ping "${response_path}"
     echo "+ RESP XREADGROUP after restart"
-    resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$1\r\nrestarted\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
+    resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$9\r\nrestarted\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
     if ! grep -Fq 't1:q1' "${response_path}"; then
         err "object-log post-restart XREADGROUP did not recover queue data"
         sed -n '1,120p' "${response_path}" >&2 || true
