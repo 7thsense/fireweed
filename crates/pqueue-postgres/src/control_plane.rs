@@ -313,19 +313,32 @@ impl QueueControlPlane for PostgresControlPlane {
             upsert_lease(&mut tx, &t, &q, acquired)?;
             // BQ-23: bind the storage append-fence epoch to the lease epoch in the SAME transaction, so the
             // single durable epoch advances ATOMICALLY at acquire (closing the two-counter crash window).
-            // The `queues` row is the PostgresBackend storage fence authority on this search_path when the
-            // CP is paired with PostgresBackend in the same DB; the control-plane-only test harness runs in
-            // an isolated schema with no `queues` table, where this is a guarded no-op.
-            let queues_present: bool = st(tx.query_one(
-                "SELECT to_regclass('queues') IS NOT NULL",
-                &[],
-            ))?
-            .get(0);
-            if queues_present {
-                st(tx.execute(
-                    "UPDATE queues SET assignment_epoch = $3 WHERE tenant = $1 AND queue = $2",
-                    &[&t, &q, &(acquired.assignment_epoch as i64)],
-                ))?;
+            // The fence-epoch column is the paired PostgresBackend's: `queues.assignment_epoch` for the
+            // log-replay backend, `relational_cursor.assignment_epoch` for the relational (postgres_native)
+            // backend. We bind whichever exists on this search_path (a deployment pairs the CP with exactly
+            // one); the control-plane-only test harness has neither, where this is a guarded no-op.
+            let e = acquired.assignment_epoch as i64;
+            // Bind the fence epoch in whichever paired-backend table carries it: `queues.assignment_epoch`
+            // (log-replay) or `relational_cursor.assignment_epoch` (relational/postgres_native). The
+            // relational backend ALSO has a `queues` table (queue defs) WITHOUT an assignment_epoch column,
+            // so we gate on the COLUMN existing (via pg_attribute on this search_path), not just the table.
+            // Table names are hardcoded literals (not user input) — safe to interpolate.
+            for table in ["queues", "relational_cursor"] {
+                let has_epoch_col: bool = st(tx.query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pg_attribute a \
+                     WHERE a.attrelid = to_regclass($1) AND a.attname = 'assignment_epoch' \
+                     AND NOT a.attisdropped)",
+                    &[&table],
+                ))?
+                .get(0);
+                if has_epoch_col {
+                    st(tx.execute(
+                        &format!(
+                            "UPDATE {table} SET assignment_epoch = $3 WHERE tenant = $1 AND queue = $2"
+                        ),
+                        &[&t, &q, &e],
+                    ))?;
+                }
             }
         }
         st(tx.commit())?;

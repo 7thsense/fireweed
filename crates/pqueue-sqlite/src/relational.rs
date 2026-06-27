@@ -366,6 +366,7 @@ impl Inner {
         shard: &QueueKey,
         command: QueueCommand,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
         let Inner {
             conn,
@@ -375,14 +376,21 @@ impl Inner {
         } = self;
         let (t, q) = parts(shard);
         let tx = st(conn.transaction())?;
-        let seq: i64 = st(tx
+        // ADR-009 / TD-003: read the durable assignment_epoch with the cursor and fence against the owner's
+        // cached acquire-time epoch (`Some`) — a superseded owner is rejected `EpochFenced`, nothing applied.
+        // `None` is the degenerate sole-owner path (no fence). Brings this data-plane path to parity with the
+        // `RelLogWriter::append` seam.
+        let (seq, epoch): (i64, i64) = st(tx
             .query_row(
-                "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
                 params![t, q],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional())?
         .ok_or(EngineError::NotFound)?;
+        if expected_epoch.is_some_and(|e| e != epoch as u64) {
+            return Err(EngineError::EpochFenced);
+        }
         let mut token_ops = Vec::new();
         apply_command_sql(
             &tx,
@@ -1867,7 +1875,7 @@ impl PushPort for SqliteRelationalBackend {
         now: UtcTimestamp,
         // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
         // contract so the owner fence is uniform once the relational/object write paths thread it.
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -1882,7 +1890,7 @@ impl PushPort for SqliteRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Push(PushCommand { items: push_items }),
-                now,
+                now, expected_epoch
             )?;
             Ok(ids)
         })();
@@ -1929,6 +1937,19 @@ impl ClaimPort for SqliteRelationalBackend {
             } = &mut *g;
             let (t, q) = parts(&req.shard);
             let tx = st(conn.transaction())?;
+            // ADR-009 / TD-003 fence: a superseded owner (cached `expected_epoch` != the durable
+            // assignment_epoch) is rejected BEFORE selecting/leasing — nothing is claimed. `None` = sole-owner.
+            let claim_epoch: i64 = st(tx
+                .query_row(
+                    "SELECT assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![t, q],
+                    |row| row.get(0),
+                )
+                .optional())?
+            .ok_or(EngineError::NotFound)?;
+            if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
             // Candidate selection inside the claim transaction (serialized under the backend Mutex). The
             // item-level path is the strict-claim order; the group/cohort paths consume their projections.
             let candidates = match unit {
@@ -2015,7 +2036,7 @@ impl UpsertPort for SqliteRelationalBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
@@ -2077,7 +2098,7 @@ impl UpsertPort for SqliteRelationalBackend {
                     g.commit_command(
                         shard,
                         QueueCommand::Push(PushCommand { items: vec![item] }),
-                        now,
+                        now, expected_epoch
                     )?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
@@ -2095,7 +2116,7 @@ impl UpsertPort for SqliteRelationalBackend {
                                     superseded_item_id: existing_id.clone(),
                                     replacement: item,
                                 }),
-                                now,
+                                now, expected_epoch
                             )?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
@@ -2120,7 +2141,7 @@ impl FinalizePort for SqliteRelationalBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2129,7 +2150,7 @@ impl FinalizePort for SqliteRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Finalize(FinalizeCommand { outcomes }),
-                now,
+                now, expected_epoch
             )?;
             Ok(())
         })();
@@ -2144,7 +2165,7 @@ impl RenewLeasePort for SqliteRelationalBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2155,7 +2176,7 @@ impl RenewLeasePort for SqliteRelationalBackend {
                     item_ids,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now,
+                now, expected_epoch
             )?;
             Ok(())
         })();
@@ -2171,7 +2192,7 @@ impl ReassignLeasePort for SqliteRelationalBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2183,7 +2204,7 @@ impl ReassignLeasePort for SqliteRelationalBackend {
                     lease_token: new_lease_token,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now,
+                now, expected_epoch
             )?;
             Ok(())
         })();
@@ -2198,7 +2219,7 @@ impl PurgePort for SqliteRelationalBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2222,7 +2243,7 @@ impl PurgePort for SqliteRelationalBackend {
                     item_ids: present,
                     force,
                 }),
-                now,
+                now, expected_epoch
             )?;
             Ok(count)
         })();
@@ -2273,7 +2294,7 @@ impl ReclaimDriver for SqliteRelationalBackend {
                 g.commit_command(
                     &shard,
                     QueueCommand::LeaseExpired(LeaseExpiredCommand { item_ids: ids }),
-                    now,
+                    now, None
                 )?;
             }
             Ok(report)

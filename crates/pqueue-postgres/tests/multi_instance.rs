@@ -20,7 +20,7 @@ use pqueue::{NewItem, Pqueue};
 use pqueue_conformance::qdef;
 use pqueue_core::{OwnerId, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{Clock, ControlPlaneConfig, EngineError, QueueControlPlane, QueueKey};
-use pqueue_postgres::{PostgresBackend, PostgresControlPlane};
+use pqueue_postgres::{PostgresBackend, PostgresControlPlane, PostgresRelationalBackend};
 
 fn bo<F: Future>(f: F) -> F::Output {
     futures::executor::block_on(f)
@@ -113,3 +113,66 @@ fn two_instances_compete_over_shared_postgres() {
     // B, the current owner, keeps operating.
     bo(b.push(&qk(), NewItem::default())).unwrap();
 }
+
+/// OWED-4: over the DB-authoritative RELATIONAL backend (`postgres_native`), multi-instance competition has
+/// **full cross-instance item visibility** (both instances read `pqueue_items` from the shared DB) AND the
+/// durable epoch fence — the complete production multi-instance guarantee.
+#[test]
+fn relational_multi_instance_has_item_visibility_and_fence() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!("B5 relational multi-instance SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+        return;
+    };
+    let schema = fresh_schema();
+    let mut c = Client::connect(&url, NoTls).expect("connect");
+    c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .expect("drop");
+    drop(c);
+
+    let clock = Arc::new(ManualClock::at(0));
+    let make = |owner: &str| -> Pqueue<PostgresRelationalBackend> {
+        let backend =
+            Arc::new(PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("backend"));
+        let cp: Arc<dyn QueueControlPlane> = Arc::new(
+            PostgresControlPlane::connect_in_schema(&url, &schema, ControlPlaneConfig::default())
+                .expect("cp"),
+        );
+        Pqueue::with_control_plane(backend, clock.clone(), OwnerId::new(owner).unwrap(), cp)
+            .expect("postgres binds the storage epoch")
+    };
+
+    let a = make("owner-A");
+    bo(a.create_queue(qdef())).unwrap();
+    let b = make("owner-B");
+
+    bo(a.push(&qk(), NewItem::default())).unwrap();
+    // Cross-instance item visibility: B reads A's write from the shared DB (impossible on the log-replay
+    // backend, which holds a per-connection in-memory projection).
+    assert_eq!(
+        bo(b.metrics(&qk())).unwrap().pending,
+        1,
+        "the relational backend gives B authoritative visibility of A's write"
+    );
+
+    // While A's lease is live, B is owned-elsewhere.
+    assert!(matches!(bo(b.push(&qk(), NewItem::default())), Err(EngineError::Forbidden(_))));
+
+    // After A's lease expires, B reclaims the queue (epoch 2) and CLAIMS A's pending item across the
+    // instance boundary — proving DB-authoritative cross-instance work handoff (no new item minted, so this
+    // sidesteps the per-connection push-id limitation noted below).
+    clock.set(20);
+    let claimed = bo(b.claim(&qk(), 10, 1_000)).unwrap();
+    assert_eq!(claimed.len(), 1, "B claims A's pending item across the instance boundary");
+
+    // A is superseded → its next data-plane op is durably fenced on the relational backend too.
+    assert!(
+        matches!(bo(a.push(&qk(), NewItem::default())), Err(EngineError::EpochFenced)),
+        "a superseded instance is durably fenced on the relational backend"
+    );
+}
+
+// NOTE (relational concurrent-push id limitation, separate from the fence): the relational backend mints
+// item ids from a per-connection sequence prefix, so two SEPARATE connections each pushing a fresh item can
+// collide on `pqueue_items_pkey` (both start at 0). Full concurrent multi-writer push needs a DB-sequence-
+// based (globally unique) item id — a tracked follow-up. The fence, cross-instance visibility, and
+// cross-instance claim handoff (the safety + work-handoff guarantees) are unaffected and proven above.

@@ -333,6 +333,7 @@ impl Inner {
         shard: &QueueKey,
         command: QueueCommand,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
         let Inner {
             client,
@@ -342,6 +343,17 @@ impl Inner {
         } = self;
         let (t, q) = parts(shard);
         let mut tx = st(client.transaction())?;
+        // ADR-009 / TD-003: fence a superseded owner (cached `expected_epoch` != durable assignment_epoch)
+        // before applying — nothing is written. `None` is the degenerate sole-owner path (no fence). BQ-23
+        // makes this `assignment_epoch` the same single durable value the control-plane acquire advances.
+        let epoch: i64 = st(tx.query_one(
+            "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?
+        .get(0);
+        if expected_epoch.is_some_and(|e| e != epoch as u64) {
+            return Err(EngineError::EpochFenced);
+        }
         let seq = alloc_seq(&mut tx, &t, &q)?;
         let mut token_ops = Vec::new();
         apply_command_sql(&mut tx, queues, &mut token_ops, shard, seq, now, &command)?;
@@ -1773,7 +1785,7 @@ impl PushPort for PostgresRelationalBackend {
         now: UtcTimestamp,
         // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
         // contract so the owner fence is uniform once the relational/object write paths thread it.
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -1788,7 +1800,7 @@ impl PushPort for PostgresRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Push(PushCommand { items: push_items }),
-                now,
+                now, expected_epoch
             )?;
             Ok(ids)
         })();
@@ -1833,6 +1845,16 @@ impl ClaimPort for PostgresRelationalBackend {
             } = &mut *g;
             let (t, q) = parts(&req.shard);
             let mut tx = st(client.transaction())?;
+            // ADR-009 / TD-003 fence: a superseded owner is rejected BEFORE selecting/leasing — nothing is
+            // claimed. `None` = sole-owner (no fence). The assignment_epoch is the BQ-23 single durable value.
+            let claim_epoch: i64 = st(tx.query_one(
+                "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?
+            .get(0);
+            if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
             let seq = alloc_seq(&mut tx, &t, &q)?;
             let now_n = ts_nanos(req.now);
             let exp = ts_nanos(req.lease_expires_at);
@@ -1944,7 +1966,7 @@ impl UpsertPort for PostgresRelationalBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
@@ -1996,7 +2018,7 @@ impl UpsertPort for PostgresRelationalBackend {
                     g.commit_command(
                         shard,
                         QueueCommand::Push(PushCommand { items: vec![item] }),
-                        now,
+                        now, expected_epoch
                     )?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
@@ -2016,7 +2038,7 @@ impl UpsertPort for PostgresRelationalBackend {
                                     superseded_item_id: existing_id.clone(),
                                     replacement: item,
                                 }),
-                                now,
+                                now, expected_epoch
                             )?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
@@ -2041,7 +2063,7 @@ impl FinalizePort for PostgresRelationalBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2050,7 +2072,7 @@ impl FinalizePort for PostgresRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Finalize(FinalizeCommand { outcomes }),
-                now,
+                now, expected_epoch
             )?;
             Ok(())
         })();
@@ -2065,7 +2087,7 @@ impl RenewLeasePort for PostgresRelationalBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2076,7 +2098,7 @@ impl RenewLeasePort for PostgresRelationalBackend {
                     item_ids,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now,
+                now, expected_epoch
             )?;
             Ok(())
         })();
@@ -2092,7 +2114,7 @@ impl ReassignLeasePort for PostgresRelationalBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2104,7 +2126,7 @@ impl ReassignLeasePort for PostgresRelationalBackend {
                     lease_token: new_lease_token,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now,
+                now, expected_epoch
             )?;
             Ok(())
         })();
@@ -2119,7 +2141,7 @@ impl PurgePort for PostgresRelationalBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2143,7 +2165,7 @@ impl PurgePort for PostgresRelationalBackend {
                     item_ids: present,
                     force,
                 }),
-                now,
+                now, expected_epoch
             )?;
             Ok(count)
         })();
@@ -2186,7 +2208,7 @@ impl ReclaimDriver for PostgresRelationalBackend {
                 g.commit_command(
                     &shard,
                     QueueCommand::LeaseExpired(LeaseExpiredCommand { item_ids: ids }),
-                    now,
+                    now, None
                 )?;
             }
             Ok(report)
