@@ -8,19 +8,19 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 6bf3dcc75c94fefa35af4ed9f1859e76b76df3f171a89622fcb24888d92c93e4
+    self_hash: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
     deps:
       adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
       adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
       prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
       td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-25T04:21:18Z"
+    reviewed_at: "2026-06-27T19:08:46Z"
 ---
 
 # Technical Design: TD-003 Queue Ownership and Fencing
 
-**Contract**: API-001 | **ADR**: ADR-001, ADR-002, ADR-004, ADR-008 | **Scope**: queue-to-owner assignment, single-writer ownership, epoch fencing, reassignment, drain, recovery
+**Contract**: API-001 | **ADR**: ADR-001, ADR-002, ADR-004, ADR-008, ADR-009 | **Scope**: queue-to-owner assignment, single-writer ownership, epoch fencing, reassignment, drain, recovery, the in-process library owner-runtime and its cached-epoch data-plane fence
 
 ## Scope
 
@@ -261,6 +261,38 @@ service-internal owners. A later hardening MAY add an unguessable lease
 incarnation token alongside the epoch to defend against owner spoofing in
 less-trusted deployments. This is recorded as a future option, not a v1
 requirement.
+
+## In-Process Library Owner-Runtime (ADR-009)
+
+This design is written in terms of an abstract "owner worker." Per ADR-007 there
+are **two** driving adapters that realize an owner-runtime over the *same* engine
+coordination: the RESP server (`pqueue-resp`) and the **in-process Rust library**
+(`pqueue`, `Pqueue`). ADR-009 makes both first-class owners — **neither is exempt
+from resolve + fence**, and coordination is enforced in the engine *below the
+ports*, not in either adapter. The rules below constrain the library realization
+specifically (closing the gap where the library delegated straight to the
+data-plane ports without acquiring a lease); the RESP server realization is
+unchanged from the rest of this design.
+
+| Rule | Normative text |
+|------|----------------|
+| Library is an owner | A `Pqueue` handle MUST carry an `OwnerId` and a `ControlPlaneStore`, resolve ownership, and operate under an acquired, fenced lease for every queue-addressed op — identically to the RESP server. It MUST NOT append to a queue it has not acquired-and-fenced. A single embedded sole-owner deployment is the degenerate case: constant ownership and a constant (always-current) epoch, so single-instance behavior is unchanged. |
+| Cached acquire-time epoch (MUST) | The `expected_epoch` carried on every data-plane append (`PushPort`/`ClaimPort`/`FinalizePort` -> `append_batch`) MUST be the epoch the owner **cached at `acquire_queue_lease`** (`OwnedSession.fence_epoch`), NOT a value re-read from the control plane / current log epoch at append time. Re-reading the current epoch defeats the fence (a superseded owner would read the new epoch and pass) and is therefore forbidden. The fence MUST be evaluated **at commit time inside the append's atomic unit of work**, so an owner superseded after it resolved but before it commits is rejected `queue-epoch-stale` mid-operation (no resolve->commit TOCTOU). |
+| Single durable epoch (MUST) | For the cached-epoch fence to bind, the control-plane `assignment_epoch` and the storage append-fence epoch MUST be **one durable value advanced atomically at acquire** — already specified as the same token (Data Model) and bound in the `postgres_native` acquire transaction (Backend Profile Bindings). An implementation that keeps two separately-advanced counters does NOT satisfy this rule. |
+| Data-path fail-closed (MUST) | Lease liveness MUST fail closed on the **data path**, not only the control path. If a library owner stalls (host GC pause) past `lease_expires_at` and a peer reclaims the queue at a greater epoch, the stalled owner's next append MUST be rejected by the cached-epoch fence regardless of whether its renew loop has run. The cached session is advisory for liveness; the append fence is the safety authority. |
+| Target-affinity (MUST) | The library policy layer MUST restrict `acquire_queue_lease` to the queue's deterministic `target_owner` (Queue-to-owner) and MUST NOT acquire a queue a live peer is the target for. A queue held by a different live owner yields an owned-elsewhere resolution (rendered `-MOVED` by RESP, an `OwnedElsewhere` value by the library); the library MUST NOT contend by acquiring a *live* lease (online handoff is `begin_drain`). The reference in-memory control plane's *cooperative* acquire (admits any live owner) is a reference-impl simplification; target-affinity is the normative requirement **both** adapters MUST apply so they cannot thrash a queue against each other. After a renew/acquire timeout the owner MUST **re-resolve**, never blindly retry the non-idempotent acquire. |
+| Bounded per-node coordination (MUST) | A library process owning many queues MUST keep renew/heartbeat and ownership state bounded per node — a single bounded renew/heartbeat driver, never one task/connection per queue (Queue density). |
+
+**Multi-instance shared-store competition (library).** Multiple `Pqueue` instances
+sharing one durable backend, competing for per-queue leases, is the library
+realization of this design. It is correct **only** on a backend that presents the
+single atomic acquire->fence epoch above — `postgres_native` once that binding
+holds. The reference in-memory control plane (per-process, resets on restart) and a
+backend with no shared durable control plane (sqlite-local) are **single-process
+only**. `object_log_sqlite_projection` is **single-owner only** until the deferred
+manifest-CAS epoch fence (Control-Plane Pluggability) lands and per-entry epochs
+are recorded. A `Pqueue` constructed for multi-owner operation MUST runtime-refuse
+a backend that does not present the atomic acquire->fence capability.
 
 ## Graceful Drain
 
@@ -598,6 +630,9 @@ TD-003 is not satisfied until these scenarios pass for every backend profile.
 | Group co-residency by construction | All items of one `group_key` are owned by the queue's single owner; `whole_group`/`whole_cohort` claims (G1/G6) are owner-local and atomic with no co-residency flag. |
 | Stalled-queue visibility | A queue left unowned past `progress_bound_ms` is surfaced as a progress-bound violation in metrics and `DiscoverActiveScopes`. |
 | Queue density (>=1000 active queues/node) | A single node owns the leases for >=1000 concurrently active queues; lease renewal stays O(owned queues / interval) via batched per-node writes (not per-queue tasks/connections), background sweeps/aggregation run as bounded shared per-node jobs, every active queue meets its progress bound, any one queue can reach the per-queue floor, and there is no cross-queue degradation as the active-queue count grows to 1000 (`queue_density_single_node_tests`, TP-002 E2). |
+| In-process library owner fenced at commit (ADR-009) | A `Pqueue` owner holding cached epoch E continues to append (push/claim/finalize) after a peer acquired E+1; the append MUST fail `queue-epoch-stale` **at commit**, MUST NOT mutate state, and MUST use the cached epoch (NOT a re-read of current). A sole-owner `Pqueue` is never spuriously fenced. |
+| Library data-path fail-closed on stall (ADR-009) | A `Pqueue` owner whose lease expired during a simulated stall, after a peer reclaimed the queue, has its next append fenced **regardless** of whether its renew loop has run (the cached-epoch fence, not the renew loop, is the authority). |
+| Multi-instance target-affinity, no thrash (ADR-009) | Two `Pqueue` instances over a shared `postgres_native` store: only the deterministic `target_owner` acquires; requests at a non-target return `OwnedElsewhere` (no contended acquire of a live lease); the `assignment_epoch` does not ping-pong; a superseded instance is fenced; ownership migrates to a new target only on expiry/drain. A multi-owner `Pqueue` on a non-atomic-acquire backend is runtime-refused. |
 
 ## Risks
 
@@ -611,6 +646,10 @@ TD-003 is not satisfied until these scenarios pass for every backend profile.
 
 ## Review Checklist
 
+- [x] In-process library is a first-class owner-runtime (ADR-009): resolves +
+      fences like the RESP server; data-plane append uses the cached acquire-time
+      epoch checked at commit; data-path fail-closed; target-affinity; multi-owner
+      is postgres-only and runtime-refused elsewhere (object-log single-owner).
 - [x] No external coordinator / consensus (ADR-001, concerns.md override).
 - [x] Storage-backed queue leases owned by the pluggable `ControlPlaneStore`
       (Postgres default; object-store deferred, ADR-008).
