@@ -486,7 +486,7 @@ async fn xadd<B: RespBackend>(
                     not_before,
                     payload,
                     fields,
-                    state.now(),
+                    state.now(), None
                 )
                 .await
             {
@@ -836,7 +836,7 @@ async fn xack<B: RespBackend>(
             kind: FinalizeKind::Complete,
         })
         .collect();
-    match backend.finalize(&shard, outcomes, state.now()).await {
+    match backend.finalize(&shard, outcomes, state.now(), None).await {
         Ok(()) => Resp::Int(ids.len() as i64),
         Err(e) => err_reply(&e),
     }
@@ -1042,7 +1042,7 @@ async fn xautoclaim<B: RespBackend>(
                 expired_ids.clone(),
                 consumer_token,
                 add_millis(now, lease_ms),
-                now,
+                now, None
             )
             .await
     {
@@ -1164,13 +1164,13 @@ async fn xclaim<B: RespBackend>(
     let new_expiry = add_millis(now, lease_ms);
 
     if !renew_ids.is_empty()
-        && let Err(e) = backend.renew(&shard, renew_ids, new_expiry, now).await
+        && let Err(e) = backend.renew(&shard, renew_ids, new_expiry, now, None).await
     {
         return err_reply(&e);
     }
     if !reassign_ids.is_empty()
         && let Err(e) = backend
-            .reassign(&shard, reassign_ids, consumer_token, new_expiry, now)
+            .reassign(&shard, reassign_ids, consumer_token, new_expiry, now, None)
             .await
     {
         return err_reply(&e);
@@ -1228,7 +1228,7 @@ async fn xdel<B: RespBackend>(
             Err(_) => return Resp::Error("ERR pqueue invalid".into()),
         }
     }
-    match backend.purge(&shard, ids, true, state.now()).await {
+    match backend.purge(&shard, ids, true, state.now(), None).await {
         Ok(n) => Resp::Int(n as i64),
         Err(e) => err_reply(&e),
     }

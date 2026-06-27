@@ -436,6 +436,7 @@ impl UpsertPort for ObjectLogBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         // Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD upsert is not offered on the eventual-apply
         // class. Refuse with the structured `Unavailable` (`-ERR pqueue unavailable`).
@@ -488,6 +489,7 @@ impl FinalizePort for ObjectLogBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -512,6 +514,7 @@ impl RenewLeasePort for ObjectLogBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -539,6 +542,7 @@ impl ReassignLeasePort for ObjectLogBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -566,6 +570,7 @@ impl PurgePort for ObjectLogBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");

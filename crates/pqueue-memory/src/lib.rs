@@ -196,6 +196,7 @@ impl UpsertPort for MemoryBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
@@ -235,7 +236,7 @@ impl UpsertPort for MemoryBackend {
             match existing {
                 None => {
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
-                    Self::commit_locked(&mut g, shard, env, None)?;
+                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
                     })
@@ -252,7 +253,7 @@ impl UpsertPort for MemoryBackend {
                                 superseded_item_id: existing_id.clone(),
                                 replacement: item,
                             }));
-                            Self::commit_locked(&mut g, shard, env, None)?;
+                            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
                                 superseded_item_id: existing_id,
@@ -314,6 +315,7 @@ impl FinalizePort for MemoryBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
@@ -326,7 +328,7 @@ impl FinalizePort for MemoryBackend {
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = self.make_envelope(cmd, item_ids, now);
-            Self::commit_locked(&mut g, shard, env, None)?;
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -340,6 +342,7 @@ impl RenewLeasePort for MemoryBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
@@ -352,7 +355,7 @@ impl RenewLeasePort for MemoryBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = self.make_envelope(cmd, item_ids, now);
-            Self::commit_locked(&mut g, shard, env, None)?;
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -367,6 +370,7 @@ impl ReassignLeasePort for MemoryBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
@@ -380,7 +384,7 @@ impl ReassignLeasePort for MemoryBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = self.make_envelope(cmd, item_ids, now);
-            Self::commit_locked(&mut g, shard, env, None)?;
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -394,6 +398,7 @@ impl PurgePort for MemoryBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
@@ -424,7 +429,7 @@ impl PurgePort for MemoryBackend {
                 force,
             });
             let env = self.make_envelope(cmd, present, now);
-            Self::commit_locked(&mut g, shard, env, None)?;
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             Ok(count)
         })();
         std::future::ready(result)

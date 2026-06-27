@@ -105,6 +105,7 @@ async fn retention_tombstone_survives_reopen() {
                 None,
                 BTreeMap::new(),
                 ts(0),
+                None,
             )
             .await
             .unwrap()
@@ -119,11 +120,11 @@ async fn retention_tombstone_survives_reopen() {
                 item_id: id.clone(),
                 kind: FinalizeKind::Complete,
             }],
-            ts(2),
+            ts(2), None
         )
         .await
         .unwrap();
-        a.purge(&shard(), vec![id], false, ts(3)).await.unwrap(); // terminal purge -> retention tombstone
+        a.purge(&shard(), vec![id], false, ts(3), None).await.unwrap(); // terminal purge -> retention tombstone
     } // crash
 
     let b = SqliteRelationalBackend::open(&path).unwrap();
@@ -138,8 +139,8 @@ async fn retention_tombstone_survives_reopen() {
             None,
             None,
             BTreeMap::new(),
-            ts(10)
-        )
+            ts(10),
+        None)
         .await,
         Err(EngineError::Terminal),
         "the retention tombstone survives reopen and still blocks the duplicate as Terminal"
@@ -172,7 +173,7 @@ async fn reopened_queue_accepts_new_push_and_claim() {
                 item_id: pre_id.clone(),
                 kind: FinalizeKind::Complete,
             }],
-            ts(2),
+            ts(2), None
         )
         .await
         .unwrap();

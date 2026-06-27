@@ -116,3 +116,59 @@ async fn push_fences_superseded_owner_epoch() {
     assert_eq!(ids.len(), 1);
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
 }
+
+/// B1b (ADR-009 / TD-003): the cached-epoch fence also covers `FinalizePort::finalize` — completing the
+/// TD-003 explicit Push/Claim/Finalize fence MUST. A superseded owner's finalize is `EpochFenced` and
+/// makes no lifecycle transition; the current-epoch owner finalizes normally.
+#[tokio::test]
+async fn finalize_fences_superseded_owner_epoch() {
+    use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
+    use pqueue_engine::{
+        ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
+        FinalizePort, ProjectionRead, PushCommand, QueueCommand,
+    };
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("a", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    // Lease the item under the degenerate (sole-owner) path.
+    let claimed = b
+        .claim(ClaimRequest {
+            expected_epoch: None,
+            ..claim_req(10, 500, 10)
+        })
+        .await
+        .unwrap();
+    let id = claimed.items[0].item_id.clone();
+
+    let e1 = b.acquire_epoch(&shard()).await.unwrap(); // ownership handoff 0 -> 1
+    let outcomes = vec![FinalizeOutcome {
+        item_id: id,
+        kind: FinalizeKind::Complete,
+    }];
+
+    assert!(
+        matches!(
+            b.finalize(&shard(), outcomes.clone(), ts(20), Some(0)).await,
+            Err(EngineError::EpochFenced)
+        ),
+        "a superseded owner's finalize must be EpochFenced"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().complete,
+        0,
+        "a fenced finalize must make no transition"
+    );
+
+    b.finalize(&shard(), outcomes, ts(20), Some(e1)).await.unwrap();
+    assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
+}

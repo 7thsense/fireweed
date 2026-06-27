@@ -2015,6 +2015,7 @@ impl UpsertPort for SqliteRelationalBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
@@ -2119,6 +2120,7 @@ impl FinalizePort for SqliteRelationalBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2142,6 +2144,7 @@ impl RenewLeasePort for SqliteRelationalBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2168,6 +2171,7 @@ impl ReassignLeasePort for SqliteRelationalBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2194,6 +2198,7 @@ impl PurgePort for SqliteRelationalBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2388,7 +2393,7 @@ mod group_summary_tests {
         );
 
         // Purge the remaining pending grouped item — group drains to empty.
-        b.purge(&shard(), vec![ids[1].clone()], false, ts(20))
+        b.purge(&shard(), vec![ids[1].clone()], false, ts(20), None)
             .await
             .unwrap();
         let (oldest, count, rep) = summary(&b, "g").unwrap();
@@ -2435,7 +2440,7 @@ mod group_summary_tests {
                 item_id: ids[0].clone(),
                 kind: FinalizeKind::Release,
             }],
-            ts(20),
+            ts(20), None
         )
         .await
         .unwrap();
@@ -2477,7 +2482,7 @@ mod group_summary_tests {
                 None,
                 None,
                 BTreeMap::new(),
-                ts(0),
+                ts(0), None
             )
             .await
             .unwrap()
@@ -2486,7 +2491,7 @@ mod group_summary_tests {
             _ => panic!("insert"),
         };
         // Purge a PENDING item (not terminal) -> no retention tombstone, so the key is freely reusable.
-        b.purge(&shard(), vec![id], false, ts(1)).await.unwrap();
+        b.purge(&shard(), vec![id], false, ts(1), None).await.unwrap();
         assert!(
             matches!(
                 b.replace_if_pending(
@@ -2497,8 +2502,8 @@ mod group_summary_tests {
                     None,
                     None,
                     BTreeMap::new(),
-                    ts(2)
-                )
+                    ts(2),
+                None)
                 .await
                 .unwrap(),
                 UpsertOutcome::Inserted { .. }

@@ -169,7 +169,7 @@ impl<B: LibBackend> Pqueue<B> {
                 item.not_before,
                 item.payload,
                 item.fields,
-                self.clock.now(),
+                self.clock.now(), None
             )
             .await
     }
@@ -248,7 +248,7 @@ impl<B: LibBackend> Pqueue<B> {
             .map(|item_id| FinalizeOutcome { item_id, kind })
             .collect();
         self.backend
-            .finalize(queue, outcomes, self.clock.now())
+            .finalize(queue, outcomes, self.clock.now(), None)
             .await
     }
 
@@ -308,7 +308,7 @@ impl<B: LibBackend> Pqueue<B> {
         let now = self.clock.now();
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .renew(queue, ids, add_millis(now, lease_ms), now)
+            .renew(queue, ids, add_millis(now, lease_ms), now, None)
             .await
     }
 
@@ -326,7 +326,7 @@ impl<B: LibBackend> Pqueue<B> {
         let token = LeaseToken::new(format!("libL{n}")).expect("lease");
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .reassign(queue, ids, token, add_millis(now, lease_ms), now)
+            .reassign(queue, ids, token, add_millis(now, lease_ms), now, None)
             .await
     }
 
@@ -350,7 +350,7 @@ impl<B: LibBackend> Pqueue<B> {
     ) -> EngineResult<u64> {
         let ids: Vec<ItemId> = ids.into_iter().collect();
         self.backend
-            .purge(queue, ids, force, self.clock.now())
+            .purge(queue, ids, force, self.clock.now(), None)
             .await
     }
 

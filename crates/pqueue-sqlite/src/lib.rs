@@ -448,6 +448,7 @@ impl UpsertPort for SqliteBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -488,7 +489,7 @@ impl UpsertPort for SqliteBackend {
             match existing {
                 None => {
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
-                    g.commit_locked(shard, env, None)?;
+                    g.commit_locked(shard, env, expected_epoch)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
                     })
@@ -505,7 +506,7 @@ impl UpsertPort for SqliteBackend {
                                 superseded_item_id: existing_id.clone(),
                                 replacement: item,
                             }));
-                            g.commit_locked(shard, env, None)?;
+                            g.commit_locked(shard, env, expected_epoch)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
                                 superseded_item_id: existing_id,
@@ -567,6 +568,7 @@ impl FinalizePort for SqliteBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -577,7 +579,7 @@ impl FinalizePort for SqliteBackend {
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env, None)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -591,6 +593,7 @@ impl RenewLeasePort for SqliteBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -603,7 +606,7 @@ impl RenewLeasePort for SqliteBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env, None)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -618,6 +621,7 @@ impl ReassignLeasePort for SqliteBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -631,7 +635,7 @@ impl ReassignLeasePort for SqliteBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env, None)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -645,6 +649,7 @@ impl PurgePort for SqliteBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -673,7 +678,7 @@ impl PurgePort for SqliteBackend {
                 force,
             });
             let env = g.make_envelope(cmd, present, now);
-            g.commit_locked(shard, env, None)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(count)
         })();
         std::future::ready(result)

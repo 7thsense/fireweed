@@ -162,7 +162,7 @@ async fn renew_extends_lease_deadline() {
     let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
     let id = claimed.items[0].item_id.clone();
 
-    b.renew(&shard(), vec![id.clone()], ts(900), ts(20))
+    b.renew(&shard(), vec![id.clone()], ts(900), ts(20), None)
         .await
         .unwrap();
     let pending = b.pending(&shard()).await.unwrap();
@@ -174,7 +174,7 @@ async fn renew_extends_lease_deadline() {
 
     // A renew of a non-leased id is rejected (NotFound), nothing changes.
     assert!(
-        b.renew(&shard(), vec![iid("nope")], ts(1000), ts(30))
+        b.renew(&shard(), vec![iid("nope")], ts(1000), ts(30), None)
             .await
             .is_err()
     );
@@ -196,7 +196,7 @@ async fn reassign_swaps_token_and_charges_delivery() {
         vec![id.clone()],
         LeaseToken::new("lease-2").unwrap(),
         ts(800),
-        ts(20),
+        ts(20), None
     )
     .await
     .unwrap();
@@ -222,7 +222,7 @@ async fn finalize_complete_and_fail_are_terminal() {
         b.finalize(
             &shard(),
             vec![FinalizeOutcome { item_id: id, kind }],
-            ts(20),
+            ts(20), None
         )
         .await
         .unwrap();
@@ -255,7 +255,7 @@ async fn finalize_retry_respects_attempt_bound() {
                 item_id: id,
                 kind: FinalizeKind::Retry,
             }],
-            ts(10 * attempt),
+            ts(10 * attempt), None
         )
         .await
         .unwrap();
@@ -274,7 +274,7 @@ async fn finalize_retry_respects_attempt_bound() {
             item_id: id,
             kind: FinalizeKind::Retry,
         }],
-        ts(100),
+        ts(100), None
     )
     .await
     .unwrap();
@@ -305,7 +305,7 @@ async fn finalize_release_and_rearm_return_to_pending() {
             item_id: id,
             kind: FinalizeKind::Release,
         }],
-        ts(20),
+        ts(20), None
     )
     .await
     .unwrap();
@@ -330,7 +330,7 @@ async fn finalize_release_and_rearm_return_to_pending() {
             item_id: id,
             kind: FinalizeKind::Rearm,
         }],
-        ts(20),
+        ts(20), None
     )
     .await
     .unwrap();
@@ -392,8 +392,8 @@ async fn fence_then_unfence_gate_finalize() {
                 item_id: id.clone(),
                 kind: FinalizeKind::Complete
             }],
-            ts(20)
-        )
+            ts(20),
+        None)
         .await
         .is_err(),
         "fenced lease cannot be finalized"
@@ -415,7 +415,7 @@ async fn fence_then_unfence_gate_finalize() {
             item_id: id,
             kind: FinalizeKind::Complete,
         }],
-        ts(30),
+        ts(30), None
     )
     .await
     .expect("unfenced lease finalizes");
@@ -485,7 +485,7 @@ async fn purge_removes_items_and_gates_leased() {
     .await;
     // Purge a pending item (no force needed); repeated id counts once.
     let removed = b
-        .purge(&shard(), vec![iid("a"), iid("a")], false, ts(20))
+        .purge(&shard(), vec![iid("a"), iid("a")], false, ts(20), None)
         .await
         .unwrap();
     assert_eq!(removed, 1);
@@ -494,13 +494,13 @@ async fn purge_removes_items_and_gates_leased() {
     // Lease "b", then a non-forced purge is gated; forced purge removes it.
     b.claim(claim_req(1, 500, 10)).await.unwrap();
     assert!(
-        b.purge(&shard(), vec![iid("b")], false, ts(30))
+        b.purge(&shard(), vec![iid("b")], false, ts(30), None)
             .await
             .is_err(),
         "leased purge needs force"
     );
     assert_eq!(
-        b.purge(&shard(), vec![iid("b")], true, ts(31))
+        b.purge(&shard(), vec![iid("b")], true, ts(31), None)
             .await
             .unwrap(),
         1
@@ -526,7 +526,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             Some(Bytes::from_static(b"v1")),
             BTreeMap::new(),
-            ts(0),
+            ts(0), None
         )
         .await
         .unwrap()
@@ -546,7 +546,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             Some(Bytes::from_static(b"v2")),
             BTreeMap::new(),
-            ts(1),
+            ts(1), None
         )
         .await
         .unwrap()
@@ -571,8 +571,8 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             None,
             BTreeMap::new(),
-            ts(2)
-        )
+            ts(2),
+        None)
         .await
         .is_err(),
         "upsert collides with a claimed item"
@@ -598,7 +598,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
-            ts(0),
+            ts(0), None
         )
         .await
         .unwrap()
@@ -612,12 +612,12 @@ async fn purged_terminal_key_is_retained_against_repush() {
             item_id: item_id.clone(),
             kind: FinalizeKind::Complete,
         }],
-        ts(2),
+        ts(2), None
     )
     .await
     .unwrap();
     assert_eq!(
-        b.purge(&shard(), vec![item_id], false, ts(3))
+        b.purge(&shard(), vec![item_id], false, ts(3), None)
             .await
             .unwrap(),
         1
@@ -633,8 +633,8 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
-            ts(10)
-        )
+            ts(10),
+        None)
         .await
         .is_err(),
         "purged terminal key is retained -> re-push rejected as a duplicate"
@@ -650,7 +650,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
-            ts(70),
+            ts(70), None
         )
         .await
         .unwrap();
@@ -746,7 +746,7 @@ async fn released_item_keeps_its_fifo_slot() {
             item_id: id,
             kind: FinalizeKind::Release,
         }],
-        ts(20),
+        ts(20), None
     )
     .await
     .unwrap();

@@ -1944,6 +1944,7 @@ impl UpsertPort for PostgresRelationalBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
@@ -2040,6 +2041,7 @@ impl FinalizePort for PostgresRelationalBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2063,6 +2065,7 @@ impl RenewLeasePort for PostgresRelationalBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2089,6 +2092,7 @@ impl ReassignLeasePort for PostgresRelationalBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -2115,6 +2119,7 @@ impl PurgePort for PostgresRelationalBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");

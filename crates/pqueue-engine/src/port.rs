@@ -276,6 +276,7 @@ pub trait UpsertPort: Send + Sync {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
 }
 
@@ -326,6 +327,7 @@ pub trait RenewLeasePort: Send + Sync {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 
@@ -341,6 +343,7 @@ pub trait ReassignLeasePort: Send + Sync {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 
@@ -356,6 +359,7 @@ pub trait PurgePort: Send + Sync {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
 }
 
@@ -365,11 +369,14 @@ pub trait PurgePort: Send + Sync {
 /// Batch is all-or-nothing in this launch slice: any fenced item fails the whole call (per-item
 /// results are a later refinement).
 pub trait FinalizePort: Send + Sync {
+    /// `expected_epoch`: the owner's cached acquire-time fence epoch (ADR-009 / TD-003). `Some(e)` fences
+    /// the commit (a superseded owner → `EpochFenced`, nothing appended); `None` = degenerate sole-owner.
     fn finalize(
         &self,
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 

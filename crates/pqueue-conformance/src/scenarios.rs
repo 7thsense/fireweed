@@ -36,7 +36,7 @@ pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
             None,
             None,
             BTreeMap::new(),
-            ts(1),
+            ts(1), None
         )
         .await
         .unwrap_err();
@@ -381,7 +381,7 @@ pub async fn structured_live_items_are_ordered_and_only_live<B: ConformanceCore>
             item_id: claimed.items[0].item_id.clone(),
             kind: FinalizeKind::Complete,
         }],
-        ts(20),
+        ts(20), None
     )
     .await
     .unwrap();
@@ -407,7 +407,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             None,
             BTreeMap::new(),
-            ts(1),
+            ts(1), None
         )
         .await
         .unwrap()
@@ -426,7 +426,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             None,
             BTreeMap::new(),
-            ts(2),
+            ts(2), None
         )
         .await
         .unwrap()
@@ -462,7 +462,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             None,
             BTreeMap::new(),
-            ts(1),
+            ts(1), None
         )
         .await
         .unwrap()
@@ -482,7 +482,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             None,
             BTreeMap::new(),
-            ts(20),
+            ts(20), None
         )
         .await
         .unwrap_err();
@@ -511,7 +511,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             None,
             BTreeMap::new(),
-            ts(30),
+            ts(30), None
         )
         .await
         .unwrap_err();
@@ -535,7 +535,7 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
             Some(ts(250)),
             Some(Bytes::from_static(b"payload")),
             BTreeMap::new(),
-            ts(1),
+            ts(1), None
         )
         .await
         .unwrap()
@@ -703,7 +703,7 @@ pub async fn fenced_lease_finalize_is_stale<B: ConformanceCore>(make: impl Fn() 
         kind: FinalizeKind::Complete,
     }];
     assert_eq!(
-        b.finalize(&shard(), outcomes.clone(), ts(20)).await,
+        b.finalize(&shard(), outcomes.clone(), ts(20), None).await,
         Err(EngineError::StaleLease)
     );
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
@@ -719,7 +719,7 @@ pub async fn fenced_lease_finalize_is_stale<B: ConformanceCore>(make: impl Fn() 
         ),
     )
     .await;
-    b.finalize(&shard(), outcomes, ts(30)).await.unwrap();
+    b.finalize(&shard(), outcomes, ts(30), None).await.unwrap();
     assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }
 
@@ -747,15 +747,15 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
             &shard(),
             vec![ItemId::new("nope").unwrap()],
             ts(2000),
-            ts(20)
-        )
+            ts(20),
+        None)
         .await,
         Err(EngineError::NotFound)
     );
 
     // Happy path: extend the lease to ts(2000). Ticking PAST the old expiry (500) reclaims nothing,
     // and the attempt_count is unchanged (renew does not charge a delivery).
-    b.renew(&shard(), vec![id.clone()], ts(2000), ts(20))
+    b.renew(&shard(), vec![id.clone()], ts(2000), ts(20), None)
         .await
         .unwrap();
     assert_eq!(
@@ -790,7 +790,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
     )
     .await;
     assert_eq!(
-        b.renew(&shard(), vec![ItemId::new("p").unwrap()], ts(2000), ts(21))
+        b.renew(&shard(), vec![ItemId::new("p").unwrap()], ts(2000), ts(21), None)
             .await,
         Err(EngineError::Invalid("item is not leased"))
     );
@@ -807,7 +807,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
     )
     .await;
     assert_eq!(
-        b.renew(&shard(), vec![id], ts(3000), ts(30)).await,
+        b.renew(&shard(), vec![id], ts(3000), ts(30), None).await,
         Err(EngineError::StaleLease)
     );
 }
@@ -839,8 +839,8 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
             vec![ItemId::new("nope").unwrap()],
             new_token.clone(),
             ts(2000),
-            ts(20)
-        )
+            ts(20),
+        None)
         .await,
         Err(EngineError::NotFound)
     );
@@ -851,7 +851,7 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
         vec![id.clone()],
         new_token.clone(),
         ts(2000),
-        ts(20),
+        ts(20), None
     )
     .await
     .unwrap();
@@ -891,7 +891,7 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
     )
     .await;
     assert_eq!(
-        b.reassign(&shard(), vec![id], new_token, ts(3000), ts(30))
+        b.reassign(&shard(), vec![id], new_token, ts(3000), ts(30), None)
             .await,
         Err(EngineError::StaleLease)
     );
@@ -956,13 +956,13 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceCore>(
 
     // Purging a LEASED item without force is gated (Conflict), appending nothing.
     assert_eq!(
-        b.purge(&shard(), vec![a.clone()], false, ts(20)).await,
+        b.purge(&shard(), vec![a.clone()], false, ts(20), None).await,
         Err(EngineError::Conflict)
     );
     // Mixed batch [pending, leased] without force: the gate rejects ALL-OR-NOTHING regardless of order —
     // the pending id is NOT purged even though it precedes the leased one in the batch.
     assert_eq!(
-        b.purge(&shard(), vec![b_id.clone(), a.clone()], false, ts(20))
+        b.purge(&shard(), vec![b_id.clone(), a.clone()], false, ts(20), None)
             .await,
         Err(EngineError::Conflict)
     );
@@ -979,7 +979,7 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceCore>(
             &shard(),
             vec![b_id.clone(), b_id.clone(), ItemId::new("nope").unwrap()],
             false,
-            ts(21),
+            ts(21), None
         )
         .await
         .unwrap();
@@ -990,7 +990,7 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceCore>(
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0, "b is gone");
 
     // Force-purge the leased item "a": removed, count 1, no longer leased.
-    let removed_a = b.purge(&shard(), vec![a], true, ts(22)).await.unwrap();
+    let removed_a = b.purge(&shard(), vec![a], true, ts(22), None).await.unwrap();
     assert_eq!(removed_a, 1);
     assert_eq!(
         b.metrics(&qkey()).await.unwrap().leased,
@@ -1031,7 +1031,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
         "first delivery"
     );
     // Retry UNDER the bound (1 < 2) → back to pending, still claimable.
-    b.finalize(&shard(), retry_outcome(), ts(20)).await.unwrap();
+    b.finalize(&shard(), retry_outcome(), ts(20), None).await.unwrap();
     let m = b.metrics(&qkey()).await.unwrap();
     assert_eq!(
         (m.pending, m.leased, m.failed),
@@ -1054,7 +1054,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
         "second delivery"
     );
     // Retry AT the bound (2 >= 2) → TERMINAL (Failed), NOT back to pending.
-    b.finalize(&shard(), retry_outcome(), ts(40)).await.unwrap();
+    b.finalize(&shard(), retry_outcome(), ts(40), None).await.unwrap();
     let m = b.metrics(&qkey()).await.unwrap();
     assert_eq!(
         (m.pending, m.leased, m.failed),
@@ -1076,8 +1076,8 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
                 item_id: id,
                 kind: FinalizeKind::Complete,
             }],
-            ts(60)
-        )
+            ts(60),
+        None)
         .await,
         Err(EngineError::Terminal)
     );
@@ -1101,7 +1101,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
             item_id: ItemId::new("b").unwrap(),
             kind: FinalizeKind::Retry,
         }],
-        ts(80),
+        ts(80), None
     )
     .await
     .unwrap();
@@ -1134,7 +1134,7 @@ pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: Conform
         kind: FinalizeKind::Complete,
     }];
     assert_eq!(
-        b.finalize(&shard(), outcomes, ts(10)).await,
+        b.finalize(&shard(), outcomes, ts(10), None).await,
         Err(EngineError::Invalid("item is not leased"))
     );
 }
@@ -1197,7 +1197,7 @@ pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: i
         kind: FinalizeKind::Complete,
     }];
     assert_eq!(
-        b.finalize(&shard(), outcomes, ts(60)).await,
+        b.finalize(&shard(), outcomes, ts(60), None).await,
         Err(EngineError::StaleLease),
         "fence reconstructed"
     );
@@ -1312,7 +1312,7 @@ pub async fn reconnect_preserves_terminal_and_pending_state<B: ConformanceCore>(
             item_id: ItemId::new("b").unwrap(),
             kind: FinalizeKind::Complete,
         }],
-        ts(20),
+        ts(20), None
     )
     .await
     .unwrap();
@@ -1402,7 +1402,7 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
 
     let unknown = ItemId::new("zzz").unwrap();
     let _ = b
-        .renew(&shard(), vec![unknown.clone()], ts(2000), ts(20))
+        .renew(&shard(), vec![unknown.clone()], ts(2000), ts(20), None)
         .await; // unknown id → NotFound
     let _ = b
         .reassign(
@@ -1410,11 +1410,11 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
             vec![unknown.clone()],
             LeaseToken::new("l2").unwrap(),
             ts(2000),
-            ts(20),
+            ts(20), None
         )
         .await; // unknown id → NotFound
     let _ = b
-        .purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(20))
+        .purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(20), None)
         .await; // leased without force → Conflict
     let _ = b
         .finalize(
@@ -1423,7 +1423,7 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
                 item_id: ItemId::new("p").unwrap(),
                 kind: FinalizeKind::Complete,
             }],
-            ts(20),
+            ts(20), None
         )
         .await; // pending, not leased → Invalid
 
@@ -1532,10 +1532,10 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     parity(&a, &b, 100, "after claim b").await;
 
     // Renew, then complete "b".
-    a.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20))
+    a.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20), None)
         .await
         .unwrap();
-    b.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20))
+    b.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20), None)
         .await
         .unwrap();
     parity(&a, &b, 100, "after renew b").await;
@@ -1543,8 +1543,8 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         item_id: ItemId::new("b").unwrap(),
         kind: FinalizeKind::Complete,
     }];
-    a.finalize(&shard(), fin_b.clone(), ts(30)).await.unwrap();
-    b.finalize(&shard(), fin_b, ts(30)).await.unwrap();
+    a.finalize(&shard(), fin_b.clone(), ts(30), None).await.unwrap();
+    b.finalize(&shard(), fin_b, ts(30), None).await.unwrap();
     parity(&a, &b, 100, "after complete b").await;
 
     // Claim "c" (now the head), reassign it to a new consumer, then retry it back to pending.
@@ -1557,7 +1557,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         vec![ItemId::new("c").unwrap()],
         l2.clone(),
         ts(800),
-        ts(50),
+        ts(50), None
     )
     .await
     .unwrap();
@@ -1566,7 +1566,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         vec![ItemId::new("c").unwrap()],
         l2,
         ts(800),
-        ts(50),
+        ts(50), None
     )
     .await
     .unwrap();
@@ -1575,8 +1575,8 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         item_id: ItemId::new("c").unwrap(),
         kind: FinalizeKind::Retry,
     }];
-    a.finalize(&shard(), retry_c.clone(), ts(60)).await.unwrap();
-    b.finalize(&shard(), retry_c, ts(60)).await.unwrap();
+    a.finalize(&shard(), retry_c.clone(), ts(60), None).await.unwrap();
+    b.finalize(&shard(), retry_c, ts(60), None).await.unwrap();
     parity(&a, &b, 100, "after retry c").await;
 
     // Fence-then-finalize "c" after a re-claim: both families reject the fenced finalize identically.
@@ -1594,8 +1594,8 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         item_id: ItemId::new("c").unwrap(),
         kind: FinalizeKind::Complete,
     }];
-    assert!(a.finalize(&shard(), fin_c.clone(), ts(80)).await.is_err());
-    assert!(b.finalize(&shard(), fin_c, ts(80)).await.is_err());
+    assert!(a.finalize(&shard(), fin_c.clone(), ts(80), None).await.is_err());
+    assert!(b.finalize(&shard(), fin_c, ts(80), None).await.is_err());
     parity(&a, &b, 100, "after fenced-finalize reject").await;
 
     // Lease-expiry reclaim tick: "c" was leased through ts(500); tick past it returns it to pending.
@@ -1604,10 +1604,10 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     parity(&a, &b, 600, "after reclaim tick").await;
 
     // Purge the still-pending "a".
-    a.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90))
+    a.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90), None)
         .await
         .unwrap();
-    b.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90))
+    b.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90), None)
         .await
         .unwrap();
     parity(&a, &b, 600, "after purge a").await;
