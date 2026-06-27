@@ -562,3 +562,40 @@ impl<B: LibBackend> Pqueue<B> {
         self.backend.claimed_view(queue, ids).await
     }
 }
+
+// ---------------------------------------------------------------------------
+// Public constructors — the blessed way to build a Pqueue WITHOUT naming a backend (ADR-009 §4a / B3).
+// The concrete backend is built internally and erased behind `impl LibBackend`, so a client of the
+// published crate never holds a port-bearing handle. Reaching a raw port requires deliberately depending
+// on an internal crate (strong-by-default, not absolute — OD-6).
+// ---------------------------------------------------------------------------
+
+/// Open a **sole-owner**, in-memory pqueue (atomic durability class) — the zero-setup embedded path.
+/// Requires the `memory` feature (default).
+#[cfg(feature = "memory")]
+pub fn open_memory(clock: Arc<dyn Clock>) -> Pqueue<impl LibBackend> {
+    Pqueue::new(Arc::new(pqueue_memory::MemoryBackend::new()), clock)
+}
+
+/// Open a **sole-owner**, sqlite-backed pqueue (durable log + projection rebuilt from the log) at `path`.
+/// Requires the `sqlite` feature (default).
+#[cfg(feature = "sqlite")]
+pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Pqueue<impl LibBackend>> {
+    Ok(Pqueue::new(
+        Arc::new(pqueue_sqlite::SqliteBackend::open(path)?),
+        clock,
+    ))
+}
+
+/// Open a **sole-owner**, object-log pqueue (eventual-apply class) rooted at `root`. Requires the
+/// `objectlog` feature (default).
+#[cfg(feature = "objectlog")]
+pub fn open_objectlog(
+    root: impl Into<std::path::PathBuf>,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Pqueue<impl LibBackend>> {
+    Ok(Pqueue::new(
+        Arc::new(pqueue_objectlog::ObjectLogBackend::open(root)?),
+        clock,
+    ))
+}
