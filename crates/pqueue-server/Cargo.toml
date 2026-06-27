@@ -8,6 +8,10 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "pqueue-service"
+path = "src/bin/pqueue-service.rs"
+
 # Composition root: the ONE place that names concrete adapters. Wires a chosen backend
 # (memory/sqlite/objectlog) + a system clock to the RESP front (`pqueue-resp`) and runs a background
 # ReclaimDriver task so leases reclaim without client traffic (TD-007 §3). Everything else depends only

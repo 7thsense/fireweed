@@ -2,7 +2,7 @@
 # Local deployment release gate for pqueue.
 #
 # This gate composes the existing source/release checks with deployment checks.
-# The only tolerated local skip is the disposable kind backend matrix when the
+# The only tolerated local skip is the disposable kind storage matrix when the
 # local Docker/kind toolchain is unavailable or Docker cannot be used.
 set -euo pipefail
 
@@ -14,11 +14,11 @@ PACKAGE_DIR="${PROOF_DIR}/release-dist"
 PROOF_JSON="${PROOF_DIR}/deployment-proof.json"
 PROOF_MD="${PROOF_DIR}/deployment-proof.md"
 COMMAND_LOG="${PROOF_DIR}/commands.tsv"
-BACKEND_LOG="${PROOF_DIR}/backend-profiles.tsv"
+STORAGE_LOG="${PROOF_DIR}/storage-combinations.tsv"
 SKIP_LOG="${PROOF_DIR}/local-skips.txt"
 SUPPORT_LOG="${PROOF_DIR}/supporting-artifacts.tsv"
 
-BACKENDS=(postgres_native object_log_sqlite_projection)
+STORAGE_COMBINATIONS=("objectlog:inmemory")
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
 export KIND_NODE_IMAGE
 
@@ -37,7 +37,7 @@ init_proof_logs() {
     rm -rf "${PROOF_DIR}"
     mkdir -p "${PROOF_DIR}"
     : >"${COMMAND_LOG}"
-    : >"${BACKEND_LOG}"
+    : >"${STORAGE_LOG}"
     : >"${SKIP_LOG}"
     : >"${SUPPORT_LOG}"
 }
@@ -53,9 +53,9 @@ record_command() {
     printf '\n' >>"${COMMAND_LOG}"
 }
 
-record_backend_profile() {
-    local profile="$1" status="$2" reason="${3:-}"
-    printf '%s\t%s\t%s\n' "${profile}" "${status}" "${reason}" >>"${BACKEND_LOG}"
+record_storage_combination() {
+    local combination="$1" status="$2" reason="${3:-}"
+    printf '%s\t%s\t%s\n' "${combination}" "${status}" "${reason}" >>"${STORAGE_LOG}"
 }
 
 record_skip() {
@@ -123,9 +123,9 @@ write_deployment_proof() {
     DEPLOYMENT_PROOF_EXIT_CODE="${exit_code}" \
     DEPLOYMENT_PROOF_COMMIT="${commit}" \
     DEPLOYMENT_PROOF_CHART_VERSION="${version:-unavailable}" \
-    DEPLOYMENT_PROOF_BACKENDS="${BACKENDS[*]}" \
+    DEPLOYMENT_PROOF_STORAGE_COMBINATIONS="${STORAGE_COMBINATIONS[*]}" \
     DEPLOYMENT_PROOF_COMMAND_LOG="${COMMAND_LOG}" \
-    DEPLOYMENT_PROOF_BACKEND_LOG="${BACKEND_LOG}" \
+    DEPLOYMENT_PROOF_STORAGE_LOG="${STORAGE_LOG}" \
     DEPLOYMENT_PROOF_SKIP_LOG="${SKIP_LOG}" \
     DEPLOYMENT_PROOF_SUPPORT_LOG="${SUPPORT_LOG}" \
     DEPLOYMENT_PROOF_JSON="${PROOF_JSON}" \
@@ -174,24 +174,24 @@ skip_path = Path(os.environ["DEPLOYMENT_PROOF_SKIP_LOG"])
 if skip_path.is_file():
     skip_reasons = [line for line in skip_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-backend_status = {}
-for row in read_tsv(os.environ["DEPLOYMENT_PROOF_BACKEND_LOG"]):
+storage_status = {}
+for row in read_tsv(os.environ["DEPLOYMENT_PROOF_STORAGE_LOG"]):
     if len(row) >= 2:
-        backend_status[row[0]] = {
-            "profile": row[0],
+        storage_status[row[0]] = {
+            "combination": row[0],
             "status": row[1],
             "reason": row[2] if len(row) > 2 else "",
         }
 
-backend_profiles = []
-for profile in os.environ["DEPLOYMENT_PROOF_BACKENDS"].split():
-    status = backend_status.get(profile)
+storage_combinations = []
+for combination in os.environ["DEPLOYMENT_PROOF_STORAGE_COMBINATIONS"].split():
+    status = storage_status.get(combination)
     if status is None:
         if skip_reasons:
-            status = {"profile": profile, "status": "skipped_local_environment", "reason": "; ".join(skip_reasons)}
+            status = {"combination": combination, "status": "skipped_local_environment", "reason": "; ".join(skip_reasons)}
         else:
-            status = {"profile": profile, "status": "not_run", "reason": "gate failed before this profile ran"}
-    backend_profiles.append(status)
+            status = {"combination": combination, "status": "not_run", "reason": "gate failed before this storage combination ran"}
+    storage_combinations.append(status)
 
 supporting_artifacts = []
 for row in read_tsv(os.environ["DEPLOYMENT_PROOF_SUPPORT_LOG"]):
@@ -284,10 +284,10 @@ proof = {
         "source": image_source,
         "unavailable_reason": "" if image_tag != "unavailable" or image_digest != "unavailable" else "no PQUEUE_IMAGE_* environment values or pqueue-service-image.txt release artifact were available",
     },
-    "backend_profiles": backend_profiles,
+    "storage_combinations": storage_combinations,
     "commands": commands,
     "local_environment_skip": {
-        "scope": "kind backend matrix only" if skip_reasons else "",
+        "scope": "kind storage matrix only" if skip_reasons else "",
         "reasons": skip_reasons,
         "ci_matrix_proof": not skip_reasons and exit_code == 0,
     },
@@ -295,7 +295,7 @@ proof = {
     "release_notes": {
         "summary": f"Deployment release gate {status} for commit {os.environ['DEPLOYMENT_PROOF_COMMIT']} and chart {chart_version}.",
         "command_list": [command["display"] for command in commands],
-        "backend_profile_matrix": [profile["profile"] + ":" + profile["status"] for profile in backend_profiles],
+        "storage_matrix": [item["combination"] + ":" + item["status"] for item in storage_combinations],
         "artifact_paths": [artifact["path"] for artifact in supporting_artifacts],
     },
 }
@@ -317,17 +317,17 @@ lines = [
 ]
 for command in commands:
     lines.append(f"- `{command['display']}` -> `{command['exit_status']}`")
-lines.extend(["", "## Backend Profiles", ""])
-for profile in backend_profiles:
-    reason = f" ({profile['reason']})" if profile.get("reason") else ""
-    lines.append(f"- `{profile['profile']}`: `{profile['status']}`{reason}")
+lines.extend(["", "## Storage Combinations", ""])
+for item in storage_combinations:
+    reason = f" ({item['reason']})" if item.get("reason") else ""
+    lines.append(f"- `{item['combination']}`: `{item['status']}`{reason}")
 lines.extend(["", "## Supporting Artifacts", ""])
 for artifact in supporting_artifacts:
     exists = "present" if artifact["exists"] else "unavailable"
     lines.append(f"- `{artifact['path']}`: {artifact['description']} ({exists})")
 if skip_reasons:
     lines.extend(["", "## Local Environment Skip", ""])
-    lines.append("The local skip applies only to the kind backend matrix; CI matrix proof still requires successful kind runs.")
+    lines.append("The local skip applies only to the kind storage matrix; CI matrix proof still requires successful kind runs.")
     for reason in skip_reasons:
         lines.append(f"- {reason}")
 lines.append("")
@@ -361,18 +361,17 @@ for path in required_docs + [index]:
 required_phrases = {
     Path("docs/deployment/helm-static-validation.md"): [
         "bash scripts/ci/helm-gate.sh",
-        "object_log_sqlite_projection",
+        "storage.log.backend",
     ],
     Path("docs/deployment/kind-helm-integration.md"): [
-        "bash scripts/ci/kind-helm-test.sh --backend postgres_native",
-        "bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection",
+        "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory",
     ],
 }
 for path, phrases in required_phrases.items():
     text = (root / path).read_text(encoding="utf-8")
     for phrase in phrases:
         if phrase not in text:
-            print(f"{path} missing documented command or profile: {phrase}", file=sys.stderr)
+            print(f"{path} missing documented command or storage axis: {phrase}", file=sys.stderr)
             sys.exit(1)
 
 class LinkParser(HTMLParser):
@@ -453,12 +452,12 @@ run_non_cluster_gates() {
 }
 
 run_kind_matrix() {
-    echo "=== deployment release gate: kind backend matrix ==="
+    echo "=== deployment release gate: kind storage matrix ==="
     local reasons
     reasons="$(kind_unavailable_reasons)"
     if [[ -n "${reasons}" ]]; then
-        echo "=== deployment release gate: SKIPPED kind backend matrix ==="
-        echo "skip scope: kind backend matrix only (${BACKENDS[*]})"
+        echo "=== deployment release gate: SKIPPED kind storage matrix ==="
+        echo "skip scope: kind storage matrix only (${STORAGE_COMBINATIONS[*]})"
         echo "missing local capability:"
         while IFS= read -r reason; do
             if [[ -n "${reason}" ]]; then
@@ -466,39 +465,41 @@ run_kind_matrix() {
                 record_skip "${reason}"
             fi
         done <<<"${reasons}"
-        local backend
-        for backend in "${BACKENDS[@]}"; do
-            record_backend_profile "${backend}" "skipped_local_environment" "${reasons//$'\n'/; }"
+        local combination
+        for combination in "${STORAGE_COMBINATIONS[@]}"; do
+            record_storage_combination "${combination}" "skipped_local_environment" "${reasons//$'\n'/; }"
         done
         echo "non-cluster deployment release checks passed before this kind-only skip"
         return 0
     fi
 
-    local backend
-    for backend in "${BACKENDS[@]}"; do
-        local backend_output="${PROOF_DIR}/kind-${backend}.out"
-        record_supporting_artifact "${backend_output}" "kind Helm test output for ${backend}"
-        if run_cmd_capture "${backend_output}" bash scripts/ci/kind-helm-test.sh --backend "${backend}"; then
-            record_backend_profile "${backend}" "tested" ""
+    local combination
+    for combination in "${STORAGE_COMBINATIONS[@]}"; do
+        local log_backend="${combination%%:*}"
+        local projection_backend="${combination##*:}"
+        local backend_output="${PROOF_DIR}/kind-${log_backend}-${projection_backend}.out"
+        record_supporting_artifact "${backend_output}" "kind Helm test output for ${combination}"
+        if run_cmd_capture "${backend_output}" bash scripts/ci/kind-helm-test.sh --log-backend "${log_backend}" --projection-backend "${projection_backend}"; then
+            record_storage_combination "${combination}" "tested" ""
         else
             local status=$?
             if [[ "${CI:-}" != "true" ]] && grep -q "timed out waiting for Kubernetes API" "${backend_output}"; then
                 local reason="local kind Kubernetes API did not become reachable"
                 record_skip "${reason}"
-                record_backend_profile "${backend}" "skipped_local_environment" "${reason}"
-                local skipped_backend
-                for skipped_backend in "${BACKENDS[@]}"; do
-                    if [[ "${skipped_backend}" == "${backend}" ]]; then
+                record_storage_combination "${combination}" "skipped_local_environment" "${reason}"
+                local skipped_combination
+                for skipped_combination in "${STORAGE_COMBINATIONS[@]}"; do
+                    if [[ "${skipped_combination}" == "${combination}" ]]; then
                         continue
                     fi
-                    record_backend_profile "${skipped_backend}" "skipped_local_environment" "${reason}"
+                    record_storage_combination "${skipped_combination}" "skipped_local_environment" "${reason}"
                 done
-                echo "=== deployment release gate: SKIPPED remaining kind backend matrix ==="
-                echo "skip scope: kind backend matrix only (${BACKENDS[*]})"
+                echo "=== deployment release gate: SKIPPED remaining kind storage matrix ==="
+                echo "skip scope: kind storage matrix only (${STORAGE_COMBINATIONS[*]})"
                 echo "missing local capability: ${reason}"
                 return 0
             fi
-            record_backend_profile "${backend}" "failed" "kind Helm test exited ${status}"
+            record_storage_combination "${combination}" "failed" "kind Helm test exited ${status}"
             return "${status}"
         fi
     done

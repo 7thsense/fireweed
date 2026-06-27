@@ -20,7 +20,8 @@ RUN chmod 0755 /usr/local/bin/pqueue-service /usr/local/bin/pqueue-verify-ledger
 USER pqueue
 
 ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
-    PQUEUE_BACKEND_PROFILE=postgres_native
+    PQUEUE_LOG_BACKEND=objectlog \
+    PQUEUE_PROJECTION_BACKEND=inmemory
 
 EXPOSE 8080
 

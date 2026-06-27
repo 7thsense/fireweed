@@ -47,13 +47,11 @@ resources:
 
 probes:
   liveness:
-    path: /healthz
     initialDelaySeconds: 10
     periodSeconds: 10
     timeoutSeconds: 2
     failureThreshold: 3
   readiness:
-    path: /readyz
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 2
@@ -64,23 +62,25 @@ config:
   principalId: pqueue-service
   tenants: []
 
-backend:
-  profile: postgres_native
+storage:
   shardCount:
     min: 1
     max: 1
-  postgres:
-    existingSecret: pqueue-postgres
-    databaseUrlKey: database-url
-  objectLog:
-    endpoint: http://minio:9000
-    bucket: pqueue-object-log
-    region: us-east-1
-    segmentMaxCommands: 1024
-    existingSecret: pqueue-object-log
-    accessKeyIdKey: access-key-id
-    secretAccessKeyKey: secret-access-key
-  sqliteProjection:
+  log:
+    backend: objectlog
+    objectLog:
+      root: /var/lib/pqueue/projection/object-log
+    postgres:
+      existingSecret: ""
+      databaseUrlKey: database-url
+  projection:
+    backend: inmemory
+    sqlite:
+      path: /var/lib/pqueue/projection/projection.db
+    postgres:
+      existingSecret: ""
+      databaseUrlKey: database-url
+  volume:
     mountPath: /var/lib/pqueue/projection
 
 persistence:

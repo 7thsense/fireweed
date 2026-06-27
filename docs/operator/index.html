@@ -322,7 +322,7 @@
               </div>
               <pre><code>OWNER=&lt;github-owner&gt;
 REPO=pqueue
-TAG=v0.2.3
+TAG=v0.2.5
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 
@@ -339,21 +339,20 @@ gh release download "$TAG" --repo "${OWNER}/${REPO}" \
             <div class="command-block">
               <div class="label">
                 <span>helm install</span>
-                <span>postgres_native</span>
+                <span>sqlite</span>
               </div>
               <pre><code>NAMESPACE=pqueue
 RELEASE=pqueue
 IMAGE="ghcr.io/${OWNER}/pqueue-service"
 
 kubectl create namespace "$NAMESPACE"
-kubectl -n "$NAMESPACE" create secret generic pqueue-postgres \
-  --from-literal=database-url='postgres://pqueue:pqueue@postgres.example:5432/pqueue'
 
 helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
   --namespace "$NAMESPACE" \
   --set image.repository="$IMAGE" \
   --set image.tag="$VERSION" \
-  --set backend.profile=postgres_native</code></pre>
+  --set storage.log.backend=objectlog \
+  --set storage.projection.backend=inmemory</code></pre>
             </div>
             <div class="command-block">
               <div class="label">
@@ -361,8 +360,7 @@ helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
                 <span>local proof</span>
               </div>
               <pre><code>bash scripts/ci/helm-gate.sh
-bash scripts/ci/kind-helm-test.sh --backend postgres_native
-bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code></pre>
+bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory</code></pre>
             </div>
           </div>
         </section>
@@ -370,24 +368,22 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
         <div>
           <section aria-labelledby="profiles-title">
             <div class="panel-heading">
-              <h2 id="profiles-title">Backend Profiles</h2>
+              <h2 id="profiles-title">Storage Axes</h2>
               <span class="badge ok">BUILD-001 scope</span>
             </div>
             <div class="profile-list">
               <article class="profile">
-                <h3>postgres_native</h3>
+                <h3>log backend</h3>
                 <p>
-                  Reference correctness backend. Requires PostgreSQL Secret
-                  <code>pqueue-postgres</code> with key
-                  <code>database-url</code>.
+                  Chart values expose <code>objectlog</code> and
+                  <code>postgres</code> without collapsing them into profiles.
                 </p>
               </article>
               <article class="profile">
-                <h3>object_log_sqlite_projection</h3>
+                <h3>projection backend</h3>
                 <p>
-                  Postgres control plane, S3-compatible object log, and
-                  PVC-backed SQLite projection. The local production proof must
-                  use MinIO and verify restart/replay.
+                  Chart values expose <code>inmemory</code>,
+                  <code>sqlite</code>, and <code>postgres</code>.
                 </p>
               </article>
             </div>
@@ -400,23 +396,20 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
             </div>
             <div class="status-list">
               <article class="status-row">
-                <h3><span class="badge ok">target</span> postgres_native</h3>
+                <h3><span class="badge ok">target</span> objectlog/inmemory</h3>
                 <p>
-                  Production-readiness claim needs release artifact
-                  verification, Helm static validation, and a passing kind
-                  install/upgrade/uninstall smoke for that release.
+                  Release claim needs artifact verification, Helm static
+                  validation, and a passing kind RESP smoke for that release.
                 </p>
               </article>
               <article class="status-row">
                 <h3>
                   <span class="badge ok">target</span>
-                  object_log_sqlite_projection
+                  explicit unsupported combinations
                 </h3>
                 <p>
-                  Do not overclaim cloud S3 certification. Current production
-                  scope is MinIO S3-compatible proof only, including bucket
-                  setup, object-log writes, restart/replay, and SQLite recovery
-                  in kind.
+                  Non-wired axis combinations render statically but fail loudly
+                  at server startup until the composition root supports them.
                 </p>
               </article>
             </div>
@@ -459,7 +452,7 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
                 stroke="#146c43"
               />
               <text x="322" y="62">pqueue-service</text>
-              <text x="322" y="84" class="thin">/healthz + /readyz</text>
+              <text x="322" y="84" class="thin">RESP TCP</text>
               <path d="M465 65 H575" stroke="#161616" stroke-width="3" />
               <path
                 d="M565 55 L585 65 L565 75"
@@ -476,8 +469,8 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
                 fill="#fff0d8"
                 stroke="#b45309"
               />
-              <text x="620" y="62">Postgres</text>
-              <text x="620" y="84" class="thin">control/data</text>
+              <text x="620" y="62">SQLite</text>
+              <text x="620" y="84" class="thin">durable db</text>
               <path d="M380 100 V158" stroke="#161616" stroke-width="3" />
               <path
                 d="M370 148 L380 168 L390 148"
@@ -494,7 +487,7 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
                 fill="#fde2e2"
                 stroke="#b91c1c"
               />
-              <text x="255" y="194">MinIO / S3</text>
+              <text x="255" y="194">Object log</text>
               <text x="255" y="216" class="thin">object log</text>
               <rect
                 x="425"
@@ -506,7 +499,7 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
                 stroke="#161616"
               />
               <text x="455" y="194">SQLite PVC</text>
-              <text x="455" y="216" class="thin">projection cache</text>
+              <text x="455" y="216" class="thin">storage mount</text>
               <path d="M395 198 H425" stroke="#161616" stroke-width="3" />
             </svg>
           </div>
@@ -533,7 +526,7 @@ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection</code><
                 >
               </h3>
               <p>
-                Environment variables, backend-profile settings, health probes,
+                Environment variables, storage-axis settings, health probes,
                 and readiness behavior.
               </p>
             </article>

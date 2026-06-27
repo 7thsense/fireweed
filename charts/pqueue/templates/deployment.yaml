@@ -35,59 +35,56 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
-            - name: http
+            - name: resp
               containerPort: {{ .Values.containerPort }}
               protocol: TCP
           envFrom:
             - configMapRef:
                 name: {{ include "pqueue.fullname" . }}-config
+          {{- if or (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") }}
           env:
-            - name: PQUEUE_POSTGRES_DATABASE_URL
+            {{- if eq .Values.storage.log.backend "postgres" }}
+            - name: PQUEUE_POSTGRES_LOG_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.backend.postgres.existingSecret | quote }}
-                  key: {{ .Values.backend.postgres.databaseUrlKey | quote }}
-            {{- if eq .Values.backend.profile "object_log_sqlite_projection" }}
-            - name: PQUEUE_OBJECT_LOG_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.backend.objectLog.existingSecret | quote }}
-                  key: {{ .Values.backend.objectLog.accessKeyIdKey | quote }}
-            - name: PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.backend.objectLog.existingSecret | quote }}
-                  key: {{ .Values.backend.objectLog.secretAccessKeyKey | quote }}
+                  name: {{ .Values.storage.log.postgres.existingSecret | quote }}
+                  key: {{ .Values.storage.log.postgres.databaseUrlKey | quote }}
             {{- end }}
+            {{- if eq .Values.storage.projection.backend "postgres" }}
+            - name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.projection.postgres.existingSecret | quote }}
+                  key: {{ .Values.storage.projection.postgres.databaseUrlKey | quote }}
+            {{- end }}
+          {{- end }}
           livenessProbe:
-            httpGet:
-              path: {{ .Values.probes.liveness.path | quote }}
-              port: http
+            tcpSocket:
+              port: resp
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
-            httpGet:
-              path: {{ .Values.probes.readiness.path | quote }}
-              port: http
+            tcpSocket:
+              port: resp
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if eq .Values.backend.profile "object_log_sqlite_projection" }}
+          {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") }}
           volumeMounts:
-            - name: sqlite-projection
-              mountPath: {{ .Values.backend.sqliteProjection.mountPath | quote }}
+            - name: storage
+              mountPath: {{ .Values.storage.volume.mountPath | quote }}
           {{- end }}
-      {{- if eq .Values.backend.profile "object_log_sqlite_projection" }}
+      {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") }}
       volumes:
-        - name: sqlite-projection
+        - name: storage
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "pqueue.sqlitePvcName" . }}
+            claimName: {{ include "pqueue.storagePvcName" . }}
           {{- else }}
           emptyDir: {}
           {{- end }}

@@ -31,7 +31,7 @@ pqueue ${VERSION}
 target=${TARGET_TRIPLE}
 
 Binaries:
-- pqueue-service: production API-001 HTTP service and container entrypoint.
+- pqueue-service: RESP service runtime and container entrypoint.
 - pqueue-verify-ledger: validates pqueue verification ledger JSONL files.
 
 Build command:
