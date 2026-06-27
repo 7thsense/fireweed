@@ -12,7 +12,7 @@
 //! never on a concrete backend (a backend is passed in). Errors are the engine's structured
 //! [`EngineError`]; nothing is stringly-typed.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -23,8 +23,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
-    OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec, QueueControlPlane,
-    QueueKey, ReassignLeasePort, RenewLeasePort, UpsertPort, acquire_and_fence,
+    LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
+    QueueControlPlane, QueueKey, ReassignLeasePort, RenewLeasePort, UpsertPort, acquire_and_fence,
 };
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
@@ -121,6 +121,9 @@ enum Coordination {
         owner_id: OwnerId,
         control_plane: Arc<dyn QueueControlPlane>,
         sessions: Mutex<HashMap<QueueKey, OwnedSession>>,
+        /// Queues observed `Draining` on the renew loop (TD-003 §Graceful Drain). While a queue is here the
+        /// owner serves in-flight ops but refuses a NEW claim with a retryable `Unavailable` (drain split).
+        draining: Mutex<HashSet<QueueKey>>,
     },
 }
 
@@ -197,6 +200,7 @@ impl<B: LibBackend> Pqueue<B> {
                 owner_id: instance_id,
                 control_plane,
                 sessions: Mutex::new(HashMap::new()),
+                draining: Mutex::new(HashSet::new()),
             },
         }
     }
@@ -215,6 +219,7 @@ impl<B: LibBackend> Pqueue<B> {
             owner_id,
             control_plane,
             sessions,
+            ..
         } = &self.coordination
         else {
             return Ok(None);
@@ -305,6 +310,7 @@ impl<B: LibBackend> Pqueue<B> {
             owner_id,
             control_plane,
             sessions,
+            draining,
         } = &self.coordination
         else {
             return Ok(());
@@ -318,15 +324,36 @@ impl<B: LibBackend> Pqueue<B> {
             .map(|(q, s)| (q.clone(), s.lease_epoch))
             .collect();
         for (queue, lease_epoch) in owned {
-            if control_plane
-                .renew_queue_lease(&queue, owner_id, lease_epoch, now)
-                .is_err()
-            {
+            match control_plane.renew_queue_lease(&queue, owner_id, lease_epoch, now) {
+                Ok(lease) => {
+                    // Observe drain on the renew loop (TD-003): a `Draining` lease ⇒ stop serving NEW claims
+                    // for this queue (drain split); a non-draining lease clears the flag.
+                    let mut d = draining.lock().expect("poisoned");
+                    if lease.state == LeaseState::Draining {
+                        d.insert(queue.clone());
+                    } else {
+                        d.remove(&queue);
+                    }
+                }
                 // Superseded (or epoch-stale): drop the stale session so the next op re-resolves.
-                self.invalidate_session(&queue);
+                Err(_) => {
+                    draining.lock().expect("poisoned").remove(&queue);
+                    self.invalidate_session(&queue);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Whether this owner has observed `queue` as `Draining` (drain split): new claims are refused while
+    /// in-flight ops continue. Sole-owner is never draining.
+    fn is_draining(&self, queue: &QueueKey) -> bool {
+        match &self.coordination {
+            Coordination::Owner { draining, .. } => {
+                draining.lock().expect("poisoned").contains(queue)
+            }
+            Coordination::Sole => false,
+        }
     }
 
     pub async fn create_queue(
@@ -416,6 +443,11 @@ impl<B: LibBackend> Pqueue<B> {
         lease_ms: u64,
         compatibility: ClaimCompatibility,
     ) -> EngineResult<Vec<ClaimedItem>> {
+        // Drain split (TD-003 §Graceful Drain): a draining owner refuses a NEW claim with a retryable
+        // `Unavailable` so in-flight leases finalize before handoff; pushes/finalizes/renews continue.
+        if self.is_draining(queue) {
+            return Err(EngineError::Unavailable);
+        }
         let expected_epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let n = self.next();

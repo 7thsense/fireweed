@@ -170,6 +170,45 @@ async fn ownership_value_form() {
     ));
 }
 
+/// Drain split (TD-003 §Graceful Drain): once a queue is `Draining` (observed on the renew loop), the owner
+/// refuses a NEW claim with a retryable `Unavailable`, but keeps serving in-flight ops (finalize) + pushes.
+#[tokio::test]
+async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
+    let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(0));
+    let cp: Arc<dyn QueueControlPlane> =
+        Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
+    let a = Pqueue::with_control_plane_in_process(
+        backend.clone(),
+        clock.clone(),
+        OwnerId::new("owner-A").unwrap(),
+        cp.clone(),
+    );
+    a.create_queue(qdef()).await.unwrap();
+    a.push(&qkey(), item(5)).await.unwrap(); // A acquires the queue (epoch 1)
+    let claimed = a.claim(&qkey(), 10, 1_000).await.unwrap();
+    assert_eq!(claimed.len(), 1, "A claims normally before drain");
+    let leased = claimed[0].item_id.clone();
+
+    // An operator begins draining the queue toward a new target owner B.
+    cp.register_owner(&OwnerId::new("owner-B").unwrap(), clock.now())
+        .unwrap();
+    cp.begin_drain(&qkey(), 1, &OwnerId::new("owner-B").unwrap(), clock.now())
+        .unwrap();
+    // A observes the drain on its renew loop.
+    a.renew_owned().unwrap();
+
+    // A now REFUSES a new claim with a retryable Unavailable...
+    assert!(
+        matches!(a.claim(&qkey(), 10, 1_000).await, Err(EngineError::Unavailable)),
+        "a draining owner refuses a new claim"
+    );
+    // ...but still serves in-flight work: finalizing the already-leased item, and pushes, continue.
+    a.ack(&qkey(), [leased]).await.unwrap();
+    a.push(&qkey(), item(6)).await.unwrap();
+    assert_eq!(a.metrics(&qkey()).await.unwrap().complete, 1, "in-flight finalize served during drain");
+}
+
 /// Runtime-refuse (ADR-009 D5 / N4a / OD-2): the durable multi-instance constructor REJECTS a control plane
 /// that does not present the atomic acquire->fence capability — the in-memory reference plane is
 /// single-process only, so passing an instance id with it is a misconfiguration, not a silent footgun.
