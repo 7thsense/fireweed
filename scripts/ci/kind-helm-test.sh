@@ -277,11 +277,51 @@ wait_for_kubernetes_api() {
 resp_request() {
     local response_path="$1"
     local payload="$2"
-    (
-        exec 3<>"/dev/tcp/127.0.0.1/${SMOKE_PORT}"
-        printf '%b' "${payload}" >&3
-        cat <&3
-    ) >"${response_path}"
+    RESP_SMOKE_PORT="${SMOKE_PORT}" \
+    RESP_SMOKE_RESPONSE="${response_path}" \
+    RESP_SMOKE_PAYLOAD="${payload}" \
+    python3 - <<'PY'
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+port = int(os.environ["RESP_SMOKE_PORT"])
+response = Path(os.environ["RESP_SMOKE_RESPONSE"])
+payload = os.environ["RESP_SMOKE_PAYLOAD"].encode("utf-8").decode("unicode_escape").encode("latin1")
+deadline = time.monotonic() + 5.0
+chunks = []
+
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=2.0) as sock:
+        sock.settimeout(0.25)
+        sock.sendall(payload)
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                if chunks:
+                    break
+                continue
+            if not chunk:
+                break
+            chunks.append(chunk)
+except OSError as exc:
+    print(f"RESP request failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if not chunks:
+    print("RESP request timed out waiting for a response", file=sys.stderr)
+    sys.exit(1)
+
+response.write_bytes(b"".join(chunks))
+PY
 }
 
 smoke_resp() {
