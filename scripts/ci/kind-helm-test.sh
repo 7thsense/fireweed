@@ -220,7 +220,7 @@ dry_run_plan() {
     echo "+ kubectl --context kind-${CLUSTER_NAME} create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl --context kind-${CLUSTER_NAME} apply -f -"
     print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
+    echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} port-forward pod/<ready-pqueue-pod> ${SMOKE_PORT}:8080"
     echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
     echo "+ RESP XADD/XREADGROUP 127.0.0.1:${SMOKE_PORT}"
     if [[ "${LOG_BACKEND}" == "objectlog" ]]; then
@@ -263,14 +263,39 @@ stop_port_forward() {
     fi
 }
 
+pod_selector() {
+    printf 'app.kubernetes.io/instance=%s,app.kubernetes.io/name=pqueue' "${RELEASE_NAME}"
+}
+
+current_ready_pod() {
+    local selector pod_name
+    selector="$(pod_selector)"
+    pod_name="$(
+        kubectl_cmd -n "${NAMESPACE}" get pods \
+            -l "${selector}" \
+            --field-selector status.phase=Running \
+            -o jsonpath='{range .items[*]}{.metadata.creationTimestamp}{" "}{.metadata.name}{"\n"}{end}' |
+            sort |
+            tail -n 1 |
+            awk '{print $2}'
+    )"
+    [[ -n "${pod_name}" ]] || die "no running pqueue pod found for selector ${selector}"
+    {
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" wait --for=condition=Ready "pod/${pod_name}" --timeout "${TIMEOUT}"
+    } >&2
+    kubectl_cmd -n "${NAMESPACE}" wait --for=condition=Ready "pod/${pod_name}" --timeout "${TIMEOUT}" >&2
+    printf '%s\n' "${pod_name}"
+}
+
 start_resp_port_forward() {
-    local run_dir log_path
+    local run_dir log_path pod_name
     run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
     mkdir -p "${run_dir}"
     log_path="${run_dir}/port-forward.log"
+    pod_name="$(current_ready_pod)"
 
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
-    kubectl_cmd -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "pod/${pod_name}" "${SMOKE_PORT}:8080"
+    kubectl_cmd -n "${NAMESPACE}" port-forward "pod/${pod_name}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
     PF_PID=$!
 
     wait_for_port_forward "${log_path}"
