@@ -147,14 +147,46 @@ impl<B: LibBackend> Pqueue<B> {
         }
     }
 
-    /// A **coordinated owner** over a shared control plane (ADR-009 / TD-003). Every queue-addressed op
-    /// resolves ownership and operates under an acquired, epoch-fenced session, so when multiple instances
-    /// share one durable backend a superseded instance is rejected `EpochFenced` at commit. The owner is
-    /// runtime-refused on a backend without an atomic acquire→fence epoch in a later step (B5/OD-2).
+    /// A **durable multi-instance** coordinated owner over a shared control plane (ADR-009 / TD-003).
+    /// `instance_id` is THIS instance's unique id — passing it *declares a multi-instance deployment*
+    /// (omit it, via [`Pqueue::new`]/`open_*`, for a single-instance deployment). Every queue-addressed op
+    /// resolves ownership and operates under an acquired, epoch-fenced session, so a superseded instance is
+    /// rejected `EpochFenced` at commit.
+    ///
+    /// **Runtime-refuse (ADR-009 D5 / N4a / TD-003):** returns `EngineError::Invalid` for a control plane
+    /// that does NOT present the atomic acquire→fence capability ([`QueueControlPlane::binds_storage_epoch`])
+    /// — e.g. the in-memory reference plane — because cross-process competition is only safe on a binding
+    /// (postgres) control plane. (In-process coordination *logic* without that capability uses the
+    /// doc-hidden [`Pqueue::with_control_plane_in_process`].)
     pub fn with_control_plane(
         backend: Arc<B>,
         clock: Arc<dyn Clock>,
-        owner_id: OwnerId,
+        instance_id: OwnerId,
+        control_plane: Arc<dyn QueueControlPlane>,
+    ) -> EngineResult<Self> {
+        if !control_plane.binds_storage_epoch() {
+            return Err(EngineError::Invalid(
+                "durable multi-instance requires an atomic acquire->fence control plane (e.g. postgres); \
+                 the in-memory reference control plane is single-process only",
+            ));
+        }
+        Ok(Self::with_control_plane_in_process(
+            backend,
+            clock,
+            instance_id,
+            control_plane,
+        ))
+    }
+
+    /// In-process coordinated owner **without** the durable-capability check — for in-process coordination
+    /// *logic* (tests, single-process multi-handle), where the in-memory reference control plane is
+    /// admissible non-durably (N4a). Hidden from the published surface; durable deployments use
+    /// [`Pqueue::with_control_plane`].
+    #[doc(hidden)]
+    pub fn with_control_plane_in_process(
+        backend: Arc<B>,
+        clock: Arc<dyn Clock>,
+        instance_id: OwnerId,
         control_plane: Arc<dyn QueueControlPlane>,
     ) -> Self {
         Self {
@@ -162,7 +194,7 @@ impl<B: LibBackend> Pqueue<B> {
             clock,
             ids: AtomicU64::new(0),
             coordination: Coordination::Owner {
-                owner_id,
+                owner_id: instance_id,
                 control_plane,
                 sessions: Mutex::new(HashMap::new()),
             },

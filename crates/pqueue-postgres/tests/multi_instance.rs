@@ -70,7 +70,9 @@ fn two_instances_compete_over_shared_postgres() {
             PostgresControlPlane::connect_in_schema(&url, &schema, ControlPlaneConfig::default())
                 .expect("cp"),
         );
+        // Postgres binds the storage epoch (BQ-23), so the durable multi-instance constructor accepts it.
         Pqueue::with_control_plane(backend, clock.clone(), OwnerId::new(owner).unwrap(), cp)
+            .expect("postgres control plane presents the atomic acquire->fence capability")
     };
 
     let a = make("owner-A");
