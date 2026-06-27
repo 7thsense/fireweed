@@ -666,3 +666,31 @@ pub fn open_objectlog(
         clock,
     ))
 }
+
+/// Open a **sole-owner** postgres-backed pqueue (log-replay class) at `url`. Requires the `postgres`
+/// feature (opt-in). For a durable **multi-instance** deployment use [`open_postgres_coordinated`].
+#[cfg(feature = "postgres")]
+pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Pqueue<impl LibBackend>> {
+    Ok(Pqueue::new(
+        Arc::new(pqueue_postgres::PostgresBackend::connect(url)?),
+        clock,
+    ))
+}
+
+/// Open a **durable multi-instance** coordinated postgres pqueue: builds the postgres backend AND the
+/// transactional postgres control plane (which binds the storage fence epoch, BQ-23) against `url`, and
+/// returns a coordinated [`Pqueue`] for this `instance_id`. Requires the `postgres` feature. The client
+/// never names a backend or control plane. (Run each process with a distinct `instance_id`.)
+#[cfg(feature = "postgres")]
+pub fn open_postgres_coordinated(
+    url: &str,
+    clock: Arc<dyn Clock>,
+    instance_id: OwnerId,
+    control_plane_config: pqueue_engine::ControlPlaneConfig,
+) -> EngineResult<Pqueue<impl LibBackend>> {
+    let backend = Arc::new(pqueue_postgres::PostgresBackend::connect(url)?);
+    let control_plane: Arc<dyn QueueControlPlane> = Arc::new(
+        pqueue_postgres::PostgresControlPlane::connect(url, control_plane_config)?,
+    );
+    Pqueue::with_control_plane(backend, clock, instance_id, control_plane)
+}

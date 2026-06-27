@@ -902,10 +902,12 @@ name = "pqueue"
 version = "0.2.5"
 dependencies = [
  "bytes",
+ "futures",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-memory",
  "pqueue-objectlog",
+ "pqueue-postgres",
  "pqueue-release",
  "pqueue-sqlite",
  "serde_json",
