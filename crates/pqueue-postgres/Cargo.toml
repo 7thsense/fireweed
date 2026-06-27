@@ -29,6 +29,9 @@ sha2 = "0.11"
 # runtime. `futures::executor::block_on` has no ambient tokio context, so the client's runtime starts
 # cleanly. This is the test-side face of the blocking-executor caveat documented in `lib.rs`.
 futures = "0.3"
+# The library facade, driven as a COORDINATED owner over the postgres backend + control plane for the B5
+# durable multi-instance competition test. `default-features = false` so we don't pull the other adapters.
+pqueue = { path = "../pqueue", default-features = false }
 # Runs the shared backend-conformance suite against the postgres backend (env-gated on PQUEUE_PG_TEST_URL).
 pqueue-conformance = { path = "../pqueue-conformance" }
 # The E0/E1 single-deployment baseline suite emits verification-ledger rows (TP-002 E0/E1) via this crate.

@@ -907,6 +907,7 @@ dependencies = [
  "pqueue-memory",
  "pqueue-objectlog",
  "pqueue-release",
+ "pqueue-sqlite",
  "serde_json",
  "tokio",
 ]
@@ -974,6 +975,7 @@ dependencies = [
  "bytes",
  "futures",
  "postgres",
+ "pqueue",
  "pqueue-conformance",
  "pqueue-core",
  "pqueue-engine",

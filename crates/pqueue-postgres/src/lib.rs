@@ -138,24 +138,30 @@ impl Inner {
     /// Durably append `env` to the shard's log + advance the persisted high-water in ONE transaction.
     /// Returns the committed position. Does NOT touch the projection (caller applies after, infallibly).
     ///
-    /// BQ-20 NOTE: the data-plane fast path (every port commits here) is the in-process owner, so it STAMPS
-    /// the queue's current epoch but does NOT validate an `expected_epoch` — the TD-003 fence that REJECTS
-    /// a stale epoch lives at the [`PgLogWriter::append`] seam. Owner-epoch caching on this path is BQ-21.
+    /// ADR-009 / TD-003 In-Process Library Owner-Runtime + BQ-23: the data-plane fast path stamps the
+    /// queue's current durable epoch and — when the owner supplies its cached acquire-time epoch (`Some`) —
+    /// fences against it (a superseded owner whose cached epoch is not current is rejected `EpochFenced` and
+    /// NOTHING is written). `None` is the degenerate sole-owner path. The `queues.assignment_epoch` read here
+    /// is the SAME single durable value the binding control-plane acquire advances (BQ-23).
     fn append_durable(
         &mut self,
         shard: &QueueKey,
         env: &CommandEnvelope,
+        expected_epoch: Option<u64>,
     ) -> EngineResult<CommandPosition> {
         let (t, q) = parts(shard);
         let json = to_json(env)?;
         let mut tx = st(self.client.transaction())?;
-        // In-process owner: stamp the queue's current durable epoch (TD-003); always-current, never fences.
+        // Stamp the queue's current durable epoch (TD-003); fence against the owner's cached epoch if given.
         let epoch: i64 = st(tx.query_opt(
             "SELECT assignment_epoch FROM queues WHERE tenant=$1 AND queue=$2",
             &[&t, &q],
         ))?
         .ok_or(EngineError::NotFound)?
         .get(0);
+        if expected_epoch.is_some_and(|e| e != epoch as u64) {
+            return Err(EngineError::EpochFenced);
+        }
         // Next sequence is MAX(seq)+1, NOT COUNT(*): it must survive log compaction/retention so a
         // persisted position never collides or regresses (TD-007 §4). Empty log → -1+1 = 0.
         let seq: i64 = st(tx.query_one(
@@ -188,8 +194,13 @@ impl Inner {
     /// doesn't, the durable log has advanced past the live projection — a silent in-process divergence. We
     /// refuse to return that as an ordinary `Err` (indistinguishable from a clean pre-commit rejection);
     /// we panic, which is the correct "rebuild the projection" signal.
-    fn commit_locked(&mut self, shard: &QueueKey, env: CommandEnvelope) -> EngineResult<()> {
-        self.append_durable(shard, &env)?;
+    fn commit_locked(
+        &mut self,
+        shard: &QueueKey,
+        env: CommandEnvelope,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        self.append_durable(shard, &env, expected_epoch)?;
         self.projections
             .get_mut(shard)
             .expect("projection exists for a shard that just accepted a durable commit")
@@ -433,7 +444,7 @@ impl ClaimPort for PostgresBackend {
                 lease_expires_at: req.lease_expires_at,
             });
             let env = g.make_envelope(cmd, candidates.clone(), req.now);
-            g.commit_locked(&req.shard, env)?;
+            g.commit_locked(&req.shard, env, req.expected_epoch)?;
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
             Ok(Claimed {
                 items: proj.render_claimed(&candidates),
@@ -454,7 +465,7 @@ impl UpsertPort for PostgresBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -495,7 +506,7 @@ impl UpsertPort for PostgresBackend {
             match existing {
                 None => {
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
-                    g.commit_locked(shard, env)?;
+                    g.commit_locked(shard, env, expected_epoch)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
                     })
@@ -512,7 +523,7 @@ impl UpsertPort for PostgresBackend {
                                 superseded_item_id: existing_id.clone(),
                                 replacement: item,
                             }));
-                            g.commit_locked(shard, env)?;
+                            g.commit_locked(shard, env, expected_epoch)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
                                 superseded_item_id: existing_id,
@@ -538,7 +549,7 @@ impl PushPort for PostgresBackend {
         now: UtcTimestamp,
         // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
         // contract so the owner fence is uniform once the relational/object write paths thread it.
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -563,7 +574,7 @@ impl PushPort for PostgresBackend {
                 checksum: CommandChecksum(0),
                 created_at: now,
             };
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(ids)
         })();
         std::future::ready(result)
@@ -576,7 +587,7 @@ impl FinalizePort for PostgresBackend {
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -587,7 +598,7 @@ impl FinalizePort for PostgresBackend {
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -601,7 +612,7 @@ impl RenewLeasePort for PostgresBackend {
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -614,7 +625,7 @@ impl RenewLeasePort for PostgresBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -629,7 +640,7 @@ impl ReassignLeasePort for PostgresBackend {
         new_lease_token: LeaseToken,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -643,7 +654,7 @@ impl ReassignLeasePort for PostgresBackend {
                 lease_expires_at: new_lease_expires_at,
             });
             let env = g.make_envelope(cmd, item_ids, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(())
         })();
         std::future::ready(result)
@@ -657,7 +668,7 @@ impl PurgePort for PostgresBackend {
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -686,7 +697,7 @@ impl PurgePort for PostgresBackend {
                 force,
             });
             let env = g.make_envelope(cmd, present, now);
-            g.commit_locked(shard, env)?;
+            g.commit_locked(shard, env, expected_epoch)?;
             Ok(count)
         })();
         std::future::ready(result)
@@ -714,7 +725,7 @@ impl ReclaimDriver for PostgresBackend {
                     item_ids: ids.clone(),
                 });
                 let env = g.make_envelope(cmd, ids.clone(), now);
-                g.commit_locked(&shard, env)?;
+                g.commit_locked(&shard, env, None)?;
                 report.leases_reclaimed += ids.len() as u64;
             }
             Ok(report)
