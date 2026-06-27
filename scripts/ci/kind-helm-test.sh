@@ -263,6 +263,31 @@ stop_port_forward() {
     fi
 }
 
+start_resp_port_forward() {
+    local run_dir log_path
+    run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
+    mkdir -p "${run_dir}"
+    log_path="${run_dir}/port-forward.log"
+
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
+    kubectl_cmd -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
+    PF_PID=$!
+
+    wait_for_port_forward "${log_path}"
+}
+
+smoke_resp_ping() {
+    local response_path="$1"
+
+    echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
+    resp_request "${response_path}" '*1\r\n$4\r\nPING\r\n'
+    if ! grep -Fq '+PONG' "${response_path}"; then
+        err "RESP PING did not return PONG"
+        sed -n '1,80p' "${response_path}" >&2 || true
+        return 1
+    fi
+}
+
 wait_for_kubernetes_api() {
     echo "waiting for Kubernetes API for kind cluster ${CLUSTER_NAME}"
     for _ in {1..60}; do
@@ -325,25 +350,13 @@ PY
 }
 
 smoke_resp() {
-    local run_dir log_path response_path
+    local run_dir response_path
     run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
     mkdir -p "${run_dir}"
-    log_path="${run_dir}/port-forward.log"
     response_path="${run_dir}/resp.response"
 
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
-    kubectl_cmd -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
-    PF_PID=$!
-
-    wait_for_port_forward "${log_path}"
-
-    echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
-    resp_request "${response_path}" '*1\r\n$4\r\nPING\r\n'
-    if ! grep -Fq '+PONG' "${response_path}"; then
-        err "RESP PING did not return PONG"
-        sed -n '1,80p' "${response_path}" >&2 || true
-        return 1
-    fi
+    start_resp_port_forward
+    smoke_resp_ping "${response_path}"
 
     echo "+ RESP XADD 127.0.0.1:${SMOKE_PORT}"
     resp_request "${response_path}" '*5\r\n$4\r\nXADD\r\n$5\r\nt1:q1\r\n$1\r\n*\r\n$8\r\npriority\r\n$1\r\n1\r\n'
@@ -385,7 +398,8 @@ smoke_object_log_runtime() {
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
 
-    smoke_resp
+    start_resp_port_forward
+    smoke_resp_ping "${response_path}"
     echo "+ RESP XREADGROUP after restart"
     resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$1\r\nrestarted\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
     if ! grep -Fq 't1:q1' "${response_path}"; then
