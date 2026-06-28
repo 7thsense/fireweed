@@ -161,6 +161,19 @@ struct Inner {
     cmd_seq: u64,
 }
 
+/// Local filesystem object-log authority without an in-process projection.
+///
+/// This is the log-only half used by the object_log_sqlite_projection runtime: callers append already
+/// validated envelopes, then feed the returned positions into a separate projection store.
+pub struct LocalObjectLog {
+    inner: Mutex<LogOnlyInner>,
+}
+
+struct LogOnlyInner {
+    root: PathBuf,
+    queues: HashMap<QueueKey, QueueDefinition>,
+}
+
 impl Inner {
     fn shard_dir(&self, shard: &QueueKey) -> PathBuf {
         shard_dir(&self.root, shard)
@@ -207,35 +220,7 @@ impl Inner {
     /// be a partial write, and it has no successor, so it is treated as uncommitted and skipped. A parse
     /// failure on any NON-final object is genuine corruption and is propagated.
     fn read_envelopes(&self, shard: &QueueKey) -> EngineResult<Vec<(u64, CommandEnvelope)>> {
-        let log_dir = self.shard_dir(shard).join("log");
-        if !log_dir.exists() {
-            return Ok(Vec::new());
-        }
-        // Collect (seq, path) first, sorted, so "final object" is well-defined before we parse.
-        let mut files: Vec<(u64, PathBuf)> = Vec::new();
-        for entry in fs::read_dir(&log_dir).map_err(store)? {
-            let path = entry.map_err(store)?.path();
-            if let Some(seq) = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                files.push((seq, path));
-            }
-        }
-        files.sort_by_key(|(seq, _)| *seq);
-        let last = files.len().saturating_sub(1);
-        let mut rows: Vec<(u64, CommandEnvelope)> = Vec::with_capacity(files.len());
-        for (i, (seq, path)) in files.iter().enumerate() {
-            let json = fs::read_to_string(path).map_err(store)?;
-            match serde_json::from_str(&json) {
-                Ok(env) => rows.push((*seq, env)),
-                // Torn trailing object → uncommitted, skip. Earlier object → real corruption, fail.
-                Err(_) if i == last => continue,
-                Err(e) => return Err(store(e)),
-            }
-        }
-        Ok(rows)
+        read_envelopes_from_root(&self.root, shard)
     }
 
     fn read_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
@@ -295,6 +280,152 @@ impl Inner {
             self.cmd_seq = m + 1;
         }
         Ok(())
+    }
+}
+
+fn read_queue_definitions(root: &Path) -> EngineResult<HashMap<QueueKey, QueueDefinition>> {
+    let mut queues = HashMap::new();
+    if !root.exists() {
+        fs::create_dir_all(root).map_err(store)?;
+        return Ok(queues);
+    }
+    for entry in fs::read_dir(root).map_err(store)? {
+        let dir = entry.map_err(store)?.path();
+        let queue_file = dir.join("queue.json");
+        if !queue_file.exists() {
+            continue;
+        }
+        let definition: QueueDefinition =
+            serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?)
+                .map_err(store)?;
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        queues.insert(key, definition);
+    }
+    Ok(queues)
+}
+
+fn create_queue_metadata(
+    root: &Path,
+    queues: &mut HashMap<QueueKey, QueueDefinition>,
+    definition: QueueDefinition,
+) -> EngineResult<CreateQueueOutcome> {
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    if let Some(existing) = queues.get(&key) {
+        if existing.ordering_mode != definition.ordering_mode
+            || existing.priority_model != definition.priority_model
+        {
+            return Err(EngineError::QueueDefinitionConflict);
+        }
+        return Ok(CreateQueueOutcome {
+            created: false,
+            definition: existing.clone(),
+        });
+    }
+    let dir = shard_dir(root, &key);
+    fs::create_dir_all(&dir).map_err(store)?;
+    fs::write(dir.join("queue.json"), to_json(&definition)?).map_err(store)?;
+    queues.insert(key, definition.clone());
+    Ok(CreateQueueOutcome {
+        created: true,
+        definition,
+    })
+}
+
+fn read_envelopes_from_root(
+    root: &Path,
+    shard: &QueueKey,
+) -> EngineResult<Vec<(u64, CommandEnvelope)>> {
+    let log_dir = shard_dir(root, shard).join("log");
+    if !log_dir.exists() {
+        return Ok(Vec::new());
+    }
+    // Collect (seq, path) first, sorted, so "final object" is well-defined before we parse.
+    let mut files: Vec<(u64, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&log_dir).map_err(store)? {
+        let path = entry.map_err(store)?.path();
+        if let Some(seq) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            files.push((seq, path));
+        }
+    }
+    files.sort_by_key(|(seq, _)| *seq);
+    let last = files.len().saturating_sub(1);
+    let mut rows: Vec<(u64, CommandEnvelope)> = Vec::with_capacity(files.len());
+    for (i, (seq, path)) in files.iter().enumerate() {
+        let json = fs::read_to_string(path).map_err(store)?;
+        match serde_json::from_str(&json) {
+            Ok(env) => rows.push((*seq, env)),
+            // Torn trailing object -> uncommitted, skip. Earlier object -> real corruption, fail.
+            Err(_) if i == last => continue,
+            Err(e) => return Err(store(e)),
+        }
+    }
+    Ok(rows)
+}
+
+impl LocalObjectLog {
+    /// Open (or create) a local filesystem object log rooted at `root`.
+    pub fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
+        let root = root.into();
+        let queues = read_queue_definitions(&root)?;
+        Ok(Self {
+            inner: Mutex::new(LogOnlyInner { root, queues }),
+        })
+    }
+
+    pub fn create_queue(&self, definition: QueueDefinition) -> EngineResult<CreateQueueOutcome> {
+        let mut inner = self.inner.lock().expect("object log store poisoned");
+        let root = inner.root.clone();
+        create_queue_metadata(&root, &mut inner.queues, definition)
+    }
+
+    pub fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
+        let inner = self.inner.lock().expect("object log store poisoned");
+        if inner.queues.contains_key(shard) {
+            Ok(read_epoch(&inner.root, shard))
+        } else {
+            Err(EngineError::NotFound)
+        }
+    }
+
+    pub fn acquire_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
+        let inner = self.inner.lock().expect("object log store poisoned");
+        if inner.queues.contains_key(shard) {
+            advance_epoch_object(&inner.root, shard)
+        } else {
+            Err(EngineError::NotFound)
+        }
+    }
+
+    pub fn append(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let inner = self.inner.lock().expect("object log store poisoned");
+        if !inner.queues.contains_key(shard) {
+            return Err(EngineError::NotFound);
+        }
+        // TD-003 local-single-owner fence: validate before any object is appended.
+        if expected_epoch != read_epoch(&inner.root, shard) {
+            return Err(EngineError::EpochFenced);
+        }
+        if commands
+            .iter()
+            .any(|env| matches!(env.command, QueueCommand::ReplacePending(_)))
+        {
+            return Err(EngineError::Unavailable);
+        }
+        let mut positions = Vec::with_capacity(commands.len());
+        for env in commands {
+            let (epoch, seq) = append_object(&inner.root, shard, env)?;
+            positions.push(CommandPosition::new(shard.clone(), epoch, seq));
+        }
+        Ok(positions)
     }
 }
 
@@ -734,31 +865,22 @@ impl ControlPlaneStore for ObjectLogBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            if let Some(existing) = g.queues.get(&key) {
-                if existing.ordering_mode != definition.ordering_mode
-                    || existing.priority_model != definition.priority_model
-                {
-                    return Err(EngineError::QueueDefinitionConflict);
-                }
-                return Ok(CreateQueueOutcome {
-                    created: false,
-                    definition: existing.clone(),
-                });
+            let root = g.root.clone();
+            let outcome = create_queue_metadata(&root, &mut g.queues, definition)?;
+            if outcome.created {
+                let shard = QueueKey::new(
+                    outcome.definition.tenant_id.clone(),
+                    outcome.definition.queue_id.clone(),
+                );
+                g.projections.insert(
+                    shard,
+                    ProjectionData::new(
+                        outcome.definition.priority_model,
+                        &outcome.definition.secondary_indexes,
+                    ),
+                );
             }
-            let shard = key.clone();
-            let dir = g.shard_dir(&shard);
-            fs::create_dir_all(&dir).map_err(store)?;
-            fs::write(dir.join("queue.json"), to_json(&definition)?).map_err(store)?;
-            g.projections.insert(
-                shard,
-                ProjectionData::new(definition.priority_model, &definition.secondary_indexes),
-            );
-            g.queues.insert(key, definition.clone());
-            Ok(CreateQueueOutcome {
-                created: true,
-                definition,
-            })
+            Ok(outcome)
         })();
         std::future::ready(result)
     }
@@ -847,6 +969,38 @@ impl LogRead for ObjectLogBackend {
             // record it alongside the manifest-CAS epoch fence — tracked with that schema work (see the
             // `advance_epoch_object` note). The high-water guard is seq-monotonic, and no recovery path
             // re-derives high-water from a replayed cross-epoch position today, so this is latent.
+            let entries: Vec<(CommandPosition, CommandEnvelope)> = all
+                .into_iter()
+                .filter(|(seq, _)| *seq >= start)
+                .take(limit)
+                .map(|(seq, env)| (CommandPosition::new(shard.clone(), 0, seq), env))
+                .collect();
+            let consumed = start + entries.len() as u64;
+            let next = (consumed < total).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            Ok(CommandPage { entries, next })
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl LogRead for LocalObjectLog {
+    fn read_from(
+        &self,
+        shard: &QueueKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
+        let result = (|| {
+            let inner = self.inner.lock().expect("object log store poisoned");
+            if !inner.queues.contains_key(shard) {
+                return Err(EngineError::NotFound);
+            }
+            let start = match &from {
+                Some(p) => p.sequence + 1,
+                None => 0,
+            };
+            let all = read_envelopes_from_root(&inner.root, shard)?;
+            let total = all.len() as u64;
             let entries: Vec<(CommandPosition, CommandEnvelope)> = all
                 .into_iter()
                 .filter(|(seq, _)| *seq >= start)
