@@ -5,7 +5,10 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue};
+use pqueue_core::{
+    ClientItemKey, GateKeyPolicy, GroupKey, ItemId, ItemState, LeaseToken, Metadata, MetadataValue,
+    PriorityValue,
+};
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, CommandPosition, EngineError, EngineResult,
     FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
@@ -36,6 +39,7 @@ pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
             None,
             None,
             BTreeMap::new(),
+            Metadata::default(),
             ts(1),
             None,
         )
@@ -536,7 +540,10 @@ pub async fn claim_returns_priority_ordered_rich_items<B: ConformanceCore>(make:
     );
     // Rich shape populated (would fail if claim returned a stub).
     let first = &claimed.items[0];
-    assert_eq!(first.lease_token.as_str(), "lease-1");
+    assert_eq!(
+        first.lease_token.as_ref().map(|token| token.as_str()),
+        Some("lease-1")
+    );
     assert_eq!(first.item_version, 2, "claim bumps item_version");
     assert_eq!(first.attempt_count, 1, "first delivery");
     assert_eq!(first.lease_expires_at, ts(500));
@@ -554,6 +561,71 @@ pub async fn claim_empty_when_nothing_eligible<B: ConformanceCore>(make: impl Fn
     b.create_queue(qdef()).await.unwrap();
     let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
     assert!(claimed.items.is_empty());
+}
+
+pub async fn claimed_item_shape_includes_payload_fields_and_gate_keys<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    let mut def = qdef();
+    def.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    def.eligibility_policy.max_gate_keys_per_item = Some(8);
+    b.create_queue(def).await.unwrap();
+    let mut item = item("1", "ka", 5);
+    item.not_before = Some(ts(50));
+    item.group_key = Some(GroupKey::new("group-a").unwrap());
+    item.payload = Some(Bytes::from_static(b"opaque-payload"));
+    item.fields = BTreeMap::from([("field-a".to_string(), Bytes::from_static(b"value-a"))]);
+    item.metadata
+        .insert("tenant_segment", MetadataValue::String("vip".to_string()));
+    item.gate_keys = vec!["gate-a".to_string(), "gate-b".to_string()];
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand { items: vec![item] }),
+            vec![],
+        ),
+    )
+    .await;
+
+    let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    let got = &claimed.items[0];
+    assert_eq!(got.item_id, ItemId::new("1").unwrap());
+    assert_eq!(got.client_item_key, ClientItemKey::new("ka").unwrap());
+    assert_eq!(got.item_version, 2, "claim bumps item_version");
+    assert_eq!(got.priority, Some(PriorityValue::Int64(5)));
+    assert_eq!(got.not_before, Some(ts(50)));
+    assert_eq!(got.group_key, Some(GroupKey::new("group-a").unwrap()));
+    assert_eq!(got.lease_token, Some(LeaseToken::new("lease-1").unwrap()));
+    assert_eq!(got.lease_expires_at, ts(500));
+    assert_eq!(got.attempt_count, 1);
+    assert_eq!(got.payload.as_deref(), Some(&b"opaque-payload"[..]));
+    assert_eq!(
+        got.fields.get("field-a").map(|bytes| bytes.as_ref()),
+        Some(&b"value-a"[..])
+    );
+    assert_eq!(
+        got.metadata.get("tenant_segment"),
+        Some(&MetadataValue::String("vip".to_string()))
+    );
+    assert_eq!(got.gate_keys, vec!["gate-a", "gate-b"]);
+
+    let view = b
+        .claimed_view(&shard(), &[ItemId::new("1").unwrap()])
+        .await
+        .unwrap();
+    assert_eq!(view.len(), 1);
+    assert_eq!(
+        view[0].metadata.get("tenant_segment"),
+        Some(&MetadataValue::String("vip".to_string())),
+        "claimed_view must render the same claimed-item metadata shape"
+    );
+    assert_eq!(
+        view[0].gate_keys,
+        vec!["gate-a", "gate-b"],
+        "claimed_view must render the same claimed-item gate-key shape"
+    );
 }
 
 pub async fn structured_live_items_are_ordered_and_only_live<B: ConformanceCore>(
@@ -637,6 +709,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             None,
             BTreeMap::new(),
+            Metadata::default(),
             ts(1),
             None,
         )
@@ -657,6 +730,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             None,
             BTreeMap::new(),
+            Metadata::default(),
             ts(2),
             None,
         )
@@ -694,6 +768,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             None,
             BTreeMap::new(),
+            Metadata::default(),
             ts(1),
             None,
         )
@@ -715,6 +790,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             None,
             BTreeMap::new(),
+            Metadata::default(),
             ts(20),
             None,
         )
@@ -742,6 +818,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             None,
             BTreeMap::new(),
+            Metadata::default(),
             ts(30),
             None,
         )
@@ -767,6 +844,7 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
             Some(ts(250)),
             Some(Bytes::from_static(b"payload")),
             BTreeMap::new(),
+            Metadata::default(),
             ts(1),
             None,
         )
@@ -1158,7 +1236,10 @@ pub async fn claimed_view_renders_leased_items<B: ConformanceCore>(make: impl Fn
         "only the leased item renders; the pending + unknown ids are omitted"
     );
     assert_eq!(view[0].item_id, a);
-    assert_eq!(view[0].lease_token, LeaseToken::new("lease-1").unwrap());
+    assert_eq!(
+        view[0].lease_token,
+        Some(LeaseToken::new("lease-1").unwrap())
+    );
     assert_eq!(view[0].attempt_count, 1);
 }
 

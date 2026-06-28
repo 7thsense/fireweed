@@ -23,8 +23,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, IndexSpec, ItemEvent, ItemId, ItemState, LeaseToken, PriorityModel,
-    PriorityValue, UtcTimestamp, apply_transition, failure_event, priority_sort,
+    ClientItemKey, GroupKey, IndexSpec, ItemEvent, ItemId, ItemState, LeaseToken, Metadata,
+    PriorityModel, PriorityValue, UtcTimestamp, apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
@@ -45,6 +45,8 @@ struct ItemRecord {
     group_key: Option<GroupKey>,
     payload: Option<Bytes>,
     fields: BTreeMap<String, Bytes>,
+    metadata: Metadata,
+    gate_keys: Vec<String>,
     state: ItemState,
     item_version: u64,
     attempt_count: u32,
@@ -67,11 +69,13 @@ impl ItemRecord {
             priority: self.priority.clone(),
             group_key: self.group_key.clone(),
             not_before: self.not_before,
-            lease_token: self.lease_token.clone()?,
+            lease_token: Some(self.lease_token.clone()?),
             lease_expires_at: self.lease_expires_at?,
             attempt_count: self.attempt_count,
             payload: self.payload.clone(),
             fields: self.fields.clone(),
+            metadata: self.metadata.clone(),
+            gate_keys: self.gate_keys.clone(),
         })
     }
 
@@ -403,6 +407,8 @@ impl ProjectionData {
             group_key: item.group_key,
             payload: item.payload,
             fields: item.fields,
+            metadata: item.metadata,
+            gate_keys: item.gate_keys,
             state: ItemState::Pending,
             item_version: 1,
             attempt_count: 0,
@@ -1088,6 +1094,7 @@ mod tests {
             max_attempts: 3,
             payload: None,
             fields: BTreeMap::new(),
+            metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
         }

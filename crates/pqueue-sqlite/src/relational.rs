@@ -52,7 +52,7 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityModel, PriorityValue,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel, PriorityValue,
     QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::ClaimUnit;
@@ -209,6 +209,15 @@ fn fields_from_json(raw: String) -> EngineResult<BTreeMap<String, Bytes>> {
         .into_iter()
         .map(|(k, v)| (k, Bytes::from(v)))
         .collect())
+}
+
+fn metadata_to_json(metadata: &Metadata) -> EngineResult<String> {
+    to_json(&metadata.clone().into_inner())
+}
+
+fn metadata_from_json(raw: String) -> EngineResult<Metadata> {
+    let entries = serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Metadata::from_entries(entries))
 }
 
 fn ensure_item_fields_column(conn: &Connection) -> EngineResult<()> {
@@ -455,6 +464,7 @@ fn insert_items(
             opt_int(item.cohort_size.map(|s| s as i64)),
             opt_blob(item.payload.as_ref().map(|b| b.to_vec())),
             Value::Text(fields_to_json(&item.fields)?),
+            Value::Text(metadata_to_json(&item.metadata)?),
             Value::Integer(seqi),
             Value::Integer(now_n),
             Value::Integer(now_n),
@@ -463,7 +473,7 @@ fn insert_items(
         ]);
     }
     const ROW_PH: &str =
-        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,'{}',0,1,NULL,NULL,NULL,?,?,?,NULL,0,0,?,?)";
+        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,0,0,?,?)";
     for chunk in rows.chunks(SQLITE_BATCH) {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
@@ -1691,7 +1701,7 @@ fn render_claimed(
         let row = st(conn
             .query_row(
                 "SELECT client_item_key, item_version, priority, group_key, not_before, \
-                 lease_expires_at, retry_count, payload, fields FROM pqueue_items \
+                 lease_expires_at, retry_count, payload, fields, metadata FROM pqueue_items \
                  WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND lifecycle_state='Leased'",
                 params![t, q, id.to_string()],
                 |row| {
@@ -1705,15 +1715,28 @@ fn render_claimed(
                         row.get::<_, i64>(6)?,
                         row.get::<_, Option<Vec<u8>>>(7)?,
                         row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
                     ))
                 },
             )
             .optional())?;
-        let Some((key, version, priority, group, not_before, exp, retry, payload, fields)) = row
+        let Some((
+            key,
+            version,
+            priority,
+            group,
+            not_before,
+            exp,
+            retry,
+            payload,
+            fields,
+            metadata,
+        )) = row
         else {
             continue;
         };
         let Some(exp) = exp else { continue };
+        let gate_keys = item_gate_keys(conn, shard, id)?;
         out.push(ClaimedItem {
             item_id: *id,
             client_item_key: ClientItemKey::new(key)
@@ -1725,14 +1748,39 @@ fn render_claimed(
                 .transpose()
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             not_before: not_before.map(nanos_ts),
-            lease_token: token,
+            lease_token: Some(token),
             lease_expires_at: nanos_ts(exp),
             attempt_count: retry as u32,
             payload: payload.map(Bytes::from),
             fields: fields_from_json(fields)?,
+            metadata: metadata_from_json(metadata)?,
+            gate_keys,
         });
     }
     Ok(out)
+}
+
+fn item_gate_keys(conn: &Connection, shard: &QueueKey, id: &ItemId) -> EngineResult<Vec<String>> {
+    let (t, q) = parts(shard);
+    let mut stmt = st(conn.prepare(
+        "SELECT gate_key FROM pqueue_item_gates \
+         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+         ORDER BY gate_key",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q, id.to_string()], |row| row.get::<_, String>(0)))?;
+    let mut keys = Vec::new();
+    for row in rows {
+        keys.push(st(row)?);
+    }
+    Ok(keys)
+}
+
+fn apply_whole_cohort_response_shape(items: &mut [ClaimedItem]) -> Option<GroupKey> {
+    let cohort_id = items.first().and_then(|item| item.group_key.clone());
+    for item in items {
+        item.lease_token = None;
+    }
+    cohort_id
 }
 
 fn live_items_sql(
@@ -2428,7 +2476,15 @@ impl ClaimPort for SqliteRelationalBackend {
             );
             st(tx.commit())?;
             apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
-            Ok(Claimed { items })
+            let mut claimed = Claimed {
+                items,
+                ..Default::default()
+            };
+            if matches!(unit, ClaimUnit::WholeCohort) {
+                claimed.cohort_lease_token = Some(req.lease_token.clone());
+                claimed.cohort_id = apply_whole_cohort_response_shape(&mut claimed.items);
+            }
+            Ok(claimed)
         })();
         std::future::ready(result)
     }
@@ -2450,6 +2506,7 @@ impl UpsertPort for SqliteRelationalBackend {
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
+        metadata: Metadata,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -2483,6 +2540,7 @@ impl UpsertPort for SqliteRelationalBackend {
                 max_attempts,
                 payload,
                 fields,
+                metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
             };
@@ -3059,6 +3117,7 @@ mod group_summary_tests {
                 None,
                 None,
                 BTreeMap::new(),
+                Default::default(),
                 ts(0),
                 None,
             )
@@ -3082,6 +3141,7 @@ mod group_summary_tests {
                     None,
                     None,
                     BTreeMap::new(),
+                    Default::default(),
                     ts(2),
                     None
                 )

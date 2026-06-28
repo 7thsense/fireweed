@@ -48,8 +48,8 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use postgres::{Client, NoTls};
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
-    QueueId, TenantId, UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
@@ -471,6 +471,7 @@ impl ClaimPort for PostgresBackend {
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
             Ok(Claimed {
                 items: proj.render_claimed(&candidates),
+                ..Default::default()
             })
         })();
         std::future::ready(result)
@@ -487,6 +488,7 @@ impl UpsertPort for PostgresBackend {
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
+        metadata: Metadata,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -517,6 +519,7 @@ impl UpsertPort for PostgresBackend {
                 max_attempts,
                 payload,
                 fields,
+                metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
             };

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
-    QueueId, TenantId, UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
@@ -194,7 +194,10 @@ impl ClaimPort for MemoryBackend {
                 candidates.len(),
                 "leased candidate failed to render"
             );
-            Ok(Claimed { items })
+            Ok(Claimed {
+                items,
+                ..Default::default()
+            })
         })();
         std::future::ready(result)
     }
@@ -210,6 +213,7 @@ impl UpsertPort for MemoryBackend {
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
+        metadata: Metadata,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -239,6 +243,7 @@ impl UpsertPort for MemoryBackend {
                 max_attempts,
                 payload,
                 fields,
+                metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
             };

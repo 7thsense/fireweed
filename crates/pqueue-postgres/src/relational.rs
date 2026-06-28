@@ -52,7 +52,7 @@ use bytes::Bytes;
 use postgres::types::ToSql;
 use postgres::{Client, NoTls};
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityModel, PriorityValue,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel, PriorityValue,
     QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
@@ -183,9 +183,9 @@ UPDATE pqueue_items i \
 SET lifecycle_state='Leased', lease_token_hash=$5, lease_expires_at=$6, \
     retry_count=retry_count+1, item_version=item_version+1, updated_at=$7, last_command_sequence=$8 \
 FROM candidates c \
-WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
-RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
-          i.lease_expires_at, i.retry_count, i.payload, i.fields";
+	WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
+	RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
+	          i.lease_expires_at, i.retry_count, i.payload, i.fields, i.metadata";
 
 // ---------------------------------------------------------------------------
 // small conversions / error mapping
@@ -214,6 +214,15 @@ fn fields_from_json(raw: String) -> EngineResult<BTreeMap<String, Bytes>> {
         .into_iter()
         .map(|(k, v)| (k, Bytes::from(v)))
         .collect())
+}
+
+fn metadata_to_json(metadata: &Metadata) -> EngineResult<String> {
+    to_json(&metadata.clone().into_inner())
+}
+
+fn metadata_from_json(raw: String) -> EngineResult<Metadata> {
+    let entries = serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Metadata::from_entries(entries))
 }
 
 fn parts(shard: &QueueKey) -> (String, String) {
@@ -512,11 +521,12 @@ struct ItemRow {
     cohort_size: Option<i64>,
     payload: Option<Vec<u8>>,
     fields: String,
+    metadata: String,
     max_attempts: i64,
     created_seq: i64,
 }
 
-/// Max `pqueue_items` rows per INSERT statement: 12 bound params/row + 4 shared; 1000 rows ≈ 12k params,
+/// Max `pqueue_items` rows per INSERT statement: 13 bound params/row + 4 shared; 1000 rows ≈ 13k params,
 /// well under postgres' 65535 bound-parameter ceiling.
 const PG_INSERT_CHUNK: usize = 1000;
 
@@ -555,6 +565,7 @@ fn insert_items(
             cohort_size: item.cohort_size.map(|s| s as i64),
             payload: item.payload.as_ref().map(|b| b.to_vec()),
             fields: fields_to_json(&item.fields)?,
+            metadata: metadata_to_json(&item.metadata)?,
             max_attempts: item.max_attempts as i64,
             created_seq: base_seq + i as i64,
         });
@@ -569,12 +580,12 @@ fn insert_items(
         );
         let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q, &seqi, &now_n];
         for (r, row) in chunk.iter().enumerate() {
-            let b = 5 + r * 12;
+            let b = 5 + r * 13;
             if r > 0 {
                 sql.push(',');
             }
             sql.push_str(&format!(
-                "($1,$2,${},${},'Pending',${},${},${},${},${},${},${},${},'{{}}',0,1,NULL,NULL,NULL,\
+                "($1,$2,${},${},'Pending',${},${},${},${},${},${},${},${},${},0,1,NULL,NULL,NULL,\
                  $3,$4,$4,NULL,false,false,${},${})",
                 b,
                 b + 1,
@@ -588,6 +599,7 @@ fn insert_items(
                 b + 9,
                 b + 10,
                 b + 11,
+                b + 12,
             ));
             params.push(&row.item_id);
             params.push(&row.key);
@@ -599,6 +611,7 @@ fn insert_items(
             params.push(&row.cohort_size);
             params.push(&row.payload);
             params.push(&row.fields);
+            params.push(&row.metadata);
             params.push(&row.max_attempts);
             params.push(&row.created_seq);
         }
@@ -1513,6 +1526,8 @@ fn claimed_from_row(
     retry: i64,
     payload: Option<Vec<u8>>,
     fields: String,
+    metadata: String,
+    gate_keys: Vec<String>,
 ) -> EngineResult<ClaimedItem> {
     Ok(ClaimedItem {
         item_id,
@@ -1525,12 +1540,33 @@ fn claimed_from_row(
             .transpose()
             .map_err(|e| EngineError::Storage(e.to_string()))?,
         not_before: not_before.map(nanos_ts),
-        lease_token: token,
+        lease_token: Some(token),
         lease_expires_at: nanos_ts(exp),
         attempt_count: retry as u32,
         payload: payload.map(Bytes::from),
         fields: fields_from_json(fields)?,
+        metadata: metadata_from_json(metadata)?,
+        gate_keys,
     })
+}
+
+fn item_gate_keys(client: &mut Client, shard: &QueueKey, id: &ItemId) -> EngineResult<Vec<String>> {
+    let (t, q) = parts(shard);
+    let rows = st(client.query(
+        "SELECT gate_key FROM pqueue_item_gates \
+         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+         ORDER BY gate_key",
+        &[&t, &q, &id.to_string()],
+    ))?;
+    Ok(rows.into_iter().map(|row| row.get(0)).collect())
+}
+
+fn apply_whole_cohort_response_shape(items: &mut [ClaimedItem]) -> Option<GroupKey> {
+    let cohort_id = items.first().and_then(|item| item.group_key.clone());
+    for item in items {
+        item.lease_token = None;
+    }
+    cohort_id
 }
 
 fn render_claimed(
@@ -1547,13 +1583,14 @@ fn render_claimed(
         };
         let row = st(client.query_opt(
             "SELECT client_item_key, item_version, priority, group_key, not_before, \
-             lease_expires_at, retry_count, payload, fields FROM pqueue_items \
+             lease_expires_at, retry_count, payload, fields, metadata FROM pqueue_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 AND lifecycle_state='Leased'",
             &[&t, &q, &id.to_string()],
         ))?;
         let Some(row) = row else { continue };
         let exp: Option<i64> = row.get(5);
         let Some(exp) = exp else { continue };
+        let gate_keys = item_gate_keys(client, shard, id)?;
         out.push(claimed_from_row(
             *id,
             token,
@@ -1566,6 +1603,8 @@ fn render_claimed(
             row.get(6),
             row.get(7),
             row.get(8),
+            row.get(9),
+            gate_keys,
         )?);
     }
     Ok(out)
@@ -2224,6 +2263,14 @@ impl ClaimPort for PostgresRelationalBackend {
                         ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
                     let exp_row: Option<i64> = row.get(6);
                     let exp_row = exp_row.unwrap_or(exp);
+                    let gate_rows = st(tx.query(
+                        "SELECT gate_key FROM pqueue_item_gates \
+                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                         ORDER BY gate_key",
+                        &[&t, &q, &item_id.to_string()],
+                    ))?;
+                    let gate_keys: Vec<String> =
+                        gate_rows.into_iter().map(|row| row.get(0)).collect();
                     items.push(claimed_from_row(
                         item_id,
                         req.lease_token.clone(),
@@ -2236,6 +2283,8 @@ impl ClaimPort for PostgresRelationalBackend {
                         row.get(7),
                         row.get(8),
                         row.get(9),
+                        row.get(10),
+                        gate_keys,
                     )?);
                     token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));
                     claimed_ids.push(item_id);
@@ -2246,7 +2295,10 @@ impl ClaimPort for PostgresRelationalBackend {
                 }
                 st(tx.commit())?;
                 apply_token_ops(live_tokens, token_ops);
-                return Ok(Claimed { items });
+                return Ok(Claimed {
+                    items,
+                    ..Default::default()
+                });
             }
 
             // Group-aware: gather the candidate items under the per-group FOR UPDATE SKIP LOCKED lock, then
@@ -2293,7 +2345,15 @@ impl ClaimPort for PostgresRelationalBackend {
             let items = render_claimed(client, &req.shard, &candidates, |id| {
                 live_tokens.get(id).cloned()
             })?;
-            Ok(Claimed { items })
+            let mut claimed = Claimed {
+                items,
+                ..Default::default()
+            };
+            if matches!(unit, ClaimUnit::WholeCohort) {
+                claimed.cohort_lease_token = Some(req.lease_token.clone());
+                claimed.cohort_id = apply_whole_cohort_response_shape(&mut claimed.items);
+            }
+            Ok(claimed)
         })();
         std::future::ready(result)
     }
@@ -2309,6 +2369,7 @@ impl UpsertPort for PostgresRelationalBackend {
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
+        metadata: Metadata,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -2337,6 +2398,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 max_attempts,
                 payload,
                 fields,
+                metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
             };

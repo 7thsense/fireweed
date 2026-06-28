@@ -310,6 +310,10 @@ impl Metadata {
         Self::default()
     }
 
+    pub fn from_entries(entries: BTreeMap<String, MetadataValue>) -> Self {
+        Self { entries }
+    }
+
     pub fn insert(
         &mut self,
         key: impl Into<String>,

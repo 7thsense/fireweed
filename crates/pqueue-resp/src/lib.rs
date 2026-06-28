@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueId, TenantId, UtcTimestamp,
-    WorkerId,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, MetadataValue, PriorityValue, QueueId,
+    TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
@@ -427,6 +427,7 @@ async fn xadd<B: RespBackend>(
     let mut group_key: Option<GroupKey> = None;
     let mut not_before: Option<UtcTimestamp> = None;
     let mut payload: Option<bytes::Bytes> = None;
+    let mut metadata = Metadata::default();
     let mut fields: BTreeMap<String, bytes::Bytes> = BTreeMap::new();
     for pair in args[3..].chunks_exact(2) {
         if arg_eq(&pair[0], "priority")
@@ -457,6 +458,15 @@ async fn xadd<B: RespBackend>(
             not_before = Some(ts);
         } else if arg_eq(&pair[0], "payload") {
             payload = Some(bytes::Bytes::copy_from_slice(&pair[1]));
+        } else if arg_eq(&pair[0], "metadata") {
+            let Ok(raw) = std::str::from_utf8(&pair[1]) else {
+                return Resp::Error("ERR metadata must be utf-8 JSON".into());
+            };
+            let entries = match serde_json::from_str::<BTreeMap<String, MetadataValue>>(raw) {
+                Ok(entries) => entries,
+                Err(_) => return Resp::Error("ERR invalid metadata".into()),
+            };
+            metadata = Metadata::from_entries(entries);
         } else {
             let Ok(field) = std::str::from_utf8(&pair[0]) else {
                 return Resp::Error("ERR field names must be utf-8".into());
@@ -486,6 +496,7 @@ async fn xadd<B: RespBackend>(
                     not_before,
                     payload,
                     fields,
+                    metadata,
                     state.now(),
                     None,
                 )
@@ -507,6 +518,7 @@ async fn xadd<B: RespBackend>(
                 group_key,
                 payload,
                 fields,
+                metadata,
                 cohort_size: None, // RESP XADD has no cohort declaration (library-only, plan §3)
                 gate_keys: Vec::new(), // RESP XADD carries no gate keys (library-only)
             };
@@ -602,6 +614,35 @@ fn claimed_to_entry(item: &ClaimedItem) -> Resp {
         item.attempt_count,
         item.payload.as_ref(),
     );
+    if let Some(lease_token) = &item.lease_token {
+        fields.push(Resp::Bulk(b"lease_token".to_vec()));
+        fields.push(Resp::Bulk(lease_token.to_string().into_bytes()));
+    }
+    fields.push(Resp::Bulk(b"lease_expires_at".to_vec()));
+    fields.push(Resp::Bulk(
+        ts_ms(item.lease_expires_at).to_string().into_bytes(),
+    ));
+    if let Some(not_before) = item.not_before {
+        fields.push(Resp::Bulk(b"not_before".to_vec()));
+        fields.push(Resp::Bulk(ts_ms(not_before).to_string().into_bytes()));
+    }
+    if let Some(group_key) = &item.group_key {
+        fields.push(Resp::Bulk(b"group_key".to_vec()));
+        fields.push(Resp::Bulk(group_key.as_str().as_bytes().to_vec()));
+    }
+    if !item.metadata.is_empty() {
+        fields.push(Resp::Bulk(b"metadata".to_vec()));
+        fields.push(Resp::Bulk(
+            serde_json::to_vec(&item.metadata.clone().into_inner())
+                .expect("metadata value serializes"),
+        ));
+    }
+    if !item.gate_keys.is_empty() {
+        fields.push(Resp::Bulk(b"gate_keys".to_vec()));
+        fields.push(Resp::Bulk(
+            serde_json::to_vec(&item.gate_keys).expect("gate keys serialize"),
+        ));
+    }
     append_user_fields(&mut fields, &item.fields);
     Resp::Array(vec![
         Resp::Bulk(item.item_id.to_string().into_bytes()),

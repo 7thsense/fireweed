@@ -51,9 +51,9 @@
 use std::collections::BTreeMap;
 
 use pqueue_core::{
-    ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
-    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, Metadata, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+    QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
@@ -171,6 +171,7 @@ pub fn item_max(id: &str, key: &str, priority: i64, max_attempts: u32) -> PushIt
         max_attempts,
         payload: None,
         fields: BTreeMap::new(),
+        metadata: Metadata::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
     }
@@ -229,6 +230,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::high_water_is_monotonic(&make).await;
     scenarios::claim_returns_priority_ordered_rich_items(&make).await;
     scenarios::claim_empty_when_nothing_eligible(&make).await;
+    scenarios::claimed_item_shape_includes_payload_fields_and_gate_keys(&make).await;
     scenarios::structured_live_items_are_ordered_and_only_live(&make).await;
     scenarios::upsert_inserts_then_replaces_pending(&make).await;
     scenarios::upsert_rejects_claimed_and_terminal(&make).await;
@@ -274,6 +276,7 @@ macro_rules! core_suite {
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
+            claimed_item_shape_includes_payload_fields_and_gate_keys,
             structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,
@@ -305,6 +308,7 @@ macro_rules! core_suite {
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
+            claimed_item_shape_includes_payload_fields_and_gate_keys,
             structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,

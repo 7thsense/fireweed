@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use pqueue::{EngineError, Nack, NewItem, PayloadUpdate, Pqueue};
+use pqueue::{
+    EngineError, GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, PayloadUpdate, Pqueue,
+    UtcTimestamp,
+};
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
@@ -108,6 +111,53 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     let again = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(again.len(), 1, "retried item is claimable again");
     assert!(again[0].attempt_count > 1, "redelivery bumps attempt_count");
+}
+
+#[tokio::test]
+async fn claimed_item_exposes_api001_shape_over_facade() {
+    let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(100));
+    let pq = Pqueue::new(backend, clock);
+    let q = qkey();
+    let mut def = qdef();
+    def.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    def.eligibility_policy.max_gate_keys_per_item = Some(8);
+    pq.create_queue(def).await.unwrap();
+
+    let mut item = NewItem {
+        priority: Some(PriorityValue::Int64(7)),
+        group_key: Some(GroupKey::new("group-a").unwrap()),
+        not_before: Some(UtcTimestamp::new(100, 0).unwrap()),
+        payload: Some(Bytes::from_static(b"opaque")),
+        fields: BTreeMap::from([("field-a".to_string(), Bytes::from_static(b"value-a"))]),
+        gate_keys: vec!["gate-a".to_string(), "gate-b".to_string()],
+        ..Default::default()
+    };
+    item.metadata
+        .insert("tenant_segment", MetadataValue::String("vip".to_string()));
+
+    let id = pq.push(&q, item).await.unwrap();
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let got = &claimed[0];
+    assert_eq!(got.item_id, id);
+    assert_eq!(got.client_item_key.as_str(), id.to_string());
+    assert_eq!(got.item_version, 2);
+    assert_eq!(got.priority, Some(PriorityValue::Int64(7)));
+    assert_eq!(got.group_key, Some(GroupKey::new("group-a").unwrap()));
+    assert_eq!(got.not_before, Some(UtcTimestamp::new(100, 0).unwrap()));
+    assert!(got.lease_token.is_some());
+    assert_eq!(got.lease_expires_at, UtcTimestamp::new(130, 0).unwrap());
+    assert_eq!(got.payload.as_deref(), Some(&b"opaque"[..]));
+    assert_eq!(
+        got.fields.get("field-a").map(|bytes| bytes.as_ref()),
+        Some(&b"value-a"[..])
+    );
+    assert_eq!(
+        got.metadata.get("tenant_segment"),
+        Some(&MetadataValue::String("vip".to_string()))
+    );
+    assert_eq!(got.gate_keys, vec!["gate-a", "gate-b"]);
 }
 
 #[tokio::test]

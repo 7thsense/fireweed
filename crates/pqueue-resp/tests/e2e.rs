@@ -236,6 +236,82 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
     assert_eq!(p, 20, "the upsert kept the replacement's priority");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xreadgroup_returns_api001_claimed_item_shape() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let (mut con, _) = serve_backend(backend, Arc::new(ManualClock::at(1_000))).await;
+    let id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("shape-key")
+        .arg("priority")
+        .arg(7)
+        .arg("group_key")
+        .arg("group-a")
+        .arg("not_before")
+        .arg(1_000_000_i64)
+        .arg("payload")
+        .arg("opaque")
+        .arg("metadata")
+        .arg(r#"{"tenant_segment":{"String":"vip"}}"#)
+        .arg("recipient_ref")
+        .arg("r-1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let claimed = &reply.keys[0].ids[0];
+    assert_eq!(claimed.id, id);
+    assert_eq!(
+        claimed.get::<String>("item_id").as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(
+        claimed.get::<String>("client_item_key").as_deref(),
+        Some("shape-key")
+    );
+    assert_eq!(claimed.get::<u64>("item_version"), Some(2));
+    assert_eq!(claimed.get::<i64>("priority"), Some(7));
+    assert_eq!(
+        claimed.get::<String>("group_key").as_deref(),
+        Some("group-a")
+    );
+    assert_eq!(claimed.get::<i64>("not_before"), Some(1_000_000));
+    assert_eq!(claimed.get::<String>("lease_token").as_deref(), Some("L1"));
+    assert_eq!(claimed.get::<i64>("lease_expires_at"), Some(1_060_000));
+    assert_eq!(claimed.get::<u32>("attempt_count"), Some(1));
+    assert_eq!(
+        claimed.get::<Vec<u8>>("payload").as_deref(),
+        Some(&b"opaque"[..])
+    );
+    assert_eq!(
+        claimed.get::<Vec<u8>>("recipient_ref").as_deref(),
+        Some(&b"r-1"[..])
+    );
+    assert_eq!(
+        claimed.get::<String>("metadata").as_deref(),
+        Some(r#"{"tenant_segment":{"String":"vip"}}"#)
+    );
+    assert!(
+        claimed.get::<String>("gate_keys").is_none(),
+        "gate_keys are omitted for gate_keys=none queues"
+    );
+}
+
 fn value_array(value: Value) -> Vec<Value> {
     match value {
         Value::Array(items) => items,

@@ -6,8 +6,8 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, RequestId,
-    UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueueDefinition,
+    RequestId, UtcTimestamp,
 };
 
 use crate::QueueKey;
@@ -103,6 +103,7 @@ pub fn build_push_items(
             max_attempts,
             payload: s.payload,
             fields: s.fields,
+            metadata: s.metadata,
             cohort_size: s.cohort_size,
             gate_keys: s.gate_keys,
         });
@@ -160,6 +161,10 @@ pub struct PushItem {
     /// replay of commands written before structured fields existed.
     #[serde(default)]
     pub fields: BTreeMap<String, Bytes>,
+    /// Caller-owned metadata for compatibility predicates and claim responses. Defaulted for log replay of
+    /// commands written before metadata existed.
+    #[serde(default)]
+    pub metadata: Metadata,
     /// Declared cohort size (BQ-14c, TD-002 cohort formation): when set together with `group_key`, this
     /// item is a member of a cohort of `cohort_size` total members (the cohort key IS the `group_key`). The
     /// relational projection forms `pqueue_cohorts` from these declarations and a `whole_cohort` claim is
@@ -346,6 +351,7 @@ mod serde_tests {
             max_attempts: 3,
             payload: Some(Bytes::from_static(b"payload")),
             fields: BTreeMap::new(),
+            metadata: Metadata::default(),
             cohort_size: Some(4),
             gate_keys: Vec::new(),
         }

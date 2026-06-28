@@ -133,7 +133,13 @@ async fn claim_apply_leases_and_charges_delivery() {
     );
     let claimed = b.claim(claim_req(10, 500, 10)).await.unwrap();
     assert_eq!(claimed.items.len(), 1);
-    assert_eq!(claimed.items[0].lease_token.as_str(), "lease-1");
+    assert_eq!(
+        claimed.items[0]
+            .lease_token
+            .as_ref()
+            .map(|token| token.as_str()),
+        Some("lease-1")
+    );
     assert_eq!(
         claimed.items[0].attempt_count, 1,
         "claim charges one delivery"
@@ -413,6 +419,7 @@ async fn cohort_expired_fails_group_members() {
         max_attempts: 3,
         payload: None,
         fields: BTreeMap::new(),
+        metadata: Default::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
     };
@@ -502,6 +509,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             Some(Bytes::from_static(b"v1")),
             BTreeMap::new(),
+            Default::default(),
             ts(0),
             None,
         )
@@ -523,6 +531,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             Some(Bytes::from_static(b"v2")),
             BTreeMap::new(),
+            Default::default(),
             ts(1),
             None,
         )
@@ -549,6 +558,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             None,
             BTreeMap::new(),
+            Default::default(),
             ts(2),
             None
         )
@@ -577,6 +587,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
+            Default::default(),
             ts(0),
             None,
         )
@@ -611,6 +622,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
+            Default::default(),
             ts(10),
             None
         )
@@ -629,6 +641,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
+            Default::default(),
             ts(70),
             None,
         )
@@ -1016,6 +1029,20 @@ async fn whole_cohort_leases_a_complete_cohort() {
         .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
         .await
         .unwrap();
+    assert_eq!(
+        claimed.cohort_lease_token,
+        Some(LeaseToken::new("lease-1").unwrap()),
+        "whole-cohort claims carry the shared lease token at the response top level"
+    );
+    assert_eq!(
+        claimed.cohort_id,
+        Some(GroupKey::new("c1").unwrap()),
+        "whole-cohort claims identify the leased cohort at the response top level"
+    );
+    assert!(
+        claimed.items.iter().all(|item| item.lease_token.is_none()),
+        "whole-cohort item rows omit per-item lease tokens"
+    );
     let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
     let mut expect: Vec<ItemId> = ids.to_vec();

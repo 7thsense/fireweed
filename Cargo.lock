@@ -1015,6 +1015,7 @@ dependencies = [
  "pqueue-memory",
  "pqueue-sqlite",
  "redis",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]

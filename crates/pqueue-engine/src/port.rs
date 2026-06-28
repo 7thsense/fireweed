@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
-    QueueId, TenantId, UtcTimestamp, WorkerId,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, TenantId, UtcTimestamp, WorkerId,
 };
 
 use crate::claim_validation::ClaimCompatibility;
@@ -251,9 +251,8 @@ pub struct ClaimRequest {
 
 /// A claimed item in the API-001 claimed-item shape (lease fields included).
 ///
-/// `metadata`/`gate_keys` are intentionally deferred (library-only render concerns); `group_key`,
-/// `not_before`, and `attempt_count` are core data-model fields included now so adapters built on
-/// this shape don't force a breaking widening later (review I2/I3).
+/// `metadata`, `group_key`, `not_before`, `gate_keys`, and `attempt_count` are core data-model fields
+/// included so adapters built on this shape don't force a breaking widening later (review I2/I3).
 #[derive(Debug, Clone)]
 pub struct ClaimedItem {
     pub item_id: ItemId,
@@ -262,17 +261,21 @@ pub struct ClaimedItem {
     pub priority: Option<PriorityValue>,
     pub group_key: Option<GroupKey>,
     pub not_before: Option<UtcTimestamp>,
-    pub lease_token: LeaseToken,
+    pub lease_token: Option<LeaseToken>,
     pub lease_expires_at: UtcTimestamp,
     /// Delivery/reclaim count as of this claim (RESP delivery-count semantics; flavor-diff 7).
     pub attempt_count: u32,
     pub payload: Option<Bytes>,
     pub fields: BTreeMap<String, Bytes>,
+    pub metadata: Metadata,
+    pub gate_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Claimed {
     pub items: Vec<ClaimedItem>,
+    pub cohort_lease_token: Option<LeaseToken>,
+    pub cohort_id: Option<GroupKey>,
 }
 
 /// A backend that leases candidates atomically with selection (TD-007 §2.2). The engine is the
@@ -315,6 +318,7 @@ pub trait UpsertPort: Send + Sync {
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
+        metadata: Metadata,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
@@ -333,6 +337,9 @@ pub struct PushSpec {
     /// Structured hot-storage fields for compound work records. These are item-local, mutable by
     /// replacement/upsert, and exposed through Redis-hash-shaped live read commands.
     pub fields: BTreeMap<String, Bytes>,
+    /// Caller-owned item metadata used by API-001 compatibility predicates and returned verbatim in the
+    /// claimed-item shape. pqueue stores and filters it without interpreting application meaning.
+    pub metadata: Metadata,
     /// Declared cohort size (BQ-14c) — see [`crate::PushItem::cohort_size`]. `None` for non-cohort items.
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d) — see [`crate::PushItem::gate_keys`]. Empty for un-gated items.

@@ -24,8 +24,8 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityValue, QueueDefinition,
-    QueueId, TenantId, UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
@@ -441,6 +441,7 @@ impl ClaimPort for ObjectLogBackend {
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
             Ok(Claimed {
                 items: proj.render_claimed(&candidates),
+                ..Default::default()
             })
         })();
         std::future::ready(result)
@@ -458,6 +459,7 @@ impl UpsertPort for ObjectLogBackend {
         _not_before: Option<UtcTimestamp>,
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
+        _metadata: Metadata,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {

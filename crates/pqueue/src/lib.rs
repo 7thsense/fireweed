@@ -34,15 +34,15 @@ pub use bytes::Bytes;
 pub use pqueue_core::{
     ClientItemKey, CohortOnIncomplete, CohortPolicy, CreateQueue, CreateQueueError,
     CreateQueueErrorKind, DecimalValue, EligibilityPolicy, GateKeyPolicy, GroupKey,
-    IdentifierError, IndexSpec, ItemId, MetadataValue, OrderingMode, OwnerId, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueCreationPolicy,
-    QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId,
-    TimestampError, UtcTimestamp,
+    IdentifierError, IndexSpec, ItemId, Metadata, MetadataValue, OrderingMode, OwnerId,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+    QueueCreationPolicy, QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy,
+    TenantId, TimestampError, UtcTimestamp,
 };
 pub use pqueue_engine::{
-    ClaimCompatibility, ClaimedItem, Clock, ControlPlaneConfig, CreateQueueOutcome, EngineError,
-    EngineResult, GroupBatching, IndexHit, ItemView, LiveItemView, PayloadUpdate, QueueKey,
-    QueueMetrics, UpsertOutcome,
+    ClaimCompatibility, Claimed, ClaimedItem, Clock, ControlPlaneConfig, CreateQueueOutcome,
+    EngineError, EngineResult, GroupBatching, IndexHit, ItemView, LiveItemView, PayloadUpdate,
+    QueueKey, QueueMetrics, UpsertOutcome,
 };
 
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
@@ -145,6 +145,7 @@ pub struct NewItem {
     pub not_before: Option<UtcTimestamp>,
     pub payload: Option<Bytes>,
     pub fields: BTreeMap<String, Bytes>,
+    pub metadata: Metadata,
     /// Declared cohort size (BQ-14c) — see [`ClaimCompatibility`]/`whole_cohort`. `None` for non-cohort items.
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d). A blocked gate key makes the item ineligible. Empty = un-gated.
@@ -438,6 +439,7 @@ impl<B: LibBackend> Pqueue<B> {
                 group_key: it.group_key,
                 payload: it.payload,
                 fields: it.fields,
+                metadata: it.metadata,
                 cohort_size: it.cohort_size,
                 gate_keys: it.gate_keys,
             })
@@ -469,6 +471,7 @@ impl<B: LibBackend> Pqueue<B> {
                 item.not_before,
                 item.payload,
                 item.fields,
+                item.metadata,
                 self.clock.now(),
                 epoch,
             )
@@ -499,6 +502,21 @@ impl<B: LibBackend> Pqueue<B> {
         lease_ms: u64,
         compatibility: ClaimCompatibility,
     ) -> EngineResult<Vec<ClaimedItem>> {
+        Ok(self
+            .claim_response_with(queue, max, lease_ms, compatibility)
+            .await?
+            .items)
+    }
+
+    /// Claim with API-001 compatibility options and return the full response envelope. Use this when the
+    /// caller needs top-level fields such as `cohort_lease_token` for `whole_cohort` claims.
+    pub async fn claim_response_with(
+        &self,
+        queue: &QueueKey,
+        max: usize,
+        lease_ms: u64,
+        compatibility: ClaimCompatibility,
+    ) -> EngineResult<Claimed> {
         // Drain split (TD-003 §Graceful Drain): a draining owner refuses a NEW claim with a retryable
         // `Unavailable` so in-flight leases finalize before handoff; pushes/finalizes/renews continue.
         if self.is_draining(queue) {
@@ -519,7 +537,7 @@ impl<B: LibBackend> Pqueue<B> {
             expected_epoch,
         };
         let r = self.backend.claim(req).await;
-        Ok(self.note(queue, r)?.items)
+        self.note(queue, r)
     }
 
     /// Complete (ack) the given leased items. All-or-nothing (a fenced/superseded/non-leased id rejects
