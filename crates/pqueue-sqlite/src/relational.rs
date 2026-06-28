@@ -2501,6 +2501,15 @@ pub struct SqliteRelationalBackend {
     counters: QueueCounters,
 }
 
+/// SQLite materialized projection fed by an external command-log authority.
+///
+/// This is intentionally not a full backend: it does not mint ids, append log entries, or expose
+/// data-plane mutation ports. It reuses the relational SQL apply path so an object-log composite can
+/// rebuild/read from SQLite without duplicating the 14-arm command projection.
+pub struct SqliteProjectionStore {
+    inner: Mutex<Inner>,
+}
+
 impl SqliteRelationalBackend {
     /// Open (or create) the relational store at `path` and load the queue-definition cache. The item
     /// projection is already durable in `pqueue_items`; there is no log to replay.
@@ -2521,16 +2530,7 @@ impl SqliteRelationalBackend {
     }
 
     fn from_conn(conn: Connection) -> EngineResult<Self> {
-        st(conn.execute_batch(RELATIONAL_SCHEMA))?;
-        ensure_item_fields_column(&conn)?;
-        ensure_item_metadata_column(&conn)?;
-        ensure_cohort_lifecycle_columns(&conn)?;
-        let mut inner = Inner {
-            conn,
-            queues: HashMap::new(),
-            live_tokens: HashMap::new(),
-        };
-        inner.reload()?;
+        let inner = open_inner(conn)?;
         let backend = Self {
             inner: Mutex::new(inner),
             node_id: 0,
@@ -2566,6 +2566,151 @@ impl SqliteRelationalBackend {
         }
         Ok(())
     }
+}
+
+impl SqliteProjectionStore {
+    /// Open (or create) a SQLite projection database at `path`.
+    pub fn open(path: &str) -> EngineResult<Self> {
+        Self::from_conn(st(Connection::open(path))?)
+    }
+
+    /// An ephemeral `:memory:` projection store for tests.
+    pub fn in_memory() -> EngineResult<Self> {
+        Self::from_conn(st(Connection::open_in_memory())?)
+    }
+
+    fn from_conn(conn: Connection) -> EngineResult<Self> {
+        Ok(Self {
+            inner: Mutex::new(open_inner(conn)?),
+        })
+    }
+
+    /// Create or validate queue projection metadata.
+    pub fn create_queue_projection(
+        &self,
+        definition: QueueDefinition,
+    ) -> EngineResult<CreateQueueOutcome> {
+        let mut g = self.inner.lock().expect("projection store poisoned");
+        create_queue_sql(&mut g, definition)
+    }
+
+    /// Apply one already-durable command at its externally assigned log position.
+    pub fn apply_committed(
+        &self,
+        position: &CommandPosition,
+        envelope: &CommandEnvelope,
+    ) -> EngineResult<()> {
+        let mut g = self.inner.lock().expect("projection store poisoned");
+        apply_committed_sql(&mut g, position, envelope)
+    }
+}
+
+fn open_inner(conn: Connection) -> EngineResult<Inner> {
+    st(conn.execute_batch(RELATIONAL_SCHEMA))?;
+    ensure_item_fields_column(&conn)?;
+    ensure_item_metadata_column(&conn)?;
+    ensure_cohort_lifecycle_columns(&conn)?;
+    let mut inner = Inner {
+        conn,
+        queues: HashMap::new(),
+        live_tokens: HashMap::new(),
+    };
+    inner.reload()?;
+    Ok(inner)
+}
+
+fn create_queue_sql(
+    g: &mut Inner,
+    definition: QueueDefinition,
+) -> EngineResult<CreateQueueOutcome> {
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    if let Some(existing) = g.queues.get(&key) {
+        if existing.ordering_mode != definition.ordering_mode
+            || existing.priority_model != definition.priority_model
+        {
+            return Err(EngineError::QueueDefinitionConflict);
+        }
+        return Ok(CreateQueueOutcome {
+            created: false,
+            definition: existing.clone(),
+        });
+    }
+    let (t, q) = parts(&key);
+    let def_json = to_json(&definition)?;
+    st(g.conn.execute(
+        "INSERT INTO queues(tenant,queue,definition,paused) VALUES(?1,?2,?3,0)",
+        params![t, q, def_json],
+    ))?;
+    st(g.conn.execute(
+        "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES(?1,?2,0,0)",
+        params![t, q],
+    ))?;
+    g.queues.insert(key, definition.clone());
+    Ok(CreateQueueOutcome {
+        created: true,
+        definition,
+    })
+}
+
+fn apply_committed_sql(
+    g: &mut Inner,
+    position: &CommandPosition,
+    envelope: &CommandEnvelope,
+) -> EngineResult<()> {
+    if !g.queues.contains_key(&position.queue) {
+        return Err(EngineError::NotFound);
+    }
+    let Inner {
+        conn,
+        queues,
+        live_tokens,
+        ..
+    } = g;
+    let (t, q) = parts(&position.queue);
+    let tx = st(conn.transaction())?;
+    let next_seq: i64 = st(tx
+        .query_row(
+            "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?
+    .ok_or(EngineError::NotFound)?;
+    let incoming_seq = position.sequence as i64;
+    if incoming_seq < next_seq {
+        return Ok(());
+    }
+    if incoming_seq > next_seq {
+        return Err(EngineError::Storage(format!(
+            "sqlite projection replay gap for {}:{}: expected sequence {next_seq}, got {incoming_seq}",
+            position.queue.tenant_id.as_str(),
+            position.queue.queue_id.as_str()
+        )));
+    }
+    let mut token_ops = Vec::new();
+    apply_command_sql(
+        &tx,
+        queues,
+        &mut token_ops,
+        &position.queue,
+        position.sequence,
+        envelope.created_at,
+        &envelope.command,
+    )?;
+    let new_next_seq = position
+        .sequence
+        .checked_add(1)
+        .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+    st(tx.execute(
+        "UPDATE relational_cursor SET \
+         next_seq=?3, \
+         assignment_epoch=CASE WHEN assignment_epoch<?4 THEN ?4 ELSE assignment_epoch END \
+         WHERE tenant=?1 AND queue=?2",
+        params![t, q, new_next_seq as i64, position.backend_epoch as i64],
+    ))?;
+    st(tx.commit())?;
+    apply_token_ops(live_tokens, token_ops);
+    Ok(())
 }
 
 // --- Backend::write unit of work (disjoint borrows: tx over conn, &mut live-token map, &queues) -------
@@ -2684,33 +2829,7 @@ impl ControlPlaneStore for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            if let Some(existing) = g.queues.get(&key) {
-                if existing.ordering_mode != definition.ordering_mode
-                    || existing.priority_model != definition.priority_model
-                {
-                    return Err(EngineError::QueueDefinitionConflict);
-                }
-                return Ok(CreateQueueOutcome {
-                    created: false,
-                    definition: existing.clone(),
-                });
-            }
-            let (t, q) = (key.tenant_id.as_str(), key.queue_id.as_str());
-            let def_json = to_json(&definition)?;
-            st(g.conn.execute(
-                "INSERT INTO queues(tenant,queue,definition,paused) VALUES(?1,?2,?3,0)",
-                params![t, q, def_json],
-            ))?;
-            st(g.conn.execute(
-                "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES(?1,?2,0,0)",
-                params![t, q],
-            ))?;
-            g.queues.insert(key, definition.clone());
-            Ok(CreateQueueOutcome {
-                created: true,
-                definition,
-            })
+            create_queue_sql(&mut g, definition)
         })();
         std::future::ready(result)
     }
@@ -2855,6 +2974,79 @@ impl ProjectionRead for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         let result = {
             let g = self.inner.lock().expect("poisoned");
+            metrics_sql(&g.conn, queue)
+        };
+        std::future::ready(result)
+    }
+}
+
+impl ProjectionRead for SqliteProjectionStore {
+    fn select_eligible(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("projection store poisoned");
+            select_eligible_sql(&g.conn, shard, now, limit)
+        };
+        std::future::ready(result)
+    }
+
+    fn peek(
+        &self,
+        shard: &QueueKey,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("projection store poisoned");
+            peek_sql(&g.conn, shard, limit)
+        };
+        std::future::ready(result)
+    }
+
+    fn pending(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("projection store poisoned");
+            pending_sql(&g.conn, &g.live_tokens, shard)
+        };
+        std::future::ready(result)
+    }
+
+    fn claimed_view(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("projection store poisoned");
+            render_claimed(&g.conn, shard, ids, |id| g.live_tokens.get(id).cloned())
+        };
+        std::future::ready(result)
+    }
+
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("projection store poisoned");
+            live_items_sql(&g.conn, shard, keys)
+        };
+        std::future::ready(result)
+    }
+
+    fn metrics(
+        &self,
+        queue: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("projection store poisoned");
             metrics_sql(&g.conn, queue)
         };
         std::future::ready(result)

@@ -39,7 +39,7 @@ use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, OptionalExtension, params};
 
 mod relational;
-pub use relational::SqliteRelationalBackend;
+pub use relational::{SqliteProjectionStore, SqliteRelationalBackend};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (

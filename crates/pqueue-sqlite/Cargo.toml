@@ -47,6 +47,11 @@ path = "tests/relational_conformance.rs"
 name = "relational_reconnect"
 path = "tests/relational_reconnect.rs"
 
+# Projection-only replay/apply seam used by the object-log + SQLite composite runtime.
+[[test]]
+name = "sqlite_projection_tests"
+path = "tests/sqlite_projection_tests.rs"
+
 # BQ-13: head-to-head CORE parity — the in-memory log-replay family vs the relational family.
 [[test]]
 name = "cross_family_parity"
