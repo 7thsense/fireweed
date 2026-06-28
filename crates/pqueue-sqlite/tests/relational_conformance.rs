@@ -33,6 +33,7 @@ use pqueue_sqlite::SqliteRelationalBackend;
 fn qdef_groups(max_group_size: u64) -> QueueDefinition {
     QueueDefinition {
         max_eligible_group_size: Some(max_group_size),
+        secondary_indexes: vec![],
         ..qdef()
     }
 }

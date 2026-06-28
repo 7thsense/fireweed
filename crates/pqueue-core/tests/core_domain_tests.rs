@@ -25,6 +25,7 @@ fn valid_create_queue() -> CreateQueue {
         max_push_batch_size: 100,
         max_claim_batch_size: 50,
         max_eligible_group_size: Some(25),
+        secondary_indexes: vec![],
     }
 }
 

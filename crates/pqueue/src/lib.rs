@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use pqueue_core::{LeaseToken, WorkerId};
 use pqueue_engine::{
     ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
-    LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort,
-    UpsertPort, acquire_and_fence,
+    IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
+    PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort,
+    UpdateFieldsPort, UpsertPort, acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -32,12 +32,13 @@ use pqueue_engine::{
 // ---------------------------------------------------------------------------
 pub use bytes::Bytes;
 pub use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, OwnerId, PriorityValue, QueueDefinition, UtcTimestamp,
+    ClientItemKey, GroupKey, IndexSpec, ItemId, OwnerId, PriorityValue, QueueDefinition,
+    UtcTimestamp,
 };
 pub use pqueue_engine::{
     ClaimCompatibility, ClaimedItem, Clock, ControlPlaneConfig, CreateQueueOutcome, EngineError,
-    EngineResult, GroupBatching, ItemView, LiveItemView, PayloadUpdate, QueueKey, QueueMetrics,
-    UpsertOutcome,
+    EngineResult, GroupBatching, IndexHit, ItemView, LiveItemView, PayloadUpdate, QueueKey,
+    QueueMetrics, UpsertOutcome,
 };
 
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
@@ -69,6 +70,7 @@ pub trait LibBackend:
     + ReclaimPort
     + PurgePort
     + ProjectionRead
+    + IndexQueryPort
     + ControlPlaneStore
     + Send
     + Sync
@@ -86,6 +88,7 @@ impl<T> LibBackend for T where
         + ReclaimPort
         + PurgePort
         + ProjectionRead
+        + IndexQueryPort
         + ControlPlaneStore
         + Send
         + Sync
@@ -603,6 +606,30 @@ impl<B: LibBackend> Pqueue<B> {
         keys: Vec<ClientItemKey>,
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
         self.backend.live_items(queue, &keys).await
+    }
+
+    /// Exact composite-key get on a UNIQUE secondary index (ADR-010). `key` is the per-field value bytes
+    /// in the index's declared field order. Returns the single [`IndexHit`] holding the key, or `None`.
+    /// Pure read (no epoch/fence). `EngineError::Invalid` if `index` is not a unique index on this queue;
+    /// `EngineError::Unavailable` on a relational backend (Phase 2).
+    pub async fn query_index_unique(
+        &self,
+        queue: &QueueKey,
+        index: &str,
+        key: Vec<Vec<u8>>,
+    ) -> EngineResult<Option<IndexHit>> {
+        self.backend.index_get_unique(queue, index, &key).await
+    }
+
+    /// Exact composite-key lookup on a secondary index (unique or non-unique, ADR-010). Returns every
+    /// matching item ordered by `item_id` ascending. Pure read (no epoch/fence).
+    pub async fn query_index(
+        &self,
+        queue: &QueueKey,
+        index: &str,
+        key: Vec<Vec<u8>>,
+    ) -> EngineResult<Vec<IndexHit>> {
+        self.backend.index_lookup(queue, index, &key).await
     }
 
     /// Dead-letter (terminal `fail`) the given leased items.

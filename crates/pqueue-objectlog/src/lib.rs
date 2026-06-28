@@ -31,12 +31,13 @@ use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
-    LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters,
-    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, build_push_items, require_item_level_claim, validate_purge_force,
+    FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand,
+    LeaseView, LiveItemView, LogRead, LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot,
+    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, require_item_level_claim,
+    validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -266,7 +267,8 @@ impl Inner {
                     .map_err(store)?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             let shard = key.clone();
-            let mut proj = ProjectionData::new(definition.priority_model);
+            let mut proj =
+                ProjectionData::new(definition.priority_model, &definition.secondary_indexes);
             for (_seq, env) in self.read_envelopes(&shard)? {
                 // Command-id is `obj-{node}-{n}` (or legacy `obj-{n}`); the trailing component is the seq.
                 if let Some(n) = env
@@ -746,8 +748,10 @@ impl ControlPlaneStore for ObjectLogBackend {
             let dir = g.shard_dir(&shard);
             fs::create_dir_all(&dir).map_err(store)?;
             fs::write(dir.join("queue.json"), to_json(&definition)?).map_err(store)?;
-            g.projections
-                .insert(shard, ProjectionData::new(definition.priority_model));
+            g.projections.insert(
+                shard,
+                ProjectionData::new(definition.priority_model, &definition.secondary_indexes),
+            );
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
                 created: true,
@@ -850,6 +854,39 @@ impl LogRead for ObjectLogBackend {
             let consumed = start + entries.len() as u64;
             let next = (consumed < total).then(|| CommandPosition::new(shard.clone(), 0, consumed));
             Ok(CommandPage { entries, next })
+        })();
+        std::future::ready(result)
+    }
+}
+
+/// Secondary-index reads over the (eventually-applied) shared projection (ADR-010). Read-after-write is
+/// NOT guaranteed on this class — a hit reflects whatever the log has applied so far — but a delegating
+/// impl is provided so the backend satisfies the library bound and serves replayed index state.
+impl IndexQueryPort for ObjectLogBackend {
+    fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_get_unique(index, key)
+        })();
+        std::future::ready(result)
+    }
+
+    fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_lookup(index, key)
         })();
         std::future::ready(result)
     }

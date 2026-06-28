@@ -26,9 +26,9 @@ use pqueue_engine::{
     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
-    ClaimCompatibility, PayloadUpdate, PurgeItemsCommand, PurgePort, PushPort, PushSpec,
-    QueueCounters, ReassignLeaseCommand, ReassignLeasePort, ReclaimPort, RenewLeaseCommand,
-    RenewLeasePort, UpdateFieldsCommand, UpdateFieldsPort, build_push_items,
+    ClaimCompatibility, IndexHit, IndexQueryPort, PayloadUpdate, PurgeItemsCommand, PurgePort,
+    PushPort, PushSpec, QueueCounters, ReassignLeaseCommand, ReassignLeasePort, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, UpdateFieldsCommand, UpdateFieldsPort, build_push_items,
     require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::{LogData, ProjectionData, commit};
@@ -252,6 +252,11 @@ impl UpsertPort for MemoryBackend {
             };
             match existing {
                 None => {
+                    // Pre-commit unique-index validation (ADR-010 §5.1): a violating insert appends nothing.
+                    {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.index_validate(&item.item_id, &item.fields, None)?;
+                    }
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
                     Self::commit_locked(&mut g, shard, env, expected_epoch)?;
                     Ok(UpsertOutcome::Inserted {
@@ -265,6 +270,11 @@ impl UpsertPort for MemoryBackend {
                     };
                     match state {
                         ItemState::Pending => {
+                            // The superseded item is removed in the same command, so it does not conflict.
+                            {
+                                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                                proj.index_validate_replace(&existing_id, &item)?;
+                            }
                             let env = mk(QueueCommand::ReplacePending(ReplacePendingCommand {
                                 client_item_key: client_item_key.clone(),
                                 superseded_item_id: existing_id,
@@ -312,6 +322,11 @@ impl PushPort for MemoryBackend {
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            // Pre-commit unique-index validation (ADR-010 §5.1): a violating push appends nothing.
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.index_validate_push(&push_items)?;
+            }
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
                 request_id: None,
@@ -472,6 +487,8 @@ impl UpdateFieldsPort for MemoryBackend {
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.update_fields_validate(&item_id, expected_item_version)?;
+                // Pre-commit unique-index validation (ADR-010 §5.1): a violating update appends nothing.
+                proj.index_validate_update(&item_id, &field_ops)?;
             }
             let cmd = QueueCommand::UpdateFields(UpdateFieldsCommand {
                 item_id,
@@ -603,9 +620,9 @@ impl ControlPlaneStore for MemoryBackend {
             }
             let shard = key.clone();
             g.logs.entry(shard.clone()).or_default();
-            g.projections
-                .entry(shard)
-                .or_insert_with(|| ProjectionData::new(definition.priority_model));
+            g.projections.entry(shard).or_insert_with(|| {
+                ProjectionData::new(definition.priority_model, &definition.secondary_indexes)
+            });
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
                 created: true,
@@ -767,6 +784,36 @@ impl ProjectionRead for MemoryBackend {
             let shard = queue.clone();
             let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
             Ok(proj.metrics())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl IndexQueryPort for MemoryBackend {
+    fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_get_unique(index, key)
+        })();
+        std::future::ready(result)
+    }
+
+    fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_lookup(index, key)
         })();
         std::future::ready(result)
     }

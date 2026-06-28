@@ -27,13 +27,13 @@ use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
-    LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef,
-    SnapshotStore, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    build_push_items, require_item_level_claim, validate_purge_force,
+    FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand,
+    LeaseView, LiveItemView, LogRead, LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot,
+    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
+    SnapshotRef, SnapshotStore, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, build_push_items, require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -231,7 +231,8 @@ impl Inner {
                 serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             let shard = key.clone();
-            let mut proj = ProjectionData::new(definition.priority_model);
+            let mut proj =
+                ProjectionData::new(definition.priority_model, &definition.secondary_indexes);
             for env in self.read_log_envelopes(&t, &q)? {
                 // Command-id is `sql-{node}-{n}` (or legacy `sql-{n}`); the trailing component is the seq.
                 if let Some(n) = env
@@ -512,6 +513,11 @@ impl UpsertPort for SqliteBackend {
             };
             match existing {
                 None => {
+                    // Pre-commit unique-index validation (ADR-010 §5.1): a violating insert appends nothing.
+                    {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.index_validate(&item.item_id, &item.fields, None)?;
+                    }
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
                     g.commit_locked(shard, env, expected_epoch)?;
                     Ok(UpsertOutcome::Inserted {
@@ -525,6 +531,11 @@ impl UpsertPort for SqliteBackend {
                     };
                     match state {
                         ItemState::Pending => {
+                            // Superseded item is removed in the same command, so it does not conflict.
+                            {
+                                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                                proj.index_validate_replace(&existing_id, &item)?;
+                            }
                             let env = mk(QueueCommand::ReplacePending(ReplacePendingCommand {
                                 client_item_key: client_item_key.clone(),
                                 superseded_item_id: existing_id,
@@ -574,6 +585,11 @@ impl PushPort for SqliteBackend {
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            // Pre-commit unique-index validation (ADR-010 §5.1): a violating push appends nothing.
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.index_validate_push(&push_items)?;
+            }
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("sql-{}-{n}", self.node_id)),
                 request_id: None,
@@ -728,6 +744,8 @@ impl UpdateFieldsPort for SqliteBackend {
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.update_fields_validate(&item_id, expected_item_version)?;
+                // Pre-commit unique-index validation (ADR-010 §5.1): a violating update appends nothing.
+                proj.index_validate_update(&item_id, &field_ops)?;
             }
             let cmd = QueueCommand::UpdateFields(UpdateFieldsCommand {
                 item_id,
@@ -834,8 +852,10 @@ impl ControlPlaneStore for SqliteBackend {
                 params![t, q, def_json],
             ))?;
             let shard = key.clone();
-            g.projections
-                .insert(shard, ProjectionData::new(definition.priority_model));
+            g.projections.insert(
+                shard,
+                ProjectionData::new(definition.priority_model, &definition.secondary_indexes),
+            );
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
                 created: true,
@@ -1041,6 +1061,36 @@ impl ProjectionRead for SqliteBackend {
             let shard = queue.clone();
             let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
             Ok(proj.metrics())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl IndexQueryPort for SqliteBackend {
+    fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_get_unique(index, key)
+        })();
+        std::future::ready(result)
+    }
+
+    fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_lookup(index, key)
         })();
         std::future::ready(result)
     }

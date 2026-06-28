@@ -59,13 +59,14 @@ use pqueue_engine::{
     ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit,
     Claimed, ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
-    LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
-    project_scopes, validate_claim_compatibility, validate_purge_force,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort,
+    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter, PayloadUpdate,
+    ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
+    ReplacePendingCommand, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, build_push_items, project_scopes, validate_claim_compatibility,
+    validate_purge_force,
 };
 use sha2::{Digest, Sha256};
 
@@ -2081,6 +2082,28 @@ impl ProjectionRead for PostgresRelationalBackend {
     }
 }
 
+/// Secondary-index queries are a Phase 2 (relational) feature (ADR-010 §7): the side index table and its
+/// maintenance are not yet built, so the relational family reports `Unavailable` rather than a wrong answer.
+impl IndexQueryPort for PostgresRelationalBackend {
+    fn index_get_unique(
+        &self,
+        _shard: &QueueKey,
+        _index: &str,
+        _key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn index_lookup(
+        &self,
+        _shard: &QueueKey,
+        _index: &str,
+        _key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
 impl DiscoveryPort for PostgresRelationalBackend {
     fn discover_active_scopes(
         &self,
@@ -2752,6 +2775,7 @@ mod gated_group_summary_tests {
             max_push_batch_size: 100,
             max_claim_batch_size: 100,
             max_eligible_group_size: None,
+            secondary_indexes: vec![],
         }
     }
     fn shard() -> QueueKey {
@@ -2835,6 +2859,7 @@ mod gated_group_summary_tests {
 
         let def = QueueDefinition {
             max_eligible_group_size: Some(5),
+            secondary_indexes: vec![],
             ..qdef()
         };
         let g2 = |priority: i64, group: &str| PushSpec {
@@ -2941,6 +2966,7 @@ mod gated_group_summary_tests {
 
         let def = QueueDefinition {
             max_eligible_group_size: Some(5),
+            secondary_indexes: vec![],
             ..qdef()
         };
         let g2 = |priority: i64, group: &str| PushSpec {

@@ -185,6 +185,44 @@ pub trait ProjectionRead: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Secondary-index query (ADR-010): exact composite-key lookup over configured item fields
+// ---------------------------------------------------------------------------
+
+/// One hit from a secondary-index lookup — enough to identify and re-read the item. Always carries the
+/// item's CURRENT `item_version` (read-after-write).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexHit {
+    pub client_item_key: ClientItemKey,
+    pub item_id: ItemId,
+    pub item_version: u64,
+}
+
+/// Read port for per-queue secondary indexes (ADR-010 §6). The `key` is the per-field value bytes in
+/// field order; the port encodes the §4.1 composite key and probes the index. The in-memory log-replay
+/// family implements this over its shared `ProjectionData`; the relational family returns
+/// [`EngineError::Unavailable`](crate::EngineError::Unavailable) until Phase 2 wires the side index table.
+#[doc(hidden)]
+pub trait IndexQueryPort: Send + Sync {
+    /// Exact composite-key get on a UNIQUE index. `Ok(None)` if no item holds the key;
+    /// [`EngineError::Invalid`](crate::EngineError::Invalid) if `index` is not a unique index on this queue.
+    fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send;
+
+    /// Exact composite-key lookup on a (non-unique or unique) index. Returns all matching items ordered
+    /// by `item_id` ascending; empty if none.
+    fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // Claim & upsert (atomic with selection)
 // ---------------------------------------------------------------------------
 

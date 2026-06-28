@@ -53,10 +53,11 @@ pub use finalize_validation::{
 };
 pub use port::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
-    CreateQueueOutcome, DiscoveryPort, FinalizePort, IdGen, ItemView, LeaseView, LiveItemView,
-    LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort,
-    PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    CreateQueueOutcome, DiscoveryPort, FinalizePort, IdGen, IndexHit, IndexQueryPort, ItemView,
+    LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
+    ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
 

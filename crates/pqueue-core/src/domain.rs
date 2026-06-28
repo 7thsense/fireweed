@@ -533,6 +533,22 @@ pub struct ItemResult {
     pub status: ItemResultStatus,
 }
 
+/// Declaration of one per-queue secondary index over configured item fields (ADR-010).
+///
+/// An index belongs to one queue (no cross-queue lookup) and is generic over field *names* and opaque
+/// *bytes* values (pqueue stays domain-agnostic). The composite key is built from `fields` in order; a
+/// `unique` index rejects a push/upsert/update that would create a duplicate key with
+/// [`ApiErrorCode::Conflict`] semantics, atomically committing nothing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IndexSpec {
+    /// Unique index name within the queue (the lookup handle).
+    pub name: String,
+    /// Ordered list of field names whose values compose the key. Order is significant.
+    pub fields: Vec<String>,
+    /// `true` => at most one live item may carry a given composite key (atomic Conflict on violation).
+    pub unique: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateQueue {
     pub tenant_id: TenantId,
@@ -550,6 +566,8 @@ pub struct CreateQueue {
     pub max_push_batch_size: u64,
     pub max_claim_batch_size: u64,
     pub max_eligible_group_size: Option<u64>,
+    /// Per-queue secondary indexes over configured item fields (ADR-010). Empty (default) = no indexes.
+    pub secondary_indexes: Vec<IndexSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -569,6 +587,10 @@ pub struct QueueDefinition {
     pub max_push_batch_size: u64,
     pub max_claim_batch_size: u64,
     pub max_eligible_group_size: Option<u64>,
+    /// Per-queue secondary indexes over configured item fields (ADR-010). Empty (default) = no indexes;
+    /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
+    #[serde(default)]
+    pub secondary_indexes: Vec<IndexSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -717,6 +739,34 @@ impl CreateQueue {
             }
         }
 
+        // Secondary-index declarations (ADR-010 §3): each index needs a non-empty name unique within the
+        // queue, and a non-empty list of non-empty field names. Field names are NOT checked against pushed
+        // items — fields are dynamic per item, and a missing field simply leaves the item out of the index
+        // (sparse rule).
+        let mut seen_index_names = std::collections::BTreeSet::new();
+        for spec in &self.secondary_indexes {
+            if spec.name.trim().is_empty() {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index name must not be empty",
+                ));
+            }
+            if !seen_index_names.insert(spec.name.as_str()) {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index names must be unique within the queue",
+                ));
+            }
+            if spec.fields.is_empty() {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index must declare at least one field",
+                ));
+            }
+            if spec.fields.iter().any(|f| f.trim().is_empty()) {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index field name must not be empty",
+                ));
+            }
+        }
+
         let mut eligibility_policy = self.eligibility_policy;
         eligibility_policy = match eligibility_policy.gate_keys {
             GateKeyPolicy::None => {
@@ -777,6 +827,7 @@ impl CreateQueue {
             max_push_batch_size: self.max_push_batch_size,
             max_claim_batch_size: self.max_claim_batch_size,
             max_eligible_group_size: self.max_eligible_group_size,
+            secondary_indexes: self.secondary_indexes,
         })
     }
 }

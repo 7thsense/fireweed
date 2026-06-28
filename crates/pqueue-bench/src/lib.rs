@@ -262,7 +262,7 @@ pub fn bench_qdef(tenant: &str, queue: &str, shape: &Shape) -> QueueDefinition {
         max_push_batch_size: 10_000_000,
         max_claim_batch_size: 10_000_000,
         max_eligible_group_size: None,
-    }
+        secondary_indexes: vec![],    }
 }
 
 /// A bench `QueueKey` in the `bench` tenant.
