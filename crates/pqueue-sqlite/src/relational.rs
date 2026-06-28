@@ -1765,6 +1765,11 @@ fn apply_command_sql(
             }
             Ok(())
         }
+        // Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37) are not
+        // yet implemented on the relational family — the durable parity slice is deferred (C9). This backend
+        // does not implement `CommitTransitionPort` (it inherits the `Unavailable` default), so a side-record
+        // command is never appended here; reject defensively if one is ever replayed.
+        QueueCommand::WriteSideRecords(_) => Err(EngineError::Unavailable),
     }
 }
 
@@ -3504,6 +3509,10 @@ impl UpsertPort for SqliteRelationalBackend {
         std::future::ready(result)
     }
 }
+
+/// Snorri authoritative vectorized claimed-work commit (epic pqueue-2201fd37). The durable relational
+/// parity slice is deferred (C9); inherits the default impl returning [`EngineError::Unavailable`].
+impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {}
 
 impl FinalizePort for SqliteRelationalBackend {
     fn finalize(

@@ -27,8 +27,8 @@ use pqueue_core::{
     PriorityModel, PriorityValue, UtcTimestamp, apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
-    ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
-    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PayloadUpdate,
+    ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
+    FinalizeKind, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PayloadUpdate,
     ProjectionSnapshot, PushItem, QueueCommand, QueueKey, QueueMetrics, SnapshotRef,
 };
 
@@ -332,6 +332,11 @@ pub struct ProjectionData {
     indexes: BTreeMap<String, SecondaryIndex>,
     /// The index declarations (field lists), needed to recompute keys from a record's fields.
     index_specs: Vec<IndexSpec>,
+    /// Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37). Wholly
+    /// SEPARATE from `items`/`eligible`/`by_key`: these are NOT claimable work — they never enter the
+    /// eligibility index, do not appear in claim/peek/metrics-as-work, and survive input finalization. Both
+    /// key and payload are opaque bytes pqueue never interprets.
+    side_records: BTreeMap<Vec<u8>, Bytes>,
 }
 
 impl ProjectionData {
@@ -354,6 +359,7 @@ impl ProjectionData {
             paused: false,
             indexes,
             index_specs: specs.to_vec(),
+            side_records: BTreeMap::new(),
         }
     }
 
@@ -707,6 +713,17 @@ impl ProjectionData {
             // Gates (BQ-14d) are a relational-mode feature; the in-memory family stores no gate state and
             // no item gate keys, so a gate flip is a no-op here (the log-replay backends replay it as such).
             QueueCommand::SetGates(_) => Ok(()),
+            // Opaque non-work side records (Snorri authoritative-commit boundary): write each key -> payload
+            // into the SEPARATE side-record map. Deliberately touches NOTHING in the work-item projection —
+            // not `items`, `eligible`, `by_key`, the secondary indexes, nor metrics — so a side record is
+            // never claimable/peekable work and survives input finalization. Infallible (insert-or-overwrite).
+            QueueCommand::WriteSideRecords(c) => {
+                for record in &c.records {
+                    self.side_records
+                        .insert(record.key.clone(), record.payload.clone());
+                }
+                Ok(())
+            }
             QueueCommand::PurgeItems(c) => {
                 let model = self.priority_model;
                 for id in &c.item_ids {
@@ -856,6 +873,52 @@ impl ProjectionData {
     /// WITHOUT mutating anything.
     pub fn finalize_validate(&self, outcomes: &[FinalizeOutcome]) -> EngineResult<()> {
         self.validate_leased(outcomes.iter().map(|o| &o.item_id))
+    }
+
+    /// Read an opaque non-work side record by key (Snorri recovery/explain read). `None` if unwritten.
+    /// Side records live in a map disjoint from the work-item projection, so this never reflects claimable
+    /// work and is unaffected by item finalization.
+    pub fn side_record(&self, key: &[u8]) -> Option<&Bytes> {
+        self.side_records.get(key)
+    }
+
+    /// Pre-commit validation for a vectorized claimed-work commit (Snorri StateStore boundary, epic
+    /// pqueue-2201fd37). Mirrors [`finalize_validate`]'s lease-state precedence (absent → `NotFound`,
+    /// fenced → `StaleLease`, terminal → `Terminal`, superseded → `Superseded`, non-leased → `Invalid`) and
+    /// ADDS, for each presented [`ClaimRef`], three claim-authority/state-fence checks on a live leased item:
+    /// the stored `lease_token` must equal the presented token and the lease must be unexpired (half-open:
+    /// expired iff `lease_expires_at < now`), else `StaleLease`; the stored `item_version` must equal
+    /// `claim_ref.item_version`, else `Conflict` (the optimistic state fence). Pre-commit: nothing is
+    /// appended or mutated on rejection.
+    pub fn commit_validate(&self, refs: &[ClaimRef], now: UtcTimestamp) -> EngineResult<()> {
+        for r in refs {
+            match self.items.get(&r.item_id) {
+                None => return Err(EngineError::NotFound),
+                Some(rec) if rec.fenced => return Err(EngineError::StaleLease),
+                Some(rec) if rec.state.is_terminal() => return Err(EngineError::Terminal),
+                Some(rec) if rec.superseded => return Err(EngineError::Superseded),
+                Some(rec) if rec.state != ItemState::Leased => {
+                    return Err(EngineError::Invalid("item is not leased"));
+                }
+                Some(rec) => {
+                    // Claim authority: the presented lease token must match the stored one (token mismatch is
+                    // a stale/forged claim, never the version-fence `Conflict`).
+                    if rec.lease_token.as_ref() != Some(&r.lease_token) {
+                        return Err(EngineError::StaleLease);
+                    }
+                    // The lease must be unexpired (half-open, identical to `expired_leases`: expired iff the
+                    // deadline is strictly before `now`).
+                    if rec.lease_expires_at.is_some_and(|exp| exp < now) {
+                        return Err(EngineError::StaleLease);
+                    }
+                    // Optimistic state fence: the caller's observed version must equal the committed version.
+                    if rec.item_version != r.item_version {
+                        return Err(EngineError::Conflict);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Pre-commit validation for a lease RENEW batch — IDENTICAL rejection semantics to

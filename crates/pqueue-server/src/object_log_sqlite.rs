@@ -266,6 +266,10 @@ impl ClaimPort for ObjectLogSqliteBackend {
     }
 }
 
+/// Snorri authoritative vectorized claimed-work commit (epic pqueue-2201fd37). This composite backend has
+/// no single atomic transition boundary; inherits the default impl returning `EngineError::Unavailable`.
+impl pqueue_engine::CommitTransitionPort for ObjectLogSqliteBackend {}
+
 impl FinalizePort for ObjectLogSqliteBackend {
     fn finalize(
         &self,

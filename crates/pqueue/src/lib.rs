@@ -17,12 +17,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 // Internal-only types (not named in the public API surface).
-use pqueue_core::{LeaseToken, WorkerId};
+use pqueue_core::WorkerId;
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
-    IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
-    PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort,
-    UpdateFieldsPort, UpsertPort, acquire_and_fence,
+    ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+    CommitTransitionPort, ControlPlaneStore, FinalizeOutcome, FinalizePort, IndexQueryPort,
+    LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
+    QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort,
+    UpsertPort, acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -34,15 +35,15 @@ pub use bytes::Bytes;
 pub use pqueue_core::{
     ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, CreateQueue, CreateQueueError,
     CreateQueueErrorKind, DecimalValue, EligibilityPolicy, GateKeyPolicy, GroupKey,
-    IdentifierError, IndexSpec, ItemId, Metadata, MetadataValue, OrderingMode, OwnerId,
+    IdentifierError, IndexSpec, ItemId, LeaseToken, Metadata, MetadataValue, OrderingMode, OwnerId,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
     QueueCreationPolicy, QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RequestId,
     RetryPolicy, TenantId, TimestampError, UtcTimestamp,
 };
 pub use pqueue_engine::{
-    ClaimCompatibility, Claimed, ClaimedItem, Clock, ControlPlaneConfig, CreateQueueOutcome,
-    EngineError, EngineResult, GroupBatching, IndexHit, ItemView, LiveItemView, PayloadUpdate,
-    QueueKey, QueueMetrics, UpsertOutcome,
+    ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, ControlPlaneConfig,
+    CreateQueueOutcome, EngineError, EngineResult, FinalizeKind, GroupBatching, IndexHit, ItemView,
+    LiveItemView, PayloadUpdate, QueueKey, QueueMetrics, SideRecord, UpsertOutcome,
 };
 
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
@@ -69,6 +70,7 @@ pub trait LibBackend:
     + UpsertPort
     + UpdateFieldsPort
     + FinalizePort
+    + CommitTransitionPort
     + RenewLeasePort
     + ReassignLeasePort
     + ReclaimPort
@@ -87,6 +89,7 @@ impl<T> LibBackend for T where
         + UpsertPort
         + UpdateFieldsPort
         + FinalizePort
+        + CommitTransitionPort
         + RenewLeasePort
         + ReassignLeasePort
         + ReclaimPort
@@ -152,6 +155,52 @@ pub struct NewItem {
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d). A blocked gate key makes the item ineligible. Empty = un-gated.
     pub gate_keys: Vec<String>,
+}
+
+/// Map a public [`NewItem`] to the engine's [`PushSpec`] (shared by `push` and `commit`).
+fn new_item_to_spec(it: NewItem) -> PushSpec {
+    PushSpec {
+        client_item_key: it.client_item_key,
+        priority: it.priority,
+        not_before: it.not_before,
+        group_key: it.group_key,
+        payload: it.payload,
+        fields: it.fields,
+        metadata: it.metadata,
+        cohort_size: it.cohort_size,
+        gate_keys: it.gate_keys,
+    }
+}
+
+/// One entry of a vectorized claimed-work [`CommitRequest`] (Snorri transition commit, epic
+/// pqueue-2201fd37): atomically validate `claim_ref` (lease token + version fence), write the opaque
+/// non-work `side_records`, enqueue `lifecycle_items` as ordinary dispatchable work, and finalize the input
+/// claim with `finalize`.
+#[derive(Debug, Clone)]
+pub struct CommitEntry {
+    pub claim_ref: ClaimRef,
+    pub finalize: FinalizeKind,
+    pub side_records: Vec<SideRecord>,
+    pub lifecycle_items: Vec<NewItem>,
+}
+
+/// A vectorized claimed-work commit (Snorri authoritative StateStore boundary). `request_id` drives
+/// retained replay/conflict/expired idempotency over the WHOLE body; `entries` are applied with independent
+/// per-entry outcomes (all-or-nothing is NOT required across entries, but each entry's writes are atomic).
+#[derive(Debug, Clone, Default)]
+pub struct CommitRequest {
+    pub request_id: Option<RequestId>,
+    pub entries: Vec<CommitEntry>,
+}
+
+/// The per-entry result of a [`Pqueue::commit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryOutcome {
+    /// The entry validated and committed atomically. `lifecycle_item_ids` are the server-assigned ids of the
+    /// entry's newly enqueued dispatchable items, in order (empty when the entry enqueued none).
+    Committed { lifecycle_item_ids: Vec<ItemId> },
+    /// The entry's `claim_ref` (or a lifecycle write) was rejected; NOTHING was mutated for this entry.
+    Rejected(EngineError),
 }
 
 /// How a [`Pqueue`] handle coordinates ownership (ADR-009 / TD-003 In-Process Library Owner-Runtime).
@@ -466,20 +515,7 @@ impl<B: LibBackend> Pqueue<B> {
         request_id: Option<RequestId>,
         items: Vec<NewItem>,
     ) -> EngineResult<Vec<ItemId>> {
-        let specs: Vec<PushSpec> = items
-            .into_iter()
-            .map(|it| PushSpec {
-                client_item_key: it.client_item_key,
-                priority: it.priority,
-                not_before: it.not_before,
-                group_key: it.group_key,
-                payload: it.payload,
-                fields: it.fields,
-                metadata: it.metadata,
-                cohort_size: it.cohort_size,
-                gate_keys: it.gate_keys,
-            })
-            .collect();
+        let specs: Vec<PushSpec> = items.into_iter().map(new_item_to_spec).collect();
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let r = if let Some(request_id) = request_id {
@@ -638,6 +674,58 @@ impl<B: LibBackend> Pqueue<B> {
             .finalize(queue, outcomes, self.clock.now(), epoch)
             .await;
         self.note(queue, r)
+    }
+
+    /// Authoritative vectorized claimed-work commit (Snorri StateStore boundary, epic pqueue-2201fd37).
+    /// Each [`CommitEntry`] is ONE recoverable transition: it validates a lease-token + version-fenced
+    /// [`ClaimRef`], writes opaque non-work `side_records` (authoritative workflow state/audit that is NOT
+    /// claimable work), enqueues `lifecycle_items` as ordinary dispatchable work (outbox/await/timer), and
+    /// finalizes the input claim — atomically per entry. `request_id` gives the whole body retained
+    /// replay/conflict/expired semantics, so a retried transition returns the prior outcomes without
+    /// double-writing. Per-entry [`EntryOutcome`]s are independent (all-or-nothing is NOT required across
+    /// entries). Backends without an atomic transition boundary reject with [`EngineError::Unavailable`].
+    pub async fn commit(
+        &self,
+        queue: &QueueKey,
+        request: CommitRequest,
+    ) -> EngineResult<Vec<EntryOutcome>> {
+        let CommitRequest {
+            request_id,
+            entries,
+        } = request;
+        let entries: Vec<CommitTransitionEntry> = entries
+            .into_iter()
+            .map(|e| CommitTransitionEntry {
+                claim_ref: e.claim_ref,
+                finalize: e.finalize,
+                side_records: e.side_records,
+                lifecycle_items: e
+                    .lifecycle_items
+                    .into_iter()
+                    .map(new_item_to_spec)
+                    .collect(),
+            })
+            .collect();
+        let transition = CommitTransition {
+            request_id,
+            entries,
+        };
+        let epoch = self.session_epoch(queue).await?;
+        let now = self.clock.now();
+        let r = self
+            .backend
+            .commit_transition(queue, transition, now, epoch)
+            .await;
+        let outcomes = self.note(queue, r)?;
+        Ok(outcomes
+            .into_iter()
+            .map(|o| match o {
+                CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+                    EntryOutcome::Committed { lifecycle_item_ids }
+                }
+                CommitEntryOutcome::Rejected(e) => EntryOutcome::Rejected(e),
+            })
+            .collect())
     }
 
     /// Non-destructive priority-ordered view of eligible items.

@@ -757,6 +757,11 @@ impl PushPort for ObjectLogBackend {
     }
 }
 
+/// Snorri authoritative vectorized claimed-work commit (epic pqueue-2201fd37). The object-log backend is
+/// eventual-apply (no single atomic transition boundary), so it inherits the default impl, which returns
+/// [`pqueue_engine::EngineError::Unavailable`] — a consumer must reject it before activation.
+impl pqueue_engine::CommitTransitionPort for ObjectLogBackend {}
+
 impl FinalizePort for ObjectLogBackend {
     fn finalize(
         &self,

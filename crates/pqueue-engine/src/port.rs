@@ -15,7 +15,9 @@ use pqueue_core::{
 };
 
 use crate::claim_validation::ClaimCompatibility;
-use crate::command::{CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand};
+use crate::command::{
+    CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand, SideRecord,
+};
 use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
@@ -499,6 +501,74 @@ pub trait CohortFinalizePort: Send + Sync {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let _ = (shard, target, kind, not_before, now, expected_epoch);
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Authoritative vectorized claimed-work commit (Snorri StateStore boundary, ADR-009 / epic
+// pqueue-2201fd37)
+// ---------------------------------------------------------------------------
+
+/// A lease-token-bearing reference to a claimed item, validated INSIDE the commit boundary. Public
+/// finalization no longer keys on item id alone: the presented `lease_token` must equal the stored token,
+/// the lease must be unexpired (half-open: valid through `lease_expires_at`), and `item_version` must
+/// equal the stored version (the optimistic state fence).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaimRef {
+    pub item_id: ItemId,
+    pub lease_token: LeaseToken,
+    pub lease_expires_at: UtcTimestamp,
+    pub item_version: u64,
+}
+
+/// One entry of a vectorized transition commit: validate `claim_ref`, write opaque non-work `side_records`,
+/// enqueue ordinary `lifecycle_items` (dispatchable outbox/await/timer work), and finalize the input claim
+/// with `finalize`. Each entry's writes commit atomically; per-entry outcomes are independent.
+///
+/// `Serialize` (not `Deserialize`, since [`PushSpec`] is serialize-only) so a backend can fingerprint the
+/// whole commit body for request-id idempotency.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommitTransitionEntry {
+    pub claim_ref: ClaimRef,
+    pub finalize: FinalizeKind,
+    pub side_records: Vec<SideRecord>,
+    pub lifecycle_items: Vec<PushSpec>,
+}
+
+/// A vectorized claimed-work commit request. `request_id` drives retained replay/conflict/expired
+/// idempotency over the WHOLE body (TD-007 §4); `entries` are applied independently with per-entry outcomes.
+#[derive(Debug, Clone)]
+pub struct CommitTransition {
+    pub request_id: Option<RequestId>,
+    pub entries: Vec<CommitTransitionEntry>,
+}
+
+/// The per-entry result of a [`CommitTransitionPort::commit_transition`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitEntryOutcome {
+    /// The entry validated and committed atomically. `lifecycle_item_ids` are the server-assigned ids of the
+    /// entry's newly enqueued dispatchable items, in order (empty when the entry enqueued none).
+    Committed { lifecycle_item_ids: Vec<ItemId> },
+    /// The entry's `claim_ref` (or a lifecycle write) was rejected; NOTHING was mutated for this entry.
+    Rejected(EngineError),
+}
+
+/// The authoritative vectorized claimed-work commit (Snorri StateStore boundary). One durable, recoverable
+/// transition boundary per entry: lease-token + version-fence validation, opaque non-work side-record
+/// writes, ordinary lifecycle enqueues, and input finalization — all atomic per entry, fenced by
+/// `expected_epoch` like the other write ports. The default impl returns
+/// [`EngineError::Unavailable`](crate::EngineError::Unavailable) so non-atomic / eventual-apply backends
+/// (which cannot offer one atomic transition boundary) reject the operation rather than silently splitting it.
+#[doc(hidden)]
+pub trait CommitTransitionPort: Send + Sync {
+    fn commit_transition(
+        &self,
+        _shard: &QueueKey,
+        _transition: CommitTransition,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }

@@ -26,10 +26,11 @@ use pqueue_engine::{
     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
-    ClaimCompatibility, IdempotencyDecision, IndexHit, IndexQueryPort, PayloadUpdate,
-    PurgeItemsCommand, PurgePort, PushPort, PushSpec, QueueCounters, QueueIdempotencyCache,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
-    UpdateFieldsCommand, UpdateFieldsPort, build_push_items, require_item_level_claim,
+    ClaimCompatibility, CommitEntryOutcome, CommitTransition, CommitTransitionPort,
+    IdempotencyDecision, IndexHit, IndexQueryPort, PayloadUpdate, PurgeItemsCommand, PurgePort,
+    PushPort, PushSpec, QueueCounters, QueueIdempotencyCache, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimPort, RenewLeaseCommand, RenewLeasePort, UpdateFieldsCommand,
+    UpdateFieldsPort, WriteSideRecordsCommand, build_push_items, require_item_level_claim,
     validate_gate_command, validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::{LogData, ProjectionData, commit};
@@ -93,6 +94,11 @@ struct State {
     /// The cached outcome is the response ids the original request produced, so a replay returns them
     /// verbatim without re-appending. Empty for the default (request-id-less) push path.
     idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+    /// Per-queue retained request-id cache for the vectorized claimed-work COMMIT path (epic
+    /// pqueue-2201fd37). Same `QueueIdempotencyCache` machinery as `idempotency`, but the cached outcome is
+    /// the whole `Vec<CommitEntryOutcome>` so a body+request_id replay returns the prior per-entry outcomes
+    /// verbatim with NO double-write. Held under the same `State` lock so check + append + record is atomic.
+    commit_idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<CommitEntryOutcome>>>,
 }
 
 /// Stable body fingerprint for request-id conflict detection: a non-cryptographic hash over the
@@ -102,6 +108,17 @@ struct State {
 fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     use std::hash::{Hash, Hasher};
     let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(BodyHash(h.finish()))
+}
+
+/// Stable body fingerprint for the vectorized commit path: a non-cryptographic hash over the serialized
+/// commit entries (the request_id is the cache KEY, not part of the body). A different body under the same
+/// request id is a `RequestIdConflict`; an equal body replays the prior per-entry outcomes.
+fn commit_body_hash(entries: &[pqueue_engine::CommitTransitionEntry]) -> EngineResult<BodyHash> {
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     Ok(BodyHash(h.finish()))
@@ -474,6 +491,138 @@ impl FinalizePort for MemoryBackend {
             let env = self.make_envelope(cmd, item_ids, now);
             Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl CommitTransitionPort for MemoryBackend {
+    /// Authoritative vectorized claimed-work commit (Snorri StateStore boundary, epic pqueue-2201fd37). The
+    /// whole operation runs under ONE `State` lock so request-id check + per-entry validate + append + apply
+    /// + record is a single atomic unit of work.
+    fn commit_transition(
+        &self,
+        shard: &QueueKey,
+        transition: CommitTransition,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
+        let result = (|| {
+            let CommitTransition {
+                request_id,
+                entries,
+            } = transition;
+            let fingerprint = commit_body_hash(&entries)?;
+            let mut g = self.state.lock().expect("poisoned");
+            let (max_attempts, retention) = {
+                let def = g.queues.get(shard).ok_or(EngineError::NotFound)?;
+                (def.retry_policy.max_attempts, def.request_id_retention_ms)
+            };
+
+            // (1) Request-id idempotency over the WHOLE commit body (same machinery as the push path). A
+            //     retained body+id REPLAYS the prior per-entry outcomes (no re-write); a different body under
+            //     that id is `RequestIdConflict`; an expired/absent entry proceeds fresh.
+            if let Some(rid) = &request_id {
+                match g
+                    .commit_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .check(rid, fingerprint, now)
+                {
+                    IdempotencyDecision::Replay(outcomes) => return Ok(outcomes),
+                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                    IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                }
+            }
+
+            // (2) Per entry: validate the lease-token + version-fenced claim_ref, then commit the entry's
+            //     side-records + lifecycle push + input finalize atomically. A rejected entry mutates nothing.
+            let mut outcomes = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let claim_ref = entry.claim_ref;
+                if let Err(e) = {
+                    let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                    proj.commit_validate(std::slice::from_ref(&claim_ref), now)
+                } {
+                    outcomes.push(CommitEntryOutcome::Rejected(e));
+                    continue;
+                }
+
+                // Build the entry's envelopes WITHOUT committing yet, so a build-time rejection (e.g. a unique
+                // -index conflict on a lifecycle item) leaves nothing mutated. The caller's request_id
+                // propagates into every envelope (no `request_id: None` on this path).
+                let mk = |command: QueueCommand, item_ids: Vec<ItemId>| {
+                    let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
+                    CommandEnvelope {
+                        command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
+                        request_id: request_id.clone(),
+                        item_ids,
+                        command,
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    }
+                };
+                let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+                if !entry.side_records.is_empty() {
+                    envelopes.push(mk(
+                        QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                            records: entry.side_records,
+                        }),
+                        Vec::new(),
+                    ));
+                }
+                let mut lifecycle_item_ids = Vec::new();
+                if !entry.lifecycle_items.is_empty() {
+                    let epoch = expected_epoch.unwrap_or(0);
+                    let counter_base =
+                        self.counters
+                            .reserve(shard, epoch, entry.lifecycle_items.len() as u32);
+                    let (push_items, ids) = build_push_items(
+                        entry.lifecycle_items,
+                        epoch,
+                        self.node_id,
+                        counter_base,
+                        max_attempts,
+                    );
+                    if let Err(e) = {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.index_validate_push(&push_items)
+                    } {
+                        outcomes.push(CommitEntryOutcome::Rejected(e));
+                        continue;
+                    }
+                    lifecycle_item_ids = ids.clone();
+                    envelopes.push(mk(
+                        QueueCommand::Push(PushCommand { items: push_items }),
+                        ids,
+                    ));
+                }
+                envelopes.push(mk(
+                    QueueCommand::Finalize(FinalizeCommand {
+                        outcomes: vec![FinalizeOutcome::new(claim_ref.item_id, entry.finalize)],
+                    }),
+                    vec![claim_ref.item_id],
+                ));
+
+                // Commit the entry's envelopes under the held lock. The epoch cannot change while we hold the
+                // lock, so either the first append fences (EpochFenced, before any mutation) or all of the
+                // entry's appends commit — each entry's writes are atomic.
+                for env in envelopes {
+                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+                }
+                outcomes.push(CommitEntryOutcome::Committed { lifecycle_item_ids });
+            }
+
+            // (3) Record the whole-body outcome only AFTER success, so a later replay returns it verbatim
+            //     with no second append.
+            if let Some(rid) = request_id {
+                let expires_at = request_expires_at(now, retention);
+                g.commit_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .record(rid, fingerprint, outcomes.clone(), expires_at);
+            }
+            Ok(outcomes)
         })();
         std::future::ready(result)
     }

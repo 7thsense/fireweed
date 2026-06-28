@@ -644,6 +644,11 @@ impl PushPort for PostgresBackend {
     }
 }
 
+/// Snorri authoritative vectorized claimed-work commit (epic pqueue-2201fd37). The durable relational
+/// parity slice is deferred (C9); this backend inherits the default impl, which returns
+/// [`pqueue_engine::EngineError::Unavailable`] so a caller rejects it before activation.
+impl pqueue_engine::CommitTransitionPort for PostgresBackend {}
+
 impl FinalizePort for PostgresBackend {
     fn finalize(
         &self,

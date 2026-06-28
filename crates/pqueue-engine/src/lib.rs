@@ -44,9 +44,9 @@ pub use command::{
     CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId, CreateQueueCommand,
     FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand,
     PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters,
-    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
-    UnfenceLeaseCommand, UpdateFieldsCommand, build_push_items, validate_gate_command,
-    validate_gate_push,
+    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand, SideRecord,
+    UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items,
+    validate_gate_command, validate_gate_push,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{
@@ -54,8 +54,9 @@ pub use finalize_validation::{
     validate_rearm,
 };
 pub use port::{
-    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CohortFinalizePort,
-    CohortLeaseTarget, CohortRenewLeasePort, CommandPage, ControlPlaneStore, CreateQueueOutcome,
+    Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, Clock, CohortFinalizePort,
+    CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitEntryOutcome, CommitTransition,
+    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryPort, FinalizePort, IdGen, IndexHit, IndexQueryPort, ItemView, LeaseView,
     LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
     PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,

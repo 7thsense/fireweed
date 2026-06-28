@@ -64,6 +64,13 @@ pub enum QueueCommand {
     /// `pqueue_gate_state`); unblocking restores eligibility. A relational-mode feature — the in-memory
     /// family applies this as a no-op (it stores no gate state).
     SetGates(SetGatesCommand),
+    /// Write bounded OPAQUE non-work side records (Snorri authoritative-commit boundary, ADR-009 / epic
+    /// pqueue-2201fd37). Each record is a `key -> payload` pair stored in a projection map that is
+    /// ENTIRELY SEPARATE from the work-item index: a side record is NOT claimable/peekable work, never
+    /// enters the eligibility index, `by_key`, or metrics-as-work, and survives input finalization. pqueue
+    /// treats both key and payload as opaque bytes (the consumer owns any meaning). Emitted only on the
+    /// vectorized claimed-work commit path.
+    WriteSideRecords(WriteSideRecordsCommand),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -357,6 +364,25 @@ pub struct PurgeItemsCommand {
     pub force: bool,
 }
 
+/// One opaque non-work side record (Snorri authoritative-commit boundary). Both `key` and `payload` are
+/// OPAQUE bytes — pqueue stores them verbatim and never interprets them. Distinct from a work item: a side
+/// record carries no lifecycle, lease, priority, or eligibility.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SideRecord {
+    #[serde(default)]
+    pub key: Vec<u8>,
+    #[serde(default)]
+    pub payload: Bytes,
+}
+
+/// Write a batch of opaque non-work [`SideRecord`]s in one durable command. Apply is infallible
+/// (insert-or-overwrite by key) and touches nothing in the work-item / eligibility projection.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct WriteSideRecordsCommand {
+    #[serde(default)]
+    pub records: Vec<SideRecord>,
+}
+
 /// Block or unblock gate keys for the queue (BQ-14d, API-001 g2 `SetGates`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SetGatesCommand {
@@ -474,6 +500,12 @@ mod serde_tests {
             QueueCommand::PurgeItems(PurgeItemsCommand {
                 item_ids: vec![iid("a")],
                 force: true,
+            }),
+            QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: vec![SideRecord {
+                    key: b"state/run-1".to_vec(),
+                    payload: Bytes::from_static(b"opaque-state"),
+                }],
             }),
         ]
     }
