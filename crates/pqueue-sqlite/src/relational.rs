@@ -61,10 +61,11 @@ use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
-    LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
-    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    QueueCounters, ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey,
+    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, QueueCounters, ReplacePendingCommand, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
     project_scopes, validate_claim_compatibility, validate_purge_force,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -680,6 +681,68 @@ fn apply_command_sql(
                     params![t, q, id.to_string(), hash, exp, now_n, seq as i64],
                 ))?;
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
+            }
+            Ok(())
+        }
+        QueueCommand::UpdateFields(c) => {
+            // FAC-1 in-place merge of a LIVE item's fields/payload (no lifecycle change). Read-merge-write
+            // the `fields` JSON map in the same representation as insert/read (`fields_to_json`/
+            // `fields_from_json`), apply the per-key delta, then UPDATE within this transaction. The caller
+            // pre-validated, so the row is live (Pending/Leased, not superseded/fenced); if it is gone here
+            // (a divergence) we apply nothing rather than fault, mirroring the in-memory `debug_assert`.
+            let current: Option<String> = st(tx
+                .query_row(
+                    "SELECT fields FROM pqueue_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+                     AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
+                    params![t, q, c.item_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional())?;
+            if let Some(raw) = current {
+                let mut fields = fields_from_json(raw)?;
+                for (k, op) in &c.field_ops {
+                    match op {
+                        Some(v) => {
+                            fields.insert(k.clone(), v.clone());
+                        }
+                        None => {
+                            fields.remove(k);
+                        }
+                    }
+                }
+                let fields_json = fields_to_json(&fields)?;
+                match &c.payload {
+                    // Keep: leave `payload` untouched (fields-only update).
+                    PayloadUpdate::Keep => {
+                        st(tx.execute(
+                            "UPDATE pqueue_items SET fields=?4, item_version=item_version+1, \
+                             updated_at=?5, last_command_sequence=?6 \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+                             AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
+                            params![t, q, c.item_id.to_string(), fields_json, now_n, seq as i64],
+                        ))?;
+                    }
+                    // Set(Some)=replace BLOB, Set(None)=NULL.
+                    PayloadUpdate::Set(p) => {
+                        let payload = p.as_ref().map(|b| b.to_vec());
+                        st(tx.execute(
+                            "UPDATE pqueue_items SET fields=?4, payload=?5, item_version=item_version+1, \
+                             updated_at=?6, last_command_sequence=?7 \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+                             AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
+                            params![
+                                t,
+                                q,
+                                c.item_id.to_string(),
+                                fields_json,
+                                payload,
+                                now_n,
+                                seq as i64,
+                            ],
+                        ))?;
+                    }
+                }
             }
             Ok(())
         }
@@ -2265,6 +2328,129 @@ impl PurgePort for SqliteRelationalBackend {
                 now, expected_epoch
             )?;
             Ok(count)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl UpdateFieldsPort for SqliteRelationalBackend {
+    fn update_fields(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: PayloadUpdate,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            // Pre-validate with the SAME error precedence as `ProjectionData::update_fields_validate`
+            // (commit has no rollback): absent => NotFound, fenced => StaleLease, terminal => Terminal,
+            // superseded => Superseded, version mismatch => Conflict.
+            let (t, q) = parts(shard);
+            let row: Option<(String, i64, i64, i64)> = st(g
+                .conn
+                .query_row(
+                    "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                    params![t, q, item_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional())?;
+            let (state, superseded, fenced, version) = row.ok_or(EngineError::NotFound)?;
+            if fenced != 0 {
+                return Err(EngineError::StaleLease);
+            }
+            if parse_state(&state)?.is_terminal() {
+                return Err(EngineError::Terminal);
+            }
+            if superseded != 0 {
+                return Err(EngineError::Superseded);
+            }
+            if expected_item_version.is_some_and(|v| v != version as u64) {
+                return Err(EngineError::Conflict);
+            }
+            g.commit_command(
+                shard,
+                QueueCommand::UpdateFields(UpdateFieldsCommand {
+                    item_id,
+                    field_ops,
+                    payload,
+                }),
+                now,
+                expected_epoch,
+            )?;
+            // The apply bumped item_version by one (the row was validated live above).
+            Ok(version as u64 + 1)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReclaimPort for SqliteRelationalBackend {
+    fn reclaim_expired(
+        &self,
+        shard: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let (t, q) = parts(shard);
+            let now_n = ts_nanos(now);
+            // This queue's leases expired strictly before `now` (half-open, like the tick), optionally capped.
+            let base = "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                        AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
+                        AND lease_expires_at<?3 ORDER BY item_id";
+            let id_strs: Vec<String> = {
+                let mut out = Vec::new();
+                if let Some(lim) = limit {
+                    let sql = format!("{base} LIMIT ?4");
+                    let mut stmt = st(g.conn.prepare(&sql))?;
+                    let rows = st(stmt.query_map(params![t, q, now_n, lim as i64], |row| {
+                        row.get::<_, String>(0)
+                    }))?;
+                    for r in rows {
+                        out.push(st(r)?);
+                    }
+                } else {
+                    let mut stmt = st(g.conn.prepare(base))?;
+                    let rows = st(stmt.query_map(params![t, q, now_n], |row| {
+                        row.get::<_, String>(0)
+                    }))?;
+                    for r in rows {
+                        out.push(st(r)?);
+                    }
+                }
+                out
+            };
+            let ids: Vec<ItemId> = id_strs
+                .into_iter()
+                .map(|s| ItemId::new(s).map_err(|e| EngineError::Storage(e.to_string())))
+                .collect::<EngineResult<Vec<_>>>()?;
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Per-queue and FENCED (unlike the global ReclaimDriver::tick, which passes None).
+            g.commit_command(
+                shard,
+                QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                    item_ids: ids.clone(),
+                }),
+                now,
+                expected_epoch,
+            )?;
+            Ok(ids)
         })();
         std::future::ready(result)
     }

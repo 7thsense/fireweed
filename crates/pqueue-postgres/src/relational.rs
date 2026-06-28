@@ -61,9 +61,10 @@ use pqueue_engine::{
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
     LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
     PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    QueueCounters, ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items,
-    project_scopes, validate_claim_compatibility, validate_purge_force,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
+    RenewLeasePort, QueueCounters, ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort,
+    PayloadUpdate, UpdateFieldsCommand, UpdateFieldsPort, build_push_items, project_scopes,
+    validate_claim_compatibility, validate_purge_force,
 };
 use sha2::{Digest, Sha256};
 
@@ -640,6 +641,54 @@ fn apply_command_sql(
                      WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                     &[&t, &q, &id.to_string(), &exp, &now_n, &seqi],
                 ))?;
+            }
+            Ok(())
+        }
+        QueueCommand::UpdateFields(c) => {
+            // Read-merge-write the hot-storage fields/payload of a LIVE item (Pending|Leased, not
+            // superseded/fenced). `fields` is the SAME TEXT-JSON representation insert_item / live_items_sql
+            // use (`fields_from_json`/`fields_to_json` over a BTreeMap<String, Vec<u8>>). Pre-validated by the
+            // UpdateFieldsPort, so a missing/ineligible row here is a no-op (commit has no rollback).
+            let item_id = c.item_id.to_string();
+            let row = st(tx.query_opt(
+                "SELECT fields FROM pqueue_items \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                 AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
+                &[&t, &q, &item_id],
+            ))?;
+            let Some(row) = row else { return Ok(()) };
+            let mut fields = fields_from_json(row.get::<_, String>(0))?;
+            for (k, op) in &c.field_ops {
+                match op {
+                    Some(v) => {
+                        fields.insert(k.clone(), v.clone());
+                    }
+                    None => {
+                        fields.remove(k);
+                    }
+                }
+            }
+            let fields_json = fields_to_json(&fields)?;
+            match &c.payload {
+                PayloadUpdate::Keep => {
+                    st(tx.execute(
+                        "UPDATE pqueue_items SET fields=$4, item_version=item_version+1, \
+                         updated_at=$5, last_command_sequence=$6 \
+                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                         AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
+                        &[&t, &q, &item_id, &fields_json, &now_n, &seqi],
+                    ))?;
+                }
+                PayloadUpdate::Set(p) => {
+                    let payload: Option<Vec<u8>> = p.as_ref().map(|b| b.to_vec());
+                    st(tx.execute(
+                        "UPDATE pqueue_items SET fields=$4, payload=$5, item_version=item_version+1, \
+                         updated_at=$6, last_command_sequence=$7 \
+                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                         AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
+                        &[&t, &q, &item_id, &fields_json, &payload, &now_n, &seqi],
+                    ))?;
+                }
             }
             Ok(())
         }
@@ -2125,6 +2174,122 @@ impl RenewLeasePort for PostgresRelationalBackend {
                 now, expected_epoch
             )?;
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl UpdateFieldsPort for PostgresRelationalBackend {
+    #[allow(clippy::too_many_arguments)]
+    fn update_fields(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: PayloadUpdate,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let id_str = item_id.to_string();
+            let mut g = self.inner.lock().expect("poisoned");
+            // Pre-validate exactly like the in-memory `update_fields_validate`: absent=NotFound,
+            // fenced=StaleLease, terminal=Terminal, superseded=Superseded, version-mismatch=Conflict.
+            // Nothing is appended on rejection (commit has no rollback).
+            let row = st(g.client.query_opt(
+                "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                &[&t, &q, &id_str],
+            ))?
+            .ok_or(EngineError::NotFound)?;
+            let state = parse_state(&row.get::<_, String>(0))?;
+            let superseded: bool = row.get(1);
+            let fenced: bool = row.get(2);
+            let version: i64 = row.get(3);
+            if fenced {
+                return Err(EngineError::StaleLease);
+            }
+            if state.is_terminal() {
+                return Err(EngineError::Terminal);
+            }
+            if superseded {
+                return Err(EngineError::Superseded);
+            }
+            if let Some(v) = expected_item_version
+                && version as u64 != v
+            {
+                return Err(EngineError::Conflict);
+            }
+            g.commit_command(
+                shard,
+                QueueCommand::UpdateFields(UpdateFieldsCommand {
+                    item_id,
+                    field_ops,
+                    payload,
+                }),
+                now,
+                expected_epoch,
+            )?;
+            // Re-read the bumped version from the now-committed projection.
+            let new_version: i64 = st(g.client.query_one(
+                "SELECT item_version FROM pqueue_items \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                &[&t, &q, &id_str],
+            ))?
+            .get(0);
+            Ok(new_version as u64)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReclaimPort for PostgresRelationalBackend {
+    fn reclaim_expired(
+        &self,
+        shard: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let now_n = ts_nanos(now);
+            let mut g = self.inner.lock().expect("poisoned");
+            // This queue's leases that expired strictly before `now` (FAC-2); LIMIT caps the batch.
+            let rows = match limit {
+                Some(lim) => st(g.client.query(
+                    "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                     AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
+                     AND lease_expires_at<$3 ORDER BY item_id LIMIT $4",
+                    &[&t, &q, &now_n, &(lim as i64)],
+                ))?,
+                None => st(g.client.query(
+                    "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                     AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
+                     AND lease_expires_at<$3 ORDER BY item_id",
+                    &[&t, &q, &now_n],
+                ))?,
+            };
+            let mut ids = Vec::with_capacity(rows.len());
+            for row in rows {
+                let id: String = row.get(0);
+                ids.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
+            }
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Per-queue and FENCED by `expected_epoch` (unlike the global ReclaimDriver::tick, which is None).
+            g.commit_command(
+                shard,
+                QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                    item_ids: ids.clone(),
+                }),
+                now,
+                expected_epoch,
+            )?;
+            Ok(ids)
         })();
         std::future::ready(result)
     }

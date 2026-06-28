@@ -42,6 +42,10 @@ pub enum QueueCommand {
     Finalize(FinalizeCommand),
     /// Pending-item replacement (RESP `XADD`-on-key upsert, Invariant 2). Atomic class only.
     ReplacePending(ReplacePendingCommand),
+    /// In-place merge of a live (Pending or Leased) item's hot-storage `fields`/`payload` with no lifecycle
+    /// change (FAC-1, ADR-009). The write side of the `LiveItemView` map; bumps `item_version`. Atomic
+    /// class only. Lets an owner-runtime keep compound per-item work state in pqueue instead of a shadow.
+    UpdateFields(UpdateFieldsCommand),
     // --- ReclaimDriver-fired (TD-007 §3) ---
     LeaseExpired(LeaseExpiredCommand),
     CohortExpired(CohortExpiredCommand),
@@ -236,6 +240,25 @@ pub struct LeaseExpiredCommand {
     pub item_ids: Vec<ItemId>,
 }
 
+/// In-place merge of a live item's hot-storage fields/payload (FAC-1). `field_ops` is a per-key delta:
+/// `Some(bytes)` sets/overwrites the key, `None` removes it. `payload` either leaves the payload untouched
+/// or replaces it (`Set(None)` clears). Bumps `item_version`. Touches neither lifecycle state nor the
+/// lease — orthogonal to claim/renew/finalize.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateFieldsCommand {
+    pub item_id: ItemId,
+    pub field_ops: BTreeMap<String, Option<Bytes>>,
+    pub payload: PayloadUpdate,
+}
+
+/// Disposition of an item's payload under [`UpdateFieldsCommand`]: leave it as-is, or replace it
+/// (`Set(None)` clears it).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PayloadUpdate {
+    Keep,
+    Set(Option<Bytes>),
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CohortExpiredCommand {
     pub group_key: GroupKey,
@@ -346,6 +369,14 @@ mod serde_tests {
                 client_item_key: ClientItemKey::new("k").unwrap(),
                 superseded_item_id: iid("old"),
                 replacement: item(),
+            }),
+            QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id: iid("a"),
+                field_ops: BTreeMap::from([
+                    ("state".to_string(), Some(Bytes::from_static(b"leased"))),
+                    ("stale".to_string(), None),
+                ]),
+                payload: PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
                 item_ids: vec![iid("a")],

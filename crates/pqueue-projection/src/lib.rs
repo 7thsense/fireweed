@@ -28,8 +28,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
-    FinalizeOutcome, ItemView, LeaseView, LiveItemView, ProjectionSnapshot, PushItem, QueueCommand,
-    QueueKey, QueueMetrics, SnapshotRef,
+    FinalizeOutcome, ItemView, LeaseView, LiveItemView, PayloadUpdate, ProjectionSnapshot, PushItem,
+    QueueCommand, QueueKey, QueueMetrics, SnapshotRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -402,6 +402,33 @@ impl ProjectionData {
                 }
                 Ok(())
             }
+            QueueCommand::UpdateFields(c) => {
+                let rec = self.items.get_mut(&c.item_id).ok_or(EngineError::NotFound)?;
+                // Bare field/payload merge (no lifecycle change), so it relies on `update_fields_validate`
+                // having run pre-commit. Assert the pre-condition so a divergent replay is LOUD in
+                // debug/test (apply stays infallible in release).
+                debug_assert!(
+                    !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
+                    "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
+                );
+                for (k, op) in &c.field_ops {
+                    match op {
+                        Some(v) => {
+                            rec.fields.insert(k.clone(), v.clone());
+                        }
+                        None => {
+                            rec.fields.remove(k);
+                        }
+                    }
+                }
+                match &c.payload {
+                    PayloadUpdate::Keep => {}
+                    PayloadUpdate::Set(p) => rec.payload = p.clone(),
+                }
+                rec.item_version += 1;
+                // State is unchanged, so the eligibility index needs no update.
+                Ok(())
+            }
             QueueCommand::Finalize(c) => {
                 for o in &c.outcomes {
                     let ev = match o.kind {
@@ -653,6 +680,12 @@ impl ProjectionData {
         self.items.get(id).map(|r| r.state)
     }
 
+    /// The current `item_version` of `id`, if present (read post-apply to return the bumped version
+    /// from an `UpdateFields`).
+    pub fn item_version(&self, id: &ItemId) -> Option<u64> {
+        self.items.get(id).map(|r| r.item_version)
+    }
+
     /// Pre-commit validation for a finalize batch (commit_locked has no rollback): every targeted item
     /// must be present, not fenced, and currently `Leased`. Returns the structured rejection otherwise,
     /// WITHOUT mutating anything.
@@ -672,6 +705,27 @@ impl ProjectionData {
     /// non-terminal leased item may be transferred.
     pub fn reassign_validate(&self, ids: &[ItemId]) -> EngineResult<()> {
         self.validate_leased(ids.iter())
+    }
+
+    /// Pre-commit validation for an in-place field/payload update (FAC-1). Legal while the item is live
+    /// (Pending OR Leased) and not fenced/superseded; terminal/superseded/absent reject with the same
+    /// structured errors as finalize. An `expected_item_version` mismatch rejects with `Conflict`
+    /// (optimistic concurrency). Mutates nothing.
+    pub fn update_fields_validate(
+        &self,
+        item_id: &ItemId,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<()> {
+        match self.items.get(item_id) {
+            None => Err(EngineError::NotFound),
+            Some(rec) if rec.fenced => Err(EngineError::StaleLease),
+            Some(rec) if rec.state.is_terminal() => Err(EngineError::Terminal),
+            Some(rec) if rec.superseded => Err(EngineError::Superseded),
+            Some(rec) => match expected_item_version {
+                Some(v) if rec.item_version != v => Err(EngineError::Conflict),
+                _ => Ok(()),
+            },
+        }
     }
 
     /// Shared "every id is present + Leased + not fenced + not superseded" check used by finalize/renew.

@@ -42,9 +42,9 @@ pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liv
 pub use command::{
     ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
+    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
     QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
-    UnfenceLeaseCommand, build_push_items,
+    UnfenceLeaseCommand, UpdateFieldsCommand, build_push_items,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{
@@ -55,8 +55,8 @@ pub use port::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
     CreateQueueOutcome, DiscoveryPort, FinalizePort, IdGen, ItemView, LeaseView, LiveItemView,
     LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort,
-    PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotRef,
-    SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
+    SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
 

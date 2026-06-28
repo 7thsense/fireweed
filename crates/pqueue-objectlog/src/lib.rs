@@ -32,11 +32,11 @@ use pqueue_engine::{
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
-    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
-    PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
-    require_item_level_claim, validate_purge_force,
+    LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
+    PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters,
+    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, build_push_items, require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -465,6 +465,26 @@ impl UpsertPort for ObjectLogBackend {
     }
 }
 
+impl UpdateFieldsPort for ObjectLogBackend {
+    #[allow(clippy::too_many_arguments)]
+    fn update_fields(
+        &self,
+        _shard: &QueueKey,
+        _item_id: ItemId,
+        _field_ops: BTreeMap<String, Option<Bytes>>,
+        _payload: PayloadUpdate,
+        _expected_item_version: Option<u64>,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        // FAC-1: in-place field/payload merge is a read-your-write mutation that returns the new
+        // `item_version` from a state this class cannot serve (the durable boundary is the object write;
+        // the projection is a derived, possibly-late view). Like `replace_if_pending`, refuse with the
+        // structured `Unavailable` (`-ERR pqueue unavailable`) BEFORE committing anything.
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
 impl PushPort for ObjectLogBackend {
     fn push(
         &self,
@@ -655,6 +675,49 @@ impl ReclaimDriver for ObjectLogBackend {
                 report.leases_reclaimed += ids.len() as u64;
             }
             Ok(report)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReclaimPort for ObjectLogBackend {
+    fn reclaim_expired(
+        &self,
+        shard: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let mut ids = {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.expired_leases(now)
+            };
+            if let Some(limit) = limit {
+                ids.truncate(limit);
+            }
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Per-queue and FENCED (unlike the global `ReclaimDriver::tick`, which passes the degenerate
+            // None path). Objectlog's `commit_locked`/`append_object` stamp the queue's current durable
+            // epoch but do NOT validate an `expected_epoch` (the TD-003 reject lives at the
+            // `ObjLogWriter::append` seam, not in the data-plane fast path). So replicate that seam's fence
+            // rule inline BEFORE the durable object write: `Some(e)` that is not the current durable epoch
+            // is a superseded owner → reject `EpochFenced`, nothing appended; `None` is the degenerate
+            // sole-owner path (stamp current, never fence).
+            if let Some(expected) = expected_epoch
+                && expected != read_epoch(&g.root, shard)
+            {
+                return Err(EngineError::EpochFenced);
+            }
+            let cmd = QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: ids.clone(),
+            });
+            let env = g.make_envelope(cmd, ids.clone(), now);
+            g.commit_locked(shard, env)?;
+            Ok(ids)
         })();
         std::future::ready(result)
     }

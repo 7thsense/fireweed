@@ -1,9 +1,11 @@
 //! The ergonomic library facade exercised over real backends (memory = atomic class; objectlog =
 //! eventual-apply class), proving the singular verbs compose the engine ports correctly.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use pqueue::{EngineError, Nack, NewItem, Pqueue};
+use bytes::Bytes;
+use pqueue::{EngineError, Nack, NewItem, PayloadUpdate, Pqueue};
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
@@ -321,4 +323,129 @@ async fn claimed_renders_only_leased_items() {
         "only the leased item renders; the pending one is omitted"
     );
     assert_eq!(view[0].item_id, lo);
+}
+
+fn with_fields(priority: i64, fields: &[(&str, &[u8])], payload: &[u8]) -> NewItem {
+    NewItem {
+        priority: Some(PriorityValue::Int64(priority)),
+        payload: Some(Bytes::copy_from_slice(payload)),
+        fields: fields
+            .iter()
+            .map(|(k, v)| (k.to_string(), Bytes::copy_from_slice(v)))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// FAC-1: `update_fields` merges a leased item's hot-storage fields/payload in place (set + remove),
+/// bumps `item_version`, and honors the optimistic `expected_item_version` CAS.
+#[tokio::test]
+async fn update_fields_merges_versions_and_cas_over_memory() {
+    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let id = pq
+        .push(&q, with_fields(5, &[("a", b"1"), ("b", b"2")], b"p0"))
+        .await
+        .unwrap();
+    // Lease it, then mutate the leased item in place — the path that upsert/replace-if-pending refuses.
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed[0].item_id, id);
+
+    let ops = BTreeMap::from([
+        ("a".to_string(), Some(Bytes::from_static(b"9"))), // overwrite
+        ("b".to_string(), None),                           // remove
+        ("c".to_string(), Some(Bytes::from_static(b"3"))), // add
+    ]);
+    let v = pq
+        .update_fields(&q, id, ops, PayloadUpdate::Set(Some(Bytes::from_static(b"p1"))), None)
+        .await
+        .unwrap();
+    assert!(v >= 2, "item_version bumped past the genesis 1");
+
+    let key = ClientItemKey::new(id.to_string()).unwrap();
+    let live = pq.live_item(&q, key.clone()).await.unwrap().expect("live");
+    assert_eq!(live.fields.get("a").map(|b| b.as_ref()), Some(&b"9"[..]));
+    assert_eq!(live.fields.get("c").map(|b| b.as_ref()), Some(&b"3"[..]));
+    assert!(!live.fields.contains_key("b"), "removed key is gone");
+    assert_eq!(live.payload.as_deref(), Some(&b"p1"[..]));
+    assert_eq!(live.item_version, v);
+
+    // A stale CAS rejects with Conflict and commits nothing.
+    let stale = pq
+        .update_fields(
+            &q,
+            id,
+            BTreeMap::from([("a".to_string(), Some(Bytes::from_static(b"x")))]),
+            PayloadUpdate::Keep,
+            Some(v - 1),
+        )
+        .await;
+    assert!(matches!(stale, Err(EngineError::Conflict)));
+    let live2 = pq.live_item(&q, key).await.unwrap().expect("live");
+    assert_eq!(live2.item_version, v, "rejected CAS left the item unchanged");
+    assert_eq!(live2.fields.get("a").map(|b| b.as_ref()), Some(&b"9"[..]));
+}
+
+/// FAC-1: a terminal item rejects `update_fields` with the structured `Terminal` (parity with finalize).
+#[tokio::test]
+async fn update_fields_rejects_terminal_over_memory() {
+    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let id = pq.push(&q, at(5)).await.unwrap();
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    pq.ack(&q, claimed.iter().map(|c| c.item_id)).await.unwrap();
+    let r = pq
+        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None)
+        .await;
+    assert!(matches!(r, Err(EngineError::Terminal)));
+}
+
+/// FAC-1: the eventual-apply class cannot serve a read-your-write field mutation — `Unavailable`.
+#[tokio::test]
+async fn update_fields_unavailable_over_objectlog() {
+    use pqueue_objectlog::ObjectLogBackend;
+    let root = std::env::temp_dir().join(format!("pqueue-facade-uf-objlog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pq = Pqueue::new(
+        Arc::new(ObjectLogBackend::open(&root).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let id = pq.push(&q, at(5)).await.unwrap();
+    let r = pq
+        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None)
+        .await;
+    assert_eq!(r.unwrap_err(), EngineError::Unavailable);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// FAC-2: `reclaim_expired` is the host-driven, per-queue lease sweep — expired leases return to Pending
+/// (claimable again), the reclaimed ids are returned, and it is idempotent.
+#[tokio::test]
+async fn reclaim_expired_recovers_leased_over_memory() {
+    let clock = Arc::new(ManualClock::at(0));
+    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), clock.clone());
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let id = pq.push(&q, at(5)).await.unwrap();
+    pq.claim(&q, 1, 30_000).await.unwrap(); // lease for 30s
+    assert_eq!(pq.metrics(&q).await.unwrap().leased, 1);
+
+    // Before the lease expires: nothing to reclaim (half-open — still valid at the boundary).
+    clock.set(10);
+    assert!(pq.reclaim_expired(&q, None).await.unwrap().is_empty());
+
+    // Past the 30s lease: the sweep returns the id and the item is Pending again.
+    clock.set(40);
+    let reclaimed = pq.reclaim_expired(&q, None).await.unwrap();
+    assert_eq!(reclaimed, vec![id]);
+    let m = pq.metrics(&q).await.unwrap();
+    assert_eq!((m.pending, m.leased), (1, 0));
+    // Idempotent: a second sweep finds nothing.
+    assert!(pq.reclaim_expired(&q, None).await.unwrap().is_empty());
+    // And the item is claimable again.
+    assert_eq!(pq.claim(&q, 1, 30_000).await.unwrap().len(), 1);
 }

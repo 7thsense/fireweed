@@ -28,11 +28,12 @@ use pqueue_engine::{
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
-    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
-    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
-    QueueCounters, build_push_items, require_item_level_claim, validate_purge_force,
+    LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey,
+    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore,
+    TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, QueueCounters,
+    build_push_items, require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -706,6 +707,72 @@ impl PurgePort for SqliteBackend {
             let env = g.make_envelope(cmd, present, now);
             g.commit_locked(shard, env, expected_epoch)?;
             Ok(count)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl UpdateFieldsPort for SqliteBackend {
+    fn update_fields(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: PayloadUpdate,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.update_fields_validate(&item_id, expected_item_version)?;
+            }
+            let cmd = QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id,
+                field_ops,
+                payload,
+            });
+            let env = g.make_envelope(cmd, vec![item_id], now);
+            g.commit_locked(shard, env, expected_epoch)?;
+            // Read the bumped version back from the just-applied projection.
+            g.projections
+                .get(shard)
+                .and_then(|p| p.item_version(&item_id))
+                .ok_or(EngineError::NotFound)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReclaimPort for SqliteBackend {
+    fn reclaim_expired(
+        &self,
+        shard: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let mut ids = {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.expired_leases(now)
+            };
+            if let Some(limit) = limit {
+                ids.truncate(limit);
+            }
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Per-queue and FENCED (unlike the global ReclaimDriver::tick, which passes None).
+            let cmd = QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: ids.clone(),
+            });
+            let env = g.make_envelope(cmd, ids.clone(), now);
+            g.commit_locked(shard, env, expected_epoch)?;
+            Ok(ids)
         })();
         std::future::ready(result)
     }

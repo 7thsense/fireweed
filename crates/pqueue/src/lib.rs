@@ -24,12 +24,13 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
     LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, QueueKey, ReassignLeasePort, RenewLeasePort, UpsertPort, acquire_and_fence,
+    QueueControlPlane, QueueKey, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort,
+    UpsertPort, acquire_and_fence,
 };
 // Re-exported so library callers name the engine's structured error + outcome/view types directly.
 pub use pqueue_engine::{
     ClaimCompatibility, ClaimedItem, CreateQueueOutcome, EngineError, EngineResult, GroupBatching,
-    ItemView, LiveItemView, QueueMetrics, UpsertOutcome,
+    ItemView, LiveItemView, PayloadUpdate, QueueMetrics, UpsertOutcome,
 };
 
 /// The capabilities the library facade composes over (the worker + control-plane ports).
@@ -37,9 +38,11 @@ pub trait LibBackend:
     PushPort
     + ClaimPort
     + UpsertPort
+    + UpdateFieldsPort
     + FinalizePort
     + RenewLeasePort
     + ReassignLeasePort
+    + ReclaimPort
     + PurgePort
     + ProjectionRead
     + ControlPlaneStore
@@ -51,9 +54,11 @@ impl<T> LibBackend for T where
     T: PushPort
         + ClaimPort
         + UpsertPort
+        + UpdateFieldsPort
         + FinalizePort
         + RenewLeasePort
         + ReassignLeasePort
+        + ReclaimPort
         + PurgePort
         + ProjectionRead
         + ControlPlaneStore
@@ -589,6 +594,46 @@ impl<B: LibBackend> Pqueue<B> {
             .backend
             .reassign(queue, ids, token, add_millis(now, lease_ms), now, epoch)
             .await;
+        self.note(queue, r)
+    }
+
+    /// In-place merge of a **live** item's hot-storage `fields`/`payload` (FAC-1) — the write half of the
+    /// [`live_item`](Self::live_item) map, so an owner-runtime can keep compound per-item work state in
+    /// pqueue instead of a side shadow store. Legal while the item is Pending OR Leased; touches neither
+    /// lifecycle state nor the lease. `field_ops`: `Some(bytes)` sets/overwrites a key, `None` removes it.
+    /// `payload`: [`PayloadUpdate::Keep`] leaves the body, `Set(_)` replaces (`Set(None)` clears).
+    /// `expected_item_version`: optional CAS — a mismatch rejects with [`EngineError::Conflict`] and commits
+    /// nothing (for rolling concurrent updates). Bumps and returns the new `item_version`. Fenced by the
+    /// owner's epoch. Atomic class only: an eventual-apply backend rejects with [`EngineError::Unavailable`].
+    pub async fn update_fields(
+        &self,
+        queue: &QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: PayloadUpdate,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<u64> {
+        let epoch = self.session_epoch(queue).await?;
+        let now = self.clock.now();
+        let r = self
+            .backend
+            .update_fields(queue, item_id, field_ops, payload, expected_item_version, now, epoch)
+            .await;
+        self.note(queue, r)
+    }
+
+    /// Reclaim THIS queue's expired leases (Leased → Pending) under the owner's fence, returning the
+    /// reclaimed ids (FAC-2). The host-driven, per-queue equivalent of the background reclaim tick: call it
+    /// before a claim on a queue you own to recover orphaned leases on a quiet queue without running the
+    /// global sweep. `limit` caps the batch (`None` = all currently expired). Idempotent.
+    pub async fn reclaim_expired(
+        &self,
+        queue: &QueueKey,
+        limit: Option<usize>,
+    ) -> EngineResult<Vec<ItemId>> {
+        let epoch = self.session_epoch(queue).await?;
+        let now = self.clock.now();
+        let r = self.backend.reclaim_expired(queue, limit, now, epoch).await;
         self.note(queue, r)
     }
 

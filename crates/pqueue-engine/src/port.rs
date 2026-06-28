@@ -387,6 +387,45 @@ pub trait FinalizePort: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 
+/// In-place merge of a **live** item's hot-storage `fields`/`payload` — the write half of the
+/// `LiveItemView` map (FAC-1, ADR-009). Pre-validated like finalize/renew: an absent / terminal /
+/// superseded id rejects and nothing is appended; an `expected_item_version` mismatch rejects with
+/// `EngineError::Conflict` (optimistic concurrency for the rolling-update case). Legal while the item is
+/// Pending OR Leased; touches neither lifecycle state nor the lease. Bumps and returns the new
+/// `item_version`. Atomic class only; on eventual-apply the engine returns `EngineError::Unavailable`.
+#[doc(hidden)]
+pub trait UpdateFieldsPort: Send + Sync {
+    /// `expected_epoch`: the owner's cached acquire-time fence epoch — `Some(e)` fences the commit
+    /// (superseded owner → `EpochFenced`, nothing appended); `None` is the sole-owner path.
+    #[allow(clippy::too_many_arguments)]
+    fn update_fields(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: crate::PayloadUpdate,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
+}
+
+/// Reclaims **this queue's** leases that expired strictly before `now` (Leased → Pending), appending one
+/// `LeaseExpired` command fenced by `expected_epoch`, and returns the reclaimed ids (FAC-2). Unlike the
+/// global background [`ReclaimDriver::tick`], this is per-queue and fenced, so an owner-runtime sweeps
+/// only the queue it owns under its own epoch — the host-driven "reclaim before claim" seam. `limit` caps
+/// the batch (`None` = all expired). Idempotent: a second call with nothing newly expired returns empty.
+#[doc(hidden)]
+pub trait ReclaimPort: Send + Sync {
+    fn reclaim_expired(
+        &self,
+        shard: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+}
+
 // ---------------------------------------------------------------------------
 // Active-scope discovery (BQ-14e)
 // ---------------------------------------------------------------------------
