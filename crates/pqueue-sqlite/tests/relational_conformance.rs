@@ -174,7 +174,7 @@ async fn renew_extends_lease_deadline() {
 
     // A renew of a non-leased id is rejected (NotFound), nothing changes.
     assert!(
-        b.renew(&shard(), vec![iid("nope")], ts(1000), ts(30), None)
+        b.renew(&shard(), vec![iid("99")], ts(1000), ts(30), None)
             .await
             .is_err()
     );
@@ -444,7 +444,7 @@ async fn cohort_expired_fails_group_members() {
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![grouped("a", "ka", 5), grouped("b", "kb", 6)],
+                items: vec![grouped("1", "ka", 5), grouped("2", "kb", 6)],
             }),
             vec![],
         ),
@@ -477,7 +477,7 @@ async fn purge_removes_items_and_gates_leased() {
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5), item("b", "kb", 6)],
+                items: vec![item("1", "ka", 5), item("2", "kb", 6)],
             }),
             vec![],
         ),
@@ -485,7 +485,7 @@ async fn purge_removes_items_and_gates_leased() {
     .await;
     // Purge a pending item (no force needed); repeated id counts once.
     let removed = b
-        .purge(&shard(), vec![iid("a"), iid("a")], false, ts(20), None)
+        .purge(&shard(), vec![iid("1"), iid("1")], false, ts(20), None)
         .await
         .unwrap();
     assert_eq!(removed, 1);
@@ -494,13 +494,13 @@ async fn purge_removes_items_and_gates_leased() {
     // Lease "b", then a non-forced purge is gated; forced purge removes it.
     b.claim(claim_req(1, 500, 10)).await.unwrap();
     assert!(
-        b.purge(&shard(), vec![iid("b")], false, ts(30), None)
+        b.purge(&shard(), vec![iid("2")], false, ts(30), None)
             .await
             .is_err(),
         "leased purge needs force"
     );
     assert_eq!(
-        b.purge(&shard(), vec![iid("b")], true, ts(31), None)
+        b.purge(&shard(), vec![iid("2")], true, ts(31), None)
             .await
             .unwrap(),
         1
@@ -726,20 +726,20 @@ async fn released_item_keeps_its_fifo_slot() {
     b.push(&shard(), vec![spec(5), spec(5)], ts(0), None)
         .await
         .unwrap();
-    let order: Vec<String> = b
+    let order: Vec<ItemId> = b
         .select_eligible(&shard(), ts(100), 10)
         .await
         .unwrap()
         .iter()
-        .map(|i| i.as_str().to_string())
+        .copied()
         .collect();
-    let first = order[0].clone();
+    let first = order[0];
 
     // Claim + release the FIRST item (its last_command_sequence advances well past the second item's).
     let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
         .item_id
         .clone();
-    assert_eq!(id.as_str(), first, "claim takes the FIFO head");
+    assert_eq!(id, first, "claim takes the FIFO head");
     b.finalize(
         &shard(),
         vec![FinalizeOutcome {
@@ -752,12 +752,12 @@ async fn released_item_keeps_its_fifo_slot() {
     .unwrap();
 
     // It must return to the HEAD of the equal-priority FIFO, not behind the second item.
-    let after: Vec<String> = b
+    let after: Vec<ItemId> = b
         .select_eligible(&shard(), ts(100), 10)
         .await
         .unwrap()
         .iter()
-        .map(|i| i.as_str().to_string())
+        .copied()
         .collect();
     assert_eq!(
         after, order,
@@ -801,22 +801,17 @@ async fn group_batching_leases_whole_groups_oldest_first() {
         .claim(claim_req_compat(10, 500, 100, compat))
         .await
         .unwrap();
-    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
     // g1 = ids[0],ids[1]; g2 = ids[2],ids[3]; g3 = ids[4].
-    let mut expect: Vec<&str> = vec![
-        ids[0].as_str(),
-        ids[1].as_str(),
-        ids[2].as_str(),
-        ids[3].as_str(),
-    ];
+    let mut expect: Vec<ItemId> = vec![ids[0], ids[1], ids[2], ids[3]];
     expect.sort();
     assert_eq!(leased, expect, "g1 + g2 leased whole; g3 not leased");
     // g3's item remains pending + claimable item-level.
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
     let rest = b.claim(claim_req(10, 500, 100)).await.unwrap();
     assert_eq!(rest.items.len(), 1);
-    assert_eq!(rest.items[0].item_id.as_str(), ids[4].as_str());
+    assert_eq!(rest.items[0].item_id, ids[4]);
 }
 
 /// `same_group_key` leases ONLY the single oldest eligible group (capped at `max_items`, partial allowed).
@@ -841,9 +836,9 @@ async fn same_group_key_leases_one_server_selected_group() {
         .claim(claim_req_compat(10, 500, 100, compat))
         .await
         .unwrap();
-    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
-    let mut expect = vec![ids[0].as_str(), ids[1].as_str()]; // g1 only (the oldest group)
+    let mut expect = vec![ids[0], ids[1]]; // g1 only (the oldest group)
     expect.sort();
     assert_eq!(leased, expect, "only the oldest group g1 is leased");
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 2);
@@ -882,9 +877,9 @@ async fn group_batching_respects_the_max_items_ceiling() {
         .claim(claim_req_compat(3, 500, 100, compat))
         .await
         .unwrap();
-    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
-    let mut expect = vec![ids[0].as_str(), ids[1].as_str()]; // only g1 (whole), g2 would overflow
+    let mut expect = vec![ids[0], ids[1]]; // only g1 (whole), g2 would overflow
     expect.sort();
     assert_eq!(
         leased, expect,
@@ -1039,9 +1034,9 @@ async fn whole_cohort_leases_a_complete_cohort() {
         .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
         .await
         .unwrap();
-    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
-    let mut expect: Vec<&str> = ids.iter().map(|i| i.as_str()).collect();
+    let mut expect: Vec<ItemId> = ids.iter().copied().collect();
     expect.sort();
     assert_eq!(leased, expect, "the whole complete cohort leases together");
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 3);
@@ -1150,9 +1145,9 @@ async fn whole_cohort_ignores_non_cohort_group_members() {
         .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
         .await
         .unwrap();
-    let mut leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
-    let mut expect = vec![ids[0].as_str(), ids[1].as_str(), ids[2].as_str()]; // the 3 cohort members
+    let mut expect = vec![ids[0], ids[1], ids[2]]; // the 3 cohort members
     expect.sort();
     assert_eq!(
         leased, expect,
@@ -1225,7 +1220,7 @@ async fn blocked_gate_hides_items_then_clear_restores() {
         1,
         "clearing the gate restores the item"
     );
-    assert_eq!(claimed.items[0].item_id.as_str(), ids[0].as_str());
+    assert_eq!(claimed.items[0].item_id, ids[0]);
 }
 
 /// CORE PARITY: an item with NO gate keys is unaffected by a blocked gate — and a blocked gate on one item
@@ -1246,10 +1241,10 @@ async fn ungated_items_are_unaffected_by_a_blocked_gate() {
     set_gates(&b, &["g"], true).await;
     // The gated item (priority 10, older) is hidden; claim skips straight to the ungated item.
     let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
-    let leased: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    let leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     assert_eq!(
         leased,
-        vec![ids[1].as_str()],
+        vec![ids[1]],
         "only the ungated item leases; the gated one is hidden but does not block it"
     );
     assert_eq!(

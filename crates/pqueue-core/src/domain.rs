@@ -88,11 +88,104 @@ identifier_type!(TenantId);
 identifier_type!(QueueId);
 identifier_type!(RequestId);
 identifier_type!(ClientItemKey);
-identifier_type!(ItemId);
 identifier_type!(LeaseToken);
 identifier_type!(GroupKey);
 identifier_type!(WorkerId);
 identifier_type!(OwnerId);
+
+/// Server-assigned item identity (ADR-009): a packed `u64` laid out **high → low** as
+/// `[ epoch : 24 ][ node : 8 ][ counter : 32 ]`.
+///
+/// The layout is chosen for the `(tenant, queue, item_id)` pkey: `epoch` (strictly-increasing per queue on
+/// every ownership change) is the high order and `counter` (per-tenure, +1 per push) the low order, so
+/// item_ids increase monotonically with insertion order — **append-only** B-tree inserts, and numeric order
+/// equals stream/insertion order. `node` (the writer's node id) sits in the middle as split-brain
+/// disambiguation; single-writer-per-epoch already makes `(epoch, counter)` unique, so `node` is
+/// defense-in-depth, not the primary guarantee. Generated **locally** by the owning node (no central
+/// sequence — works on the log); the counter resets each acquire (a new, strictly-greater epoch).
+///
+/// Serialized as its **decimal string** on the log/wire (no JSON-number precision footgun, stable token);
+/// stored as a native `BIGINT`/`INTEGER` ([`as_u64`](Self::as_u64)) in a relational projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemId(u64);
+
+impl ItemId {
+    const NODE_SHIFT: u32 = 32;
+    const EPOCH_SHIFT: u32 = 40;
+    const EPOCH_MASK: u64 = (1 << 24) - 1;
+
+    /// Pack `(epoch, node, counter)` into the id. Only the low 24 bits of `epoch` are used (it wraps after
+    /// 2^24 ownership changes — a centuries-away event, see the epoch-exhaustion guard at the owner).
+    pub fn mint(epoch: u64, node: u8, counter: u32) -> Self {
+        Self(
+            ((epoch & Self::EPOCH_MASK) << Self::EPOCH_SHIFT)
+                | ((node as u64) << Self::NODE_SHIFT)
+                | counter as u64,
+        )
+    }
+
+    /// Wrap a raw packed value (read from durable storage / the wire).
+    pub fn from_u64(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Parse a persisted/wire rendering — the inverse of [`Display`](std::fmt::Display). Accepts the
+    /// canonical decimal of the packed value; used when reading an id back from a TEXT column or a RESP
+    /// frame. (Kept named `new` so the many read-from-storage call sites are unchanged.)
+    pub fn new(rendered: impl AsRef<str>) -> Result<Self, IdentifierError> {
+        rendered.as_ref().parse()
+    }
+
+    /// The packed value — store this as the native `BIGINT`/`INTEGER` pkey in a relational projection.
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// The 24-bit epoch field (low bits of the queue's `assignment_epoch`).
+    pub fn epoch(&self) -> u64 {
+        self.0 >> Self::EPOCH_SHIFT
+    }
+
+    /// The writer's node id.
+    pub fn node(&self) -> u8 {
+        (self.0 >> Self::NODE_SHIFT) as u8
+    }
+
+    /// The per-tenure counter.
+    pub fn counter(&self) -> u32 {
+        self.0 as u32
+    }
+}
+
+impl fmt::Display for ItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Decimal of the packed value: stable, opaque token; numeric order == stream/insertion order.
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for ItemId {
+    type Err = IdentifierError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u64>()
+            .map(Self)
+            .map_err(|_| IdentifierError::new("ItemId must be a u64 decimal string"))
+    }
+}
+
+impl serde::Serialize for ItemId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // String on the wire/log — avoids the JSON >2^53 number-precision footgun.
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ItemId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,

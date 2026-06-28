@@ -64,8 +64,8 @@ use pqueue_engine::{
     LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
     PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items, project_scopes,
-    validate_claim_compatibility, validate_purge_force,
+    QueueCounters, ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    project_scopes, validate_claim_compatibility, validate_purge_force,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -305,8 +305,6 @@ struct Inner {
     queues: HashMap<QueueKey, QueueDefinition>,
     /// Ephemeral live lease tokens (cleartext is never persisted; only the hash is). Lost on reopen.
     live_tokens: HashMap<ItemId, LeaseToken>,
-    /// Monotonic counter for command ids only (positions come from `relational_cursor`).
-    cmd_seq: u64,
 }
 
 impl Inner {
@@ -328,28 +326,8 @@ impl Inner {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             self.queues.insert(key, definition);
         }
-        // Restore the command counter past every server-assigned id (`rel-{n}-{i}`) already in the durable
-        // projection, so a push after reopen never re-mints an existing item id (PushPort restart-safety;
-        // mirrors the log backend's counter restore). There is no log to scan — the items table is the
-        // authority — so we derive it from the live ids directly.
-        let mut max_n: Option<u64> = None;
-        {
-            let mut stmt = st(self.conn.prepare("SELECT item_id FROM pqueue_items"))?;
-            let mapped = st(stmt.query_map([], |row| row.get::<_, String>(0)))?;
-            for r in mapped {
-                let id = st(r)?;
-                if let Some(n) = id
-                    .strip_prefix("rel-")
-                    .and_then(|s| s.split('-').next())
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    max_n = Some(max_n.map_or(n, |m| m.max(n)));
-                }
-            }
-        }
-        if let Some(m) = max_n {
-            self.cmd_seq = m + 1;
-        }
+        // NOTE: item-id restart-safety is handled by `restore_counters` (it seeds `QueueCounters` past the
+        // highest durable id, decoding `(epoch, counter)` straight from the packed id — ADR-009).
         Ok(())
     }
 
@@ -451,7 +429,7 @@ fn insert_item(
         params![
             t,
             q,
-            item.item_id.as_str(),
+            item.item_id.to_string(),
             item.client_item_key.as_str(),
             priority_json,
             sort,
@@ -476,7 +454,7 @@ fn insert_item(
         st(tx.execute(
             "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES (?1,?2,?3,?4) \
              ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
-            params![t, q, item.item_id.as_str(), gk.as_str()],
+            params![t, q, item.item_id.to_string(), gk.as_str()],
         ))?;
     }
     Ok(())
@@ -538,7 +516,7 @@ fn groups_of(
         let g: Option<String> = st(tx
             .query_row(
                 "SELECT group_key FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                params![t, q, id.as_str()],
+                params![t, q, id.to_string()],
                 |row| row.get(0),
             )
             .optional())?
@@ -670,9 +648,9 @@ fn apply_command_sql(
                      lease_expires_at=?5, retry_count=retry_count+1, item_version=item_version+1, \
                      updated_at=?6, last_command_sequence=?7 \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str(), hash, exp, now_n, seq as i64],
+                    params![t, q, id.to_string(), hash, exp, now_n, seq as i64],
                 ))?;
-                token_ops.push(TokenOp::Set(id.clone(), c.lease_token.clone()));
+                token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
             for g in groups_of(tx, shard, &c.item_ids)? {
                 refresh_group_summary(tx, shard, &g, now)?;
@@ -686,7 +664,7 @@ fn apply_command_sql(
                     "UPDATE pqueue_items SET lease_expires_at=?4, item_version=item_version+1, \
                      updated_at=?5, last_command_sequence=?6 \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str(), exp, now_n, seq as i64],
+                    params![t, q, id.to_string(), exp, now_n, seq as i64],
                 ))?;
             }
             Ok(())
@@ -699,9 +677,9 @@ fn apply_command_sql(
                     "UPDATE pqueue_items SET lease_token_hash=?4, lease_expires_at=?5, \
                      retry_count=retry_count+1, item_version=item_version+1, updated_at=?6, \
                      last_command_sequence=?7 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str(), hash, exp, now_n, seq as i64],
+                    params![t, q, id.to_string(), hash, exp, now_n, seq as i64],
                 ))?;
-                token_ops.push(TokenOp::Set(id.clone(), c.lease_token.clone()));
+                token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
             Ok(())
         }
@@ -716,7 +694,7 @@ fn apply_command_sql(
                         let (rc, ma): (i64, i64) = st(tx.query_row(
                             "SELECT retry_count, max_attempts FROM pqueue_items \
                              WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                            params![t, q, o.item_id.as_str()],
+                            params![t, q, o.item_id.to_string()],
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         ))?;
                         if is_retry_exhausted(rc as u32, ma as u32) {
@@ -740,7 +718,7 @@ fn apply_command_sql(
                     params![
                         t,
                         q,
-                        o.item_id.as_str(),
+                        o.item_id.to_string(),
                         state_str(new_state),
                         reset_attempts,
                         terminal_at,
@@ -748,9 +726,9 @@ fn apply_command_sql(
                         seq as i64,
                     ],
                 ))?;
-                token_ops.push(TokenOp::Clear(o.item_id.clone()));
+                token_ops.push(TokenOp::Clear(o.item_id));
             }
-            let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id).collect();
             for g in groups_of(tx, shard, &ids)? {
                 refresh_group_summary(tx, shard, &g, now)?;
             }
@@ -762,7 +740,7 @@ fn apply_command_sql(
             st(tx.execute(
                 "UPDATE pqueue_items SET superseded=1, updated_at=?4, last_command_sequence=?5 \
                  WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                params![t, q, c.superseded_item_id.as_str(), now_n, seq as i64],
+                params![t, q, c.superseded_item_id.to_string(), now_n, seq as i64],
             ))?;
             let model = queues
                 .get(shard)
@@ -787,9 +765,9 @@ fn apply_command_sql(
                     "UPDATE pqueue_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
                      lease_expires_at=NULL, item_version=item_version+1, updated_at=?4, \
                      last_command_sequence=?5 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str(), now_n, seq as i64],
+                    params![t, q, id.to_string(), now_n, seq as i64],
                 ))?;
-                token_ops.push(TokenOp::Clear(id.clone()));
+                token_ops.push(TokenOp::Clear(*id));
             }
             for g in groups_of(tx, shard, &c.item_ids)? {
                 refresh_group_summary(tx, shard, &g, now)?;
@@ -819,9 +797,9 @@ fn apply_command_sql(
                     "UPDATE pqueue_items SET lifecycle_state='Failed', item_version=item_version+1, \
                      terminal_at=?4, updated_at=?4, last_command_sequence=?5 \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str(), now_n, seq as i64],
+                    params![t, q, id.to_string(), now_n, seq as i64],
                 ))?;
-                token_ops.push(TokenOp::Clear(id.clone()));
+                token_ops.push(TokenOp::Clear(*id));
             }
             // The whole cohort (group) is now terminal — refresh its summary to empty.
             refresh_group_summary(tx, shard, &c.group_key, now)?;
@@ -832,7 +810,7 @@ fn apply_command_sql(
                 // Operator fence: no item_version bump (parity with the in-memory arm).
                 st(tx.execute(
                     "UPDATE pqueue_items SET fenced=1 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str()],
+                    params![t, q, id.to_string()],
                 ))?;
             }
             Ok(())
@@ -841,7 +819,7 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 st(tx.execute(
                     "UPDATE pqueue_items SET fenced=0 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str()],
+                    params![t, q, id.to_string()],
                 ))?;
             }
             Ok(())
@@ -872,7 +850,7 @@ fn apply_command_sql(
                     .query_row(
                         "SELECT group_key, client_item_key, lifecycle_state FROM pqueue_items \
                          WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                        params![t, q, id.as_str()],
+                        params![t, q, id.to_string()],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
                     .optional())?;
@@ -888,7 +866,7 @@ fn apply_command_sql(
                              (tenant_id,queue_id,client_item_key,item_id,expires_at) \
                              VALUES (?1,?2,?3,?4,?5) ON CONFLICT(tenant_id,queue_id,client_item_key) \
                              DO UPDATE SET item_id=excluded.item_id, expires_at=excluded.expires_at",
-                            params![t, q, ck, id.as_str(), expires],
+                            params![t, q, ck, id.to_string(), expires],
                         ))?;
                     }
                     if let Some(g) = gk {
@@ -901,14 +879,14 @@ fn apply_command_sql(
                 }
                 st(tx.execute(
                     "DELETE FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str()],
+                    params![t, q, id.to_string()],
                 ))?;
                 // BQ-14d: drop the purged item's gate membership (the anti-join source).
                 st(tx.execute(
                     "DELETE FROM pqueue_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    params![t, q, id.as_str()],
+                    params![t, q, id.to_string()],
                 ))?;
-                token_ops.push(TokenOp::Clear(id.clone()));
+                token_ops.push(TokenOp::Clear(*id));
             }
             for g in &groups {
                 refresh_group_summary(tx, shard, g, now)?;
@@ -1359,7 +1337,7 @@ fn render_claimed(
                 "SELECT client_item_key, item_version, priority, group_key, not_before, \
                  lease_expires_at, retry_count, payload, fields FROM pqueue_items \
                  WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND lifecycle_state='Leased'",
-                params![t, q, id.as_str()],
+                params![t, q, id.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -1381,7 +1359,7 @@ fn render_claimed(
         };
         let Some(exp) = exp else { continue };
         out.push(ClaimedItem {
-            item_id: id.clone(),
+            item_id: *id,
             client_item_key: ClientItemKey::new(key)
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             item_version: version as u64,
@@ -1489,7 +1467,7 @@ fn item_flags(
         .query_row(
             "SELECT lifecycle_state, fenced, superseded FROM pqueue_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-            params![t, q, id.as_str()],
+            params![t, q, id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1529,6 +1507,10 @@ fn validate_leased(conn: &Connection, shard: &QueueKey, ids: &[ItemId]) -> Engin
 /// (ADR-008 / TD-001 relational class). Atomic durability class.
 pub struct SqliteRelationalBackend {
     inner: Mutex<Inner>,
+    /// This instance's node id, packed into every minted [`ItemId`] (ADR-009). `0` single-instance.
+    node_id: u8,
+    /// Per-(queue, epoch) item-id sequence — see `QueueCounters`.
+    counters: QueueCounters,
 }
 
 impl SqliteRelationalBackend {
@@ -1543,6 +1525,13 @@ impl SqliteRelationalBackend {
         Self::from_conn(st(Connection::open_in_memory())?)
     }
 
+    /// Tag this backend with `node_id` — packed into the disambiguation byte of every minted [`ItemId`]
+    /// so distinct nodes competing for one queue never mint a colliding id (ADR-009).
+    pub fn with_node_id(mut self, node_id: u8) -> Self {
+        self.node_id = node_id;
+        self
+    }
+
     fn from_conn(conn: Connection) -> EngineResult<Self> {
         st(conn.execute_batch(RELATIONAL_SCHEMA))?;
         ensure_item_fields_column(&conn)?;
@@ -1550,12 +1539,41 @@ impl SqliteRelationalBackend {
             conn,
             queues: HashMap::new(),
             live_tokens: HashMap::new(),
-            cmd_seq: 0,
         };
         inner.reload()?;
-        Ok(Self {
+        let backend = Self {
             inner: Mutex::new(inner),
-        })
+            node_id: 0,
+            counters: QueueCounters::default(),
+        };
+        backend.restore_counters()?;
+        Ok(backend)
+    }
+
+    /// Restart recovery: seed the per-queue mint counter past every id already in `pqueue_items`, so a push
+    /// after reopen never re-mints an existing item id (the durable items table is the authority — there is
+    /// no log to replay). `observe` decodes `(epoch, counter)` from each packed id and only advances.
+    fn restore_counters(&self) -> EngineResult<()> {
+        let g = self.inner.lock().expect("poisoned");
+        let mut stmt =
+            st(g.conn.prepare("SELECT tenant_id, queue_id, item_id FROM pqueue_items"))?;
+        let rows = st(stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }))?;
+        for r in rows {
+            let (t, q, id) = st(r)?;
+            let key = QueueKey::new(
+                TenantId::new(t).map_err(|e| EngineError::Storage(e.to_string()))?,
+                QueueId::new(q).map_err(|e| EngineError::Storage(e.to_string()))?,
+            );
+            let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+            self.counters.observe(&key, item_id);
+        }
+        Ok(())
     }
 }
 
@@ -1884,9 +1902,10 @@ impl PushPort for SqliteRelationalBackend {
                 .get(shard)
                 .map(|d| d.retry_policy.max_attempts)
                 .ok_or(EngineError::NotFound)?;
-            let n = g.cmd_seq;
-            g.cmd_seq += 1;
-            let (push_items, ids) = build_push_items(items, n, "rel", max_attempts);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             g.commit_command(
                 shard,
                 QueueCommand::Push(PushCommand { items: push_items }),
@@ -2056,12 +2075,12 @@ impl UpsertPort for SqliteRelationalBackend {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional())?;
-            let n = g.cmd_seq;
-            g.cmd_seq += 1;
-            let new_item_id = ItemId::new(format!("rel-{n}-0")).expect("id");
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, 1);
+            let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
             let item = PushItem {
                 client_item_key: client_item_key.clone(),
-                item_id: new_item_id.clone(),
+                item_id: new_item_id,
                 priority,
                 not_before,
                 group_key,
@@ -2113,7 +2132,7 @@ impl UpsertPort for SqliteRelationalBackend {
                                 shard,
                                 QueueCommand::ReplacePending(ReplacePendingCommand {
                                     client_item_key: client_item_key.clone(),
-                                    superseded_item_id: existing_id.clone(),
+                                    superseded_item_id: existing_id,
                                     replacement: item,
                                 }),
                                 now, expected_epoch
@@ -2145,7 +2164,7 @@ impl FinalizePort for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            let ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             validate_leased(&g.conn, shard, &ids)?;
             g.commit_command(
                 shard,
@@ -2230,7 +2249,7 @@ impl PurgePort for SqliteRelationalBackend {
                 }
                 if let Some((state, _, _)) = item_flags(&g.conn, shard, id)? {
                     validate_purge_force(state == ItemState::Leased, force)?;
-                    present.push(id.clone());
+                    present.push(*id);
                 }
             }
             if present.is_empty() {
@@ -2398,8 +2417,8 @@ mod group_summary_tests {
             "oldest_eligible_at set while items eligible"
         );
         assert_eq!(
-            rep.as_deref(),
-            Some(ids[0].as_str()),
+            rep,
+            Some(ids[0].to_string()),
             "rep is the first-claimable item"
         );
 
@@ -2408,8 +2427,8 @@ mod group_summary_tests {
         let (_, count, rep) = summary(&b, "g").unwrap();
         assert_eq!(count, 1, "leased item leaves the eligible count");
         assert_eq!(
-            rep.as_deref(),
-            Some(ids[1].as_str()),
+            rep,
+            Some(ids[1].to_string()),
             "rep advances to the next eligible item"
         );
 
@@ -2440,7 +2459,7 @@ mod group_summary_tests {
         b.tick(ts(101)).await.unwrap();
         let (_, count, rep) = summary(&b, "g").unwrap();
         assert_eq!(count, 1, "reclaimed item is eligible again");
-        assert_eq!(rep.as_deref(), Some(ids[0].as_str()));
+        assert_eq!(rep, Some(ids[0].to_string()));
     }
 
     #[tokio::test]
@@ -2467,7 +2486,7 @@ mod group_summary_tests {
         .unwrap();
         let (_, count, rep) = summary(&b, "g").unwrap();
         assert_eq!(count, 1, "released item is eligible again");
-        assert_eq!(rep.as_deref(), Some(ids[0].as_str()));
+        assert_eq!(rep, Some(ids[0].to_string()));
     }
 
     #[tokio::test]
@@ -2576,7 +2595,7 @@ mod group_summary_tests {
                 .unwrap();
             let (_, count, rep) = summary(&a, "g").unwrap();
             assert_eq!(count, 2);
-            assert_eq!(rep.as_deref(), Some(ids[0].as_str()));
+            assert_eq!(rep, Some(ids[0].to_string()));
             rep_before = rep;
         } // crash
 

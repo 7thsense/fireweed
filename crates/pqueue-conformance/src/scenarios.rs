@@ -57,9 +57,9 @@ pub async fn peek_is_priority_ordered_and_nondestructive<B: ConformanceCore>(mak
         envelope(
             QueueCommand::Push(PushCommand {
                 items: vec![
-                    item("a", "ka", 30),
-                    item("b", "kb", 10),
-                    item("c", "kc", 20),
+                    item("1", "ka", 30),
+                    item("2", "kb", 10),
+                    item("3", "kc", 20),
                 ],
             }),
             vec![],
@@ -67,10 +67,10 @@ pub async fn peek_is_priority_ordered_and_nondestructive<B: ConformanceCore>(mak
     )
     .await;
     let views = b.peek(&shard(), 10).await.unwrap();
-    let peeked: Vec<&str> = views.iter().map(|v| v.item_id.as_str()).collect();
+    let peeked: Vec<String> = views.iter().map(|v| v.item_id.to_string()).collect();
     assert_eq!(
         peeked,
-        vec!["b", "c", "a"],
+        vec!["2", "3", "1"],
         "peek is priority-ordered (10,20,30)"
     );
     // Non-destructive: peeking again returns the same items (peek must not consume/claim).
@@ -94,7 +94,7 @@ pub async fn pending_lists_leased_items<B: ConformanceCore>(make: impl Fn() -> B
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -107,7 +107,7 @@ pub async fn pending_lists_leased_items<B: ConformanceCore>(make: impl Fn() -> B
     b.claim(claim_req(1, 500, 10)).await.unwrap();
     let pending = b.pending(&shard()).await.unwrap();
     assert_eq!(pending.len(), 1, "the leased item appears in pending");
-    assert_eq!(pending[0].item_id.as_str(), "a");
+    assert_eq!(pending[0].item_id.to_string(), "1");
     assert_eq!(pending[0].lease_token.as_str(), "lease-1");
 }
 
@@ -163,19 +163,19 @@ pub async fn push_then_select_eligible_in_priority_order<B: ConformanceCore>(mak
     // Push out of priority order: 30, 10, 20.
     let push = QueueCommand::Push(PushCommand {
         items: vec![
-            item("a", "ka", 30),
-            item("b", "kb", 10),
-            item("c", "kc", 20),
+            item("1", "ka", 30),
+            item("2", "kb", 10),
+            item("3", "kc", 20),
         ],
     });
     commit(&b, envelope(push, vec![])).await;
 
     let eligible = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
-    let ids: Vec<&str> = eligible.iter().map(|i| i.as_str()).collect();
+    let ids: Vec<String> = eligible.iter().map(|i| i.to_string()).collect();
     // Ascending Int64 priority => 10(b), 20(c), 30(a). Fails if select_eligible is a no-op.
     assert_eq!(
         ids,
-        vec!["b", "c", "a"],
+        vec!["2", "3", "1"],
         "must be priority-ordered, not insertion order"
     );
 }
@@ -187,7 +187,7 @@ pub async fn claim_then_complete_lifecycle<B: ConformanceCore>(make: impl Fn() -
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -196,11 +196,11 @@ pub async fn claim_then_complete_lifecycle<B: ConformanceCore>(make: impl Fn() -
 
     // Claim it.
     let claim = QueueCommand::Claim(ClaimCommand {
-        item_ids: vec![ItemId::new("a").unwrap()],
+        item_ids: vec![ItemId::new("1").unwrap()],
         lease_token: LeaseToken::new("lease-1").unwrap(),
         lease_expires_at: ts(200),
     });
-    commit(&b, envelope(claim, vec![ItemId::new("a").unwrap()])).await;
+    commit(&b, envelope(claim, vec![ItemId::new("1").unwrap()])).await;
 
     let m = b.metrics(&qkey()).await.unwrap();
     assert_eq!(m.leased, 1, "claim must move item to leased");
@@ -216,11 +216,11 @@ pub async fn claim_then_complete_lifecycle<B: ConformanceCore>(make: impl Fn() -
     // Complete it.
     let fin = QueueCommand::Finalize(FinalizeCommand {
         outcomes: vec![FinalizeOutcome {
-            item_id: ItemId::new("a").unwrap(),
+            item_id: ItemId::new("1").unwrap(),
             kind: FinalizeKind::Complete,
         }],
     });
-    commit(&b, envelope(fin, vec![ItemId::new("a").unwrap()])).await;
+    commit(&b, envelope(fin, vec![ItemId::new("1").unwrap()])).await;
 
     let m = b.metrics(&qkey()).await.unwrap();
     assert_eq!(
@@ -237,7 +237,7 @@ pub async fn replace_pending_supersedes_old<B: ConformanceCore>(make: impl Fn() 
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("old", "dup", 5)],
+                items: vec![item("5", "dup", 5)],
             }),
             vec![],
         ),
@@ -247,16 +247,16 @@ pub async fn replace_pending_supersedes_old<B: ConformanceCore>(make: impl Fn() 
     // Upsert: same client_item_key replaces the pending item with a new id.
     let replace = QueueCommand::ReplacePending(ReplacePendingCommand {
         client_item_key: ClientItemKey::new("dup").unwrap(),
-        superseded_item_id: ItemId::new("old").unwrap(),
-        replacement: item("new", "dup", 5),
+        superseded_item_id: ItemId::new("5").unwrap(),
+        replacement: item("6", "dup", 5),
     });
     commit(&b, envelope(replace, vec![])).await;
 
     let eligible = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
-    let ids: Vec<&str> = eligible.iter().map(|i| i.as_str()).collect();
+    let ids: Vec<String> = eligible.iter().map(|i| i.to_string()).collect();
     assert_eq!(
         ids,
-        vec!["new"],
+        vec!["6"],
         "superseded old id must not be eligible; new id is"
     );
 
@@ -288,9 +288,9 @@ pub async fn claim_returns_priority_ordered_rich_items<B: ConformanceCore>(make:
         envelope(
             QueueCommand::Push(PushCommand {
                 items: vec![
-                    item("a", "ka", 30),
-                    item("b", "kb", 10),
-                    item("c", "kc", 20),
+                    item("1", "ka", 30),
+                    item("2", "kb", 10),
+                    item("3", "kc", 20),
                 ],
             }),
             vec![],
@@ -299,10 +299,10 @@ pub async fn claim_returns_priority_ordered_rich_items<B: ConformanceCore>(make:
     .await;
 
     let claimed = b.claim(claim_req(2, 500, 100)).await.unwrap();
-    let ids: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
+    let ids: Vec<String> = claimed.items.iter().map(|i| i.item_id.to_string()).collect();
     assert_eq!(
         ids,
-        vec!["b", "c"],
+        vec!["2", "3"],
         "claim must deliver highest priority first"
     );
     // Rich shape populated (would fail if claim returned a stub).
@@ -315,8 +315,8 @@ pub async fn claim_returns_priority_ordered_rich_items<B: ConformanceCore>(make:
     // The unclaimed lowest-priority item remains eligible.
     let remaining = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
     assert_eq!(
-        remaining.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
-        vec!["a"]
+        remaining.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        vec!["1"]
     );
 }
 
@@ -335,7 +335,7 @@ pub async fn structured_live_items_are_ordered_and_only_live<B: ConformanceCore>
     let mut fields = BTreeMap::new();
     fields.insert("recipient_ref".to_string(), Bytes::from_static(b"r-1"));
     fields.insert("payload_ref".to_string(), Bytes::from_static(b"work-1"));
-    let mut pushed = item("hot-id", "hot-key", 5);
+    let mut pushed = item("7", "hot-key", 5);
     pushed.payload = Some(Bytes::from_static(b"opaque"));
     pushed.fields = fields.clone();
     commit(
@@ -378,7 +378,7 @@ pub async fn structured_live_items_are_ordered_and_only_live<B: ConformanceCore>
     b.finalize(
         &shard(),
         vec![FinalizeOutcome {
-            item_id: claimed.items[0].item_id.clone(),
+            item_id: claimed.items[0].item_id,
             kind: FinalizeKind::Complete,
         }],
         ts(20), None
@@ -494,7 +494,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
         envelope(
             QueueCommand::Finalize(FinalizeCommand {
                 outcomes: vec![FinalizeOutcome {
-                    item_id: id1.clone(),
+                    item_id: id1,
                     kind: FinalizeKind::Complete,
                 }],
             }),
@@ -574,7 +574,7 @@ pub async fn tick_reclaims_expired_lease_with_no_client_traffic<B: ConformanceCo
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -604,8 +604,8 @@ pub async fn tick_reclaims_expired_lease_with_no_client_traffic<B: ConformanceCo
     // attempt_count = number of deliveries; a fresh claim of this item would charge the next one.)
     let pending = b.select_eligible(&shard(), ts(300), 10).await.unwrap();
     assert_eq!(
-        pending.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
-        vec!["a"]
+        pending.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        vec!["1"]
     );
 }
 
@@ -617,7 +617,7 @@ pub async fn tick_lease_boundary_is_half_open<B: ConformanceCore>(make: impl Fn(
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -641,7 +641,7 @@ pub async fn paused_queue_yields_no_claims<B: ConformanceCore>(make: impl Fn() -
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -677,29 +677,29 @@ pub async fn fenced_lease_finalize_is_stale<B: ConformanceCore>(make: impl Fn() 
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
     )
     .await;
     b.claim(claim_req(10, 500, 10)).await.unwrap();
-    let id = ItemId::new("a").unwrap();
+    let id = ItemId::new("1").unwrap();
 
     // Operator fences the lease.
     commit(
         &b,
         envelope(
             QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![id.clone()],
+                item_ids: vec![id],
             }),
-            vec![id.clone()],
+            vec![id],
         ),
     )
     .await;
     // The holder's finalize is rejected StaleLease, and nothing is committed (still leased).
     let outcomes = vec![FinalizeOutcome {
-        item_id: id.clone(),
+        item_id: id,
         kind: FinalizeKind::Complete,
     }];
     assert_eq!(
@@ -713,9 +713,9 @@ pub async fn fenced_lease_finalize_is_stale<B: ConformanceCore>(make: impl Fn() 
         &b,
         envelope(
             QueueCommand::UnfenceLease(UnfenceLeaseCommand {
-                item_ids: vec![id.clone()],
+                item_ids: vec![id],
             }),
-            vec![id.clone()],
+            vec![id],
         ),
     )
     .await;
@@ -732,20 +732,20 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
     )
     .await;
-    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "a" leased, expires at ts(500)
-    let id = ItemId::new("a").unwrap();
+    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "1" leased, expires at ts(500)
+    let id = ItemId::new("1").unwrap();
 
     // Unknown id -> NotFound, and NOTHING appended (reject before commit, B1).
     assert_eq!(
         b.renew(
             &shard(),
-            vec![ItemId::new("nope").unwrap()],
+            vec![ItemId::new("90").unwrap()],
             ts(2000),
             ts(20),
         None)
@@ -755,7 +755,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
 
     // Happy path: extend the lease to ts(2000). Ticking PAST the old expiry (500) reclaims nothing,
     // and the attempt_count is unchanged (renew does not charge a delivery).
-    b.renew(&shard(), vec![id.clone()], ts(2000), ts(20), None)
+    b.renew(&shard(), vec![id], ts(2000), ts(20), None)
         .await
         .unwrap();
     assert_eq!(
@@ -783,14 +783,14 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("p", "kp", 9)],
+                items: vec![item("4", "kp", 9)],
             }),
             vec![],
         ),
     )
     .await;
     assert_eq!(
-        b.renew(&shard(), vec![ItemId::new("p").unwrap()], ts(2000), ts(21), None)
+        b.renew(&shard(), vec![ItemId::new("4").unwrap()], ts(2000), ts(21), None)
             .await,
         Err(EngineError::Invalid("item is not leased"))
     );
@@ -800,9 +800,9 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
         &b,
         envelope(
             QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![id.clone()],
+                item_ids: vec![id],
             }),
-            vec![id.clone()],
+            vec![id],
         ),
     )
     .await;
@@ -822,21 +822,21 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
     )
     .await;
-    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "a" leased by "lease-1", attempt_count = 1
-    let id = ItemId::new("a").unwrap();
+    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "1" leased by "lease-1", attempt_count = 1
+    let id = ItemId::new("1").unwrap();
     let new_token = LeaseToken::new("lease-2").unwrap();
 
     // Unknown id -> NotFound, and NOTHING appended.
     assert_eq!(
         b.reassign(
             &shard(),
-            vec![ItemId::new("nope").unwrap()],
+            vec![ItemId::new("90").unwrap()],
             new_token.clone(),
             ts(2000),
             ts(20),
@@ -848,7 +848,7 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
     // Happy path: transfer the lease to "lease-2", extend to ts(2000), charge exactly one delivery.
     b.reassign(
         &shard(),
-        vec![id.clone()],
+        vec![id],
         new_token.clone(),
         ts(2000),
         ts(20), None
@@ -884,9 +884,9 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
         &b,
         envelope(
             QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![id.clone()],
+                item_ids: vec![id],
             }),
-            vec![id.clone()],
+            vec![id],
         ),
     )
     .await;
@@ -906,19 +906,19 @@ pub async fn claimed_view_renders_leased_items<B: ConformanceCore>(make: impl Fn
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5), item("p", "kp", 9)],
+                items: vec![item("1", "ka", 5), item("4", "kp", 9)],
             }),
             vec![],
         ),
     )
     .await;
-    // Claim only the top-priority item "a" (5 < 9, ascending); "p" stays pending.
+    // Claim only the top-priority item "1" (5 < 9, ascending); "4" stays pending.
     b.claim(claim_req(1, 500, 10)).await.unwrap();
-    let a = ItemId::new("a").unwrap();
-    let p = ItemId::new("p").unwrap();
+    let a = ItemId::new("1").unwrap();
+    let p = ItemId::new("4").unwrap();
 
     let view = b
-        .claimed_view(&shard(), &[a.clone(), p, ItemId::new("nope").unwrap()])
+        .claimed_view(&shard(), &[a, p, ItemId::new("90").unwrap()])
         .await
         .unwrap();
     assert_eq!(
@@ -943,26 +943,26 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceCore>(
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5), item("b", "kb", 9)],
+                items: vec![item("1", "ka", 5), item("2", "kb", 9)],
             }),
             vec![],
         ),
     )
     .await;
-    // Claim "a" (top priority) → leased; "b" stays pending.
+    // Claim "1" (top priority) → leased; "2" stays pending.
     b.claim(claim_req(1, 500, 10)).await.unwrap();
-    let a = ItemId::new("a").unwrap();
-    let b_id = ItemId::new("b").unwrap();
+    let a = ItemId::new("1").unwrap();
+    let b_id = ItemId::new("2").unwrap();
 
     // Purging a LEASED item without force is gated (Conflict), appending nothing.
     assert_eq!(
-        b.purge(&shard(), vec![a.clone()], false, ts(20), None).await,
+        b.purge(&shard(), vec![a], false, ts(20), None).await,
         Err(EngineError::Conflict)
     );
     // Mixed batch [pending, leased] without force: the gate rejects ALL-OR-NOTHING regardless of order —
     // the pending id is NOT purged even though it precedes the leased one in the batch.
     assert_eq!(
-        b.purge(&shard(), vec![b_id.clone(), a.clone()], false, ts(20), None)
+        b.purge(&shard(), vec![b_id, a], false, ts(20), None)
             .await,
         Err(EngineError::Conflict)
     );
@@ -977,7 +977,7 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceCore>(
     let removed = b
         .purge(
             &shard(),
-            vec![b_id.clone(), b_id.clone(), ItemId::new("nope").unwrap()],
+            vec![b_id, b_id, ItemId::new("90").unwrap()],
             false,
             ts(21), None
         )
@@ -989,7 +989,7 @@ pub async fn purge_removes_present_items_and_gates_leased<B: ConformanceCore>(
     );
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0, "b is gone");
 
-    // Force-purge the leased item "a": removed, count 1, no longer leased.
+    // Force-purge the leased item "1": removed, count 1, no longer leased.
     let removed_a = b.purge(&shard(), vec![a], true, ts(22), None).await.unwrap();
     assert_eq!(removed_a, 1);
     assert_eq!(
@@ -1009,16 +1009,16 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item_max("a", "ka", 5, 2)],
+                items: vec![item_max("1", "ka", 5, 2)],
             }),
             vec![],
         ),
     )
     .await;
-    let id = ItemId::new("a").unwrap();
+    let id = ItemId::new("1").unwrap();
     let retry_outcome = || {
         vec![FinalizeOutcome {
-            item_id: ItemId::new("a").unwrap(),
+            item_id: ItemId::new("1").unwrap(),
             kind: FinalizeKind::Retry,
         }]
     };
@@ -1083,12 +1083,12 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
     );
 
     // Boundary: max_attempts = 1 means ONE delivery, no retries — the first retry exhausts immediately
-    // (pins `>=`, not `>`). Push a second item "b" with max_attempts = 1.
+    // (pins `>=`, not `>`). Push a second item "2" with max_attempts = 1.
     commit(
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item_max("b", "kb", 9, 1)],
+                items: vec![item_max("2", "kb", 9, 1)],
             }),
             vec![],
         ),
@@ -1098,7 +1098,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
     b.finalize(
         &shard(),
         vec![FinalizeOutcome {
-            item_id: ItemId::new("b").unwrap(),
+            item_id: ItemId::new("2").unwrap(),
             kind: FinalizeKind::Retry,
         }],
         ts(80), None
@@ -1121,13 +1121,13 @@ pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: Conform
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
     )
     .await;
-    let id = ItemId::new("a").unwrap();
+    let id = ItemId::new("1").unwrap();
     // Item is Pending (never claimed) -> finalize rejected, and NOTHING is appended (no divergence, B1).
     let outcomes = vec![FinalizeOutcome {
         item_id: id,
@@ -1147,21 +1147,21 @@ pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: i
         &a,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5), item("p", "kp", 9)],
+                items: vec![item("1", "ka", 5), item("4", "kp", 9)],
             }),
             vec![],
         ),
     )
     .await;
-    a.claim(claim_req(1, 500, 10)).await.unwrap(); // claims "a" (priority 5 < 9)
-    let aid = ItemId::new("a").unwrap();
+    a.claim(claim_req(1, 500, 10)).await.unwrap(); // claims "1" (priority 5 < 9)
+    let aid = ItemId::new("1").unwrap();
     commit(
         &a,
         envelope(
             QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![aid.clone()],
+                item_ids: vec![aid],
             }),
-            vec![aid.clone()],
+            vec![aid],
         ),
     )
     .await;
@@ -1212,7 +1212,7 @@ pub async fn high_water_advances_on_each_commit<B: ConformanceBackend>(make: imp
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -1252,9 +1252,9 @@ pub async fn reconnect_after_crash_preserves_committed_state<B: ConformanceCore>
         envelope(
             QueueCommand::Push(PushCommand {
                 items: vec![
-                    item("a", "ka", 30),
-                    item("b", "kb", 10),
-                    item("c", "kc", 20),
+                    item("1", "ka", 30),
+                    item("2", "kb", 10),
+                    item("3", "kc", 20),
                 ],
             }),
             vec![],
@@ -1272,9 +1272,9 @@ pub async fn reconnect_after_crash_preserves_committed_state<B: ConformanceCore>
     assert_eq!(
         eligible,
         vec![
-            ItemId::new("b").unwrap(),
-            ItemId::new("c").unwrap(),
-            ItemId::new("a").unwrap(),
+            ItemId::new("2").unwrap(),
+            ItemId::new("3").unwrap(),
+            ItemId::new("1").unwrap(),
         ],
         "committed items present in priority order after reconnect (no log replay)"
     );
@@ -1294,22 +1294,22 @@ pub async fn reconnect_preserves_terminal_and_pending_state<B: ConformanceCore>(
         envelope(
             QueueCommand::Push(PushCommand {
                 items: vec![
-                    item("a", "ka", 30),
-                    item("b", "kb", 10),
-                    item("c", "kc", 20),
+                    item("1", "ka", 30),
+                    item("2", "kb", 10),
+                    item("3", "kc", 20),
                 ],
             }),
             vec![],
         ),
     )
     .await;
-    // Claim the priority-10 item ("b") and complete it -> terminal; "a"/"c" stay pending.
+    // Claim the priority-10 item ("2") and complete it -> terminal; "1"/"3" stay pending.
     let claimed = a.claim(claim_req(1, 500, 10)).await.unwrap();
-    assert_eq!(claimed.items[0].item_id.as_str(), "b");
+    assert_eq!(claimed.items[0].item_id.to_string(), "2");
     a.finalize(
         &shard(),
         vec![FinalizeOutcome {
-            item_id: ItemId::new("b").unwrap(),
+            item_id: ItemId::new("2").unwrap(),
             kind: FinalizeKind::Complete,
         }],
         ts(20), None
@@ -1328,7 +1328,7 @@ pub async fn reconnect_preserves_terminal_and_pending_state<B: ConformanceCore>(
     );
     assert_eq!(
         b.select_eligible(&shard(), ts(100), 10).await.unwrap(),
-        vec![ItemId::new("c").unwrap(), ItemId::new("a").unwrap()],
+        vec![ItemId::new("3").unwrap(), ItemId::new("1").unwrap()],
         "the two untouched items remain pending in priority order; the completed one does not reappear"
     );
 }
@@ -1344,7 +1344,7 @@ pub async fn reconnect_preserves_leased_item_state<B: ConformanceCore>(make: imp
         &a,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -1380,18 +1380,18 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
 ) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();
-    // Push two items, claim the higher-priority one ("a", priority 5) → leased; "p" stays pending.
+    // Push two items, claim the higher-priority one ("1", priority 5) → leased; "4" stays pending.
     commit(
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5), item("p", "kp", 9)],
+                items: vec![item("1", "ka", 5), item("4", "kp", 9)],
             }),
             vec![],
         ),
     )
     .await;
-    b.claim(claim_req(1, 500, 10)).await.unwrap(); // leases "a"
+    b.claim(claim_req(1, 500, 10)).await.unwrap(); // leases "1"
 
     let before = b
         .read_from(&shard(), None, 1000)
@@ -1400,27 +1400,27 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
         .entries
         .len();
 
-    let unknown = ItemId::new("zzz").unwrap();
+    let unknown = ItemId::new("91").unwrap();
     let _ = b
-        .renew(&shard(), vec![unknown.clone()], ts(2000), ts(20), None)
+        .renew(&shard(), vec![unknown], ts(2000), ts(20), None)
         .await; // unknown id → NotFound
     let _ = b
         .reassign(
             &shard(),
-            vec![unknown.clone()],
+            vec![unknown],
             LeaseToken::new("l2").unwrap(),
             ts(2000),
             ts(20), None
         )
         .await; // unknown id → NotFound
     let _ = b
-        .purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(20), None)
+        .purge(&shard(), vec![ItemId::new("1").unwrap()], false, ts(20), None)
         .await; // leased without force → Conflict
     let _ = b
         .finalize(
             &shard(),
             vec![FinalizeOutcome {
-                item_id: ItemId::new("p").unwrap(),
+                item_id: ItemId::new("4").unwrap(),
                 kind: FinalizeKind::Complete,
             }],
             ts(20), None
@@ -1477,14 +1477,14 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
             .await
             .unwrap()
             .into_iter()
-            .map(|v| (v.item_id.as_str().to_string(), v.priority, v.item_version))
+            .map(|v| (v.item_id.to_string(), v.priority, v.item_version))
             .collect();
         let pb: Vec<(String, Option<PriorityValue>, u64)> = b
             .peek(&shard(), 100)
             .await
             .unwrap()
             .into_iter()
-            .map(|v| (v.item_id.as_str().to_string(), v.priority, v.item_version))
+            .map(|v| (v.item_id.to_string(), v.priority, v.item_version))
             .collect();
         assert_eq!(pa, pb, "peek diverge @ {label}");
         let sort_pending = |v: Vec<pqueue_engine::LeaseView>| {
@@ -1492,7 +1492,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
                 .into_iter()
                 .map(|l| {
                     (
-                        l.item_id.as_str().to_string(),
+                        l.item_id.to_string(),
                         l.lease_token.as_str().to_string(),
                         l.lease_expires_at.seconds,
                         l.attempt_count,
@@ -1517,44 +1517,44 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         &b,
         QueueCommand::Push(PushCommand {
             items: vec![
-                item("a", "ka", 30),
-                item("b", "kb", 10),
-                item("c", "kc", 20),
+                item("1", "ka", 30),
+                item("2", "kb", 10),
+                item("3", "kc", 20),
             ],
         }),
     )
     .await;
     parity(&a, &b, 100, "after push").await;
 
-    // Claim the priority-10 head ("b") on both — identical request, identical selection + lease.
+    // Claim the priority-10 head ("2") on both — identical request, identical selection + lease.
     a.claim(claim_req(1, 500, 10)).await.unwrap();
     b.claim(claim_req(1, 500, 10)).await.unwrap();
     parity(&a, &b, 100, "after claim b").await;
 
-    // Renew, then complete "b".
-    a.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20), None)
+    // Renew, then complete "2".
+    a.renew(&shard(), vec![ItemId::new("2").unwrap()], ts(900), ts(20), None)
         .await
         .unwrap();
-    b.renew(&shard(), vec![ItemId::new("b").unwrap()], ts(900), ts(20), None)
+    b.renew(&shard(), vec![ItemId::new("2").unwrap()], ts(900), ts(20), None)
         .await
         .unwrap();
     parity(&a, &b, 100, "after renew b").await;
     let fin_b = vec![FinalizeOutcome {
-        item_id: ItemId::new("b").unwrap(),
+        item_id: ItemId::new("2").unwrap(),
         kind: FinalizeKind::Complete,
     }];
     a.finalize(&shard(), fin_b.clone(), ts(30), None).await.unwrap();
     b.finalize(&shard(), fin_b, ts(30), None).await.unwrap();
     parity(&a, &b, 100, "after complete b").await;
 
-    // Claim "c" (now the head), reassign it to a new consumer, then retry it back to pending.
+    // Claim "3" (now the head), reassign it to a new consumer, then retry it back to pending.
     a.claim(claim_req(1, 500, 40)).await.unwrap();
     b.claim(claim_req(1, 500, 40)).await.unwrap();
     parity(&a, &b, 100, "after claim c").await;
     let l2 = LeaseToken::new("lease-2").unwrap();
     a.reassign(
         &shard(),
-        vec![ItemId::new("c").unwrap()],
+        vec![ItemId::new("3").unwrap()],
         l2.clone(),
         ts(800),
         ts(50), None
@@ -1563,7 +1563,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     .unwrap();
     b.reassign(
         &shard(),
-        vec![ItemId::new("c").unwrap()],
+        vec![ItemId::new("3").unwrap()],
         l2,
         ts(800),
         ts(50), None
@@ -1572,42 +1572,42 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     .unwrap();
     parity(&a, &b, 100, "after reassign c").await;
     let retry_c = vec![FinalizeOutcome {
-        item_id: ItemId::new("c").unwrap(),
+        item_id: ItemId::new("3").unwrap(),
         kind: FinalizeKind::Retry,
     }];
     a.finalize(&shard(), retry_c.clone(), ts(60), None).await.unwrap();
     b.finalize(&shard(), retry_c, ts(60), None).await.unwrap();
     parity(&a, &b, 100, "after retry c").await;
 
-    // Fence-then-finalize "c" after a re-claim: both families reject the fenced finalize identically.
+    // Fence-then-finalize "3" after a re-claim: both families reject the fenced finalize identically.
     a.claim(claim_req(1, 500, 70)).await.unwrap();
     b.claim(claim_req(1, 500, 70)).await.unwrap();
     commit_both(
         &a,
         &b,
         QueueCommand::FenceLease(FenceLeaseCommand {
-            item_ids: vec![ItemId::new("c").unwrap()],
+            item_ids: vec![ItemId::new("3").unwrap()],
         }),
     )
     .await;
     let fin_c = vec![FinalizeOutcome {
-        item_id: ItemId::new("c").unwrap(),
+        item_id: ItemId::new("3").unwrap(),
         kind: FinalizeKind::Complete,
     }];
     assert!(a.finalize(&shard(), fin_c.clone(), ts(80), None).await.is_err());
     assert!(b.finalize(&shard(), fin_c, ts(80), None).await.is_err());
     parity(&a, &b, 100, "after fenced-finalize reject").await;
 
-    // Lease-expiry reclaim tick: "c" was leased through ts(500); tick past it returns it to pending.
+    // Lease-expiry reclaim tick: "3" was leased through ts(500); tick past it returns it to pending.
     a.tick(ts(501)).await.unwrap();
     b.tick(ts(501)).await.unwrap();
     parity(&a, &b, 600, "after reclaim tick").await;
 
-    // Purge the still-pending "a".
-    a.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90), None)
+    // Purge the still-pending "1".
+    a.purge(&shard(), vec![ItemId::new("1").unwrap()], false, ts(90), None)
         .await
         .unwrap();
-    b.purge(&shard(), vec![ItemId::new("a").unwrap()], false, ts(90), None)
+    b.purge(&shard(), vec![ItemId::new("1").unwrap()], false, ts(90), None)
         .await
         .unwrap();
     parity(&a, &b, 600, "after purge a").await;
@@ -1618,14 +1618,14 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     commit_both(&a, &b, QueueCommand::ResumeQueue).await;
     parity(&a, &b, 600, "after resume").await;
 
-    // ReplacePending (upsert via the write-UoW with explicit ids): supersede the pending "c" with "c2".
+    // ReplacePending (upsert via the write-UoW with explicit ids): supersede the pending "3" with "8".
     commit_both(
         &a,
         &b,
         QueueCommand::ReplacePending(ReplacePendingCommand {
             client_item_key: ClientItemKey::new("kc").unwrap(),
-            superseded_item_id: ItemId::new("c").unwrap(),
-            replacement: item("c2", "kc", 20),
+            superseded_item_id: ItemId::new("3").unwrap(),
+            replacement: item("8", "kc", 20),
         }),
     )
     .await;
@@ -1645,7 +1645,7 @@ pub async fn claim_compatibility_is_resolved_and_gated<B: ConformanceCore>(make:
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -1665,7 +1665,7 @@ pub async fn claim_compatibility_is_resolved_and_gated<B: ConformanceCore>(make:
         "an invalid compatibility combination is rejected with the structured error"
     );
 
-    // The rejected claim changed nothing — an item-level (default) claim still leases "a", proving the
+    // The rejected claim changed nothing — an item-level (default) claim still leases "1", proving the
     // compatibility gate rejects BEFORE any selection/commit (no partial state).
     let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
     assert_eq!(

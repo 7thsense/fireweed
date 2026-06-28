@@ -116,7 +116,7 @@ async fn push_batch(b: &PostgresRelationalBackend, shard: &QueueKey, base: u64, 
     let items = (0..n)
         .map(|k| {
             let id = base + k;
-            item(&format!("i{id}"), &format!("k{id}"), (id % 1000) as i64)
+            item(&format!("{id}"), &format!("k{id}"), (id % 1000) as i64)
         })
         .collect();
     commit_to(

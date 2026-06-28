@@ -59,8 +59,8 @@ use pqueue_engine::{
     LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
     PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
-    build_push_items, require_item_level_claim, validate_purge_force,
+    QueueCounters, ReplacePendingCommand, SnapshotRef, SnapshotStore, TickReport, UpsertOutcome,
+    UpsertPort, build_push_items, require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -214,7 +214,7 @@ impl Inner {
 
     /// Reconstruct every queue's projection from durable state (queues + their replayed logs). Proves the
     /// log is the source of truth: a reopen loses no committed state (TD-007 §4 replay).
-    fn rebuild_all(&mut self) -> EngineResult<()> {
+    fn rebuild_all(&mut self, counters: &QueueCounters) -> EngineResult<()> {
         let rows = st(self
             .client
             .query("SELECT tenant, queue, definition FROM queues", &[]))?;
@@ -231,13 +231,20 @@ impl Inner {
             let shard = key.clone();
             let mut proj = ProjectionData::new(definition.priority_model);
             for env in self.read_log_envelopes(&t, &q)? {
+                // Command-id is `pg-{node}-{n}` (or legacy `pg-{n}`); the trailing component is the seq.
                 if let Some(n) = env
                     .command_id
                     .0
-                    .strip_prefix("pg-")
+                    .rsplit('-')
+                    .next()
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     max_cmd_seq = Some(max_cmd_seq.map_or(n, |m| m.max(n)));
+                }
+                // Restart-safety: resume the per-queue item counter past every id already in the log so a
+                // push after reopen never re-mints an existing id (ADR-009 / `QueueCounters::observe`).
+                for id in &env.item_ids {
+                    counters.observe(&shard, *id);
                 }
                 proj.apply_command(&env.command)?;
             }
@@ -272,6 +279,10 @@ impl Inner {
 /// Postgres-backed atomic-class backend.
 pub struct PostgresBackend {
     inner: Mutex<Inner>,
+    /// This instance's node id, packed into every minted [`ItemId`] (ADR-009). `0` single-instance.
+    node_id: u8,
+    /// Per-(queue, epoch) item-id sequence — see [`QueueCounters`].
+    counters: QueueCounters,
 }
 
 impl PostgresBackend {
@@ -308,10 +319,20 @@ impl PostgresBackend {
             queues: HashMap::new(),
             cmd_seq: 0,
         };
-        inner.rebuild_all()?;
+        let counters = QueueCounters::default();
+        inner.rebuild_all(&counters)?;
         Ok(Self {
             inner: Mutex::new(inner),
+            node_id: 0,
+            counters,
         })
+    }
+
+    /// Tag this backend with `node_id` — packed into the disambiguation byte of every minted [`ItemId`]
+    /// so distinct nodes competing for one queue never mint a colliding id (ADR-009).
+    pub fn with_node_id(mut self, node_id: u8) -> Self {
+        self.node_id = node_id;
+        self
     }
 }
 
@@ -482,10 +503,12 @@ impl UpsertPort for PostgresBackend {
             // cmd_seq is restored past the max on rebuild, so no collision across a reopen).
             let n = g.cmd_seq;
             g.cmd_seq += 1;
-            let new_item_id = ItemId::new(format!("pg-{n}-0")).expect("id");
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, 1);
+            let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
             let item = PushItem {
                 client_item_key: client_item_key.clone(),
-                item_id: new_item_id.clone(),
+                item_id: new_item_id,
                 priority,
                 not_before,
                 group_key,
@@ -496,9 +519,9 @@ impl UpsertPort for PostgresBackend {
                 gate_keys: Vec::new(),
             };
             let mk = |command: QueueCommand| CommandEnvelope {
-                command_id: CommandId::new(format!("pg-{n}")),
+                command_id: CommandId::new(format!("pg-{}-{n}", self.node_id)),
                 request_id: None,
-                item_ids: vec![new_item_id.clone()],
+                item_ids: vec![new_item_id],
                 command,
                 checksum: CommandChecksum(0),
                 created_at: now,
@@ -520,7 +543,7 @@ impl UpsertPort for PostgresBackend {
                         ItemState::Pending => {
                             let env = mk(QueueCommand::ReplacePending(ReplacePendingCommand {
                                 client_item_key: client_item_key.clone(),
-                                superseded_item_id: existing_id.clone(),
+                                superseded_item_id: existing_id,
                                 replacement: item,
                             }));
                             g.commit_locked(shard, env, expected_epoch)?;
@@ -565,9 +588,12 @@ impl PushPort for PostgresBackend {
                 .unwrap_or(1);
             let n = g.cmd_seq;
             g.cmd_seq += 1;
-            let (push_items, ids) = build_push_items(items, n, "pg", max_attempts);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             let env = CommandEnvelope {
-                command_id: CommandId::new(format!("pg-{n}")),
+                command_id: CommandId::new(format!("pg-{}-{n}", self.node_id)),
                 request_id: None,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
@@ -595,7 +621,7 @@ impl FinalizePort for PostgresBackend {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.finalize_validate(&outcomes)?;
             }
-            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = g.make_envelope(cmd, item_ids, now);
             g.commit_locked(shard, env, expected_epoch)?;
@@ -683,7 +709,7 @@ impl PurgePort for PostgresBackend {
                     }
                     if let Some(state) = proj.item_state(id) {
                         validate_purge_force(state == ItemState::Leased, force)?;
-                        present.push(id.clone());
+                        present.push(*id);
                     }
                 }
                 present

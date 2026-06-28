@@ -22,11 +22,7 @@ async fn manual_clock_and_idgen_are_real() {
     let ids = SeqIdGen::default();
     let a = ids.next_item_id();
     let b = ids.next_item_id();
-    assert_ne!(
-        a.as_str(),
-        b.as_str(),
-        "ids must be unique, not a no-op constant"
-    );
+    assert_ne!(a, b, "ids must be unique, not a no-op constant");
 }
 
 /// B1a (ADR-009 / TD-003 In-Process Library Owner-Runtime): a claim stamped with the owner's *cached*
@@ -47,7 +43,7 @@ async fn claim_fences_superseded_owner_epoch() {
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -134,7 +130,7 @@ async fn finalize_fences_superseded_owner_epoch() {
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),

@@ -33,9 +33,9 @@ use pqueue_engine::{
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
     LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
-    PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, SnapshotRef,
-    SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
+    SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort, build_push_items,
     require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
@@ -249,7 +249,7 @@ impl Inner {
 
     /// Reconstruct every queue's projection from the durable object log on open (TD-007 §4 replay), and
     /// restore `cmd_seq` past the highest minted `obj-N` so a post-restart id never collides.
-    fn rebuild_all(&mut self) -> EngineResult<()> {
+    fn rebuild_all(&mut self, counters: &QueueCounters) -> EngineResult<()> {
         if !self.root.exists() {
             fs::create_dir_all(&self.root).map_err(store)?;
             return Ok(());
@@ -268,13 +268,20 @@ impl Inner {
             let shard = key.clone();
             let mut proj = ProjectionData::new(definition.priority_model);
             for (_seq, env) in self.read_envelopes(&shard)? {
+                // Command-id is `obj-{node}-{n}` (or legacy `obj-{n}`); the trailing component is the seq.
                 if let Some(n) = env
                     .command_id
                     .0
-                    .strip_prefix("obj-")
+                    .rsplit('-')
+                    .next()
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     max_cmd_seq = Some(max_cmd_seq.map_or(n, |m| m.max(n)));
+                }
+                // Restart-safety: resume the per-queue item counter past every id already in the log so a
+                // push after reopen never re-mints an existing id (ADR-009 / `QueueCounters::observe`).
+                for id in &env.item_ids {
+                    counters.observe(&shard, *id);
                 }
                 proj.apply_command(&env.command)
                     .expect("durable log replays into a consistent projection");
@@ -292,6 +299,10 @@ impl Inner {
 /// Object-log backed, eventual-apply-class backend (filesystem object store).
 pub struct ObjectLogBackend {
     inner: Mutex<Inner>,
+    /// This instance's node id, packed into every minted [`ItemId`] (ADR-009). `0` single-instance.
+    node_id: u8,
+    /// Per-(queue, epoch) item-id sequence — see `QueueCounters`.
+    counters: QueueCounters,
 }
 
 impl ObjectLogBackend {
@@ -304,10 +315,20 @@ impl ObjectLogBackend {
             queues: HashMap::new(),
             cmd_seq: 0,
         };
-        inner.rebuild_all()?;
+        let counters = QueueCounters::default();
+        inner.rebuild_all(&counters)?;
         Ok(Self {
             inner: Mutex::new(inner),
+            node_id: 0,
+            counters,
         })
+    }
+
+    /// Tag this backend with `node_id` — packed into the disambiguation byte of every minted [`ItemId`]
+    /// so distinct nodes competing for one queue never mint a colliding id (ADR-009).
+    pub fn with_node_id(mut self, node_id: u8) -> Self {
+        self.node_id = node_id;
+        self
     }
 }
 
@@ -452,7 +473,7 @@ impl PushPort for ObjectLogBackend {
         now: UtcTimestamp,
         // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
         // contract so the owner fence is uniform once the relational/object write paths thread it.
-        _expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
@@ -467,9 +488,12 @@ impl PushPort for ObjectLogBackend {
                 .unwrap_or(1);
             let n = g.cmd_seq;
             g.cmd_seq += 1;
-            let (push_items, ids) = build_push_items(items, n, "obj", max_attempts);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             let env = CommandEnvelope {
-                command_id: CommandId::new(format!("obj-{n}")),
+                command_id: CommandId::new(format!("obj-{}-{n}", self.node_id)),
                 request_id: None,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
@@ -497,7 +521,7 @@ impl FinalizePort for ObjectLogBackend {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.finalize_validate(&outcomes)?;
             }
-            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = g.make_envelope(cmd, item_ids, now);
             g.commit_locked(shard, env)?;
@@ -585,7 +609,7 @@ impl PurgePort for ObjectLogBackend {
                     }
                     if let Some(state) = proj.item_state(id) {
                         validate_purge_force(state == ItemState::Leased, force)?;
-                        present.push(id.clone());
+                        present.push(*id);
                     }
                 }
                 present

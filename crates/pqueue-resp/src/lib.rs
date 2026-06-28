@@ -494,7 +494,7 @@ async fn xadd<B: RespBackend>(
                 | Ok(UpsertOutcome::Replaced {
                     new_item_id: item_id,
                     ..
-                }) => Resp::Bulk(item_id.as_str().as_bytes().to_vec()),
+                }) => Resp::Bulk(item_id.to_string().into_bytes()),
                 Err(e) => err_reply(&e),
             }
         }
@@ -510,7 +510,7 @@ async fn xadd<B: RespBackend>(
                 gate_keys: Vec::new(), // RESP XADD carries no gate keys (library-only)
             };
             match backend.push(&shard, vec![spec], state.now(), None).await {
-                Ok(ids) => Resp::Bulk(ids[0].as_str().as_bytes().to_vec()),
+                Ok(ids) => Resp::Bulk(ids[0].to_string().into_bytes()),
                 Err(e) => err_reply(&e),
             }
         }
@@ -593,7 +593,7 @@ async fn xreadgroup<B: RespBackend>(
 /// Render a claimed item as a Streams entry `[id, [field, value, ...]]`.
 fn claimed_to_entry(item: &ClaimedItem) -> Resp {
     let mut fields = base_fields(
-        item.item_id.as_str(),
+        &item.item_id.to_string(),
         item.client_item_key.as_str(),
         item.item_version,
         None,
@@ -603,7 +603,7 @@ fn claimed_to_entry(item: &ClaimedItem) -> Resp {
     );
     append_user_fields(&mut fields, &item.fields);
     Resp::Array(vec![
-        Resp::Bulk(item.item_id.as_str().as_bytes().to_vec()),
+        Resp::Bulk(item.item_id.to_string().into_bytes()),
         Resp::Array(fields),
     ])
 }
@@ -660,7 +660,7 @@ fn lifecycle_name(state: pqueue_core::ItemState) -> &'static str {
 
 fn live_to_entry(item: &LiveItemView) -> Resp {
     let mut fields = base_fields(
-        item.item_id.as_str(),
+        &item.item_id.to_string(),
         item.client_item_key.as_str(),
         item.item_version,
         Some(lifecycle_name(item.lifecycle_state)),
@@ -670,7 +670,7 @@ fn live_to_entry(item: &LiveItemView) -> Resp {
     );
     if let Some(group) = &item.group_key {
         fields.push(Resp::Bulk(b"group_key".to_vec()));
-        fields.push(Resp::Bulk(group.as_str().as_bytes().to_vec()));
+        fields.push(Resp::Bulk(group.to_string().into_bytes()));
     }
     if let Some(not_before) = item.not_before {
         fields.push(Resp::Bulk(b"not_before".to_vec()));
@@ -678,16 +678,16 @@ fn live_to_entry(item: &LiveItemView) -> Resp {
     }
     append_user_fields(&mut fields, &item.fields);
     Resp::Array(vec![
-        Resp::Bulk(item.item_id.as_str().as_bytes().to_vec()),
+        Resp::Bulk(item.item_id.to_string().into_bytes()),
         Resp::Array(fields),
     ])
 }
 
 fn live_field_value(item: &LiveItemView, field: &[u8]) -> Option<Vec<u8>> {
     if arg_eq(field, "item_id") {
-        Some(item.item_id.as_str().as_bytes().to_vec())
+        Some(item.item_id.to_string().into_bytes())
     } else if arg_eq(field, "client_item_key") {
-        Some(item.client_item_key.as_str().as_bytes().to_vec())
+        Some(item.client_item_key.to_string().into_bytes())
     } else if arg_eq(field, "item_version") {
         Some(item.item_version.to_string().into_bytes())
     } else if arg_eq(field, "lifecycle_state") {
@@ -704,7 +704,7 @@ fn live_field_value(item: &LiveItemView, field: &[u8]) -> Option<Vec<u8>> {
     } else if arg_eq(field, "group_key") {
         item.group_key
             .as_ref()
-            .map(|g| g.as_str().as_bytes().to_vec())
+            .map(|g| g.to_string().into_bytes())
     } else if arg_eq(field, "not_before") {
         item.not_before.map(|ts| ts_ms(ts).to_string().into_bytes())
     } else {
@@ -832,7 +832,7 @@ async fn xack<B: RespBackend>(
     let outcomes: Vec<FinalizeOutcome> = ids
         .iter()
         .map(|id| FinalizeOutcome {
-            item_id: id.clone(),
+            item_id: *id,
             kind: FinalizeKind::Complete,
         })
         .collect();
@@ -842,16 +842,13 @@ async fn xack<B: RespBackend>(
     }
 }
 
-/// Numeric order key for a backend-assigned item id `"{prefix}-{n}-{i}"` (e.g. `"mem-5-0"`): order by the
-/// two numeric components `(n, i)` — `n` the command sequence (insertion order), `i` the index within a
-/// batch — NOT a lexical compare (which would mis-order `"mem-10-0" < "mem-2-0"` past 10 items). The full
-/// id is the final tie-break. The `"0-0"` cursor sentinel keys as `(0, 0, "0-0")`, sorting at/before the
-/// first real id so a `start = "0-0"` scan includes the whole PEL.
-fn id_order(id: &str) -> (u64, u64, &str) {
-    let mut nums = id.split('-').filter_map(|p| p.parse::<u64>().ok());
-    let n = nums.next().unwrap_or(u64::MAX);
-    let i = nums.next().unwrap_or(0);
-    (n, i, id)
+/// Numeric order key for a server-assigned item id. An [`ItemId`](pqueue_core::ItemId) is a single packed
+/// `u64` rendered as decimal, and its numeric value IS stream/insertion order by construction (epoch high,
+/// counter low — ADR-009). So the order key is just the parsed value. The `"0-0"` cursor sentinel (and any
+/// non-numeric cursor) keys as `0`, sorting at/before the first real id so a `start = "0-0"` scan includes
+/// the whole PEL.
+fn id_order(id: &str) -> u64 {
+    id.parse::<u64>().unwrap_or(0)
 }
 
 /// `XPENDING key group [start end count [consumer]]` — the in-flight (leased, not-yet-acked) items.
@@ -891,8 +888,8 @@ async fn xpending<B: RespBackend>(
                 Resp::NullArray,
             ]);
         }
-        let mut ids: Vec<&str> = leases.iter().map(|l| l.item_id.as_str()).collect();
-        ids.sort_by_key(|id| id_order(id));
+        let mut ids: Vec<ItemId> = leases.iter().map(|l| l.item_id).collect();
+        ids.sort_by_key(|id| id.as_u64());
         // Aggregate the per-consumer (lease-token) counts.
         let mut by_consumer: std::collections::BTreeMap<&str, usize> =
             std::collections::BTreeMap::new();
@@ -910,8 +907,8 @@ async fn xpending<B: RespBackend>(
             .collect();
         return Resp::Array(vec![
             Resp::Int(leases.len() as i64),
-            Resp::Bulk(ids.first().unwrap().as_bytes().to_vec()),
-            Resp::Bulk(ids.last().unwrap().as_bytes().to_vec()),
+            Resp::Bulk(ids.first().unwrap().to_string().into_bytes()),
+            Resp::Bulk(ids.last().unwrap().to_string().into_bytes()),
             Resp::Array(consumers),
         ]);
     }
@@ -928,7 +925,7 @@ async fn xpending<B: RespBackend>(
         .map(|d| d.max_lease_duration_ms as i64)
         .unwrap_or(0);
     let mut entries: Vec<&LeaseView> = leases.iter().collect();
-    entries.sort_by_key(|lv| id_order(lv.item_id.as_str()));
+    entries.sort_by_key(|lv| lv.item_id.as_u64());
     let out: Vec<Resp> = entries
         .into_iter()
         .take(limit)
@@ -936,8 +933,8 @@ async fn xpending<B: RespBackend>(
             // idle = now - claimed_at, claimed_at = lease_expires_at - lease_ms.
             let idle = ((now_ms - ts_ms(lv.lease_expires_at)) + lease_ms).max(0);
             Resp::Array(vec![
-                Resp::Bulk(lv.item_id.as_str().as_bytes().to_vec()),
-                Resp::Bulk(lv.lease_token.as_str().as_bytes().to_vec()),
+                Resp::Bulk(lv.item_id.to_string().into_bytes()),
+                Resp::Bulk(lv.lease_token.to_string().into_bytes()),
                 Resp::Int(idle),
                 Resp::Int(lv.attempt_count as i64),
             ])
@@ -1021,11 +1018,11 @@ async fn xautoclaim<B: RespBackend>(
         Ok(p) => p,
         Err(e) => return err_reply(&e),
     };
-    pel.sort_by(|a, b| id_order(a.item_id.as_str()).cmp(&id_order(b.item_id.as_str())));
+    pel.sort_by(|a, b| a.item_id.as_u64().cmp(&b.item_id.as_u64()));
     let start_key = id_order(&start);
     let from: Vec<&LeaseView> = pel
         .iter()
-        .filter(|lv| id_order(lv.item_id.as_str()) >= start_key)
+        .filter(|lv| lv.item_id.as_u64() >= start_key)
         .collect();
 
     // Examine a COUNT-sized window; the idle (lease-expired) entries in it are reclaimed to `consumer`.
@@ -1033,7 +1030,7 @@ async fn xautoclaim<B: RespBackend>(
         .iter()
         .take(count)
         .filter(|lv| lv.lease_expires_at < now)
-        .map(|lv| lv.item_id.clone())
+        .map(|lv| lv.item_id)
         .collect();
     if !expired_ids.is_empty()
         && let Err(e) = backend
@@ -1051,7 +1048,7 @@ async fn xautoclaim<B: RespBackend>(
 
     // Cursor: the entry after the scanned window, or `0-0` once the window covers the PEL tail.
     let next_cursor = if from.len() > count {
-        from[count].item_id.as_str().as_bytes().to_vec()
+        from[count].item_id.to_string().into_bytes()
     } else {
         b"0-0".to_vec()
     };
@@ -1059,7 +1056,7 @@ async fn xautoclaim<B: RespBackend>(
     let entries: Vec<Resp> = if justid {
         expired_ids
             .iter()
-            .map(|id| Resp::Bulk(id.as_str().as_bytes().to_vec()))
+            .map(|id| Resp::Bulk(id.to_string().into_bytes()))
             .collect()
     } else {
         match backend.claimed_view(&shard, &expired_ids).await {
@@ -1115,7 +1112,7 @@ async fn xclaim<B: RespBackend>(
     let mut ids: Vec<ItemId> = Vec::new();
     let mut i = 5;
     while i < args.len() && !is_opt(&args[i]) {
-        match ItemId::new(String::from_utf8_lossy(&args[i]).to_string()) {
+        match ItemId::new(String::from_utf8_lossy(&args[i])) {
             Ok(id) => ids.push(id),
             Err(_) => return Resp::Error("ERR pqueue invalid".into()),
         }
@@ -1127,7 +1124,7 @@ async fn xclaim<B: RespBackend>(
     // De-duplicate (preserving order): a repeated id must transfer/renew once, not charge the delivery
     // count once per occurrence in the command's `item_ids` (the apply arm bumps per element).
     let mut seen = std::collections::HashSet::new();
-    ids.retain(|id| seen.insert(id.clone()));
+    ids.retain(|id| seen.insert(*id));
     let justid = args[i..].iter().any(|a| arg_eq(a, "JUSTID"));
 
     let consumer = String::from_utf8_lossy(&args[3]).to_string();
@@ -1150,9 +1147,9 @@ async fn xclaim<B: RespBackend>(
             .find(|lv| lv.item_id == *id)
             .map(|lv| lv.lease_token.as_str());
         if current == Some(consumer.as_str()) {
-            renew_ids.push(id.clone());
+            renew_ids.push(*id);
         } else {
-            reassign_ids.push(id.clone());
+            reassign_ids.push(*id);
         }
     }
 
@@ -1179,7 +1176,7 @@ async fn xclaim<B: RespBackend>(
     if justid {
         return Resp::Array(
             ids.iter()
-                .map(|id| Resp::Bulk(id.as_str().as_bytes().to_vec()))
+                .map(|id| Resp::Bulk(id.to_string().into_bytes()))
                 .collect(),
         );
     }
@@ -1223,7 +1220,7 @@ async fn xdel<B: RespBackend>(
     };
     let mut ids = Vec::with_capacity(args.len() - 2);
     for a in &args[2..] {
-        match ItemId::new(String::from_utf8_lossy(a).to_string()) {
+        match ItemId::new(String::from_utf8_lossy(a)) {
             Ok(id) => ids.push(id),
             Err(_) => return Resp::Error("ERR pqueue invalid".into()),
         }

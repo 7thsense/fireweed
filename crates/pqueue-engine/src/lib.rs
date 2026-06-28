@@ -43,7 +43,7 @@ pub use command::{
     ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
     LeaseExpiredCommand, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
-    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
+    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
     UnfenceLeaseCommand, build_push_items,
 };
 pub use error::{EngineError, EngineResult};

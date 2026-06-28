@@ -22,7 +22,7 @@ async fn claim_fences_superseded_owner_epoch() {
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),

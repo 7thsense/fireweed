@@ -118,7 +118,7 @@ async fn push_all(
         let push_items = (0..n)
             .map(|k| {
                 let id = pushed + k;
-                item(&format!("i{id}"), &format!("k{id}"), (id % 1000) as i64)
+                item(&format!("{id}"), &format!("k{id}"), (id % 1000) as i64)
             })
             .collect();
         commit_to(

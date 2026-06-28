@@ -61,7 +61,7 @@ struct ItemRecord {
 impl ItemRecord {
     fn to_claimed(&self) -> Option<ClaimedItem> {
         Some(ClaimedItem {
-            item_id: self.item_id.clone(),
+            item_id: self.item_id,
             client_item_key: self.client_item_key.clone(),
             item_version: self.item_version,
             priority: self.priority.clone(),
@@ -80,7 +80,7 @@ impl ItemRecord {
             return None;
         }
         Some(LiveItemView {
-            item_id: self.item_id.clone(),
+            item_id: self.item_id,
             client_item_key: self.client_item_key.clone(),
             item_version: self.item_version,
             lifecycle_state: self.state,
@@ -115,7 +115,7 @@ fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
     EligKey {
         sort,
         created_seq: rec.created_seq,
-        item: rec.item_id.clone(),
+        item: rec.item_id,
     }
 }
 
@@ -292,7 +292,7 @@ impl ProjectionData {
         let seq = self.next_seq;
         self.next_seq += 1;
         let rec = ItemRecord {
-            item_id: item.item_id.clone(),
+            item_id: item.item_id,
             client_item_key: item.client_item_key.clone(),
             priority: item.priority,
             not_before: item.not_before,
@@ -311,8 +311,8 @@ impl ProjectionData {
         };
         self.eligible.insert(elig_key(&rec, &self.priority_model));
         self.by_key
-            .insert(rec.client_item_key.clone(), rec.item_id.clone());
-        self.items.insert(rec.item_id.clone(), rec);
+            .insert(rec.client_item_key.clone(), rec.item_id);
+        self.items.insert(rec.item_id, rec);
     }
 
     /// Drive the lifecycle state machine for one item, keeping the eligibility index in sync and
@@ -476,7 +476,7 @@ impl ProjectionData {
                     .filter(|r| {
                         r.group_key.as_ref() == Some(&c.group_key) && !r.state.is_terminal()
                     })
-                    .map(|r| r.item_id.clone())
+                    .map(|r| r.item_id)
                     .collect();
                 for id in ids {
                     if let Some(rec) = self.items.get_mut(&id) {
@@ -558,7 +558,7 @@ impl ProjectionData {
                     && r.not_before.map(|nb| nb <= now).unwrap_or(true)
             })
             .take(max)
-            .map(|r| r.item_id.clone())
+            .map(|r| r.item_id)
             .collect()
     }
 
@@ -579,7 +579,7 @@ impl ProjectionData {
                 && !rec.superseded
             {
                 out.push(ItemView {
-                    item_id: rec.item_id.clone(),
+                    item_id: rec.item_id,
                     client_item_key: rec.client_item_key.clone(),
                     priority: rec.priority.clone(),
                     item_version: rec.item_version,
@@ -596,7 +596,7 @@ impl ProjectionData {
             .filter(|r| r.state == ItemState::Leased)
             .filter_map(|r| {
                 Some(LeaseView {
-                    item_id: r.item_id.clone(),
+                    item_id: r.item_id,
                     lease_token: r.lease_token.clone()?,
                     lease_expires_at: r.lease_expires_at?,
                     attempt_count: r.attempt_count,
@@ -702,7 +702,7 @@ impl ProjectionData {
                 r.state == ItemState::Leased
                     && r.lease_expires_at.map(|exp| exp < now).unwrap_or(false)
             })
-            .map(|r| r.item_id.clone())
+            .map(|r| r.item_id)
             .collect()
     }
 }
@@ -819,39 +819,39 @@ mod tests {
             &mut proj,
             &sk,
             env(QueueCommand::Push(PushCommand {
-                items: vec![push_item("a", "ka", 5)],
+                items: vec![push_item("1", "ka", 5)],
             })),
             None,
         )
         .unwrap();
-        let v0 = version_of(&proj, "a"); // push -> 1
+        let v0 = version_of(&proj, "1"); // push -> 1
 
         commit(
             &mut log,
             &mut proj,
             &sk,
             env(QueueCommand::Claim(ClaimCommand {
-                item_ids: vec![iid("a")],
+                item_ids: vec![iid("1")],
                 lease_token: LeaseToken::new("lease-1").unwrap(),
                 lease_expires_at: ts(500),
             })),
             None,
         )
         .unwrap();
-        let v1 = version_of(&proj, "a"); // claim -> 2
+        let v1 = version_of(&proj, "1"); // claim -> 2
 
         commit(
             &mut log,
             &mut proj,
             &sk,
             env(QueueCommand::RenewLease(RenewLeaseCommand {
-                item_ids: vec![iid("a")],
+                item_ids: vec![iid("1")],
                 lease_expires_at: ts(600),
             })),
             None,
         )
         .unwrap();
-        let v2 = version_of(&proj, "a"); // renew -> 3
+        let v2 = version_of(&proj, "1"); // renew -> 3
 
         commit(
             &mut log,
@@ -859,14 +859,14 @@ mod tests {
             &sk,
             env(QueueCommand::Finalize(FinalizeCommand {
                 outcomes: vec![FinalizeOutcome {
-                    item_id: iid("a"),
+                    item_id: iid("1"),
                     kind: FinalizeKind::Complete,
                 }],
             })),
             None,
         )
         .unwrap();
-        let v3 = version_of(&proj, "a"); // finalize -> 4
+        let v3 = version_of(&proj, "1"); // finalize -> 4
 
         assert_eq!(
             (v0, v1, v2, v3),
@@ -886,7 +886,7 @@ mod tests {
                 &mut proj,
                 &sk,
                 env(QueueCommand::Push(PushCommand {
-                    items: vec![push_item(&format!("i{p}"), &format!("k{p}"), p)],
+                    items: vec![push_item(&format!("{p}"), &format!("k{p}"), p)],
                 })),
                 None,
             )

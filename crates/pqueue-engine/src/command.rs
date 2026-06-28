@@ -1,13 +1,16 @@
 //! Engine-owned command model — the durable append unit of the log and the input to the
 //! projection. Commands are the only way state changes (CQRS write side, ADR-001).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, RequestId,
     UtcTimestamp,
 };
+
+use crate::QueueKey;
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -65,23 +68,28 @@ pub struct PushCommand {
     pub items: Vec<PushItem>,
 }
 
-/// Build `PushItem`s + their ids for one push, deriving server ids from a backend command sequence `n`
-/// (unique across handles + restart). The dedup `client_item_key` defaults to the item id (a unique
-/// append) when the spec omits it. Shared by every backend's `PushPort` impl.
+/// Build `PushItem`s + their ids for one push (ADR-009). Each id is minted **locally** as
+/// `ItemId::mint(epoch, node, counter_base + i)`: `epoch` is the owner's fence epoch, `node` the owning
+/// node id, and `counter_base..` a per-(queue, epoch) sequence reserved from [`QueueCounters`].
+/// Single-writer-per-epoch makes `(epoch, counter)` unique within a queue; `node` is defense-in-depth so
+/// even a split-brain (two writers, same epoch) cannot collide. No central sequence is consulted — this
+/// works identically on the log (the only cross-node backend). The dedup `client_item_key` defaults to the
+/// item id's string when the spec omits it. Shared by every backend's `PushPort` impl.
 pub fn build_push_items(
     specs: Vec<crate::PushSpec>,
-    n: u64,
-    prefix: &str,
+    epoch: u64,
+    node: u8,
+    counter_base: u32,
     max_attempts: u32,
 ) -> (Vec<PushItem>, Vec<ItemId>) {
     let mut items = Vec::with_capacity(specs.len());
     let mut ids = Vec::with_capacity(specs.len());
     for (i, s) in specs.into_iter().enumerate() {
-        let item_id = ItemId::new(format!("{prefix}-{n}-{i}")).expect("id");
+        let item_id = ItemId::mint(epoch, node, counter_base.wrapping_add(i as u32));
         let key = s
             .client_item_key
-            .unwrap_or_else(|| ClientItemKey::new(format!("{prefix}-{n}-{i}")).expect("key"));
-        ids.push(item_id.clone());
+            .unwrap_or_else(|| ClientItemKey::new(item_id.to_string()).expect("id is non-empty"));
+        ids.push(item_id);
         items.push(PushItem {
             client_item_key: key,
             item_id,
@@ -96,6 +104,43 @@ pub fn build_push_items(
         });
     }
     (items, ids)
+}
+
+/// Per-queue item-id counter that **resets when the fence epoch advances**, so the 32-bit `counter` field
+/// of [`ItemId`] only ever spans a single owner tenure — it cannot wrap in practice (a tenure pushing 2^32
+/// items is centuries away at any real rate; see ADR-009). Each backend embeds one and reserves a
+/// contiguous base per push batch under a brief leaf lock (never held while any other lock is taken).
+#[derive(Default)]
+pub struct QueueCounters {
+    inner: Mutex<HashMap<QueueKey, (u64, u32)>>,
+}
+
+impl QueueCounters {
+    /// Reserve `count` consecutive counter values for `queue` at `epoch`, returning the base. Advancing the
+    /// epoch (a re-acquire) resets the sequence to 0 so a fresh tenure starts low and dense.
+    pub fn reserve(&self, queue: &QueueKey, epoch: u64, count: u32) -> u32 {
+        let mut g = self.inner.lock().expect("queue-counter mutex poisoned");
+        let entry = g.entry(queue.clone()).or_insert((epoch, 0));
+        if entry.0 != epoch {
+            *entry = (epoch, 0);
+        }
+        let base = entry.1;
+        entry.1 = entry.1.wrapping_add(count);
+        base
+    }
+
+    /// Restart recovery: ensure `queue` resumes minting *past* an id already present in durable storage.
+    /// Call once per recovered [`ItemId`] (or just the max) during rebuild/reopen — a push afterward then
+    /// never re-mints an existing id. Decoding `(epoch, counter)` straight from the id keeps this format-
+    /// agnostic. Monotone: only ever advances the stored `(epoch, next)` for a queue, never rewinds.
+    pub fn observe(&self, queue: &QueueKey, id: ItemId) {
+        let (epoch, next) = (id.epoch(), id.counter().wrapping_add(1));
+        let mut g = self.inner.lock().expect("queue-counter mutex poisoned");
+        let entry = g.entry(queue.clone()).or_insert((epoch, next));
+        if epoch > entry.0 || (epoch == entry.0 && next > entry.1) {
+            *entry = (epoch, next);
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -241,7 +286,12 @@ mod serde_tests {
     use pqueue_core::{PriorityValue, UtcTimestamp};
 
     fn iid(s: &str) -> ItemId {
-        ItemId::new(s).unwrap()
+        // Test ids are arbitrary labels; map each to a stable, distinct packed `ItemId` (these tests only
+        // assert serde round-trips the value — the exact bits are immaterial).
+        ItemId::from_u64(
+            s.bytes()
+                .fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(b as u64)),
+        )
     }
     fn ts(s: i64) -> UtcTimestamp {
         UtcTimestamp::new(s, 0).unwrap()

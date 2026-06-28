@@ -44,9 +44,9 @@ async fn projection_rebuilds_from_durable_log_on_reconnect_inner(url: String) {
             envelope(
                 QueueCommand::Push(PushCommand {
                     items: vec![
-                        item("a", "ka", 30),
-                        item("b", "kb", 10),
-                        item("c", "kc", 20),
+                        item("1", "ka", 30),
+                        item("2", "kb", 10),
+                        item("3", "kc", 20),
                     ],
                 }),
                 vec![],
@@ -79,11 +79,11 @@ async fn projection_rebuilds_from_durable_log_on_reconnect_inner(url: String) {
             )
             .await
             .unwrap();
-        let ids: Vec<&str> = elig.iter().map(|i| i.as_str()).collect();
+        let ids: Vec<u64> = elig.iter().map(|i| i.as_u64()).collect();
         assert_eq!(
             ids,
-            vec!["c", "a"],
-            "eligibility order survives the rebuild"
+            vec![3, 1],
+            "eligibility order survives the rebuild (c=prio20 before a=prio30)"
         );
     }
 }
@@ -110,7 +110,7 @@ async fn orchestration_writes_after_reconnect_do_not_collide_inner(url: String) 
             &b,
             envelope(
                 QueueCommand::Push(PushCommand {
-                    items: vec![item("a", "ka", 5), item("b", "kb", 9)],
+                    items: vec![item("1", "ka", 5), item("2", "kb", 9)],
                 }),
                 vec![],
             ),

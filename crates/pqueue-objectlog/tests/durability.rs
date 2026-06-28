@@ -52,7 +52,7 @@ async fn replace_pending_command_is_refused_at_the_write_path() {
         &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
@@ -61,8 +61,8 @@ async fn replace_pending_command_is_refused_at_the_write_path() {
     let env = envelope(
         QueueCommand::ReplacePending(ReplacePendingCommand {
             client_item_key: ClientItemKey::new("ka").unwrap(),
-            superseded_item_id: ItemId::new("a").unwrap(),
-            replacement: item("new", "ka", 5),
+            superseded_item_id: ItemId::new("1").unwrap(),
+            replacement: item("6", "ka", 5),
         }),
         vec![],
     );
@@ -98,7 +98,7 @@ async fn torn_trailing_object_is_skipped_on_reopen() {
             &b,
             envelope(
                 QueueCommand::Push(PushCommand {
-                    items: vec![item("a", "ka", 5)],
+                    items: vec![item("1", "ka", 5)],
                 }),
                 vec![],
             ),
@@ -108,7 +108,7 @@ async fn torn_trailing_object_is_skipped_on_reopen() {
             &b,
             envelope(
                 QueueCommand::Push(PushCommand {
-                    items: vec![item("b", "kb", 9)],
+                    items: vec![item("2", "kb", 9)],
                 }),
                 vec![],
             ),
@@ -141,9 +141,9 @@ async fn projection_rebuilds_from_object_log_on_reopen() {
             envelope(
                 QueueCommand::Push(PushCommand {
                     items: vec![
-                        item("a", "ka", 30),
-                        item("b", "kb", 10),
-                        item("c", "kc", 20),
+                        item("1", "ka", 30),
+                        item("2", "kb", 10),
+                        item("3", "kc", 20),
                     ],
                 }),
                 vec![],

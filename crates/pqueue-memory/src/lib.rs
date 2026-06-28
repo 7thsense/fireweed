@@ -27,7 +27,7 @@ use pqueue_engine::{
 };
 use pqueue_engine::{
     ClaimCompatibility, PurgeItemsCommand, PurgePort, PushPort, PushSpec, ReassignLeaseCommand,
-    ReassignLeasePort, RenewLeaseCommand, RenewLeasePort, build_push_items,
+    QueueCounters, ReassignLeasePort, RenewLeaseCommand, RenewLeasePort, build_push_items,
     require_item_level_claim, validate_purge_force,
 };
 use pqueue_projection::{LogData, ProjectionData, commit};
@@ -90,6 +90,11 @@ struct State {
 pub struct MemoryBackend {
     state: Mutex<State>,
     cmd_seq: AtomicU64,
+    /// This instance's node id, packed into every minted [`ItemId`] (ADR-009) so concurrent writers never
+    /// collide. `0` for the default single-instance backend.
+    node_id: u8,
+    /// Per-(queue, epoch) item-id sequence — see [`QueueCounters`].
+    counters: QueueCounters,
 }
 
 impl Default for MemoryBackend {
@@ -97,6 +102,8 @@ impl Default for MemoryBackend {
         Self {
             state: Mutex::new(State::default()),
             cmd_seq: AtomicU64::new(0),
+            node_id: 0,
+            counters: QueueCounters::default(),
         }
     }
 }
@@ -104,6 +111,15 @@ impl Default for MemoryBackend {
 impl MemoryBackend {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build a backend tagged with `node_id` — the value packed into the high-disambiguation byte of every
+    /// minted [`ItemId`]. Distinct nodes competing for the same queue MUST pass distinct ids.
+    pub fn with_node_id(node_id: u8) -> Self {
+        Self {
+            node_id,
+            ..Self::default()
+        }
     }
 
     fn make_envelope(
@@ -209,13 +225,15 @@ impl UpsertPort for MemoryBackend {
                 .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
-            // ONE command-sequence number stamps both the command id and the assigned item id
-            // (restart-safe, unique across handles — callers never supply an id).
+            // The command id stays a backend-local sequence; the item id is minted from
+            // (epoch, node, per-queue counter) like a push so it never collides across writers (ADR-009).
             let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
-            let new_item_id = ItemId::new(format!("mem-{n}-0")).expect("id");
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, 1);
+            let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
             let item = PushItem {
                 client_item_key: client_item_key.clone(),
-                item_id: new_item_id.clone(),
+                item_id: new_item_id,
                 priority,
                 not_before,
                 group_key,
@@ -226,9 +244,9 @@ impl UpsertPort for MemoryBackend {
                 gate_keys: Vec::new(),
             };
             let mk = |command: QueueCommand| CommandEnvelope {
-                command_id: CommandId::new(format!("mem-{n}")),
+                command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
                 request_id: None,
-                item_ids: vec![new_item_id.clone()],
+                item_ids: vec![new_item_id],
                 command,
                 checksum: CommandChecksum(0),
                 created_at: now,
@@ -250,7 +268,7 @@ impl UpsertPort for MemoryBackend {
                         ItemState::Pending => {
                             let env = mk(QueueCommand::ReplacePending(ReplacePendingCommand {
                                 client_item_key: client_item_key.clone(),
-                                superseded_item_id: existing_id.clone(),
+                                superseded_item_id: existing_id,
                                 replacement: item,
                             }));
                             Self::commit_locked(&mut g, shard, env, expected_epoch)?;
@@ -288,12 +306,15 @@ impl PushPort for MemoryBackend {
                 .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
-            // ONE command-sequence number stamps the command id AND all item ids, so they are unique
-            // across handles + restart (cmd_seq is the backend's, not a caller counter).
+            // The command id stays a backend-local sequence; the ITEM ids are minted from
+            // (epoch, node, per-queue counter) so concurrent writers to one queue never collide (ADR-009).
             let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
-            let (push_items, ids) = build_push_items(items, n, "mem", max_attempts);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             let env = CommandEnvelope {
-                command_id: CommandId::new(format!("mem-{n}")),
+                command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
                 request_id: None,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
@@ -325,7 +346,7 @@ impl FinalizePort for MemoryBackend {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.finalize_validate(&outcomes)?;
             }
-            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = self.make_envelope(cmd, item_ids, now);
             Self::commit_locked(&mut g, shard, env, expected_epoch)?;
@@ -415,7 +436,7 @@ impl PurgePort for MemoryBackend {
                     }
                     if let Some(state) = proj.item_state(id) {
                         validate_purge_force(state == ItemState::Leased, force)?;
-                        present.push(id.clone());
+                        present.push(*id);
                     }
                 }
                 present
@@ -801,7 +822,7 @@ impl Default for SeqIdGen {
 impl IdGen for SeqIdGen {
     fn next_item_id(&self) -> ItemId {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
-        ItemId::new(format!("item-{n}")).expect("valid id")
+        ItemId::from_u64(n)
     }
 
     fn next_command_id(&self) -> CommandId {
