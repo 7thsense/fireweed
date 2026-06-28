@@ -32,8 +32,12 @@ use pqueue_engine::{
 // ---------------------------------------------------------------------------
 pub use bytes::Bytes;
 pub use pqueue_core::{
-    ClientItemKey, GroupKey, IndexSpec, ItemId, OwnerId, PriorityValue, QueueDefinition,
-    UtcTimestamp,
+    ClientItemKey, CohortOnIncomplete, CohortPolicy, CreateQueue, CreateQueueError,
+    CreateQueueErrorKind, DecimalValue, EligibilityPolicy, GateKeyPolicy, GroupKey,
+    IdentifierError, IndexSpec, ItemId, MetadataValue, OrderingMode, OwnerId, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueCreationPolicy,
+    QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId,
+    TimestampError, UtcTimestamp,
 };
 pub use pqueue_engine::{
     ClaimCompatibility, ClaimedItem, Clock, ControlPlaneConfig, CreateQueueOutcome, EngineError,

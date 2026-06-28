@@ -7,12 +7,11 @@
 
 use std::sync::Arc;
 
-use pqueue_core::{
-    EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
-    TenantId,
+use pqueue::{
+    CohortPolicy, CreateQueue, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueCreationPolicy, QueueDefinition,
+    QueueId, QueueKey, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use pqueue_engine::QueueKey;
 use pqueue_memory::ManualClock;
 
 fn qkey() -> QueueKey {
@@ -42,6 +41,43 @@ fn qdef() -> QueueDefinition {
         max_eligible_group_size: None,
         secondary_indexes: vec![],
     }
+}
+
+#[test]
+fn facade_exports_queue_definition_construction_surface() {
+    let key = qkey();
+    assert_eq!(key.tenant_id.as_str(), "t1");
+    assert_eq!(key.queue_id.as_str(), "q1");
+
+    let definition = qdef();
+    assert_eq!(definition.tenant_id.as_str(), "t1");
+    assert_eq!(definition.queue_id.as_str(), "q1");
+
+    let create = CreateQueue {
+        tenant_id: TenantId::new("t1").unwrap(),
+        queue_id: QueueId::new("q2").unwrap(),
+        priority_model: PriorityModel {
+            kind: PriorityModelKind::Int64,
+            direction: PriorityDirection::Ascending,
+            tie_breaker: PriorityTieBreaker::CreatedSequence,
+        },
+        ordering_mode: OrderingMode::Strict,
+        progress_bound_ms: 60_000,
+        eligibility_policy: EligibilityPolicy::default(),
+        cohort_policy: CohortPolicy::disabled(),
+        recurrence: RecurrencePolicy::default(),
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: 60_000,
+        max_lease_duration_ms: 60_000,
+        retry_policy: RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
+    };
+
+    let validated = create.validate(&QueueCreationPolicy::default()).unwrap();
+    assert_eq!(validated.queue_id.as_str(), "q2");
 }
 
 /// The blessed construction path: `pqueue::open_memory` yields a usable handle with no concrete backend
