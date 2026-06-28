@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use postgres::{Client, NoTls};
+use postgres::Client;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
     QueueDefinition, QueueId, TenantId, UtcTimestamp,
@@ -65,9 +65,14 @@ use pqueue_engine::{
 };
 use pqueue_projection::ProjectionData;
 
+mod connect;
 mod control_plane;
 mod credential;
 mod relational;
+pub use connect::{
+    CredentialProvider, PostgresConnectConfig, PostgresSslMode, connect,
+    default_max_connection_lifetime,
+};
 pub use control_plane::PostgresControlPlane;
 pub use credential::{
     Credential, DatabricksAuth, DatabricksCliCommand, DatabricksCredentialConfig,
@@ -297,7 +302,7 @@ impl PostgresBackend {
     /// Connect to `url` (using the connection's default `search_path`), ensure the schema, and rebuild the
     /// in-memory projection of every known queue by replaying its durable log.
     pub fn connect(url: &str) -> EngineResult<Self> {
-        let client = st(Client::connect(url, NoTls))?;
+        let client = connect(PostgresConnectConfig::new(url))?;
         Self::from_client(client)
     }
 
@@ -312,7 +317,7 @@ impl PostgresBackend {
         {
             return Err(EngineError::Invalid("schema name must be [A-Za-z0-9_]"));
         }
-        let mut client = st(Client::connect(url, NoTls))?;
+        let mut client = connect(PostgresConnectConfig::new(url))?;
         st(client.batch_execute(&format!(
             "CREATE SCHEMA IF NOT EXISTS {schema}; SET search_path TO {schema};"
         )))?;

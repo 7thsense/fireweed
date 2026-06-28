@@ -49,8 +49,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
+use postgres::Client;
 use postgres::types::ToSql;
-use postgres::{Client, NoTls};
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel, PriorityValue,
     QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
@@ -69,6 +69,8 @@ use pqueue_engine::{
     validate_purge_force,
 };
 use sha2::{Digest, Sha256};
+
+use crate::{PostgresConnectConfig, connect};
 
 /// The relational schema (postgres). Mirrors the sqlite reference column-for-column: `pqueue_items` is
 /// TD-002's item projection plus the reference operational columns (`fenced`/`superseded`/`max_attempts`/
@@ -1743,7 +1745,7 @@ pub struct PostgresRelationalBackend {
 impl PostgresRelationalBackend {
     /// Connect to `url` (default `search_path`), ensure the schema, and load the queue-def cache.
     pub fn connect(url: &str) -> EngineResult<Self> {
-        let client = st(Client::connect(url, NoTls))?;
+        let client = connect(PostgresConnectConfig::new(url))?;
         Self::from_client(client)
     }
 
@@ -1757,7 +1759,7 @@ impl PostgresRelationalBackend {
         {
             return Err(EngineError::Invalid("schema name must be [A-Za-z0-9_]"));
         }
-        let mut client = st(Client::connect(url, NoTls))?;
+        let mut client = connect(PostgresConnectConfig::new(url))?;
         st(client.batch_execute(&format!(
             "CREATE SCHEMA IF NOT EXISTS {schema}; SET search_path TO {schema};"
         )))?;
@@ -2813,6 +2815,7 @@ mod gated_group_summary_tests {
     //! summary table directly via the private client (there is no read port until BQ-14).
     use super::*;
     use futures::executor::block_on;
+    use postgres::NoTls;
     use pqueue_core::{
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModelKind, PriorityTieBreaker,
         RecurrencePolicy, RetryPolicy, WorkerId,

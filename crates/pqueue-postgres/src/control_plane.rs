@@ -20,7 +20,7 @@
 
 use std::sync::Mutex;
 
-use postgres::{Client, NoTls};
+use postgres::Client;
 use pqueue_core::{OwnerId, UtcTimestamp};
 use pqueue_engine::{
     AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseState, OwnerResolution,
@@ -28,6 +28,8 @@ use pqueue_engine::{
     lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
     resolve_target,
 };
+
+use crate::{PostgresConnectConfig, connect};
 
 const CONTROL_PLANE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS pqueue_workers (
@@ -157,7 +159,7 @@ pub struct PostgresControlPlane {
 impl PostgresControlPlane {
     /// Connect to `url` on the default `search_path` and ensure the control-plane schema.
     pub fn connect(url: &str, config: ControlPlaneConfig) -> EngineResult<Self> {
-        let client = st(Client::connect(url, NoTls))?;
+        let client = connect(PostgresConnectConfig::new(url))?;
         Self::from_client(client, config)
     }
 
@@ -173,7 +175,7 @@ impl PostgresControlPlane {
         {
             return Err(EngineError::Invalid("schema name must be [A-Za-z0-9_]"));
         }
-        let mut client = st(Client::connect(url, NoTls))?;
+        let mut client = connect(PostgresConnectConfig::new(url))?;
         st(client.batch_execute(&format!(
             "CREATE SCHEMA IF NOT EXISTS {schema}; SET search_path TO {schema};"
         )))?;
