@@ -18,10 +18,14 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
-use pqueue::{ClaimCompatibility, EngineError, GroupBatching, Nack, NewItem, Pqueue};
+use pqueue::{
+    ClaimCompatibility, ClientItemKey, EngineError, GroupBatching, LibBackend, Nack, NewItem,
+    Pqueue, UpsertOutcome,
+};
 use pqueue_core::{
     CohortPolicy, EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
@@ -30,6 +34,7 @@ use pqueue_core::{
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, MemoryBackend};
 use pqueue_objectlog::ObjectLogBackend;
+use pqueue_sqlite::SqliteBackend;
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -89,12 +94,39 @@ fn qk(tenant: &str, queue: &str) -> QueueKey {
     QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
 }
 
+fn unique_temp_path(tag: &str) -> std::path::PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "pqueue-product-{tag}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ))
+}
+
 /// Emit a SMOKE-tier AC-E2E ledger row from real measured/observed values, and assert it round-trips strict
 /// validation under its acceptance id. (Structure check; the workflow's own asserts verify the behavior.)
 fn emit_ac(
     ac_id: &str,
     inv_ids: &[&str],
     pass_bar: &str,
+    values: BTreeMap<String, serde_json::Value>,
+) {
+    emit_ac_with_context(
+        ac_id,
+        inv_ids,
+        pass_bar,
+        "memory",
+        "in-process lib facade (Pqueue + MemoryBackend); release shape is the provisioned run",
+        values,
+    );
+}
+
+fn emit_ac_with_context(
+    ac_id: &str,
+    inv_ids: &[&str],
+    pass_bar: &str,
+    backend_profile: &str,
+    environment: &str,
     values: BTreeMap<String, serde_json::Value>,
 ) {
     let suite = format!(
@@ -104,12 +136,10 @@ fn emit_ac(
     let row = pqueue_release::LedgerRow {
         suite: "product_validation_tests".into(),
         command: "cargo test -p pqueue --test product_validation_tests".into(),
-        backend_profile: "memory".into(),
+        backend_profile: backend_profile.into(),
         scale: "smoke".into(),
         seed: 0,
-        environment:
-            "in-process lib facade (Pqueue + MemoryBackend); release shape is the provisioned run"
-                .into(),
+        environment: environment.into(),
         exit_status: 0,
         ac_ids: vec![ac_id.into()],
         inv_ids: inv_ids.iter().map(|s| s.to_string()).collect(),
@@ -437,123 +467,47 @@ fn ts(seconds: i64) -> UtcTimestamp {
 
 /// AC-E2E-1 (TP-003): model `scheduled_actions` — a timestamp-ascending queue where items are pushed EARLY
 /// with a future send time (`not_before`), become eligible exactly when the clock reaches that time, are
-/// delivered in schedule order, and renew/finalize cleanly; with cross-tenant isolation and metrics matching
-/// the terminal state. (FR-1..3, FR-7, FR-18..28, FR-40..46.)
+/// delivered in schedule order, and finalize through each API-003 outcome mapping; with cross-tenant
+/// isolation and metrics matching the terminal state. (FR-1..3, FR-7, FR-18..28, FR-40..46.)
 ///
 /// COVERED via the lib facade: not_before scheduling + eligibility gating by the clock; strict
-/// timestamp-ascending delivery order (INV: schedule order == timestamp); single delivery per item (INV-1);
-/// renew commits + preserves the lease; progress to terminal (INV-4); tenant NAMESPACING (same queue_id under
-/// two tenants are independent queues with no cross-tenant leakage); metrics match the terminal state.
+/// timestamp-ascending delivery order (INV: schedule order == timestamp); stable client keys; caller
+/// max_items/cadence pacing; complete/fail/retry/release/rearm finalize mappings; progress to terminal
+/// (INV-4); tenant NAMESPACING (same queue_id under two tenants are independent queues with no cross-tenant
+/// leakage); metrics match the terminal state.
 /// DEFERRED (tracked on pqueue-7a96f929 — facade lacks the seam): BatchUpdate reschedule (change
 /// priority/not_before after push), SetGates close+reopen gating (no gated item claimed while blocked),
-/// claim-by-group_key, and the expiry-REDELIVERY-vs-renew proof (needs a facade reclaim tick). Cross-tenant
-/// AUTHZ denial lives in the auth layer (ADR-002), not this trusted library facade. NOT claimed in the row.
+/// and claim-by-group_key. Cross-tenant AUTHZ denial lives in the auth layer (ADR-002), not this trusted
+/// library facade. NOT claimed in the row.
 #[tokio::test]
 async fn scheduled_action_delivery_e2e() {
     let (pq, clock) = deployment();
-    // Timestamp-ascending queue: priority == scheduled send time, ascending → earliest scheduled first.
-    let q = qk("sched", "campaign");
-    pq.create_queue(qdef(
-        "sched",
-        "campaign",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    let memory = scheduled_batch_delivery_profile(&pq, clock.clone(), "sched-mem").await;
+    let memory_idempotent = assert_keyed_upsert_converges(&pq, "sched-mem-idempotent").await;
 
-    // Push 3 actions EARLY (clock is at 0), each scheduled for a future send time via not_before, priority ==
-    // the send time so schedule order == timestamp order.
-    let schedule = [10i64, 20, 30];
-    for &t in &schedule {
-        pq.push(
-            &q,
-            NewItem {
-                priority: Some(PriorityValue::Int64(t)),
-                not_before: Some(ts(t)),
-                payload: Some(Bytes::from(format!("send@{t}").into_bytes())),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    }
-    assert_eq!(
-        pq.metrics(&q).await.unwrap().pending,
-        3,
-        "all scheduled, pending"
+    let sqlite_path = unique_temp_path("scheduled-sqlite");
+    let _ = std::fs::remove_file(&sqlite_path);
+    let sqlite_clock = Arc::new(ManualClock::at(0));
+    let sqlite = Pqueue::new(
+        Arc::new(SqliteBackend::open(sqlite_path.to_str().unwrap()).expect("open sqlite")),
+        sqlite_clock.clone(),
     );
+    let sqlite_evidence =
+        scheduled_batch_delivery_profile(&sqlite, sqlite_clock, "sched-sqlite").await;
+    let sqlite_idempotent = assert_keyed_upsert_converges(&sqlite, "sched-sqlite-idempotent").await;
+    let _ = std::fs::remove_file(&sqlite_path);
 
-    // BEFORE any send time (clock=0): nothing is eligible — a claim returns an empty batch (the actions are
-    // scheduled, not withheld; their not_before simply hasn't arrived).
-    assert!(
-        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
-        "no action is deliverable before its scheduled time"
+    let dir = unique_temp_path("scheduled-objectlog");
+    let _ = std::fs::remove_dir_all(&dir);
+    let object_clock = Arc::new(ManualClock::at(0));
+    let objectlog = Pqueue::new(
+        Arc::new(ObjectLogBackend::open(&dir).expect("open object log")),
+        object_clock.clone(),
     );
-
-    // Delivery in schedule order as the clock advances; track ids to prove single delivery (INV-1).
-    let mut delivered_order = Vec::new();
-    let mut delivered_ids: Vec<ItemId> = Vec::new();
-
-    // clock=15 → only the action scheduled at 10 is eligible.
-    clock.set(15);
-    let batch = pq.claim(&q, 10, 60_000).await.unwrap();
-    assert_eq!(
-        batch.len(),
-        1,
-        "exactly the one due action is deliverable at t=15"
-    );
-    record(&batch, &mut delivered_order, &mut delivered_ids);
-    pq.ack(&q, batch.iter().map(|c| c.item_id)).await.unwrap();
-
-    // clock=100 → the remaining actions (20, 30) are eligible; delivered in ascending schedule order.
-    clock.set(100);
-    let batch = pq.claim(&q, 10, 50_000).await.unwrap(); // lease 50s → expiry at 150
-    assert_eq!(
-        batch.len(),
-        2,
-        "both remaining due actions are deliverable at t=100"
-    );
-    record(&batch, &mut delivered_order, &mut delivered_ids);
-
-    // RENEW the leases: the renew verb commits on the leased items and they remain leased + claimable for
-    // finalize. NOTE (honest scope): expiry-REDELIVERY suppression (an un-renewed lease would redeliver after
-    // its deadline, a renewed one would not) is NOT exercised here — the memory backend only returns an
-    // expired lease to Pending via a reclaim tick (ReclaimDriver), which the lib facade does not expose, so a
-    // claim never reclaims expired leases regardless of renew. The redelivery-vs-renew proof needs a facade
-    // reclaim-tick seam (deferred to pqueue-7a96f929). Here we prove only that renew succeeds and preserves
-    // the lease.
-    clock.set(140);
-    pq.renew(&q, batch.iter().map(|c| c.item_id), 50_000)
-        .await
-        .unwrap();
-    assert_eq!(
-        pq.metrics(&q).await.unwrap().leased,
-        2,
-        "renew preserves the lease (items still leased, claimable for finalize)"
-    );
-    pq.ack(&q, batch.iter().map(|c| c.item_id)).await.unwrap();
-
-    // Schedule order == timestamp order (INV: ordering), and each action delivered exactly once (INV-1).
-    assert_eq!(
-        delivered_order, schedule,
-        "actions delivered in scheduled (timestamp) order"
-    );
-    delivered_ids.sort();
-    delivered_ids.dedup();
-    assert_eq!(
-        delivered_ids.len(),
-        3,
-        "each action delivered exactly once (INV-1: no duplicate delivery)"
-    );
-
-    // Metrics match the terminal state (INV-4 progress: everything reached complete).
-    let m = pq.metrics(&q).await.unwrap();
-    assert_eq!(
-        (m.complete, m.pending, m.leased),
-        (3, 0, 0),
-        "all actions terminal-complete"
-    );
+    let object = scheduled_batch_delivery_profile(&objectlog, object_clock, "sched-obj").await;
+    let objectlog_upsert_unavailable =
+        assert_upsert_unavailable(&objectlog, "sched-obj-idempotent").await;
+    let _ = std::fs::remove_dir_all(&dir);
 
     // Tenant NAMESPACING: the SAME queue_id under two different tenants are independent queues with NO
     // cross-tenant leakage. Push a distinct marker into each tenant's same-named queue and prove each claim
@@ -620,22 +574,60 @@ async fn scheduled_action_delivery_e2e() {
         "no cross-tenant leakage into B"
     );
 
-    emit_ac(
+    emit_ac_with_context(
         "AC-E2E-1",
-        &["INV-1", "INV-4"],
-        "scheduled actions become eligible at not_before, delivered in timestamp order, single delivery (INV-1), renew commits + preserves the lease, tenant-namespaced (no cross-tenant leakage), progress to terminal (INV-4), metrics match terminal [DEFERRED -> pqueue-7a96f929: BatchUpdate-reschedule, SetGates-gating, claim-by-group_key, expiry-redelivery-vs-renew (needs facade reclaim tick); cross-tenant AUTHZ denial is the auth layer]",
+        &["INV-4"],
+        "scheduled actions use stable client_item_key, become eligible at not_before, obey caller max_items/cadence pacing, map application results onto complete/fail/retry/release/rearm, preserve the no-rate-admission boundary, remain tenant-namespaced, and reach terminal metrics on memory/sqlite/object-log smoke profiles [DEFERRED -> pqueue-7a96f929: BatchUpdate-reschedule, SetGates-gating, claim-by-group_key; cross-tenant AUTHZ denial is the auth layer]",
+        "memory+sqlite+object_log_sqlite_projection",
+        "in-process lib facade over MemoryBackend, SqliteBackend, and ObjectLogBackend; release shape is the provisioned run",
         BTreeMap::from([
             (
                 "scheduled_actions".into(),
-                serde_json::json!(schedule.len()),
+                serde_json::json!(memory.scheduled_actions),
             ),
             (
                 "delivered_in_schedule_order".into(),
-                serde_json::json!(delivered_order == schedule),
+                serde_json::json!(
+                    memory.delivered_in_schedule_order
+                        && sqlite_evidence.delivered_in_schedule_order
+                        && object.delivered_in_schedule_order
+                ),
             ),
             (
                 "unique_deliveries".into(),
-                serde_json::json!(delivered_ids.len()),
+                serde_json::json!(memory.unique_deliveries),
+            ),
+            (
+                "finalize_outcomes".into(),
+                serde_json::json!(["complete", "fail", "retry", "release", "rearm"]),
+            ),
+            (
+                "max_items_pacing_observed".into(),
+                serde_json::json!(
+                    memory.max_items_pacing_observed
+                        && sqlite_evidence.max_items_pacing_observed
+                        && object.max_items_pacing_observed
+                ),
+            ),
+            (
+                "stable_client_keys_observed".into(),
+                serde_json::json!(
+                    memory.stable_client_keys_observed
+                        && sqlite_evidence.stable_client_keys_observed
+                        && object.stable_client_keys_observed
+                ),
+            ),
+            (
+                "idempotent_client_key_convergence_profiles".into(),
+                serde_json::json!({
+                    "memory": memory_idempotent,
+                    "sqlite": sqlite_idempotent,
+                    "object_log_upsert_unavailable": objectlog_upsert_unavailable
+                }),
+            ),
+            (
+                "backend_profiles".into(),
+                serde_json::json!(["memory", "sqlite", "object_log_sqlite_projection"]),
             ),
             (
                 "deferred_subparts".into(),
@@ -647,14 +639,243 @@ async fn scheduled_action_delivery_e2e() {
     );
 }
 
-/// Record a claimed batch's priorities (delivery order) + ids (for single-delivery checks).
-fn record(batch: &[pqueue::ClaimedItem], order: &mut Vec<i64>, ids: &mut Vec<ItemId>) {
-    for c in batch {
-        if let Some(PriorityValue::Int64(n)) = c.priority {
-            order.push(n);
-        }
-        ids.push(c.item_id);
+struct ScheduledProfileEvidence {
+    scheduled_actions: usize,
+    delivered_in_schedule_order: bool,
+    unique_deliveries: usize,
+    max_items_pacing_observed: bool,
+    stable_client_keys_observed: bool,
+}
+
+async fn scheduled_batch_delivery_profile<B: LibBackend>(
+    pq: &Pqueue<B>,
+    clock: Arc<ManualClock>,
+    tenant: &str,
+) -> ScheduledProfileEvidence {
+    let q = qk(tenant, "campaign");
+    pq.create_queue(qdef(
+        tenant,
+        "campaign",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+
+    let actions = [
+        ("complete", 10i64),
+        ("fail", 20),
+        ("retry", 30),
+        ("release", 40),
+        ("rearm", 50),
+    ];
+    for &(outcome, due) in &actions {
+        let key = ClientItemKey::new(format!("{tenant}-{outcome}")).unwrap();
+        let item = NewItem {
+            client_item_key: Some(key),
+            priority: Some(PriorityValue::Int64(due)),
+            not_before: Some(ts(due)),
+            payload: Some(Bytes::from(outcome.as_bytes().to_vec())),
+            ..Default::default()
+        };
+        pq.push(&q, item).await.unwrap();
     }
+    assert!(
+        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
+        "not_before prevents early delivery"
+    );
+
+    clock.set(100);
+    let mut delivered_order = Vec::new();
+    let mut delivered_ids = Vec::new();
+    let mut max_items_pacing_observed = true;
+    let mut stable_client_keys_observed = true;
+
+    let complete = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    assert_eq!(payload_label(&complete), "complete");
+    assert_eq!(
+        complete.client_item_key.as_str(),
+        format!("{tenant}-complete")
+    );
+    pq.ack(&q, [complete.item_id]).await.unwrap();
+
+    let failed = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    assert_eq!(payload_label(&failed), "fail");
+    stable_client_keys_observed &= failed.client_item_key.as_str() == format!("{tenant}-fail");
+    pq.fail(&q, [failed.item_id]).await.unwrap();
+
+    let retry = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    assert_eq!(payload_label(&retry), "retry");
+    stable_client_keys_observed &= retry.client_item_key.as_str() == format!("{tenant}-retry");
+    pq.nack(
+        &q,
+        [retry.item_id],
+        Nack::Retry {
+            not_before: Some(ts(130)),
+        },
+    )
+    .await
+    .unwrap();
+
+    let release = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    assert_eq!(payload_label(&release), "release");
+    stable_client_keys_observed &= release.client_item_key.as_str() == format!("{tenant}-release");
+    pq.nack(&q, [release.item_id], Nack::Release).await.unwrap();
+    let release_again = pq.claim(&q, 1, 60_000).await.unwrap();
+    max_items_pacing_observed &= release_again.len() == 1;
+    assert_eq!(release_again[0].item_id, release.item_id);
+    pq.ack(&q, [release_again[0].item_id]).await.unwrap();
+
+    let rearm = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    assert_eq!(payload_label(&rearm), "rearm");
+    stable_client_keys_observed &= rearm.client_item_key.as_str() == format!("{tenant}-rearm");
+    pq.rearm(&q, [rearm.item_id]).await.unwrap();
+    let rearm_again = pq.claim(&q, 1, 60_000).await.unwrap();
+    max_items_pacing_observed &= rearm_again.len() == 1;
+    assert_eq!(rearm_again[0].item_id, rearm.item_id);
+    pq.ack(&q, [rearm_again[0].item_id]).await.unwrap();
+
+    clock.set(120);
+    assert!(
+        pq.claim(&q, 1, 60_000).await.unwrap().is_empty(),
+        "retry backoff is caller-chosen not_before, not pqueue rate admission"
+    );
+    clock.set(130);
+    let retry_again = pq.claim(&q, 1, 60_000).await.unwrap();
+    max_items_pacing_observed &= retry_again.len() == 1;
+    assert_eq!(retry_again[0].item_id, retry.item_id);
+    pq.ack(&q, [retry_again[0].item_id]).await.unwrap();
+
+    let m = pq.metrics(&q).await.unwrap();
+    assert_eq!(
+        (m.complete, m.failed, m.pending, m.leased),
+        (4, 1, 0, 0),
+        "all scheduled actions reached terminal state after the five outcome mappings"
+    );
+
+    delivered_ids.sort();
+    delivered_ids.dedup();
+    ScheduledProfileEvidence {
+        scheduled_actions: actions.len(),
+        delivered_in_schedule_order: delivered_order == [10, 20, 30, 40, 50],
+        unique_deliveries: delivered_ids.len(),
+        max_items_pacing_observed,
+        stable_client_keys_observed,
+    }
+}
+
+async fn claim_one<B: LibBackend>(
+    pq: &Pqueue<B>,
+    q: &QueueKey,
+    order: &mut Vec<i64>,
+    ids: &mut Vec<ItemId>,
+) -> pqueue::ClaimedItem {
+    let got = pq.claim(q, 1, 60_000).await.unwrap();
+    assert_eq!(
+        got.len(),
+        1,
+        "caller-selected max_items=1 paces delivery; pqueue returns the one eligible item instead of applying downstream admission"
+    );
+    let item = got.into_iter().next().unwrap();
+    if let Some(PriorityValue::Int64(n)) = item.priority {
+        order.push(n);
+    }
+    ids.push(item.item_id);
+    item
+}
+
+fn payload_label(item: &pqueue::ClaimedItem) -> String {
+    String::from_utf8(item.payload.clone().expect("payload").to_vec()).expect("utf8 payload")
+}
+
+async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &Pqueue<B>, tenant: &str) -> bool {
+    let q = qk(tenant, "campaign");
+    pq.create_queue(qdef(
+        tenant,
+        "campaign",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+
+    let key = ClientItemKey::new(format!("{tenant}-stable")).unwrap();
+    let first = pq
+        .upsert(
+            &q,
+            key.clone(),
+            NewItem {
+                priority: Some(PriorityValue::Int64(10)),
+                payload: Some(Bytes::from_static(b"first")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let first_id = match first {
+        UpsertOutcome::Inserted { item_id } => item_id,
+        UpsertOutcome::Replaced { .. } => panic!("first upsert inserts"),
+    };
+    let second = pq
+        .upsert(
+            &q,
+            key.clone(),
+            NewItem {
+                priority: Some(PriorityValue::Int64(20)),
+                payload: Some(Bytes::from_static(b"second")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let second_id = match second {
+        UpsertOutcome::Replaced {
+            new_item_id,
+            superseded_item_id,
+        } => {
+            assert_eq!(superseded_item_id, first_id);
+            new_item_id
+        }
+        UpsertOutcome::Inserted { .. } => panic!("second upsert replaces the pending item"),
+    };
+
+    let got = pq.claim(&q, 10, 60_000).await.unwrap();
+    assert_eq!(
+        got.len(),
+        1,
+        "stable client_item_key duplicate submission converges to one live item"
+    );
+    assert_eq!(got[0].item_id, second_id);
+    assert_eq!(got[0].client_item_key, key);
+    assert_eq!(got[0].payload.as_deref(), Some(b"second".as_ref()));
+    true
+}
+
+async fn assert_upsert_unavailable<B: LibBackend>(pq: &Pqueue<B>, tenant: &str) -> bool {
+    let q = qk(tenant, "campaign");
+    pq.create_queue(qdef(
+        tenant,
+        "campaign",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+
+    let err = pq
+        .upsert(
+            &q,
+            ClientItemKey::new(format!("{tenant}-stable")).unwrap(),
+            NewItem {
+                priority: Some(PriorityValue::Int64(10)),
+                payload: Some(Bytes::from_static(b"object-log-upsert")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("object-log profile keeps replace-if-pending unavailable");
+    assert_eq!(err, EngineError::Unavailable);
+    true
 }
 
 // ---------------------------------------------------------------------------

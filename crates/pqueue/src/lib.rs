@@ -136,10 +136,12 @@ pub enum Ownership {
     Unowned,
 }
 
-/// An item to enqueue. The id and dedup key are server-assigned for [`Pqueue::push`]; for
-/// [`Pqueue::upsert`] the caller supplies the dedup `client_item_key`.
+/// An item to enqueue. For [`Pqueue::push`], `client_item_key` is optional and defaults to the
+/// server-assigned id when omitted; for [`Pqueue::upsert`], the caller supplies the dedup key as the
+/// method argument.
 #[derive(Debug, Clone, Default)]
 pub struct NewItem {
+    pub client_item_key: Option<ClientItemKey>,
     pub priority: Option<PriorityValue>,
     pub group_key: Option<GroupKey>,
     pub not_before: Option<UtcTimestamp>,
@@ -433,7 +435,7 @@ impl<B: LibBackend> Pqueue<B> {
         let specs: Vec<PushSpec> = items
             .into_iter()
             .map(|it| PushSpec {
-                client_item_key: None,
+                client_item_key: it.client_item_key,
                 priority: it.priority,
                 not_before: it.not_before,
                 group_key: it.group_key,
