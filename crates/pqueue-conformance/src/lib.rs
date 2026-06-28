@@ -231,6 +231,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::claim_returns_priority_ordered_rich_items(&make).await;
     scenarios::claim_empty_when_nothing_eligible(&make).await;
     scenarios::claimed_item_shape_includes_payload_fields_and_gate_keys(&make).await;
+    scenarios::claimed_item_shape_omits_empty_conditionals(&make).await;
     scenarios::structured_live_items_are_ordered_and_only_live(&make).await;
     scenarios::upsert_inserts_then_replaces_pending(&make).await;
     scenarios::upsert_rejects_claimed_and_terminal(&make).await;
@@ -263,6 +264,27 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
 // classes that match their durability + recovery model.
 // ---------------------------------------------------------------------------
 
+/// API-001 claimed-item response-shape conformance. The `@core` arm applies to every claim-capable
+/// backend; the `@whole_cohort` arm is opt-in because log-replay backends intentionally reject
+/// non-item claim units until cohort compatibility is implemented there.
+#[macro_export]
+macro_rules! claimed_item_shape_conformance_tests {
+    ($make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            claimed_item_shape_includes_payload_fields_and_gate_keys,
+            claimed_item_shape_omits_empty_conditionals,
+        );
+    };
+    (@core $make:expr) => {
+        $crate::claimed_item_shape_conformance_tests!($make);
+    };
+    (@whole_cohort $make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            claimed_item_shape_whole_cohort_omits_per_item_lease_token,
+        );
+    };
+}
+
 /// **Core** scenario class — substrate-independent behavior every projection family must satisfy
 /// (ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, the per-queue progress
 /// bound). Two durability variants on the one upsert axis (TD-007 §2.3): `@atomic` includes the three
@@ -271,12 +293,12 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
 #[macro_export]
 macro_rules! core_suite {
     (@atomic $make:expr) => {
+        $crate::claimed_item_shape_conformance_tests!($make);
         $crate::conformance_suite!(@scenarios $make,
             push_then_select_eligible_in_priority_order,
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
-            claimed_item_shape_includes_payload_fields_and_gate_keys,
             structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,
@@ -303,12 +325,12 @@ macro_rules! core_suite {
         );
     };
     (@eventual $make:expr) => {
+        $crate::claimed_item_shape_conformance_tests!($make);
         $crate::conformance_suite!(@scenarios $make,
             push_then_select_eligible_in_priority_order,
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
-            claimed_item_shape_includes_payload_fields_and_gate_keys,
             structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,

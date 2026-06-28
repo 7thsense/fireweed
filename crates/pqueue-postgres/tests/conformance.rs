@@ -58,6 +58,7 @@ pg_conformance!(
     claim_returns_priority_ordered_rich_items,
     claim_empty_when_nothing_eligible,
     claimed_item_shape_includes_payload_fields_and_gate_keys,
+    claimed_item_shape_omits_empty_conditionals,
     structured_live_items_are_ordered_and_only_live,
     upsert_inserts_then_replaces_pending,
     upsert_rejects_claimed_and_terminal,

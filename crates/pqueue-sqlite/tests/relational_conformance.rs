@@ -113,6 +113,7 @@ fn spec(priority: i64) -> PushSpec {
 // ---------------------------------------------------------------------------
 
 pqueue_conformance::core_suite!(@atomic make);
+pqueue_conformance::claimed_item_shape_conformance_tests!(@whole_cohort make);
 
 // ---------------------------------------------------------------------------
 // 2. Lifecycle round-trip — every apply arm observed back through the read ports

@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GateKeyPolicy, GroupKey, ItemId, ItemState, LeaseToken, Metadata, MetadataValue,
-    PriorityValue,
+    ClientItemKey, CohortPolicy, GateKeyPolicy, GroupKey, ItemId, ItemState, LeaseToken, Metadata,
+    MetadataValue, PriorityValue,
 };
 use pqueue_engine::{
-    ClaimCommand, ClaimCompatibility, CommandPosition, EngineError, EngineResult,
+    ClaimCommand, ClaimCompatibility, ClaimRequest, CommandPosition, EngineError, EngineResult,
     FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
     PayloadUpdate, ProjectionSnapshot, PushCommand, QueueCommand, ReplacePendingCommand,
     UnfenceLeaseCommand, UpsertOutcome,
@@ -625,6 +625,98 @@ pub async fn claimed_item_shape_includes_payload_fields_and_gate_keys<B: Conform
         view[0].gate_keys,
         vec!["gate-a", "gate-b"],
         "claimed_view must render the same claimed-item gate-key shape"
+    );
+}
+
+pub async fn claimed_item_shape_omits_empty_conditionals<B: ConformanceCore>(make: impl Fn() -> B) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+
+    let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    let got = &claimed.items[0];
+    assert_eq!(got.item_id, ItemId::new("1").unwrap());
+    assert_eq!(got.client_item_key, ClientItemKey::new("ka").unwrap());
+    assert_eq!(got.item_version, 2);
+    assert_eq!(got.lease_token, Some(LeaseToken::new("lease-1").unwrap()));
+    assert_eq!(got.lease_expires_at, ts(500));
+    assert_eq!(got.priority, Some(PriorityValue::Int64(5)));
+    assert_eq!(got.not_before, None, "absent not_before stays absent");
+    assert_eq!(got.group_key, None, "absent group_key stays absent");
+    assert_eq!(got.payload, None, "absent payload stays absent");
+    assert!(
+        got.metadata.is_empty(),
+        "absent metadata stays empty/omitted"
+    );
+    assert!(
+        got.gate_keys.is_empty(),
+        "gate_keys are absent for gate_keys=none queues"
+    );
+}
+
+pub async fn claimed_item_shape_whole_cohort_omits_per_item_lease_token<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    let mut def = qdef();
+    def.cohort_policy = Some(CohortPolicy {
+        enabled: true,
+        completion_bound_ms: Some(30_000),
+        on_incomplete: None,
+        max_cohort_size: Some(10),
+    });
+    b.create_queue(def).await.unwrap();
+
+    let members = ["1", "2", "3"]
+        .into_iter()
+        .zip(["ka", "kb", "kc"])
+        .map(|(id, key)| {
+            let mut member = item(id, key, 5);
+            member.group_key = Some(GroupKey::new("cohort-a").unwrap());
+            member.cohort_size = Some(3);
+            member
+        })
+        .collect();
+    commit(
+        &b,
+        envelope(QueueCommand::Push(PushCommand { items: members }), vec![]),
+    )
+    .await;
+
+    let claimed = b
+        .claim(ClaimRequest {
+            compatibility: ClaimCompatibility {
+                whole_cohort: true,
+                ..Default::default()
+            },
+            ..claim_req(10, 500, 100)
+        })
+        .await
+        .unwrap();
+    assert_eq!(claimed.items.len(), 3);
+    assert_eq!(
+        claimed.cohort_lease_token,
+        Some(LeaseToken::new("lease-1").unwrap()),
+        "whole_cohort carries the shared lease token at the response top level"
+    );
+    assert_eq!(
+        claimed.cohort_id,
+        Some(GroupKey::new("cohort-a").unwrap()),
+        "whole_cohort identifies the claimed cohort at the response top level"
+    );
+    assert!(
+        claimed.items.iter().all(|item| item.lease_token.is_none()),
+        "whole_cohort item rows omit per-item lease_token"
     );
 }
 

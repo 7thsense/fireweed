@@ -142,6 +142,7 @@ Implementation beads should create or extend these suites:
 - `storage_conformance_group_batching_tests`
 - `storage_conformance_cohort_tests`
 - `storage_conformance_gate_tests`
+- `claimed_item_shape_conformance_tests`
 - `storage_conformance_discovery_tests`
 - `storage_conformance_ownership_routing_tests`
 - `fault_injection_harness_tests`
