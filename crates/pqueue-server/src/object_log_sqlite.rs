@@ -1,3 +1,7 @@
+// The port impls below return `-> impl Future` (the engine's port signature) with `async move` bodies —
+// the deliberate codebase pattern, not convertible to bare `async fn` without changing the trait shape.
+#![allow(clippy::manual_async_fn)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;

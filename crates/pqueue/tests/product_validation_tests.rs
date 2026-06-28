@@ -692,7 +692,7 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
     let mut max_items_pacing_observed = true;
     let mut stable_client_keys_observed = true;
 
-    let complete = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let complete = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&complete), "complete");
     assert_eq!(
         complete.client_item_key.as_str(),
@@ -700,12 +700,12 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
     );
     pq.ack(&q, [complete.item_id]).await.unwrap();
 
-    let failed = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let failed = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&failed), "fail");
     stable_client_keys_observed &= failed.client_item_key.as_str() == format!("{tenant}-fail");
     pq.fail(&q, [failed.item_id]).await.unwrap();
 
-    let retry = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let retry = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&retry), "retry");
     stable_client_keys_observed &= retry.client_item_key.as_str() == format!("{tenant}-retry");
     pq.nack(
@@ -718,7 +718,7 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
     .await
     .unwrap();
 
-    let release = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let release = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&release), "release");
     stable_client_keys_observed &= release.client_item_key.as_str() == format!("{tenant}-release");
     pq.nack(&q, [release.item_id], Nack::Release).await.unwrap();
@@ -727,7 +727,7 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
     assert_eq!(release_again[0].item_id, release.item_id);
     pq.ack(&q, [release_again[0].item_id]).await.unwrap();
 
-    let rearm = claim_one(&pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let rearm = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&rearm), "rearm");
     stable_client_keys_observed &= rearm.client_item_key.as_str() == format!("{tenant}-rearm");
     pq.rearm(&q, [rearm.item_id]).await.unwrap();

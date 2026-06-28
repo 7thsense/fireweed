@@ -168,17 +168,16 @@ where
                     .as_ref()
                     .is_some_and(|target| target != &self.owner)
                 && resolution.state == LeaseState::Assigned
+                && let Some(active_epoch) = resolution.assignment_epoch
             {
-                if let Some(active_epoch) = resolution.assignment_epoch {
-                    let _ = self
-                        .cp_begin_drain(
-                            queue.clone(),
-                            active_epoch,
-                            resolution.target_owner.as_ref().expect("checked").clone(),
-                            now,
-                        )
-                        .await?;
-                }
+                let _ = self
+                    .cp_begin_drain(
+                        queue.clone(),
+                        active_epoch,
+                        resolution.target_owner.as_ref().expect("checked").clone(),
+                        now,
+                    )
+                    .await?;
             }
             let session = self.sessions.lock().expect("poisoned").get(&queue).cloned();
             match (resolution.state, resolution.active_owner.as_ref(), session) {
@@ -246,15 +245,14 @@ where
                 .as_ref()
                 .is_some_and(|target| target != &self.owner)
             && resolution.state == LeaseState::Assigned
-        {
-            if let (Some(epoch), Some(target)) = (
+            && let (Some(epoch), Some(target)) = (
                 resolution.assignment_epoch,
                 resolution.target_owner.as_ref(),
-            ) {
-                self.cp_begin_drain(queue.clone(), epoch, target.clone(), now)
-                    .await?;
-                resolution = self.cp_resolve(queue.clone(), now).await?;
-            }
+            )
+        {
+            self.cp_begin_drain(queue.clone(), epoch, target.clone(), now)
+                .await?;
+            resolution = self.cp_resolve(queue.clone(), now).await?;
         }
         match (resolution.state, resolution.active_owner.as_ref()) {
             (LeaseState::Assigned, Some(owner)) | (LeaseState::Draining, Some(owner))

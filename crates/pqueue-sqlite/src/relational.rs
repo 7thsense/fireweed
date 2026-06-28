@@ -301,6 +301,7 @@ fn check_request_idempotency(
     Err(EngineError::RequestIdConflict)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_request_idempotency(
     tx: &Transaction<'_>,
     shard: &QueueKey,
@@ -2832,10 +2833,10 @@ impl ControlPlaneStore for SqliteRelationalBackend {
         &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        let result = (|| {
+        let result = {
             let mut g = self.inner.lock().expect("poisoned");
             create_queue_sql(&mut g, definition)
-        })();
+        };
         std::future::ready(result)
     }
 
@@ -3226,10 +3227,10 @@ impl SetGatesPort for SqliteRelationalBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let result = (|| {
+        let result = {
             let mut g = self.inner.lock().expect("poisoned");
             g.commit_command(shard, QueueCommand::SetGates(command), now, expected_epoch)
-        })();
+        };
         std::future::ready(result)
     }
 }
