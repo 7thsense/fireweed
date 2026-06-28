@@ -350,6 +350,7 @@ fn is_read_reserved_field(field: &str) -> bool {
         || field.eq_ignore_ascii_case("max_attempts")
         || field.eq_ignore_ascii_case("gate_keys")
         || field.eq_ignore_ascii_case("cohort_id")
+        || field.eq_ignore_ascii_case("lease_token")
         || field.eq_ignore_ascii_case("lease_expires_at")
 }
 

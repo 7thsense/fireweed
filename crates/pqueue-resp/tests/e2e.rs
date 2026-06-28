@@ -312,6 +312,26 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xadd_rejects_claimed_shape_reserved_lease_token_field() {
+    let (mut con, _) = setup().await;
+    let result: redis::RedisResult<String> = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("reserved-lease")
+        .arg("lease_token")
+        .arg("user-value")
+        .query_async(&mut con)
+        .await;
+
+    let err = result.expect_err("lease_token is reserved by XREADGROUP output");
+    assert!(
+        err.to_string().contains("field 'lease_token' is reserved"),
+        "unexpected error: {err}"
+    );
+}
+
 fn value_array(value: Value) -> Vec<Value> {
     match value {
         Value::Array(items) => items,

@@ -21,6 +21,7 @@ use pqueue_engine::{
     UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
+use rusqlite::Connection;
 use std::cell::Cell;
 
 fn ts(s: i64) -> UtcTimestamp {
@@ -68,6 +69,61 @@ fn unique_path(tag: &str) -> String {
         .to_str()
         .unwrap()
         .to_string()
+}
+
+#[test]
+fn open_upgrades_existing_relational_items_table_with_metadata_column() {
+    let path = unique_path("metadata-migration");
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pqueue_items (
+                tenant_id TEXT NOT NULL,
+                queue_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                client_item_key TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL,
+                priority TEXT,
+                priority_sort BLOB NOT NULL,
+                not_before INTEGER,
+                eligible_since INTEGER,
+                group_key TEXT,
+                cohort_size INTEGER,
+                recurrence_until INTEGER,
+                payload BLOB,
+                fields TEXT NOT NULL DEFAULT '{}',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                item_version INTEGER NOT NULL,
+                lease_token_hash BLOB,
+                lease_expires_at INTEGER,
+                worker_id TEXT,
+                last_command_sequence INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                terminal_at INTEGER,
+                fenced INTEGER NOT NULL DEFAULT 0,
+                superseded INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL,
+                created_seq INTEGER NOT NULL,
+                PRIMARY KEY (tenant_id, queue_id, item_id)
+             );",
+        )
+        .unwrap();
+    }
+
+    let _backend = SqliteRelationalBackend::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let mut stmt = conn.prepare("PRAGMA table_info(pqueue_items)").unwrap();
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        columns.iter().any(|column| column == "metadata"),
+        "open() must upgrade old relational pqueue_items tables with metadata"
+    );
 }
 
 fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {

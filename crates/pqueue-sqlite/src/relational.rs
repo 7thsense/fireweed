@@ -220,11 +220,21 @@ fn metadata_from_json(raw: String) -> EngineResult<Metadata> {
     Ok(Metadata::from_entries(entries))
 }
 
-fn ensure_item_fields_column(conn: &Connection) -> EngineResult<()> {
-    match conn.execute(
-        "ALTER TABLE pqueue_items ADD COLUMN fields TEXT NOT NULL DEFAULT '{}'",
-        [],
-    ) {
+fn ensure_item_text_column(
+    conn: &Connection,
+    column: &str,
+    default_json: &str,
+) -> EngineResult<()> {
+    if !column
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(EngineError::Invalid("column name must be [A-Za-z0-9_]"));
+    }
+    let sql = format!(
+        "ALTER TABLE pqueue_items ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default_json}'"
+    );
+    match conn.execute(&sql, []) {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
             if msg.contains("duplicate column name") =>
@@ -233,6 +243,14 @@ fn ensure_item_fields_column(conn: &Connection) -> EngineResult<()> {
         }
         Err(e) => Err(EngineError::Storage(e.to_string())),
     }
+}
+
+fn ensure_item_fields_column(conn: &Connection) -> EngineResult<()> {
+    ensure_item_text_column(conn, "fields", "{}")
+}
+
+fn ensure_item_metadata_column(conn: &Connection) -> EngineResult<()> {
+    ensure_item_text_column(conn, "metadata", "{}")
 }
 
 fn parts(shard: &QueueKey) -> (String, String) {
@@ -1955,6 +1973,7 @@ impl SqliteRelationalBackend {
     fn from_conn(conn: Connection) -> EngineResult<Self> {
         st(conn.execute_batch(RELATIONAL_SCHEMA))?;
         ensure_item_fields_column(&conn)?;
+        ensure_item_metadata_column(&conn)?;
         let mut inner = Inner {
             conn,
             queues: HashMap::new(),

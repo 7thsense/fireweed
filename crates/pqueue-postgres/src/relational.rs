@@ -1769,6 +1769,9 @@ impl PostgresRelationalBackend {
         st(client.batch_execute(
             "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';",
         ))?;
+        st(client.batch_execute(
+            "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';",
+        ))?;
         let mut inner = Inner {
             client,
             queues: HashMap::new(),
@@ -3002,6 +3005,20 @@ mod gated_group_summary_tests {
             ..claim_req(10, 500, 100)
         };
         let claimed = block_on(b.claim(req)).unwrap();
+        assert_eq!(
+            claimed.cohort_lease_token,
+            Some(LeaseToken::new("lease-1").unwrap()),
+            "whole-cohort claims carry the shared lease token at the response top level"
+        );
+        assert_eq!(
+            claimed.cohort_id,
+            Some(GroupKey::new("c1").unwrap()),
+            "whole-cohort claims identify the leased cohort at the response top level"
+        );
+        assert!(
+            claimed.items.iter().all(|item| item.lease_token.is_none()),
+            "whole-cohort item rows omit per-item lease tokens"
+        );
         assert_eq!(
             claimed.items.len(),
             3,
