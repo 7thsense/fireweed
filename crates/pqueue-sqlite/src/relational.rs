@@ -56,17 +56,18 @@ use pqueue_core::{
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
-    ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
-    ClaimedItem, CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand,
+    ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest,
+    Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand,
     CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand, CohortRenewLeasePort,
-    CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity,
-    DiscoveryPort, DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand,
-    LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand,
-    SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    CommandEnvelope, CommandPosition, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+    ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
+    EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter,
+    PayloadUpdate, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
+    PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
+    RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
     build_push_items, project_scopes, validate_claim_compatibility, validate_gate_push,
     validate_purge_force,
 };
@@ -211,6 +212,14 @@ CREATE TABLE IF NOT EXISTS pqueue_gate_state (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, gate_key TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, gate_key)
 );
+-- C9 (epic pqueue-2201fd37): opaque NON-WORK side records written by the authoritative vectorized
+-- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `pqueue_items`: a side
+-- record carries no lifecycle/lease/priority/eligibility, so it is never claimable, eligible, peekable, or
+-- counted as work. `key`/`payload` are opaque bytes pqueue stores verbatim; the apply arm upserts by key.
+CREATE TABLE IF NOT EXISTS pqueue_side_records (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BLOB NOT NULL, payload BLOB NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, key)
+);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -336,6 +345,270 @@ fn record_request_idempotency(
             ts_nanos(now),
         ],
     ))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// C9: authoritative vectorized claimed-work commit — idempotency + validation helpers
+// (epic pqueue-2201fd37)
+// ---------------------------------------------------------------------------
+
+/// The retained-request-id operation key for the vectorized commit path, distinct from the push key so the
+/// two operations never collide on a shared `request_id` in `pqueue_request_idempotency`.
+const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
+
+/// Stable body fingerprint for the commit path: SHA-256 over the serialized entries (the `request_id` is the
+/// cache KEY, not part of the body — same shape as [`push_request_fingerprint`]). A different body under the
+/// same request id is a `RequestIdConflict`; an equal body replays the stored per-entry outcomes.
+fn commit_request_fingerprint(entries: &[CommitTransitionEntry]) -> EngineResult<Vec<u8>> {
+    let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+/// Durable, replay-faithful mirror of a [`CommitEntryOutcome`]. The rich outcome (which carries an
+/// [`EngineError`] in its `Rejected` arm) is not itself `Serialize`, so it is projected to this shape for the
+/// `pqueue_request_idempotency.response_payload` column and reconstructed verbatim on replay.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum StoredEntryOutcome {
+    Committed {
+        lifecycle_item_ids: Vec<String>,
+    },
+    Rejected {
+        code: String,
+        detail: Option<String>,
+    },
+}
+
+/// Stable `(code, detail)` projection of an [`EngineError`] for durable replay. `Invalid`/`Forbidden` carry
+/// their `&'static str` reason in `detail` so the exact variant round-trips for the reasons this path emits.
+fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
+    match e {
+        EngineError::NotFound => ("not_found", None),
+        EngineError::QueueDefinitionConflict => ("queue_definition_conflict", None),
+        EngineError::Invalid(why) => ("invalid", Some((*why).to_string())),
+        EngineError::Terminal => ("terminal", None),
+        EngineError::StaleLease => ("stale_lease", None),
+        EngineError::Superseded => ("superseded", None),
+        EngineError::Unavailable => ("unavailable", None),
+        EngineError::Conflict => ("conflict", None),
+        EngineError::BatchTooLarge => ("batch_too_large", None),
+        EngineError::RequestIdConflict => ("request_id_conflict", None),
+        EngineError::RequestExpired => ("request_expired", None),
+        EngineError::EpochFenced => ("epoch_fenced", None),
+        EngineError::Forbidden(why) => ("forbidden", Some((*why).to_string())),
+        EngineError::Storage(msg) => ("storage", Some(msg.clone())),
+    }
+}
+
+/// Reconstruct an [`EngineError`] from its durable `(code, detail)` projection. `Invalid` reasons this path
+/// emits ("item is not leased") round-trip to the same `&'static str`; any other reason falls back to a
+/// stable static so the variant (and its `PartialEq`) is preserved.
+fn decode_engine_error(code: &str, detail: Option<String>) -> EngineError {
+    match code {
+        "not_found" => EngineError::NotFound,
+        "queue_definition_conflict" => EngineError::QueueDefinitionConflict,
+        "invalid" => EngineError::Invalid(match detail.as_deref() {
+            Some("item is not leased") => "item is not leased",
+            _ => "invalid",
+        }),
+        "terminal" => EngineError::Terminal,
+        "stale_lease" => EngineError::StaleLease,
+        "superseded" => EngineError::Superseded,
+        "unavailable" => EngineError::Unavailable,
+        "conflict" => EngineError::Conflict,
+        "batch_too_large" => EngineError::BatchTooLarge,
+        "request_id_conflict" => EngineError::RequestIdConflict,
+        "request_expired" => EngineError::RequestExpired,
+        "epoch_fenced" => EngineError::EpochFenced,
+        "forbidden" => EngineError::Forbidden("forbidden"),
+        _ => EngineError::Storage(detail.unwrap_or_else(|| code.to_string())),
+    }
+}
+
+fn encode_commit_outcomes(outcomes: &[CommitEntryOutcome]) -> EngineResult<String> {
+    let stored: Vec<StoredEntryOutcome> = outcomes
+        .iter()
+        .map(|o| match o {
+            CommitEntryOutcome::Committed { lifecycle_item_ids } => StoredEntryOutcome::Committed {
+                lifecycle_item_ids: lifecycle_item_ids.iter().map(|id| id.to_string()).collect(),
+            },
+            CommitEntryOutcome::Rejected(e) => {
+                let (code, detail) = encode_engine_error(e);
+                StoredEntryOutcome::Rejected {
+                    code: code.to_string(),
+                    detail,
+                }
+            }
+        })
+        .collect();
+    to_json(&stored)
+}
+
+fn decode_commit_outcomes(raw: &str) -> EngineResult<Vec<CommitEntryOutcome>> {
+    let stored: Vec<StoredEntryOutcome> =
+        serde_json::from_str(raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    stored
+        .into_iter()
+        .map(|s| match s {
+            StoredEntryOutcome::Committed { lifecycle_item_ids } => {
+                let ids = lifecycle_item_ids
+                    .into_iter()
+                    .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+                    .collect::<EngineResult<Vec<_>>>()?;
+                Ok(CommitEntryOutcome::Committed {
+                    lifecycle_item_ids: ids,
+                })
+            }
+            StoredEntryOutcome::Rejected { code, detail } => Ok(CommitEntryOutcome::Rejected(
+                decode_engine_error(&code, detail),
+            )),
+        })
+        .collect()
+}
+
+/// Commit-path twin of [`check_request_idempotency`]: same retained-request-id table + replay / conflict /
+/// expired classification, but the stored `response_payload` is the rich per-entry outcome vector (encoded
+/// via [`encode_commit_outcomes`]) rather than a flat id list. A live record with an equal fingerprint
+/// REPLAYS the prior outcomes; a different fingerprint is `RequestIdConflict`; an expired/absent record
+/// returns `None` (proceed fresh, deleting the stale row).
+fn check_commit_idempotency(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    now_n: i64,
+) -> EngineResult<Option<Vec<CommitEntryOutcome>>> {
+    let (t, q) = parts(shard);
+    let prior: Option<(Vec<u8>, String, i64)> = st(tx
+        .query_row(
+            "SELECT request_fingerprint, response_payload, expires_at \
+             FROM pqueue_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![t, q, IDEMPOTENCY_OPERATION_COMMIT, request_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional())?;
+    let Some((prior_fingerprint, response_payload, expires_at)) = prior else {
+        return Ok(None);
+    };
+    if expires_at <= now_n {
+        st(tx.execute(
+            "DELETE FROM pqueue_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![t, q, IDEMPOTENCY_OPERATION_COMMIT, request_id.as_str()],
+        ))?;
+        return Ok(None);
+    }
+    if prior_fingerprint == fingerprint {
+        return Ok(Some(decode_commit_outcomes(&response_payload)?));
+    }
+    Err(EngineError::RequestIdConflict)
+}
+
+/// Commit-path twin of [`record_request_idempotency`]: persist the whole-body outcome under the `commit`
+/// operation so a later replay returns it verbatim with no second write.
+#[allow(clippy::too_many_arguments)]
+fn record_commit_idempotency(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    outcomes: &[CommitEntryOutcome],
+    positions: &[CommandPosition],
+    now: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    st(tx.execute(
+        "INSERT INTO pqueue_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+          command_positions,expires_at,created_at) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+          request_fingerprint=excluded.request_fingerprint, \
+          response_payload=excluded.response_payload, \
+          command_positions=excluded.command_positions, \
+          expires_at=excluded.expires_at",
+        params![
+            t,
+            q,
+            IDEMPOTENCY_OPERATION_COMMIT,
+            request_id.as_str(),
+            fingerprint,
+            encode_commit_outcomes(outcomes)?,
+            positions_to_json(positions)?,
+            expires_at,
+            ts_nanos(now),
+        ],
+    ))?;
+    Ok(())
+}
+
+/// Pre-commit validation of one [`ClaimRef`] against the durable `pqueue_items` row, with rejection
+/// precedence IDENTICAL to the in-memory [`pqueue_projection::ProjectionData::commit_validate`]: absent ->
+/// `NotFound`, fenced -> `StaleLease`, terminal -> `Terminal`, superseded -> `Superseded`, non-leased ->
+/// `Invalid`, presented-token mismatch -> `StaleLease`, expired lease (half-open: `lease_expires_at < now`)
+/// -> `StaleLease`, version-fence mismatch -> `Conflict`. Nothing is mutated.
+///
+/// LEASE-TOKEN NOTE (flagged): the relational projection persists only the lease token **hash**
+/// (`lease_token_hash`), so token authority is checked by hashing the presented token and comparing hashes —
+/// whereas the in-memory family compares cleartext tokens. The accept/reject decision (and its precedence)
+/// is identical; only the stored representation differs.
+fn commit_validate_sql(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    claim_ref: &ClaimRef,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    /// `(lifecycle_state, fenced, superseded, lease_token_hash, lease_expires_at, item_version)`.
+    type CommitRow = (String, i64, i64, Option<Vec<u8>>, Option<i64>, i64);
+    let (t, q) = parts(shard);
+    let row: Option<CommitRow> = st(tx
+        .query_row(
+            "SELECT lifecycle_state, fenced, superseded, lease_token_hash, lease_expires_at, item_version \
+             FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+            params![t, q, claim_ref.item_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional())?;
+    let Some((state, fenced, superseded, lease_token_hash, lease_expires_at, item_version)) = row
+    else {
+        return Err(EngineError::NotFound);
+    };
+    let state = parse_state(&state)?;
+    if fenced != 0 {
+        return Err(EngineError::StaleLease);
+    }
+    if state.is_terminal() {
+        return Err(EngineError::Terminal);
+    }
+    if superseded != 0 {
+        return Err(EngineError::Superseded);
+    }
+    if state != ItemState::Leased {
+        return Err(EngineError::Invalid("item is not leased"));
+    }
+    // Claim authority: the presented token's hash must equal the stored hash (a forged/stale token differs).
+    if lease_token_hash.as_deref() != Some(lease_hash(&claim_ref.lease_token).as_slice()) {
+        return Err(EngineError::StaleLease);
+    }
+    // The lease must be unexpired (half-open, identical to `expired_leases`: expired iff strictly before now).
+    if lease_expires_at.is_some_and(|exp| exp < ts_nanos(now)) {
+        return Err(EngineError::StaleLease);
+    }
+    // Optimistic state fence: the caller's observed version must equal the committed version.
+    if item_version as u64 != claim_ref.item_version {
+        return Err(EngineError::Conflict);
+    }
     Ok(())
 }
 
@@ -1765,11 +2038,21 @@ fn apply_command_sql(
             }
             Ok(())
         }
-        // Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37) are not
-        // yet implemented on the relational family — the durable parity slice is deferred (C9). This backend
-        // does not implement `CommitTransitionPort` (it inherits the `Unavailable` default), so a side-record
-        // command is never appended here; reject defensively if one is ever replayed.
-        QueueCommand::WriteSideRecords(_) => Err(EngineError::Unavailable),
+        // C9 (epic pqueue-2201fd37): opaque NON-WORK side records (Snorri authoritative-commit boundary).
+        // Upsert each (key,payload) into `pqueue_side_records` — a table disjoint from `pqueue_items`, so a
+        // side record is never claimable/eligible/peekable nor counted as work. Apply is infallible
+        // (insert-or-overwrite by key), exactly like the in-memory `side_records` map.
+        QueueCommand::WriteSideRecords(c) => {
+            for rec in &c.records {
+                st(tx.execute(
+                    "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                     VALUES (?1,?2,?3,?4) \
+                     ON CONFLICT(tenant_id,queue_id,key) DO UPDATE SET payload=excluded.payload",
+                    params![t, q, rec.key, rec.payload.as_ref()],
+                ))?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -3510,9 +3793,154 @@ impl UpsertPort for SqliteRelationalBackend {
     }
 }
 
-/// Snorri authoritative vectorized claimed-work commit (epic pqueue-2201fd37). The durable relational
-/// parity slice is deferred (C9); inherits the default impl returning [`EngineError::Unavailable`].
-impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {}
+/// Snorri authoritative vectorized claimed-work commit on the DB-authoritative relational family (C9, epic
+/// pqueue-2201fd37) — "at least one durable backend" parity for the commit boundary. The WHOLE request body
+/// runs in ONE sqlite transaction so request-id check + per-entry validate + side-record/lifecycle/finalize
+/// writes + outcome record commit atomically (or roll back together on a storage fault).
+impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
+    fn commit_transition(
+        &self,
+        shard: &QueueKey,
+        transition: CommitTransition,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
+        let result = (|| {
+            let CommitTransition {
+                request_id,
+                entries,
+            } = transition;
+            let fingerprint = commit_request_fingerprint(&entries)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let max_attempts = g
+                .queues
+                .get(shard)
+                .map(|d| d.retry_policy.max_attempts)
+                .ok_or(EngineError::NotFound)?;
+            let expires_at = request_expires_at(&g.queues, shard, now)?;
+            let epoch = expected_epoch.unwrap_or(0);
+            let Inner {
+                conn,
+                queues,
+                live_tokens,
+                ..
+            } = &mut *g;
+            let (t, q) = parts(shard);
+            let tx = st(conn.transaction())?;
+            // ADR-009 / TD-003: read the durable assignment_epoch with the cursor and fence the owner's cached
+            // acquire-time epoch (`Some`) — a superseded owner is rejected `EpochFenced`, nothing applied.
+            let (seq0, cursor_epoch): (i64, i64) = st(tx
+                .query_row(
+                    "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![t, q],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional())?
+            .ok_or(EngineError::NotFound)?;
+            if expected_epoch.is_some_and(|e| e != cursor_epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
+
+            // (1) Request-id idempotency over the WHOLE commit body (same retained-request-id table/path as
+            //     the relational push). A retained body+id REPLAYS the prior per-entry outcomes (no re-write);
+            //     a different body under that id is `RequestIdConflict`; an expired/absent record proceeds.
+            if let Some(rid) = &request_id
+                && let Some(stored) =
+                    check_commit_idempotency(&tx, shard, rid, &fingerprint, ts_nanos(now))?
+            {
+                return Ok(stored);
+            }
+
+            // (2) Per entry: validate the lease-token + version-fenced claim_ref, then apply the entry's
+            //     side-records + lifecycle push + input finalize in this same transaction. A rejected entry
+            //     applies nothing (its outcome is captured; later entries still proceed). The caller's
+            //     `request_id` is recorded with the whole-body outcome (no `request_id: None` on this path).
+            let mut token_ops = Vec::new();
+            let mut seq = seq0 as u64;
+            let mut positions: Vec<CommandPosition> = Vec::new();
+            let mut apply =
+                |command: &QueueCommand, token_ops: &mut Vec<TokenOp>| -> EngineResult<()> {
+                    apply_command_sql(&tx, queues, token_ops, shard, seq, now, command)?;
+                    positions.push(CommandPosition::new(
+                        shard.clone(),
+                        cursor_epoch as u64,
+                        seq,
+                    ));
+                    seq += 1;
+                    Ok(())
+                };
+
+            let mut outcomes = Vec::with_capacity(entries.len());
+            for entry in entries {
+                if let Err(e) = commit_validate_sql(&tx, shard, &entry.claim_ref, now) {
+                    outcomes.push(CommitEntryOutcome::Rejected(e));
+                    continue;
+                }
+                if !entry.side_records.is_empty() {
+                    apply(
+                        &QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                            records: entry.side_records,
+                        }),
+                        &mut token_ops,
+                    )?;
+                }
+                let mut lifecycle_item_ids = Vec::new();
+                if !entry.lifecycle_items.is_empty() {
+                    let counter_base =
+                        self.counters
+                            .reserve(shard, epoch, entry.lifecycle_items.len() as u32);
+                    let (push_items, ids) = build_push_items(
+                        entry.lifecycle_items,
+                        epoch,
+                        self.node_id,
+                        counter_base,
+                        max_attempts,
+                    );
+                    lifecycle_item_ids = ids;
+                    apply(
+                        &QueueCommand::Push(PushCommand { items: push_items }),
+                        &mut token_ops,
+                    )?;
+                }
+                apply(
+                    &QueueCommand::Finalize(FinalizeCommand {
+                        outcomes: vec![FinalizeOutcome::new(
+                            entry.claim_ref.item_id,
+                            entry.finalize,
+                        )],
+                    }),
+                    &mut token_ops,
+                )?;
+                outcomes.push(CommitEntryOutcome::Committed { lifecycle_item_ids });
+            }
+
+            // Advance the durable command sequence past every command this body applied.
+            st(tx.execute(
+                "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
+                params![t, q, seq as i64],
+            ))?;
+
+            // (3) Record the whole-body outcome (only when a request_id was supplied) BEFORE commit, so a
+            //     later replay returns it verbatim with no second write.
+            if let Some(rid) = &request_id {
+                record_commit_idempotency(
+                    &tx,
+                    shard,
+                    rid,
+                    &fingerprint,
+                    &outcomes,
+                    &positions,
+                    now,
+                    expires_at,
+                )?;
+            }
+            st(tx.commit())?;
+            apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
+            Ok(outcomes)
+        })();
+        std::future::ready(result)
+    }
+}
 
 impl FinalizePort for SqliteRelationalBackend {
     fn finalize(
