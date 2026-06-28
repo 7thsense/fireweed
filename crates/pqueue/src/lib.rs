@@ -19,11 +19,11 @@ use std::sync::{Arc, Mutex};
 // Internal-only types (not named in the public API surface).
 use pqueue_core::WorkerId;
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+    Backend, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, FinalizeOutcome, FinalizePort, IndexQueryPort,
     LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort,
-    UpsertPort, acquire_and_fence,
+    QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    UpdateFieldsPort, UpsertPort, acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,8 +41,9 @@ pub use pqueue_core::{
     RetryPolicy, TenantId, TimestampError, UtcTimestamp,
 };
 pub use pqueue_engine::{
-    ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, ControlPlaneConfig,
-    CreateQueueOutcome, EngineError, EngineResult, FinalizeKind, GroupBatching, IndexHit, ItemView,
+    ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommitCapabilities,
+    CommitEntryStatus, CommitRecovery, ControlPlaneConfig, CreateQueueOutcome, EngineError,
+    EngineResult, EntryRecovery, FinalizeKind, GroupBatching, IndexHit, InstanceFence, ItemView,
     LiveItemView, PayloadUpdate, QueueKey, QueueMetrics, SideRecord, UpsertOutcome,
 };
 
@@ -65,12 +66,14 @@ impl Clock for SystemClock {
 /// impl over the engine ports) and a consumer never names or implements it. Hidden from the public docs.
 #[doc(hidden)]
 pub trait LibBackend:
-    PushPort
+    Backend
+    + PushPort
     + ClaimPort
     + UpsertPort
     + UpdateFieldsPort
     + FinalizePort
     + CommitTransitionPort
+    + RecoveryReadPort
     + RenewLeasePort
     + ReassignLeasePort
     + ReclaimPort
@@ -84,12 +87,14 @@ pub trait LibBackend:
 }
 #[doc(hidden)]
 impl<T> LibBackend for T where
-    T: PushPort
+    T: Backend
+        + PushPort
         + ClaimPort
         + UpsertPort
         + UpdateFieldsPort
         + FinalizePort
         + CommitTransitionPort
+        + RecoveryReadPort
         + RenewLeasePort
         + ReassignLeasePort
         + ReclaimPort
@@ -182,6 +187,11 @@ pub struct CommitEntry {
     pub finalize: FinalizeKind,
     pub side_records: Vec<SideRecord>,
     pub lifecycle_items: Vec<NewItem>,
+    /// Optional caller-supplied instance/state fence advanced/validated atomically with this entry (C6,
+    /// epic pqueue-2201fd37). The entry commits only if the queue's stored fence for `instance_key` equals
+    /// `expected` (absent reads as `0`) and `next > expected`; on a stale `expected` the entry is rejected
+    /// `Conflict` (nothing written), on `next <= expected` rejected `Invalid`. Defaults to `None` (no fence).
+    pub instance_fence: Option<InstanceFence>,
 }
 
 /// A vectorized claimed-work commit (Snorri authoritative StateStore boundary). `request_id` drives
@@ -704,6 +714,7 @@ impl<B: LibBackend> Pqueue<B> {
                     .into_iter()
                     .map(new_item_to_spec)
                     .collect(),
+                instance_fence: e.instance_fence,
             })
             .collect();
         let transition = CommitTransition {
@@ -726,6 +737,39 @@ impl<B: LibBackend> Pqueue<B> {
                 CommitEntryOutcome::Rejected(e) => EntryOutcome::Rejected(e),
             })
             .collect())
+    }
+
+    /// The backend's authoritative-commit capability descriptors (epic pqueue-2201fd37, ADR-009). A consumer
+    /// (Snorri) reads these BEFORE activation and rejects a backend that does not advertise the guarantees it
+    /// needs (e.g. `atomic_transition_commit`). Memory + sqlite-relational advertise the real capabilities;
+    /// objectlog/postgres keep the all-false default. `queue` is accepted for signature stability — the
+    /// capability set is backend-wide.
+    pub fn commit_capabilities(&self, _queue: &QueueKey) -> EngineResult<CommitCapabilities> {
+        Ok(self.backend.commit_capabilities())
+    }
+
+    /// Recovery/explain read for a committed transition (epic pqueue-2201fd37 acceptance #5). Reconstructs the
+    /// transition addressed by `request_id` — the consumed input id, the advanced instance fence, the
+    /// side-record keys, the lifecycle item ids, and per-entry status — from the retained commit idempotency
+    /// record plus current durable state. `Ok(None)` when no such record is retained. Proves committed
+    /// state/audit remains recoverable after the input is finalized. Backends without an authoritative commit
+    /// boundary reject with [`EngineError::Unavailable`].
+    pub async fn explain_commit(
+        &self,
+        queue: &QueueKey,
+        request_id: RequestId,
+    ) -> EngineResult<Option<CommitRecovery>> {
+        let r = self.backend.explain_commit(queue, request_id).await;
+        self.note(queue, r)
+    }
+
+    /// Read one opaque non-work side record by key (epic pqueue-2201fd37 acceptance #5). Side records are
+    /// disjoint from work items, so this never reflects claimable work and survives input finalization.
+    /// `Ok(None)` if unwritten. Backends without an authoritative commit boundary reject with
+    /// [`EngineError::Unavailable`].
+    pub async fn side_record(&self, queue: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
+        let r = self.backend.side_record(queue, key).await;
+        self.note(queue, r)
     }
 
     /// Non-destructive priority-ordered view of eligible items.

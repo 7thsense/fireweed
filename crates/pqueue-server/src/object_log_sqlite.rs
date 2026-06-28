@@ -270,6 +270,9 @@ impl ClaimPort for ObjectLogSqliteBackend {
 /// no single atomic transition boundary; inherits the default impl returning `EngineError::Unavailable`.
 impl pqueue_engine::CommitTransitionPort for ObjectLogSqliteBackend {}
 
+/// Recovery/explain reads inherit the `Unavailable` default (no authoritative commit boundary on this path).
+impl pqueue_engine::RecoveryReadPort for ObjectLogSqliteBackend {}
+
 impl FinalizePort for ObjectLogSqliteBackend {
     fn finalize(
         &self,

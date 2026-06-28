@@ -56,20 +56,21 @@ use pqueue_core::{
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
-    ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest,
-    Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand,
-    CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand, CohortRenewLeasePort,
-    CommandEnvelope, CommandPosition, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
-    ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
-    EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+    ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
+    ClaimRef, ClaimRequest, Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand,
+    CohortFinalizeCommand, CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand,
+    CohortRenewLeasePort, CommandEnvelope, CommandPosition, CommitCapabilities, CommitEntryOutcome,
+    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry, ControlPlaneStore,
+    CreateQueueOutcome, DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError,
+    EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
     IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter,
     PayloadUpdate, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
     PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
-    RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
-    build_push_items, project_scopes, validate_claim_compatibility, validate_gate_push,
-    validate_purge_force,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
+    TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    WriteSideRecordsCommand, build_push_items, project_scopes, validate_claim_compatibility,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -220,6 +221,14 @@ CREATE TABLE IF NOT EXISTS pqueue_side_records (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BLOB NOT NULL, payload BLOB NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, key)
 );
+-- C6 (epic pqueue-2201fd37): caller-supplied opaque instance/state fences advanced by the authoritative
+-- vectorized claimed-work commit (Snorri StateStore boundary). SEPARATE from `pqueue_items`: a fence carries
+-- no lifecycle/lease and is never claimable/eligible/peekable. `instance_key` is opaque bytes; an absent key
+-- reads as fence 0 (the unset convention). The commit upserts the row to `next` only after validation.
+CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BLOB NOT NULL, fence INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, instance_key)
+);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -365,18 +374,22 @@ fn commit_request_fingerprint(entries: &[CommitTransitionEntry]) -> EngineResult
     Ok(Sha256::digest(&bytes).to_vec())
 }
 
-/// Durable, replay-faithful mirror of a [`CommitEntryOutcome`]. The rich outcome (which carries an
-/// [`EngineError`] in its `Rejected` arm) is not itself `Serialize`, so it is projected to this shape for the
-/// `pqueue_request_idempotency.response_payload` column and reconstructed verbatim on replay.
+/// Durable, replay-faithful mirror of an [`EntryRecovery`] (which carries non-`Serialize` types — an
+/// [`EngineError`] in its rejected arm and an [`ItemId`]). Projected to this shape for the
+/// `pqueue_request_idempotency.response_payload` column and reconstructed verbatim on replay AND for the
+/// recovery/explain read (epic pqueue-2201fd37 acceptance #5). A `None` `rejected` means the entry committed.
 #[derive(serde::Serialize, serde::Deserialize)]
-enum StoredEntryOutcome {
-    Committed {
-        lifecycle_item_ids: Vec<String>,
-    },
-    Rejected {
-        code: String,
-        detail: Option<String>,
-    },
+struct StoredEntryRecovery {
+    consumed_input_id: String,
+    #[serde(default)]
+    instance: Option<(Vec<u8>, u64)>,
+    #[serde(default)]
+    side_record_keys: Vec<Vec<u8>>,
+    #[serde(default)]
+    lifecycle_item_ids: Vec<String>,
+    /// `None` = committed; `Some((code, detail))` = the structured rejection.
+    #[serde(default)]
+    rejected: Option<(String, Option<String>)>,
 }
 
 /// Stable `(code, detail)` projection of an [`EngineError`] for durable replay. `Invalid`/`Forbidden` carry
@@ -425,43 +438,69 @@ fn decode_engine_error(code: &str, detail: Option<String>) -> EngineError {
     }
 }
 
-fn encode_commit_outcomes(outcomes: &[CommitEntryOutcome]) -> EngineResult<String> {
-    let stored: Vec<StoredEntryOutcome> = outcomes
+/// Project the retained per-entry recovery records into the public per-entry outcomes (the commit return /
+/// replay value), mirroring the in-memory `outcomes_from_recovery`.
+fn recovery_to_outcomes(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
+    recovery
         .iter()
-        .map(|o| match o {
-            CommitEntryOutcome::Committed { lifecycle_item_ids } => StoredEntryOutcome::Committed {
-                lifecycle_item_ids: lifecycle_item_ids.iter().map(|id| id.to_string()).collect(),
+        .map(|r| match &r.status {
+            CommitEntryStatus::Committed => CommitEntryOutcome::Committed {
+                lifecycle_item_ids: r.lifecycle_item_ids.clone(),
             },
-            CommitEntryOutcome::Rejected(e) => {
-                let (code, detail) = encode_engine_error(e);
-                StoredEntryOutcome::Rejected {
-                    code: code.to_string(),
-                    detail,
+            CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
+        })
+        .collect()
+}
+
+fn encode_commit_recovery(recovery: &[EntryRecovery]) -> EngineResult<String> {
+    let stored: Vec<StoredEntryRecovery> = recovery
+        .iter()
+        .map(|r| StoredEntryRecovery {
+            consumed_input_id: r.consumed_input_id.to_string(),
+            instance: r.instance.clone(),
+            side_record_keys: r.side_record_keys.clone(),
+            lifecycle_item_ids: r
+                .lifecycle_item_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            rejected: match &r.status {
+                CommitEntryStatus::Committed => None,
+                CommitEntryStatus::Rejected(e) => {
+                    let (code, detail) = encode_engine_error(e);
+                    Some((code.to_string(), detail))
                 }
-            }
+            },
         })
         .collect();
     to_json(&stored)
 }
 
-fn decode_commit_outcomes(raw: &str) -> EngineResult<Vec<CommitEntryOutcome>> {
-    let stored: Vec<StoredEntryOutcome> =
+fn decode_commit_recovery(raw: &str) -> EngineResult<Vec<EntryRecovery>> {
+    let stored: Vec<StoredEntryRecovery> =
         serde_json::from_str(raw).map_err(|e| EngineError::Storage(e.to_string()))?;
     stored
         .into_iter()
-        .map(|s| match s {
-            StoredEntryOutcome::Committed { lifecycle_item_ids } => {
-                let ids = lifecycle_item_ids
-                    .into_iter()
-                    .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
-                    .collect::<EngineResult<Vec<_>>>()?;
-                Ok(CommitEntryOutcome::Committed {
-                    lifecycle_item_ids: ids,
-                })
-            }
-            StoredEntryOutcome::Rejected { code, detail } => Ok(CommitEntryOutcome::Rejected(
-                decode_engine_error(&code, detail),
-            )),
+        .map(|s| {
+            let lifecycle_item_ids = s
+                .lifecycle_item_ids
+                .into_iter()
+                .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+                .collect::<EngineResult<Vec<_>>>()?;
+            let status = match s.rejected {
+                None => CommitEntryStatus::Committed,
+                Some((code, detail)) => {
+                    CommitEntryStatus::Rejected(decode_engine_error(&code, detail))
+                }
+            };
+            Ok(EntryRecovery {
+                consumed_input_id: ItemId::new(s.consumed_input_id)
+                    .map_err(|e| EngineError::Storage(e.to_string()))?,
+                instance: s.instance,
+                side_record_keys: s.side_record_keys,
+                lifecycle_item_ids,
+                status,
+            })
         })
         .collect()
 }
@@ -477,7 +516,7 @@ fn check_commit_idempotency(
     request_id: &RequestId,
     fingerprint: &[u8],
     now_n: i64,
-) -> EngineResult<Option<Vec<CommitEntryOutcome>>> {
+) -> EngineResult<Option<Vec<EntryRecovery>>> {
     let (t, q) = parts(shard);
     let prior: Option<(Vec<u8>, String, i64)> = st(tx
         .query_row(
@@ -500,9 +539,32 @@ fn check_commit_idempotency(
         return Ok(None);
     }
     if prior_fingerprint == fingerprint {
-        return Ok(Some(decode_commit_outcomes(&response_payload)?));
+        return Ok(Some(decode_commit_recovery(&response_payload)?));
     }
     Err(EngineError::RequestIdConflict)
+}
+
+/// Recovery/explain read of the retained commit record by `request_id`, IGNORING the body fingerprint (the
+/// reader has only the id). Returns the durable recovery while the record is retained; `None` once it has
+/// elapsed/been deleted. Read-only — does not delete an expired row (that is the commit path's job).
+fn read_commit_recovery(
+    conn: &Connection,
+    shard: &QueueKey,
+    request_id: &RequestId,
+) -> EngineResult<Option<Vec<EntryRecovery>>> {
+    let (t, q) = parts(shard);
+    let payload: Option<String> = st(conn
+        .query_row(
+            "SELECT response_payload FROM pqueue_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![t, q, IDEMPOTENCY_OPERATION_COMMIT, request_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional())?;
+    match payload {
+        Some(raw) => Ok(Some(decode_commit_recovery(&raw)?)),
+        None => Ok(None),
+    }
 }
 
 /// Commit-path twin of [`record_request_idempotency`]: persist the whole-body outcome under the `commit`
@@ -513,7 +575,7 @@ fn record_commit_idempotency(
     shard: &QueueKey,
     request_id: &RequestId,
     fingerprint: &[u8],
-    outcomes: &[CommitEntryOutcome],
+    recovery: &[EntryRecovery],
     positions: &[CommandPosition],
     now: UtcTimestamp,
     expires_at: i64,
@@ -535,7 +597,7 @@ fn record_commit_idempotency(
             IDEMPOTENCY_OPERATION_COMMIT,
             request_id.as_str(),
             fingerprint,
-            encode_commit_outcomes(outcomes)?,
+            encode_commit_recovery(recovery)?,
             positions_to_json(positions)?,
             expires_at,
             ts_nanos(now),
@@ -2053,6 +2115,18 @@ fn apply_command_sql(
             }
             Ok(())
         }
+        // C6 (epic pqueue-2201fd37): advance a caller-supplied opaque instance/state fence. Validated
+        // pre-commit (stored==expected, next>expected), so the upsert is infallible. Disjoint from
+        // `pqueue_items` — a fence is never claimable/peekable work.
+        QueueCommand::AdvanceInstanceFence(c) => {
+            st(tx.execute(
+                "INSERT INTO pqueue_instance_fences (tenant_id,queue_id,instance_key,fence) \
+                 VALUES (?1,?2,?3,?4) \
+                 ON CONFLICT(tenant_id,queue_id,instance_key) DO UPDATE SET fence=excluded.fence",
+                params![t, q, c.instance_key, c.next as i64],
+            ))?;
+            Ok(())
+        }
     }
 }
 
@@ -3084,6 +3158,26 @@ impl Backend for SqliteRelationalBackend {
         true
     }
 
+    /// Authoritative-commit capabilities (epic pqueue-2201fd37). The DB-authoritative relational backend
+    /// implements the full vectorized claimed-work commit boundary in one sqlite transaction: atomic per-entry
+    /// transition, vectorized commit, lease-token (hash) + version + lease-expiry validation, retained
+    /// whole-body request-id idempotency (`pqueue_request_idempotency`), opaque non-work side records
+    /// (`pqueue_side_records`), and authoritative recovery/explain reads. Delayed/timer lifecycle work is
+    /// supported (`not_before`). The boundary is `Atomic` (single-transaction durability).
+    fn commit_capabilities(&self) -> CommitCapabilities {
+        CommitCapabilities {
+            atomic_transition_commit: true,
+            vectorized_commit: true,
+            lease_validation: true,
+            retained_commit_idempotency: true,
+            non_work_side_records: true,
+            authoritative_recovery_reads: true,
+            delayed_awaits_timers: true,
+            durability_class: DurabilityClass::Atomic,
+            consistency: "atomic single-transaction commit on sqlite",
+        }
+    }
+
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
     where
         F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
@@ -3848,7 +3942,7 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                 && let Some(stored) =
                     check_commit_idempotency(&tx, shard, rid, &fingerprint, ts_nanos(now))?
             {
-                return Ok(stored);
+                return Ok(recovery_to_outcomes(&stored));
             }
 
             // (2) Per entry: validate the lease-token + version-fenced claim_ref, then apply the entry's
@@ -3870,16 +3964,59 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                     Ok(())
                 };
 
-            let mut outcomes = Vec::with_capacity(entries.len());
+            let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
             for entry in entries {
+                let consumed_input_id = entry.claim_ref.item_id;
+                let reject = |e: EngineError| EntryRecovery {
+                    consumed_input_id,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(e),
+                };
                 if let Err(e) = commit_validate_sql(&tx, shard, &entry.claim_ref, now) {
-                    outcomes.push(CommitEntryOutcome::Rejected(e));
+                    recovery.push(reject(e));
                     continue;
                 }
+                // C6: validate the caller-supplied instance fence against the durable fence (absent == 0).
+                // A stale `expected` -> Conflict, a non-monotonic `next` -> Invalid; NOTHING is applied.
+                if let Some(fence) = &entry.instance_fence {
+                    let (it, iq) = parts(shard);
+                    let stored: i64 = st(tx
+                        .query_row(
+                            "SELECT fence FROM pqueue_instance_fences \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
+                            params![it, iq, fence.instance_key],
+                            |row| row.get(0),
+                        )
+                        .optional())?
+                    .unwrap_or(0);
+                    if let Err(e) = validate_instance_fence(stored as u64, fence) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                }
+                let side_record_keys: Vec<Vec<u8>> =
+                    entry.side_records.iter().map(|r| r.key.clone()).collect();
+                let instance = entry
+                    .instance_fence
+                    .as_ref()
+                    .map(|f| (f.instance_key.clone(), f.next));
+
                 if !entry.side_records.is_empty() {
                     apply(
                         &QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
                             records: entry.side_records,
+                        }),
+                        &mut token_ops,
+                    )?;
+                }
+                if let Some(fence) = entry.instance_fence {
+                    apply(
+                        &QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                            instance_key: fence.instance_key,
+                            expected: fence.expected,
+                            next: fence.next,
                         }),
                         &mut token_ops,
                     )?;
@@ -3911,8 +4048,15 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                     }),
                     &mut token_ops,
                 )?;
-                outcomes.push(CommitEntryOutcome::Committed { lifecycle_item_ids });
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    instance,
+                    side_record_keys,
+                    lifecycle_item_ids,
+                    status: CommitEntryStatus::Committed,
+                });
             }
+            let outcomes = recovery_to_outcomes(&recovery);
 
             // Advance the durable command sequence past every command this body applied.
             st(tx.execute(
@@ -3928,7 +4072,7 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                     shard,
                     rid,
                     &fingerprint,
-                    &outcomes,
+                    &recovery,
                     &positions,
                     now,
                     expires_at,
@@ -3937,6 +4081,52 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
             st(tx.commit())?;
             apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
             Ok(outcomes)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl RecoveryReadPort for SqliteRelationalBackend {
+    /// Reconstruct a committed transition from the retained `pqueue_request_idempotency` record (epic
+    /// pqueue-2201fd37 acceptance #5). The durable `response_payload` already holds every per-entry recovery
+    /// field; we only re-attach the `request_id`. `Ok(None)` when nothing is retained under that id. Survives
+    /// a reopen (the record is a durable table row).
+    fn explain_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let entries = read_commit_recovery(&g.conn, shard, &request_id)?;
+            Ok(entries.map(|entries| CommitRecovery {
+                request_id,
+                entries,
+            }))
+        })();
+        std::future::ready(result)
+    }
+
+    /// Read an opaque non-work side record by key from `pqueue_side_records` (recovery/audit read). Disjoint
+    /// from `pqueue_items`, so it never reflects claimable work and survives input finalization + reopen.
+    fn side_record(
+        &self,
+        shard: &QueueKey,
+        key: &[u8],
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let (t, q) = parts(shard);
+            let payload: Option<Vec<u8>> = st(g
+                .conn
+                .query_row(
+                    "SELECT payload FROM pqueue_side_records \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND key=?3",
+                    params![t, q, key],
+                    |row| row.get(0),
+                )
+                .optional())?;
+            Ok(payload.map(Bytes::from))
         })();
         std::future::ready(result)
     }

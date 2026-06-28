@@ -337,6 +337,10 @@ pub struct ProjectionData {
     /// eligibility index, do not appear in claim/peek/metrics-as-work, and survive input finalization. Both
     /// key and payload are opaque bytes pqueue never interprets.
     side_records: BTreeMap<Vec<u8>, Bytes>,
+    /// Per-queue caller-supplied instance/state fences (Snorri authoritative-commit boundary, epic
+    /// pqueue-2201fd37). `instance_key -> fence`; an absent key reads as `0` (unset). Wholly SEPARATE from the
+    /// work-item projection — never claimable/peekable. Advanced atomically by `AdvanceInstanceFence`.
+    instance_fences: BTreeMap<Vec<u8>, u64>,
 }
 
 impl ProjectionData {
@@ -360,6 +364,7 @@ impl ProjectionData {
             indexes,
             index_specs: specs.to_vec(),
             side_records: BTreeMap::new(),
+            instance_fences: BTreeMap::new(),
         }
     }
 
@@ -724,6 +729,13 @@ impl ProjectionData {
                 }
                 Ok(())
             }
+            // Advance a caller-supplied opaque instance/state fence (Snorri authoritative-commit boundary).
+            // Validated pre-commit (stored == expected, next > expected), so this overwrite is infallible.
+            // Touches NOTHING in the work-item projection — a fence is never claimable/peekable work.
+            QueueCommand::AdvanceInstanceFence(c) => {
+                self.instance_fences.insert(c.instance_key.clone(), c.next);
+                Ok(())
+            }
             QueueCommand::PurgeItems(c) => {
                 let model = self.priority_model;
                 for id in &c.item_ids {
@@ -880,6 +892,13 @@ impl ProjectionData {
     /// work and is unaffected by item finalization.
     pub fn side_record(&self, key: &[u8]) -> Option<&Bytes> {
         self.side_records.get(key)
+    }
+
+    /// Read the stored instance/state fence for `key` (Snorri authoritative-commit boundary). `None` if the
+    /// `instance_key` has never advanced (callers treat absent as the unset value `0`). The fence map is
+    /// disjoint from the work-item projection, so this never reflects claimable work.
+    pub fn instance_fence(&self, key: &[u8]) -> Option<u64> {
+        self.instance_fences.get(key).copied()
     }
 
     /// Pre-commit validation for a vectorized claimed-work commit (Snorri StateStore boundary, epic

@@ -17,6 +17,16 @@ use pqueue_core::{
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
+    AdvanceInstanceFenceCommand, ClaimCompatibility, CommitCapabilities, CommitEntryOutcome,
+    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionPort, EntryRecovery,
+    IdempotencyDecision, IndexHit, IndexQueryPort, PayloadUpdate, PurgeItemsCommand, PurgePort,
+    PushPort, PushSpec, QueueCounters, QueueIdempotencyCache, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort,
+    UpdateFieldsCommand, UpdateFieldsPort, WriteSideRecordsCommand, build_push_items,
+    require_item_level_claim, validate_gate_command, validate_gate_push, validate_instance_fence,
+    validate_purge_force,
+};
+use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
     CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
@@ -24,14 +34,6 @@ use pqueue_engine::{
     LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand,
     PushItem, QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand,
     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
-};
-use pqueue_engine::{
-    ClaimCompatibility, CommitEntryOutcome, CommitTransition, CommitTransitionPort,
-    IdempotencyDecision, IndexHit, IndexQueryPort, PayloadUpdate, PurgeItemsCommand, PurgePort,
-    PushPort, PushSpec, QueueCounters, QueueIdempotencyCache, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimPort, RenewLeaseCommand, RenewLeasePort, UpdateFieldsCommand,
-    UpdateFieldsPort, WriteSideRecordsCommand, build_push_items, require_item_level_claim,
-    validate_gate_command, validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::{LogData, ProjectionData, commit};
 
@@ -98,7 +100,22 @@ struct State {
     /// pqueue-2201fd37). Same `QueueIdempotencyCache` machinery as `idempotency`, but the cached outcome is
     /// the whole `Vec<CommitEntryOutcome>` so a body+request_id replay returns the prior per-entry outcomes
     /// verbatim with NO double-write. Held under the same `State` lock so check + append + record is atomic.
-    commit_idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<CommitEntryOutcome>>>,
+    commit_idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
+}
+
+/// Project the retained per-entry recovery records into the public per-entry outcomes (the commit return /
+/// replay value). The recovery record is the superset (it ALSO carries the consumed input id, instance fence,
+/// and side-record keys for `explain_commit`).
+fn outcomes_from_recovery(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
+    recovery
+        .iter()
+        .map(|r| match &r.status {
+            CommitEntryStatus::Committed => CommitEntryOutcome::Committed {
+                lifecycle_item_ids: r.lifecycle_item_ids.clone(),
+            },
+            CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
+        })
+        .collect()
 }
 
 /// Stable body fingerprint for request-id conflict detection: a non-cryptographic hash over the
@@ -529,24 +546,58 @@ impl CommitTransitionPort for MemoryBackend {
                     .or_default()
                     .check(rid, fingerprint, now)
                 {
-                    IdempotencyDecision::Replay(outcomes) => return Ok(outcomes),
+                    IdempotencyDecision::Replay(recovery) => {
+                        return Ok(outcomes_from_recovery(&recovery));
+                    }
                     IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                     IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
                 }
             }
 
-            // (2) Per entry: validate the lease-token + version-fenced claim_ref, then commit the entry's
-            //     side-records + lifecycle push + input finalize atomically. A rejected entry mutates nothing.
-            let mut outcomes = Vec::with_capacity(entries.len());
+            // (2) Per entry: validate the lease-token + version-fenced claim_ref AND the optional instance
+            //     fence, then commit the entry's side-records + fence advance + lifecycle push + input finalize
+            //     atomically. A rejected entry mutates nothing. Each entry's `EntryRecovery` (the superset of
+            //     its outcome) is retained so `explain_commit` can reconstruct the transition.
+            let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
             for entry in entries {
                 let claim_ref = entry.claim_ref;
+                let consumed_input_id = claim_ref.item_id;
+                let reject = |e: EngineError| EntryRecovery {
+                    consumed_input_id,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(e),
+                };
+
                 if let Err(e) = {
                     let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                     proj.commit_validate(std::slice::from_ref(&claim_ref), now)
                 } {
-                    outcomes.push(CommitEntryOutcome::Rejected(e));
+                    recovery.push(reject(e));
                     continue;
                 }
+
+                // C6: validate the caller-supplied instance fence against the stored fence (absent == 0).
+                // A stale `expected` -> Conflict, a non-monotonic `next` -> Invalid; NOTHING is written.
+                if let Some(fence) = &entry.instance_fence {
+                    let stored = {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.instance_fence(&fence.instance_key).unwrap_or(0)
+                    };
+                    if let Err(e) = validate_instance_fence(stored, fence) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                }
+
+                // Capture the recovery facts BEFORE moving the entry's records into commands.
+                let side_record_keys: Vec<Vec<u8>> =
+                    entry.side_records.iter().map(|r| r.key.clone()).collect();
+                let instance = entry
+                    .instance_fence
+                    .as_ref()
+                    .map(|f| (f.instance_key.clone(), f.next));
 
                 // Build the entry's envelopes WITHOUT committing yet, so a build-time rejection (e.g. a unique
                 // -index conflict on a lifecycle item) leaves nothing mutated. The caller's request_id
@@ -571,6 +622,16 @@ impl CommitTransitionPort for MemoryBackend {
                         Vec::new(),
                     ));
                 }
+                if let Some(fence) = entry.instance_fence {
+                    envelopes.push(mk(
+                        QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                            instance_key: fence.instance_key,
+                            expected: fence.expected,
+                            next: fence.next,
+                        }),
+                        Vec::new(),
+                    ));
+                }
                 let mut lifecycle_item_ids = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
                     let epoch = expected_epoch.unwrap_or(0);
@@ -588,7 +649,7 @@ impl CommitTransitionPort for MemoryBackend {
                         let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                         proj.index_validate_push(&push_items)
                     } {
-                        outcomes.push(CommitEntryOutcome::Rejected(e));
+                        recovery.push(reject(e));
                         continue;
                     }
                     lifecycle_item_ids = ids.clone();
@@ -610,21 +671,66 @@ impl CommitTransitionPort for MemoryBackend {
                 for env in envelopes {
                     Self::commit_locked(&mut g, shard, env, expected_epoch)?;
                 }
-                outcomes.push(CommitEntryOutcome::Committed { lifecycle_item_ids });
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    instance,
+                    side_record_keys,
+                    lifecycle_item_ids,
+                    status: CommitEntryStatus::Committed,
+                });
             }
 
-            // (3) Record the whole-body outcome only AFTER success, so a later replay returns it verbatim
-            //     with no second append.
+            // (3) Record the whole-body recovery only AFTER success, so a later replay/explain returns it
+            //     verbatim with no second append.
+            let outcomes = outcomes_from_recovery(&recovery);
             if let Some(rid) = request_id {
                 let expires_at = request_expires_at(now, retention);
                 g.commit_idempotency
                     .entry(shard.clone())
                     .or_default()
-                    .record(rid, fingerprint, outcomes.clone(), expires_at);
+                    .record(rid, fingerprint, recovery, expires_at);
             }
             Ok(outcomes)
         })();
         std::future::ready(result)
+    }
+}
+
+impl RecoveryReadPort for MemoryBackend {
+    /// Reconstruct a committed transition from the retained commit idempotency record (epic
+    /// pqueue-2201fd37 acceptance #5). The retained `Vec<EntryRecovery>` already holds every field; we only
+    /// re-attach the `request_id`. `Ok(None)` when nothing is retained under that id (never committed, or
+    /// compacted away).
+    fn explain_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
+        let g = self.state.lock().expect("poisoned");
+        let found = g
+            .commit_idempotency
+            .get(shard)
+            .and_then(|c| c.peek(&request_id))
+            .map(|entries| CommitRecovery {
+                request_id,
+                entries,
+            });
+        std::future::ready(Ok(found))
+    }
+
+    /// Read an opaque non-work side record by key (recovery/audit read). Disjoint from the work-item
+    /// projection, so it never reflects claimable work and survives input finalization.
+    fn side_record(
+        &self,
+        shard: &QueueKey,
+        key: &[u8],
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let g = self.state.lock().expect("poisoned");
+        let found = g
+            .projections
+            .get(shard)
+            .and_then(|proj| proj.side_record(key).cloned());
+        std::future::ready(Ok(found))
     }
 }
 
@@ -834,6 +940,25 @@ impl ReclaimDriver for MemoryBackend {
 impl Backend for MemoryBackend {
     fn durability_class(&self) -> DurabilityClass {
         DurabilityClass::Atomic
+    }
+
+    /// Authoritative-commit capabilities (epic pqueue-2201fd37). The atomic in-memory reference backend
+    /// implements the full vectorized claimed-work commit boundary: atomic per-entry transition, vectorized
+    /// commit, lease-token + version + lease-expiry validation, retained whole-body request-id idempotency,
+    /// opaque non-work side records, and authoritative recovery/explain reads. Delayed/timer lifecycle work is
+    /// supported (`not_before` on lifecycle items). The boundary is `Atomic`.
+    fn commit_capabilities(&self) -> CommitCapabilities {
+        CommitCapabilities {
+            atomic_transition_commit: true,
+            vectorized_commit: true,
+            lease_validation: true,
+            retained_commit_idempotency: true,
+            non_work_side_records: true,
+            authoritative_recovery_reads: true,
+            delayed_awaits_timers: true,
+            durability_class: DurabilityClass::Atomic,
+            consistency: "atomic append+apply under one in-memory lock",
+        }
     }
 
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send

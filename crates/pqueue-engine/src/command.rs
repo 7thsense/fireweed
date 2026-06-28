@@ -71,6 +71,12 @@ pub enum QueueCommand {
     /// treats both key and payload as opaque bytes (the consumer owns any meaning). Emitted only on the
     /// vectorized claimed-work commit path.
     WriteSideRecords(WriteSideRecordsCommand),
+    /// Advance a caller-supplied OPAQUE instance/state fence (Snorri authoritative-commit boundary, ADR-009
+    /// / epic pqueue-2201fd37). Sets the stored fence for `instance_key` to `next` — validated pre-commit
+    /// (stored == `expected`, `next > expected`) so the apply is infallible. The fence map is SEPARATE from
+    /// the work-item projection (not claimable/peekable). `instance_key` is opaque bytes pqueue never
+    /// interprets. Emitted only on the vectorized claimed-work commit path.
+    AdvanceInstanceFence(AdvanceInstanceFenceCommand),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -383,6 +389,18 @@ pub struct WriteSideRecordsCommand {
     pub records: Vec<SideRecord>,
 }
 
+/// Advance a caller-supplied opaque instance/state fence to `next` (Snorri authoritative-commit boundary).
+/// Validated pre-commit, so apply is infallible (overwrite the stored fence for `instance_key` with `next`).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AdvanceInstanceFenceCommand {
+    #[serde(default)]
+    pub instance_key: Vec<u8>,
+    #[serde(default)]
+    pub expected: u64,
+    #[serde(default)]
+    pub next: u64,
+}
+
 /// Block or unblock gate keys for the queue (BQ-14d, API-001 g2 `SetGates`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SetGatesCommand {
@@ -506,6 +524,11 @@ mod serde_tests {
                     key: b"state/run-1".to_vec(),
                     payload: Bytes::from_static(b"opaque-state"),
                 }],
+            }),
+            QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                instance_key: b"instance/run-1".to_vec(),
+                expected: 7,
+                next: 8,
             }),
         ]
     }

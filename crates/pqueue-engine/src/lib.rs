@@ -40,13 +40,13 @@ pub use operator::{OperationHandle, OperationId, OperatorOperationState, Operato
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
 pub use command::{
-    ClaimCommand, CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand,
-    CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId, CreateQueueCommand,
-    FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand,
-    PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters,
-    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand, SideRecord,
-    UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items,
-    validate_gate_command, validate_gate_push,
+    AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
+    CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
+    CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
+    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
+    SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
+    build_push_items, validate_gate_command, validate_gate_push,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{
@@ -55,13 +55,14 @@ pub use finalize_validation::{
 };
 pub use port::{
     Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, Clock, CohortFinalizePort,
-    CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitEntryOutcome, CommitTransition,
-    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome,
-    DiscoveryPort, FinalizePort, IdGen, IndexHit, IndexQueryPort, ItemView, LeaseView,
+    CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitCapabilities, CommitEntryOutcome,
+    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
+    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery,
+    FinalizePort, IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView, LeaseView,
     LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
     PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, SetGatesPort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort,
+    RecoveryReadPort, RenewLeasePort, SetGatesPort, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
 

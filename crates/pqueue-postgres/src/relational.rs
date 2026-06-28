@@ -1439,6 +1439,10 @@ fn apply_command_sql(
         // does not implement `CommitTransitionPort` (it inherits the `Unavailable` default), so a side-record
         // command is never appended here; reject defensively if one is ever replayed.
         QueueCommand::WriteSideRecords(_) => Err(EngineError::Unavailable),
+        // Caller-supplied instance/state fences (epic pqueue-2201fd37) are likewise not yet implemented on the
+        // relational family (this backend inherits the `Unavailable` commit default), so the command is never
+        // appended here; reject defensively if one is ever replayed.
+        QueueCommand::AdvanceInstanceFence(_) => Err(EngineError::Unavailable),
     }
 }
 
@@ -2853,6 +2857,9 @@ impl UpsertPort for PostgresRelationalBackend {
 /// parity slice is deferred (C9); this backend inherits the default impl, which returns
 /// [`EngineError::Unavailable`] so a caller rejects it before activation.
 impl pqueue_engine::CommitTransitionPort for PostgresRelationalBackend {}
+
+/// Recovery/explain reads inherit the `Unavailable` default until the relational parity slice lands.
+impl pqueue_engine::RecoveryReadPort for PostgresRelationalBackend {}
 
 impl FinalizePort for PostgresRelationalBackend {
     fn finalize(

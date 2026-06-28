@@ -762,6 +762,10 @@ impl PushPort for ObjectLogBackend {
 /// [`pqueue_engine::EngineError::Unavailable`] — a consumer must reject it before activation.
 impl pqueue_engine::CommitTransitionPort for ObjectLogBackend {}
 
+/// Recovery/explain reads are unavailable: this eventual-apply backend has no authoritative commit boundary
+/// (it inherits the `Unavailable` default).
+impl pqueue_engine::RecoveryReadPort for ObjectLogBackend {}
+
 impl FinalizePort for ObjectLogBackend {
     fn finalize(
         &self,

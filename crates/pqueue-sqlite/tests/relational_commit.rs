@@ -13,9 +13,10 @@ use bytes::Bytes;
 use pqueue_conformance::{qdef, shard};
 use pqueue_core::{LeaseToken, PriorityValue, RequestId, UtcTimestamp, WorkerId};
 use pqueue_engine::{
-    ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome, CommitTransition,
-    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind,
-    ProjectionRead, PushPort, PushSpec, QueueKey, SideRecord,
+    Backend, ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome,
+    CommitEntryStatus, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
+    ControlPlaneStore, EngineError, FinalizeKind, InstanceFence, ProjectionRead, PushPort,
+    PushSpec, QueueKey, RecoveryReadPort, SideRecord,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 use rusqlite::Connection;
@@ -121,6 +122,7 @@ async fn relational_commit_writes_side_records_enqueues_lifecycle_finalizes_and_
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("state/run-1", "audit-bytes")],
                         lifecycle_items: vec![item(20)],
+                        instance_fence: None,
                     }],
                 },
                 ts(1),
@@ -209,6 +211,7 @@ async fn relational_commit_rejects_bad_token_and_bad_version_without_writing() {
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("state/x", "v")],
                         lifecycle_items: vec![item(20)],
+                        instance_fence: None,
                     }],
                 },
                 ts(1),
@@ -254,6 +257,7 @@ async fn relational_commit_rejects_bad_token_and_bad_version_without_writing() {
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("state/x", "v")],
                         lifecycle_items: vec![item(20)],
+                        instance_fence: None,
                     }],
                 },
                 ts(1),
@@ -297,6 +301,7 @@ async fn relational_commit_request_id_replays_without_double_write() {
             finalize: FinalizeKind::Complete,
             side_records: vec![side("state/run-1", "v1")],
             lifecycle_items: vec![item(20)],
+            instance_fence: None,
         }],
     };
 
@@ -341,6 +346,7 @@ async fn relational_commit_request_id_replays_without_double_write() {
                     finalize: FinalizeKind::Fail, // different body
                     side_records: vec![side("state/run-1", "v1")],
                     lifecycle_items: vec![item(20)],
+                    instance_fence: None,
                 }],
             },
             ts(1),
@@ -359,6 +365,233 @@ async fn relational_commit_request_id_replays_without_double_write() {
         1,
         "the conflicting body wrote no side record"
     );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+fn read_instance_fence(path: &str, q: &QueueKey, key: &[u8]) -> Option<i64> {
+    let conn = Connection::open(path).unwrap();
+    conn.query_row(
+        "SELECT fence FROM pqueue_instance_fences WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
+        rusqlite::params![q.tenant_id.as_str(), q.queue_id.as_str(), key],
+        |row| row.get::<_, i64>(0),
+    )
+    .ok()
+}
+
+/// C6 (durable): an entry advancing `expected -> next` succeeds and the durable fence is `next`; a stale
+/// `expected` -> Rejected(Conflict) (nothing written: fence unchanged, side record absent, input still
+/// leased); a non-monotonic `next <= expected` -> Rejected(Invalid).
+#[tokio::test]
+async fn relational_commit_advances_validates_and_rejects_instance_fence() {
+    let path = unique_path("fence");
+    let _ = std::fs::remove_file(&path);
+    let q = shard();
+    let key = b"instance/run-1".to_vec();
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    b.create_queue(qdef()).await.unwrap();
+
+    // First transition: stored fence unset (== 0). expected=0 -> next=1 commits and advances.
+    let cr1 = push_and_claim(&b, 0).await;
+    let outcomes = b
+        .commit_transition(
+            &q,
+            CommitTransition {
+                request_id: Some(RequestId::new("fence-1").unwrap()),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref: cr1,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![side("state/run-1", "v1")],
+                    lifecycle_items: vec![],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: key.clone(),
+                        expected: 0,
+                        next: 1,
+                    }),
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcomes[0], CommitEntryOutcome::Committed { .. }));
+    assert_eq!(
+        read_instance_fence(&path, &q, &key),
+        Some(1),
+        "fence advanced to 1"
+    );
+
+    // STALE expected (stored is 1, caller presents 0) -> Conflict, nothing written.
+    let cr2 = push_and_claim(&b, 2).await;
+    let stale = b
+        .commit_transition(
+            &q,
+            CommitTransition {
+                request_id: None,
+                entries: vec![CommitTransitionEntry {
+                    claim_ref: cr2,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![side("state/should-not-write", "x")],
+                    lifecycle_items: vec![item(20)],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: key.clone(),
+                        expected: 0,
+                        next: 2,
+                    }),
+                }],
+            },
+            ts(3),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stale,
+        vec![CommitEntryOutcome::Rejected(EngineError::Conflict)]
+    );
+    assert_eq!(
+        read_instance_fence(&path, &q, &key),
+        Some(1),
+        "stale fence: unchanged"
+    );
+    assert!(
+        read_side_record(&path, &q, "state/should-not-write").is_none(),
+        "stale: no side record"
+    );
+    let m = b.metrics(&q).await.unwrap();
+    assert_eq!(
+        (m.pending, m.leased),
+        (0, 1),
+        "stale fence: input still leased, nothing enqueued"
+    );
+
+    // NON-MONOTONIC (stored 1; expected=1, next=1) -> Invalid.
+    let cr3 = push_and_claim(&b, 4).await;
+    let nonmono = b
+        .commit_transition(
+            &q,
+            CommitTransition {
+                request_id: None,
+                entries: vec![CommitTransitionEntry {
+                    claim_ref: cr3,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: key.clone(),
+                        expected: 1,
+                        next: 1,
+                    }),
+                }],
+            },
+            ts(5),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        nonmono,
+        vec![CommitEntryOutcome::Rejected(EngineError::Invalid(
+            "instance fence is not monotonic"
+        ))]
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// C7 (durable): the relational backend advertises the full authoritative-commit capability set.
+#[tokio::test]
+async fn relational_advertises_full_commit_capabilities() {
+    let path = unique_path("caps");
+    let _ = std::fs::remove_file(&path);
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    let caps = b.commit_capabilities();
+    assert!(caps.atomic_transition_commit);
+    assert!(caps.vectorized_commit);
+    assert!(caps.lease_validation);
+    assert!(caps.retained_commit_idempotency);
+    assert!(caps.non_work_side_records);
+    assert!(caps.authoritative_recovery_reads);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// C8 (durable): after a successful commit, `explain_commit(request_id)` reconstructs the transition and
+/// `side_record(key)` returns the bytes — BOTH survive a reopen (recovery from durable tables, acceptance #5).
+#[tokio::test]
+async fn relational_explain_commit_recovers_transition_and_survives_reopen() {
+    let path = unique_path("explain");
+    let _ = std::fs::remove_file(&path);
+    let q = shard();
+    let rid = RequestId::new("recover-1").unwrap();
+    let instance_key = b"instance/run-1".to_vec();
+    let input_id;
+    let lifecycle_id;
+
+    {
+        let b = SqliteRelationalBackend::open(&path).unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let cr = push_and_claim(&b, 0).await;
+        input_id = cr.item_id;
+        let outcomes = b
+            .commit_transition(
+                &q,
+                CommitTransition {
+                    request_id: Some(rid.clone()),
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref: cr,
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![side("audit/run-1", "audit-bytes")],
+                        lifecycle_items: vec![item(20)],
+                        instance_fence: Some(InstanceFence {
+                            instance_key: instance_key.clone(),
+                            expected: 0,
+                            next: 5,
+                        }),
+                    }],
+                },
+                ts(1),
+                None,
+            )
+            .await
+            .unwrap();
+        lifecycle_id = match &outcomes[0] {
+            CommitEntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
+            other => panic!("expected Committed, got {other:?}"),
+        };
+    } // drop the handle
+
+    // Reopen the same file: recovery comes entirely from durable tables.
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    let recovery = b
+        .explain_commit(&q, rid.clone())
+        .await
+        .unwrap()
+        .expect("record survives reopen");
+    assert_eq!(recovery.request_id, rid);
+    assert_eq!(recovery.entries.len(), 1);
+    let e = &recovery.entries[0];
+    assert_eq!(e.consumed_input_id, input_id);
+    assert_eq!(e.instance, Some((instance_key.clone(), 5)));
+    assert_eq!(e.side_record_keys, vec![b"audit/run-1".to_vec()]);
+    assert_eq!(e.lifecycle_item_ids, vec![lifecycle_id]);
+    assert_eq!(e.status, CommitEntryStatus::Committed);
+
+    // side_record(key) returns the bytes after reopen.
+    assert_eq!(
+        b.side_record(&q, b"audit/run-1").await.unwrap().as_deref(),
+        Some(&b"audit-bytes"[..])
+    );
+
+    // The input is finalized + not re-claimable; the side record is not claimable/peekable work.
+    assert_eq!(b.metrics(&q).await.unwrap().complete, 1);
+    let claimed = b.claim(claim_req(10, 600, 2)).await.unwrap();
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "only the lifecycle item is claimable"
+    );
+    assert_eq!(claimed.items[0].item_id, lifecycle_id);
 
     let _ = std::fs::remove_file(&path);
 }

@@ -71,6 +71,14 @@ pub trait Backend: Send + Sync {
         false
     }
 
+    /// The authoritative-commit capability descriptors (Snorri StateStore boundary, epic pqueue-2201fd37).
+    /// Default = [`CommitCapabilities::default`] (all-false): a backend that has not wired the atomic commit
+    /// boundary advertises NO commit guarantees, so a consumer rejects it before activation. Memory +
+    /// sqlite-relational override this to advertise what they actually implement.
+    fn commit_capabilities(&self) -> CommitCapabilities {
+        CommitCapabilities::default()
+    }
+
     /// Run `f` as one unit of work. The closure is synchronous (no `.await` inside); the async
     /// boundary is the method itself.
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
@@ -522,6 +530,38 @@ pub struct ClaimRef {
     pub item_version: u64,
 }
 
+/// A caller-supplied OPAQUE instance/state fence advanced or validated INSIDE the commit boundary (Snorri
+/// authoritative-commit boundary, ADR-009 / epic pqueue-2201fd37). `instance_key` is opaque bytes pqueue
+/// never interprets (e.g. a workflow instance key). The commit accepts the entry only if the queue's stored
+/// fence for `instance_key` equals `expected` (an `instance_key` never advanced reads as `0` — the unset
+/// convention), and `next > expected` (strictly monotonic). On accept the stored fence advances to `next`
+/// ATOMICALLY in the same durable boundary as the side-record writes + input finalize; on a stale `expected`
+/// the entry is rejected `Conflict` and NOTHING is written; on `next <= expected` it is rejected `Invalid`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InstanceFence {
+    #[serde(default)]
+    pub instance_key: Vec<u8>,
+    #[serde(default)]
+    pub expected: u64,
+    #[serde(default)]
+    pub next: u64,
+}
+
+/// Validate a caller-supplied [`InstanceFence`] against the queue's currently-stored fence (`0` when the
+/// `instance_key` has never advanced — the unset convention). Shared by every commit backend so the
+/// accept/reject decision is identical regardless of where the fence is physically stored: `next <= expected`
+/// → `Invalid` (non-monotonic, a structural request error, checked first); stored `!= expected` → `Conflict`
+/// (the optimistic state fence). Mutates nothing.
+pub fn validate_instance_fence(stored: u64, fence: &InstanceFence) -> EngineResult<()> {
+    if fence.next <= fence.expected {
+        return Err(EngineError::Invalid("instance fence is not monotonic"));
+    }
+    if stored != fence.expected {
+        return Err(EngineError::Conflict);
+    }
+    Ok(())
+}
+
 /// One entry of a vectorized transition commit: validate `claim_ref`, write opaque non-work `side_records`,
 /// enqueue ordinary `lifecycle_items` (dispatchable outbox/await/timer work), and finalize the input claim
 /// with `finalize`. Each entry's writes commit atomically; per-entry outcomes are independent.
@@ -534,6 +574,10 @@ pub struct CommitTransitionEntry {
     pub finalize: FinalizeKind,
     pub side_records: Vec<SideRecord>,
     pub lifecycle_items: Vec<PushSpec>,
+    /// Optional caller-supplied instance/state fence advanced/validated atomically with this entry (C6).
+    /// `#[serde(default)]` so existing serialized commit bodies/definitions don't churn their fingerprint.
+    #[serde(default)]
+    pub instance_fence: Option<InstanceFence>,
 }
 
 /// A vectorized claimed-work commit request. `request_id` drives retained replay/conflict/expired
@@ -569,6 +613,113 @@ pub trait CommitTransitionPort: Send + Sync {
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
+/// Capability descriptors for the authoritative vectorized claimed-work commit (Snorri StateStore boundary,
+/// epic pqueue-2201fd37 acceptance, ADR-009). A consumer (Snorri) reads these BEFORE activation and rejects a
+/// backend that does not advertise the guarantees it needs — every bool defaults to `false` (the safe default
+/// for an eventual-apply backend that cannot offer one atomic transition boundary). Memory + sqlite-relational
+/// advertise the capabilities they actually implement; objectlog/postgres keep the all-false default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitCapabilities {
+    /// Each commit entry's writes (side records + instance fence + lifecycle + finalize) commit atomically.
+    pub atomic_transition_commit: bool,
+    /// A single call commits a VECTOR of independent entries with per-entry outcomes.
+    pub vectorized_commit: bool,
+    /// The claim reference's lease token + lease expiry are validated inside the commit boundary.
+    pub lease_validation: bool,
+    /// Caller `request_id`s have retained replay/conflict/expired semantics over the whole commit body.
+    pub retained_commit_idempotency: bool,
+    /// Opaque non-work side records that are NOT claimable/peekable ordinary work.
+    pub non_work_side_records: bool,
+    /// Recovery/explain reads reconstruct the committed transition (request id, instance fence, consumed
+    /// input id, side-record keys, lifecycle ids, per-entry status) from authoritative durable state.
+    pub authoritative_recovery_reads: bool,
+    /// Delayed/timer lifecycle items (awaits/due timers) are supported as ordinary lifecycle work.
+    pub delayed_awaits_timers: bool,
+    /// The durability class of the commit boundary (the clear durability boundary Snorri keys off).
+    pub durability_class: DurabilityClass,
+    /// A short human-readable note on the consistency boundary (e.g. "atomic append+apply under one lock").
+    pub consistency: &'static str,
+}
+
+impl Default for CommitCapabilities {
+    /// The safe all-false default: a backend that has not opted in advertises NO commit guarantees, so Snorri
+    /// rejects it before activation. `durability_class` defaults to the weakest (`EventualApply`).
+    fn default() -> Self {
+        Self {
+            atomic_transition_commit: false,
+            vectorized_commit: false,
+            lease_validation: false,
+            retained_commit_idempotency: false,
+            non_work_side_records: false,
+            authoritative_recovery_reads: false,
+            delayed_awaits_timers: false,
+            durability_class: DurabilityClass::EventualApply,
+            consistency: "no authoritative commit boundary",
+        }
+    }
+}
+
+/// Per-entry commit status surfaced by a recovery/explain read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitEntryStatus {
+    /// The entry validated and committed atomically.
+    Committed,
+    /// The entry was rejected; nothing was mutated for it. Carries the structured rejection.
+    Rejected(EngineError),
+}
+
+/// One entry's reconstructed transition record (epic pqueue-2201fd37 acceptance #5). Built from the retained
+/// commit idempotency record plus current durable state, so committed state/audit side records are provably
+/// recoverable after input finalization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryRecovery {
+    /// The input event id this entry consumed/finalized.
+    pub consumed_input_id: ItemId,
+    /// The advanced instance/state fence, if the entry carried one: `(instance_key, fence_after_advance)`.
+    pub instance: Option<(Vec<u8>, u64)>,
+    /// The opaque non-work side-record keys this entry wrote (empty when it wrote none).
+    pub side_record_keys: Vec<Vec<u8>>,
+    /// The server-assigned ids of the entry's dispatchable lifecycle items (empty when it enqueued none).
+    pub lifecycle_item_ids: Vec<ItemId>,
+    /// The per-entry commit status.
+    pub status: CommitEntryStatus,
+}
+
+/// The reconstructed record of a vectorized claimed-work commit, addressed by its `request_id`
+/// (epic pqueue-2201fd37 acceptance #5). Proves the committed transition is recoverable for retry/replay/audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRecovery {
+    pub request_id: RequestId,
+    pub entries: Vec<EntryRecovery>,
+}
+
+/// Recovery/explain reads for the authoritative commit boundary (epic pqueue-2201fd37 acceptance #5). The
+/// default impl returns [`EngineError::Unavailable`](crate::EngineError::Unavailable) so backends without an
+/// authoritative commit boundary expose no (misleading) recovery surface.
+#[doc(hidden)]
+pub trait RecoveryReadPort: Send + Sync {
+    /// Reconstruct the committed transition addressed by `request_id` from the retained commit idempotency
+    /// record (plus current durable state). `Ok(None)` when no such record is retained (never committed under
+    /// that id, or its retention window has elapsed).
+    fn explain_commit(
+        &self,
+        _shard: &QueueKey,
+        _request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// Read an opaque non-work side record by key (recovery/audit read). `Ok(None)` if unwritten. Side records
+    /// are disjoint from work items, so this never reflects claimable work and survives input finalization.
+    fn side_record(
+        &self,
+        _shard: &QueueKey,
+        _key: &[u8],
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }

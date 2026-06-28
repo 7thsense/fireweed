@@ -649,6 +649,9 @@ impl PushPort for PostgresBackend {
 /// [`pqueue_engine::EngineError::Unavailable`] so a caller rejects it before activation.
 impl pqueue_engine::CommitTransitionPort for PostgresBackend {}
 
+/// Recovery/explain reads inherit the `Unavailable` default (no authoritative commit boundary on this path).
+impl pqueue_engine::RecoveryReadPort for PostgresBackend {}
+
 impl FinalizePort for PostgresBackend {
     fn finalize(
         &self,
