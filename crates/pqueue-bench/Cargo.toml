@@ -12,6 +12,10 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "pqueue_bench"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pqueue-bench"
 path = "src/main.rs"
