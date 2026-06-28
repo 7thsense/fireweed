@@ -519,16 +519,19 @@ dependencies = [
 
 [[package]]
 name = "pqueue"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "pqueue-core",
  "pqueue-engine",
+ "pqueue-memory",
+ "pqueue-objectlog",
+ "pqueue-sqlite",
 ]
 
 [[package]]
 name = "pqueue-bench"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "futures",
  "pqueue",
@@ -544,14 +547,14 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "pqueue-engine"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -561,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-memory"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -571,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -583,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "postgres",
@@ -597,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-projection"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -606,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-release"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -614,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "pqueue-core",
