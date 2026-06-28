@@ -952,6 +952,7 @@ dependencies = [
  "pqueue-core",
  "pqueue-engine",
  "pqueue-projection",
+ "serde_json",
  "tokio",
 ]
 

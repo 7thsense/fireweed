@@ -149,20 +149,30 @@ async fn request_id_push_replays_over_sqlite_relational_facade() {
 }
 
 #[tokio::test]
-async fn request_id_push_is_explicitly_unavailable_on_memory_backend() {
+async fn request_id_push_is_idempotent_on_memory_backend() {
+    // The memory reference backend now wires the retained request-id idempotency cache (ddx-pqueue-2201fd37,
+    // foundation for the Snorri authoritative commit boundary): a request-id'd push succeeds and a same-body
+    // replay returns the original id without a second append. Full replay/conflict/expired coverage lives in
+    // `tests/request_id_idempotency.rs`.
     let backend = Arc::new(MemoryBackend::new());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
-    let err = pq
-        .push_with_request_id(&q, RequestId::new("push-req-unsupported").unwrap(), at(10))
+    let rid = RequestId::new("push-req-1").unwrap();
+    let first = pq
+        .push_with_request_id(&q, rid.clone(), at(10))
         .await
-        .unwrap_err();
+        .unwrap();
+    let replay = pq.push_with_request_id(&q, rid, at(10)).await.unwrap();
 
-    assert_eq!(err, EngineError::Unavailable);
-    assert_eq!(pq.metrics(&q).await.unwrap().pending, 0);
+    assert_eq!(first, replay, "same request id + same body replays the id");
+    assert_eq!(
+        pq.metrics(&q).await.unwrap().pending,
+        1,
+        "replay must not enqueue a duplicate"
+    );
 }
 
 #[tokio::test]
@@ -176,13 +186,15 @@ async fn claimed_item_exposes_api001_shape_over_facade() {
     def.eligibility_policy.max_gate_keys_per_item = Some(8);
     pq.create_queue(def).await.unwrap();
 
+    // NB: no `gate_keys` here — the memory reference backend is not gate-capable (`supports_gates()` is
+    // false), so the in-tree gate-validation guard rejects a gate-bearing push on it. Gate round-trip in
+    // the claimed-item shape is covered against a gate-capable (relational) backend.
     let mut item = NewItem {
         priority: Some(PriorityValue::Int64(7)),
         group_key: Some(GroupKey::new("group-a").unwrap()),
         not_before: Some(UtcTimestamp::new(100, 0).unwrap()),
         payload: Some(Bytes::from_static(b"opaque")),
         fields: BTreeMap::from([("field-a".to_string(), Bytes::from_static(b"value-a"))]),
-        gate_keys: vec!["gate-a".to_string(), "gate-b".to_string()],
         ..Default::default()
     };
     item.metadata
@@ -209,7 +221,10 @@ async fn claimed_item_exposes_api001_shape_over_facade() {
         got.metadata.get("tenant_segment"),
         Some(&MetadataValue::String("vip".to_string()))
     );
-    assert_eq!(got.gate_keys, vec!["gate-a", "gate-b"]);
+    assert!(
+        got.gate_keys.is_empty(),
+        "no gate keys carried on the non-gate-capable memory backend"
+    );
 }
 
 #[tokio::test]

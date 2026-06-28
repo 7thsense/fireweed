@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
-    QueueDefinition, QueueId, TenantId, UtcTimestamp,
+    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
@@ -26,10 +26,11 @@ use pqueue_engine::{
     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_engine::{
-    ClaimCompatibility, IndexHit, IndexQueryPort, PayloadUpdate, PurgeItemsCommand, PurgePort,
-    PushPort, PushSpec, QueueCounters, ReassignLeaseCommand, ReassignLeasePort, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, UpdateFieldsCommand, UpdateFieldsPort, build_push_items,
-    require_item_level_claim, validate_purge_force,
+    ClaimCompatibility, IdempotencyDecision, IndexHit, IndexQueryPort, PayloadUpdate,
+    PurgeItemsCommand, PurgePort, PushPort, PushSpec, QueueCounters, QueueIdempotencyCache,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
+    UpdateFieldsCommand, UpdateFieldsPort, build_push_items, require_item_level_claim,
+    validate_gate_command, validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::{LogData, ProjectionData, commit};
 
@@ -48,6 +49,9 @@ impl LogWriter for LogWriterView<'_> {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
+        for env in commands {
+            validate_gate_command(false, &env.command)?;
+        }
         self.logs
             .get_mut(shard)
             .ok_or(EngineError::NotFound)?
@@ -84,6 +88,35 @@ struct State {
     logs: HashMap<QueueKey, LogData>,
     projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
+    /// Per-queue retained request-id idempotency cache (TD-007 §4). Kept under the SAME `State` lock as
+    /// the log/projection so a request-id'd write does check + append + record in one atomic unit of work.
+    /// The cached outcome is the response ids the original request produced, so a replay returns them
+    /// verbatim without re-appending. Empty for the default (request-id-less) push path.
+    idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+}
+
+/// Stable body fingerprint for request-id conflict detection: a non-cryptographic hash over the
+/// serialized push specs. A different body under the same request id is a `RequestIdConflict`; an equal
+/// body replays. (Memory is the reference backend; the durable relational backend uses SHA-256 over the
+/// same serialization — both only need determinism + collision-safety, not cryptographic strength.)
+fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(BodyHash(h.finish()))
+}
+
+/// `now + retention_ms` as the idempotency entry expiry.
+fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp {
+    let total = now.seconds as i128 * 1_000_000_000
+        + now.nanoseconds as i128
+        + retention_ms as i128 * 1_000_000;
+    UtcTimestamp::new(
+        total.div_euclid(1_000_000_000) as i64,
+        total.rem_euclid(1_000_000_000) as u32,
+    )
+    .expect("valid ts")
 }
 
 /// In-memory atomic-class backend. One `Mutex<State>`; `write` takes the lock for the whole unit of
@@ -149,6 +182,7 @@ impl MemoryBackend {
         let State {
             logs, projections, ..
         } = state;
+        validate_gate_command(false, &env.command)?;
         let log = logs.get_mut(shard).ok_or(EngineError::NotFound)?;
         let proj = projections.get_mut(shard).ok_or(EngineError::NotFound)?;
         commit(log, proj, shard, env, expected_epoch)
@@ -314,6 +348,7 @@ impl PushPort for MemoryBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.state.lock().expect("poisoned");
             let max_attempts = g
                 .queues
@@ -343,6 +378,75 @@ impl PushPort for MemoryBackend {
             // commit_locked fetches the shard's projection first (NotFound if absent) BEFORE appending,
             // and Push apply is infallible, so the log can never lead the projection.
             Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+
+    /// Request-id'd push with retained replay/conflict/expired semantics (API-001 / TD-007 §4). Unlike the
+    /// default trait impl (which refuses with `Unavailable`), the memory reference backend wires a per-queue
+    /// [`QueueIdempotencyCache`]: a retried body under the same `request_id` REPLAYS the original ids without
+    /// a second append, a different body under that id is `RequestIdConflict`, and a retry after the
+    /// queue's `request_id_retention_ms` window is treated as a genuinely new request (push semantics —
+    /// the prior leases/ids are gone). The caller's `request_id` propagates into the committed
+    /// [`CommandEnvelope`] (no longer hardcoded `request_id: None`), so the durable log records it.
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
+            let mut g = self.state.lock().expect("poisoned");
+            let def = g.queues.get(shard).ok_or(EngineError::NotFound)?;
+            let max_attempts = def.retry_policy.max_attempts;
+            let expires_at = request_expires_at(now, def.request_id_retention_ms);
+            // Check the retained cache FIRST (still under the State lock, so check+append+record is atomic).
+            match g.idempotency.entry(shard.clone()).or_default().check(
+                &request_id,
+                fingerprint,
+                now,
+            ) {
+                // A live record with the same body — replay the original response ids, append nothing.
+                IdempotencyDecision::Replay(ids) => return Ok(ids),
+                // Same request id, different body — structural conflict (API-001 request-id-conflict).
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                // No record, or the retention window elapsed: proceed as a fresh push (push treats an
+                // expired entry as a genuinely new logical request, per the module mapping in `idempotency`).
+                IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+            }
+            // The ITEM ids are minted from (epoch, node, per-queue counter) so concurrent writers never
+            // collide (ADR-009), exactly as the request-id-less push path does.
+            let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.index_validate_push(&push_items)?;
+            }
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
+                // Propagate the caller's request id into the durable envelope (no longer `request_id: None`).
+                request_id: Some(request_id.clone()),
+                item_ids: ids.clone(),
+                command: QueueCommand::Push(PushCommand { items: push_items }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            };
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            // Record the outcome only AFTER a successful commit, so a rejected append leaves no replay entry.
+            g.idempotency.entry(shard.clone()).or_default().record(
+                request_id,
+                fingerprint,
+                ids.clone(),
+                expires_at,
+            );
             Ok(ids)
         })();
         std::future::ready(result)
