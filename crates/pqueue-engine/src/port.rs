@@ -639,12 +639,10 @@ pub trait ControlPlaneStore: Send + Sync {
     /// is the ownership-handoff primitive: after it commits, the previous epoch's writers are fenced at
     /// their next [`LogWriter::append`] (step 2), before any new-epoch segment exists. `assignment_epoch`
     /// MUST increase strictly and MUST NOT decrease or repeat for a queue (TD-003 epoch monotonicity).
-    /// NOTE (BQ-21/BQ-23 binding): this is the STORAGE backend's durable epoch. The queue-ownership control
-    /// plane ([`crate::QueueControlPlane`], BQ-21) keeps its OWN reference `assignment_epoch` in the
-    /// authority record and does NOT yet call this — the two epochs are currently SEPARATE counters. Binding
-    /// the control-plane acquire to this storage `acquire_epoch` (one durable value the append fence reads),
-    /// and stamping the owner's epoch on the data-plane write path, is the postgres control plane (BQ-22) +
-    /// server wiring (BQ-23). Do not assume the two epochs agree until then.
+    /// NOTE (BQ-21/BQ-23 binding): this is the storage backend's durable epoch. Some control-plane
+    /// implementations, notably postgres-native, bind their acquire transaction directly to this value and
+    /// make `acquire_epoch` a fallback only for control planes that cannot update the storage fence
+    /// atomically. Callers should stamp the acquired owner's cached epoch on every data-plane write.
     fn acquire_epoch(
         &self,
         shard: &QueueKey,

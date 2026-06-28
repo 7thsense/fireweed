@@ -11,15 +11,21 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pqueue_core::QueueDefinition;
-use pqueue_engine::{Clock, EngineError, EngineResult};
+use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
+use pqueue_engine::{
+    AcquireOutcome, AuthContext, Clock, EngineError, EngineResult, InMemoryControlPlane,
+    LeaseState, OwnedSession, QueueControlPlane, QueueKey,
+};
 use pqueue_memory::MemoryBackend;
 use pqueue_objectlog::ObjectLogBackend;
-use pqueue_resp::{RespBackend, SystemClock, serve_with_shutdown};
+use pqueue_resp::{
+    RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
+    serve_with_shutdown_and_hooks,
+};
 use pqueue_sqlite::SqliteBackend;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -54,6 +60,380 @@ pub struct Config {
     pub queues: Vec<QueueDefinition>,
 }
 
+pub struct OwnershipRuntime<B, CP> {
+    backend: Arc<B>,
+    control_plane: Arc<CP>,
+    owner: OwnerId,
+    endpoint: String,
+    owner_endpoints: Mutex<std::collections::HashMap<OwnerId, String>>,
+    managed_queues: Mutex<std::collections::HashSet<QueueKey>>,
+    sessions: Mutex<std::collections::HashMap<QueueKey, OwnedSession>>,
+}
+
+impl<B, CP> OwnershipRuntime<B, CP>
+where
+    B: RespBackend,
+    CP: QueueControlPlane + 'static,
+{
+    pub fn new(backend: Arc<B>, control_plane: Arc<CP>, owner: OwnerId, endpoint: String) -> Self {
+        let mut endpoints = std::collections::HashMap::new();
+        endpoints.insert(owner.clone(), endpoint.clone());
+        Self {
+            backend,
+            control_plane,
+            owner,
+            endpoint,
+            owner_endpoints: Mutex::new(endpoints),
+            managed_queues: Mutex::new(std::collections::HashSet::new()),
+            sessions: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn owner(&self) -> &OwnerId {
+        &self.owner
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn set_owner_endpoint(&self, owner: OwnerId, endpoint: impl Into<String>) {
+        self.owner_endpoints
+            .lock()
+            .expect("poisoned")
+            .insert(owner, endpoint.into());
+    }
+
+    pub fn watch_queue(&self, queue: QueueKey) {
+        self.managed_queues.lock().expect("poisoned").insert(queue);
+    }
+
+    pub fn register_owner(&self, now: UtcTimestamp) -> EngineResult<()> {
+        self.control_plane.register_owner(&self.owner, now)
+    }
+
+    pub async fn acquire_queue(&self, queue: &QueueKey, now: UtcTimestamp) -> EngineResult<()> {
+        match self
+            .cp_acquire(queue.clone(), self.owner.clone(), now)
+            .await?
+        {
+            AcquireOutcome::Acquired(lease) => {
+                let current_epoch = self.backend.current_epoch(queue).await?;
+                let fence_epoch = if current_epoch == lease.assignment_epoch {
+                    current_epoch
+                } else if current_epoch < lease.assignment_epoch {
+                    self.backend.acquire_epoch(queue).await?
+                } else {
+                    return Err(EngineError::EpochFenced);
+                };
+                let session = OwnedSession {
+                    owner: self.owner.clone(),
+                    queue: queue.clone(),
+                    lease_epoch: lease.assignment_epoch,
+                    fence_epoch,
+                };
+                self.sessions
+                    .lock()
+                    .expect("poisoned")
+                    .insert(queue.clone(), session);
+                Ok(())
+            }
+            AcquireOutcome::Rejected(_) => Err(EngineError::Unavailable),
+        }
+    }
+
+    pub async fn renew_sessions(&self, now: UtcTimestamp) -> EngineResult<()> {
+        self.cp_heartbeat(self.owner.clone(), now).await?;
+        let mut queues: std::collections::BTreeSet<QueueKey> = self
+            .managed_queues
+            .lock()
+            .expect("poisoned")
+            .iter()
+            .cloned()
+            .collect();
+        queues.extend(self.sessions.lock().expect("poisoned").keys().cloned());
+        for queue in queues {
+            let resolution = self.cp_resolve(queue.clone(), now).await?;
+            if resolution.active_owner.as_ref() == Some(&self.owner)
+                && resolution
+                    .target_owner
+                    .as_ref()
+                    .is_some_and(|target| target != &self.owner)
+                && resolution.state == LeaseState::Assigned
+            {
+                if let Some(active_epoch) = resolution.assignment_epoch {
+                    let _ = self
+                        .cp_begin_drain(
+                            queue.clone(),
+                            active_epoch,
+                            resolution.target_owner.as_ref().expect("checked").clone(),
+                            now,
+                        )
+                        .await?;
+                }
+            }
+            let session = self.sessions.lock().expect("poisoned").get(&queue).cloned();
+            match (resolution.state, resolution.active_owner.as_ref(), session) {
+                (LeaseState::Assigned, Some(owner), Some(session)) if owner == &self.owner => {
+                    match self
+                        .cp_renew(queue.clone(), self.owner.clone(), session.lease_epoch, now)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(EngineError::EpochFenced) => {
+                            self.sessions.lock().expect("poisoned").remove(&queue);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                (LeaseState::Draining, Some(owner), Some(session)) if owner == &self.owner => {
+                    let metrics = self.backend.metrics(&queue).await?;
+                    if metrics.leased == 0 {
+                        self.cp_release(
+                            queue.clone(),
+                            self.owner.clone(),
+                            session.lease_epoch,
+                            now,
+                        )
+                        .await?;
+                        self.sessions.lock().expect("poisoned").remove(&queue);
+                    } else {
+                        match self
+                            .cp_renew(queue.clone(), self.owner.clone(), session.lease_epoch, now)
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(EngineError::EpochFenced) => {
+                                self.sessions.lock().expect("poisoned").remove(&queue);
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                (LeaseState::Unassigned, None, _)
+                    if resolution.target_owner.as_ref() == Some(&self.owner) =>
+                {
+                    match self.acquire_queue(&queue, now).await {
+                        Ok(()) | Err(EngineError::Unavailable) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_epoch(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+        is_new_claim: bool,
+    ) -> EngineResult<Option<u64>> {
+        self.cp_register(self.owner.clone(), now).await?;
+        let mut resolution = self.cp_resolve(queue.clone(), now).await?;
+        if resolution.active_owner.as_ref() == Some(&self.owner)
+            && resolution
+                .target_owner
+                .as_ref()
+                .is_some_and(|target| target != &self.owner)
+            && resolution.state == LeaseState::Assigned
+        {
+            if let (Some(epoch), Some(target)) = (
+                resolution.assignment_epoch,
+                resolution.target_owner.as_ref(),
+            ) {
+                self.cp_begin_drain(queue.clone(), epoch, target.clone(), now)
+                    .await?;
+                resolution = self.cp_resolve(queue.clone(), now).await?;
+            }
+        }
+        match (resolution.state, resolution.active_owner.as_ref()) {
+            (LeaseState::Assigned, Some(owner)) | (LeaseState::Draining, Some(owner))
+                if owner == &self.owner =>
+            {
+                if resolution.state == LeaseState::Draining && is_new_claim {
+                    return Err(EngineError::Unavailable);
+                }
+                let epoch = resolution
+                    .assignment_epoch
+                    .ok_or(EngineError::Unavailable)?;
+                let existing = {
+                    let sessions = self.sessions.lock().expect("poisoned");
+                    sessions.get(queue).and_then(|session| {
+                        (session.lease_epoch == epoch).then_some(session.fence_epoch)
+                    })
+                };
+                if existing.is_some() {
+                    return Ok(existing);
+                }
+                let fence_epoch = self.backend.current_epoch(queue).await?;
+                if fence_epoch != epoch {
+                    return Err(EngineError::EpochFenced);
+                }
+                let session = OwnedSession {
+                    owner: self.owner.clone(),
+                    queue: queue.clone(),
+                    lease_epoch: epoch,
+                    fence_epoch,
+                };
+                let fence_epoch = session.fence_epoch;
+                self.sessions
+                    .lock()
+                    .expect("poisoned")
+                    .insert(queue.clone(), session);
+                Ok(Some(fence_epoch))
+            }
+            (_, Some(_)) => Err(EngineError::Unavailable),
+            (LeaseState::Unassigned, None)
+                if resolution.target_owner.as_ref() == Some(&self.owner) =>
+            {
+                self.acquire_queue(queue, now).await?;
+                let sessions = self.sessions.lock().expect("poisoned");
+                Ok(sessions.get(queue).map(|session| session.fence_epoch))
+            }
+            _ => Err(EngineError::Unavailable),
+        }
+    }
+
+    async fn cp_register(&self, owner: OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.register_owner(&owner, now)).await
+    }
+
+    async fn cp_heartbeat(&self, owner: OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.heartbeat(&owner, now)).await
+    }
+
+    async fn cp_resolve(
+        &self,
+        queue: QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<pqueue_engine::OwnerResolution> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.resolve_queue_owner(&queue, now)).await
+    }
+
+    async fn cp_acquire(
+        &self,
+        queue: QueueKey,
+        owner: OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<AcquireOutcome> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.acquire_queue_lease(&queue, &owner, now)).await
+    }
+
+    async fn cp_renew(
+        &self,
+        queue: QueueKey,
+        owner: OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<pqueue_engine::QueueLease> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.renew_queue_lease(&queue, &owner, expected_epoch, now))
+            .await
+    }
+
+    async fn cp_begin_drain(
+        &self,
+        queue: QueueKey,
+        expected_epoch: u64,
+        target_owner: OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<pqueue_engine::QueueLease> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.begin_drain(&queue, expected_epoch, &target_owner, now))
+            .await
+    }
+
+    async fn cp_release(
+        &self,
+        queue: QueueKey,
+        owner: OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.release_queue_lease(&queue, &owner, expected_epoch, now))
+            .await
+    }
+}
+
+async fn blocking_control_plane<T, F>(f: F) -> EngineResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> EngineResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| EngineError::Storage(format!("control-plane task failed: {e}")))?
+}
+
+impl<B, CP> RespHooks for OwnershipRuntime<B, CP>
+where
+    B: RespBackend,
+    CP: QueueControlPlane + 'static,
+{
+    async fn route_command(
+        &self,
+        _name: &str,
+        _args: &[Vec<u8>],
+        routing_key: &[u8],
+        now: UtcTimestamp,
+        is_new_claim: bool,
+    ) -> EngineResult<RouteDecision> {
+        let Ok(queue) = parse_resp_queue_key(routing_key) else {
+            return Ok(RouteDecision::Serve);
+        };
+        let auth = AuthContext::new("resp", [queue.tenant_id.as_str()]);
+        if auth.authorize_tenant(queue.tenant_id.as_str()).is_err() {
+            return Ok(RouteDecision::NoPerm);
+        }
+        self.cp_register(self.owner.clone(), now).await?;
+        let resolution = self.cp_resolve(queue.clone(), now).await?;
+        if resolution.state == LeaseState::Unassigned
+            && resolution.target_owner.as_ref() == Some(&self.owner)
+        {
+            self.acquire_queue(&queue, now).await?;
+            return Ok(RouteDecision::Serve);
+        }
+        let endpoints = self.owner_endpoints.lock().expect("poisoned").clone();
+        Ok(route(
+            &self.owner,
+            &queue,
+            routing_key,
+            &auth,
+            &resolution,
+            |owner| endpoints.get(owner).cloned(),
+            is_new_claim,
+        ))
+    }
+
+    async fn expected_epoch_for_write(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        is_new_claim: bool,
+    ) -> EngineResult<Option<u64>> {
+        self.ensure_epoch(shard, now, is_new_claim).await
+    }
+}
+
+fn parse_resp_queue_key(key: &[u8]) -> EngineResult<QueueKey> {
+    let s = std::str::from_utf8(key).map_err(|_| EngineError::Invalid("non-utf8 key"))?;
+    let (tenant, queue) = match s.split_once(':') {
+        Some((t, q)) => (t, q),
+        None => ("default", s),
+    };
+    Ok(QueueKey::new(
+        TenantId::new(tenant).map_err(|_| EngineError::Invalid("bad tenant"))?,
+        QueueId::new(queue).map_err(|_| EngineError::Invalid("bad queue"))?,
+    ))
+}
+
 /// Observable counters for the background reclaim loop (so a swallowed tick error is countable, not
 /// silent, and the reclaim work is surfaced for ops).
 #[derive(Default)]
@@ -62,6 +442,12 @@ struct ReclaimCounters {
     errors: AtomicU64,
     leases_reclaimed: AtomicU64,
     cohorts_expired: AtomicU64,
+}
+
+#[derive(Default)]
+struct OwnershipCounters {
+    ticks: AtomicU64,
+    errors: AtomicU64,
 }
 
 /// A point-in-time snapshot of the reclaim loop's counters.
@@ -73,6 +459,13 @@ pub struct ReclaimStats {
     pub cohorts_expired: u64,
 }
 
+/// A point-in-time snapshot of the ownership loop's counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnershipStats {
+    pub ticks: u64,
+    pub errors: u64,
+}
+
 /// A running server: the bound address + the two background tasks (RESP accept loop + reclaim ticker).
 /// The task handles are `Option` so [`Server::shutdown_and_drain`] can take ownership to await the serve
 /// task; [`Drop`] aborts whatever remains.
@@ -80,9 +473,11 @@ pub struct Server {
     addr: SocketAddr,
     serve_task: Option<JoinHandle<()>>,
     reclaim_task: Option<JoinHandle<()>>,
+    ownership_task: Option<JoinHandle<()>>,
     /// Signals the RESP serve loop to stop accepting and drain in-flight connection handlers.
     cancel: CancellationToken,
     reclaim: Arc<ReclaimCounters>,
+    ownership: Arc<OwnershipCounters>,
 }
 
 impl Server {
@@ -97,6 +492,10 @@ impl Server {
     pub fn is_running(&self) -> bool {
         self.serve_task.as_ref().is_some_and(|t| !t.is_finished())
             && self.reclaim_task.as_ref().is_some_and(|t| !t.is_finished())
+            && self
+                .ownership_task
+                .as_ref()
+                .is_none_or(|t| !t.is_finished())
     }
 
     /// A snapshot of the background reclaim loop's counters (ticks run, tick errors, leases reclaimed,
@@ -110,6 +509,14 @@ impl Server {
         }
     }
 
+    /// A snapshot of the ownership loop's counters (renew ticks and renewal/resolve errors).
+    pub fn ownership_stats(&self) -> OwnershipStats {
+        OwnershipStats {
+            ticks: self.ownership.ticks.load(Ordering::Relaxed),
+            errors: self.ownership.errors.load(Ordering::Relaxed),
+        }
+    }
+
     /// Stop serving and stop the reclaim ticker, synchronously. Signals the drain token (so the serve
     /// loop stops accepting) and then **aborts** both background tasks immediately — it does NOT wait for
     /// in-flight connection handlers to drain. Being sync, it is safe to call from [`Drop`] and from the
@@ -120,6 +527,9 @@ impl Server {
             t.abort();
         }
         if let Some(t) = &self.reclaim_task {
+            t.abort();
+        }
+        if let Some(t) = &self.ownership_task {
             t.abort();
         }
     }
@@ -138,6 +548,9 @@ impl Server {
         }
         if let Some(reclaim) = self.reclaim_task.take() {
             reclaim.abort();
+        }
+        if let Some(ownership) = self.ownership_task.take() {
+            ownership.abort();
         }
     }
 }
@@ -177,8 +590,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let node_id = config.node_id;
     match config.backend {
         Backend::Memory => {
-            start_with(
-                Arc::new(MemoryBackend::new().with_node_id(node_id)),
+            let backend = Arc::new(MemoryBackend::new().with_node_id(node_id));
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{node_id}"))
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            start_with_ownership(
+                backend,
+                cp,
+                owner,
                 clock,
                 &config.listen,
                 config.reclaim_interval,
@@ -190,8 +609,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            start_with(
-                Arc::new(SqliteBackend::open(p)?.with_node_id(node_id)),
+            let backend = Arc::new(SqliteBackend::open(p)?.with_node_id(node_id));
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{node_id}"))
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            start_with_ownership(
+                backend,
+                cp,
+                owner,
                 clock,
                 &config.listen,
                 config.reclaim_interval,
@@ -200,8 +625,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .await
         }
         Backend::ObjectLog(path) => {
-            start_with(
-                Arc::new(ObjectLogBackend::open(path)?.with_node_id(node_id)),
+            let backend = Arc::new(ObjectLogBackend::open(path)?.with_node_id(node_id));
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{node_id}"))
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            start_with_ownership(
+                backend,
+                cp,
+                owner,
                 clock,
                 &config.listen,
                 config.reclaim_interval,
@@ -229,6 +660,7 @@ pub async fn start_with<B: RespBackend>(
     let listener = TcpListener::bind(listen).await.map_err(io_err)?;
     let addr = listener.local_addr().map_err(io_err)?;
     let reclaim = Arc::new(ReclaimCounters::default());
+    let ownership = Arc::new(OwnershipCounters::default());
     let cancel = CancellationToken::new();
     let serve_task = tokio::spawn(serve_with_shutdown(
         listener,
@@ -246,8 +678,87 @@ pub async fn start_with<B: RespBackend>(
         addr,
         serve_task: Some(serve_task),
         reclaim_task: Some(reclaim_task),
+        ownership_task: None,
         cancel,
         reclaim,
+        ownership,
+    })
+}
+
+pub async fn start_with_ownership<B, CP>(
+    backend: Arc<B>,
+    control_plane: Arc<CP>,
+    owner: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server>
+where
+    B: RespBackend,
+    CP: QueueControlPlane + 'static,
+{
+    for def in queues {
+        backend.create_queue(def.clone()).await?;
+    }
+    let listener = TcpListener::bind(listen).await.map_err(io_err)?;
+    let addr = listener.local_addr().map_err(io_err)?;
+    let endpoint = {
+        let ip = addr.ip();
+        let host = if ip.is_unspecified() {
+            "127.0.0.1".to_string()
+        } else {
+            ip.to_string()
+        };
+        format!("{host}:{}", addr.port())
+    };
+    let hooks = Arc::new(OwnershipRuntime::new(
+        backend.clone(),
+        control_plane,
+        owner,
+        endpoint,
+    ));
+    let now = clock.now();
+    hooks.register_owner(now)?;
+    for def in queues {
+        let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        hooks.watch_queue(queue.clone());
+        match hooks.acquire_queue(&queue, now).await {
+            Ok(()) | Err(EngineError::Unavailable) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    let reclaim = Arc::new(ReclaimCounters::default());
+    let ownership = Arc::new(OwnershipCounters::default());
+    let cancel = CancellationToken::new();
+    let serve_task = tokio::spawn(serve_with_shutdown_and_hooks(
+        listener,
+        backend.clone(),
+        hooks.clone(),
+        clock.clone(),
+        cancel.clone(),
+    ));
+    let reclaim_task = tokio::spawn(reclaim_loop(
+        backend,
+        clock.clone(),
+        reclaim_interval,
+        reclaim.clone(),
+    ));
+    let ownership_task = tokio::spawn(ownership_loop(
+        hooks,
+        clock,
+        reclaim_interval,
+        ownership.clone(),
+    ));
+    Ok(Server {
+        addr,
+        serve_task: Some(serve_task),
+        reclaim_task: Some(reclaim_task),
+        ownership_task: Some(ownership_task),
+        cancel,
+        reclaim,
+        ownership,
     })
 }
 
@@ -282,6 +793,26 @@ async fn reclaim_loop<B: RespBackend>(
             Err(_) => {
                 counters.errors.fetch_add(1, Ordering::Relaxed);
             }
+        }
+    }
+}
+
+async fn ownership_loop<B, CP>(
+    hooks: Arc<OwnershipRuntime<B, CP>>,
+    clock: Arc<dyn Clock>,
+    interval: Duration,
+    counters: Arc<OwnershipCounters>,
+) where
+    B: RespBackend,
+    CP: QueueControlPlane + 'static,
+{
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        counters.ticks.fetch_add(1, Ordering::Relaxed);
+        if hooks.renew_sessions(clock.now()).await.is_err() {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

@@ -5,9 +5,10 @@
 //!
 //! 1. [`acquire_and_fence`] — the lease↔fence binding primitive. TD-003 Recovery step 1 / the Single
 //!    Authoritative Fencing Rule: a new owner acquires the lease AND durably advances the storage epoch
-//!    before serving. This drives both — control-plane `acquire_queue_lease` (liveness + single-active-lease)
-//!    then storage `acquire_epoch` — and returns the [`OwnedSession`] whose `fence_epoch` is the value the
-//!    owner is meant to stamp on `LogWriter::append(..., expected_epoch)`.
+//!    before serving. On backends whose control-plane acquire transaction already advanced the storage
+//!    fence, this reuses that value; otherwise it advances the storage epoch after a successful
+//!    `acquire_queue_lease`. It returns the [`OwnedSession`] whose `fence_epoch` is the value the owner is
+//!    meant to stamp on `LogWriter::append(..., expected_epoch)`.
 //!
 //!    SCOPE / WHAT IS AND IS NOT FENCED (do not overstate this): the storage `LogWriter::append` SEAM does
 //!    reject a stale `expected_epoch` (BQ-20), and the end-to-end test drives exactly that seam. But the
@@ -20,14 +21,10 @@
 //!    BQ-20/21/22 deferral) is the server-wiring follow-up (pqueue-c33c367e); the `port.rs::acquire_epoch`
 //!    note that "the two epochs are separate" remains accurate until then.
 //!
-//!    KNOWN HAZARD (two-counter non-atomicity): `acquire_and_fence` performs two NON-transactional
-//!    mutations (the control-plane lease epoch, then the storage fence epoch). A crash BETWEEN them, or a
-//!    partial failure, can (a) leave the storage epoch un-advanced so an old owner's writes still pass while
-//!    the control plane reports a new owner (delayed fencing), or (b) drift the two counters permanently
-//!    (a later owner whose lease renews but whose appends are `EpochFenced`, or the mirror). TD-003's
-//!    "atomic acquire→fence" is satisfied by the postgres_native SINGLE-ROW binding (the acquire txn IS the
-//!    durable fence); this in-memory two-counter reference does not yet collapse them. The single-row
-//!    unification + the hot-path threading are the same follow-up.
+//!    KNOWN HAZARD (two-counter non-atomicity): for backends whose control-plane acquire does not bind the
+//!    storage fence in the same transaction, this helper still performs two mutations (control-plane lease
+//!    epoch, then storage fence epoch). A crash BETWEEN them can delay fencing or drift counters. The
+//!    postgres_native control plane avoids that by advancing the storage fence in the acquire transaction.
 //!
 //! 2. [`owner_liveness_violation`] — the PREDICATE KERNEL of the TD-003 owner-liveness / stalled-queue guard
 //!    (FR-41): a queue with eligible work aged at/past `progress_bound_ms` while it has no live SERVING
@@ -72,10 +69,10 @@ pub enum OwnershipOutcome {
     Rejected(QueueLease),
 }
 
-/// Acquire the queue lease and advance the storage fence epoch (TD-003 Recovery step 1). The order matters:
-/// the control-plane acquire (single-active-lease + liveness) happens FIRST; only on success do we advance
-/// the durable storage fence — so a rejected acquire never touches the fence. See the module-doc SCOPE for
-/// what this does and does NOT fence, and the two-counter non-atomicity HAZARD.
+/// Acquire the queue lease and ensure the storage fence epoch is advanced (TD-003 Recovery step 1). The
+/// order matters: the control-plane acquire (single-active-lease + liveness) happens FIRST; only on success
+/// do we observe or advance the durable storage fence, so a rejected acquire never touches the fence. See
+/// the module-doc SCOPE for what this does and does NOT fence.
 pub async fn acquire_and_fence<CP, S>(
     control_plane: &CP,
     storage: &S,
@@ -90,12 +87,17 @@ where
     match control_plane.acquire_queue_lease(queue, owner, now)? {
         AcquireOutcome::Rejected(held) => Ok(OwnershipOutcome::Rejected(held)),
         AcquireOutcome::Acquired(lease) => {
-            // Durable fence BEFORE the owner serves: the STORAGE backend's `acquire_epoch` is the single
-            // authority for the append-fence epoch (ADR-009). The control plane records ownership in its own
-            // table; it never writes the storage's. The two counters advance one-per-acquire in lock-step,
-            // so `fence_epoch == lease_epoch` in practice — but only the storage value gates appends. After
-            // this, any prior owner's cached `fence_epoch` is stale and its next append is `EpochFenced`.
-            let fence_epoch = storage.acquire_epoch(queue).await?;
+            // Durable fence BEFORE the owner serves. Postgres-native control planes bind the storage fence
+            // inside the acquire transaction, so the current storage epoch may already equal the lease
+            // epoch. Reference/in-memory control planes still need the explicit storage advance.
+            let current_epoch = storage.current_epoch(queue).await?;
+            let fence_epoch = if current_epoch == lease.assignment_epoch {
+                current_epoch
+            } else if current_epoch < lease.assignment_epoch {
+                storage.acquire_epoch(queue).await?
+            } else {
+                return Err(crate::error::EngineError::EpochFenced);
+            };
             Ok(OwnershipOutcome::Owned(OwnedSession {
                 owner: owner.clone(),
                 queue: queue.clone(),

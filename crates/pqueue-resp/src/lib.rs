@@ -18,9 +18,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
-    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, LiveItemView, ProjectionRead,
-    PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
-    UpsertOutcome, UpsertPort,
+    EngineResult, FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, LiveItemView,
+    ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver,
+    RenewLeasePort, UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -70,6 +70,35 @@ impl<T> RespBackend for T where
         + 'static
 {
 }
+
+pub trait RespHooks: Send + Sync + 'static {
+    /// Optional live-routing hook. Default single-node/backward-compatible behavior serves locally.
+    fn route_command(
+        &self,
+        _name: &str,
+        _args: &[Vec<u8>],
+        _routing_key: &[u8],
+        _now: UtcTimestamp,
+        _is_new_claim: bool,
+    ) -> impl std::future::Future<Output = EngineResult<RouteDecision>> + Send {
+        std::future::ready(Ok(RouteDecision::Serve))
+    }
+
+    /// Optional ownership fence hook for queue writes. Default backends run the degenerate sole-owner path.
+    fn expected_epoch_for_write(
+        &self,
+        _shard: &QueueKey,
+        _now: UtcTimestamp,
+        _is_new_claim: bool,
+    ) -> impl std::future::Future<Output = EngineResult<Option<u64>>> + Send {
+        std::future::ready(Ok(None))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopRespHooks;
+
+impl RespHooks for NoopRespHooks {}
 
 struct ServerState {
     ids: AtomicU64,
@@ -251,6 +280,16 @@ pub async fn serve_with_shutdown<B: RespBackend>(
     clock: Arc<dyn Clock>,
     cancel: CancellationToken,
 ) {
+    serve_with_shutdown_and_hooks(listener, backend, Arc::new(NoopRespHooks), clock, cancel).await;
+}
+
+pub async fn serve_with_shutdown_and_hooks<B: RespBackend, H: RespHooks>(
+    listener: TcpListener,
+    backend: Arc<B>,
+    hooks: Arc<H>,
+    clock: Arc<dyn Clock>,
+    cancel: CancellationToken,
+) {
     // Derive this node's advertised cluster identity from the bound address. An unspecified bind host
     // (0.0.0.0/::) is not connectable, so advertise loopback for a stock client connecting locally.
     let node = match listener.local_addr() {
@@ -287,10 +326,11 @@ pub async fn serve_with_shutdown<B: RespBackend>(
                     break;
                 };
                 let backend = backend.clone();
+                let hooks = hooks.clone();
                 let state = state.clone();
                 let conn_cancel = cancel.clone();
                 conns.spawn(async move {
-                    let _ = handle_conn(stream, backend, state, conn_cancel).await;
+                    let _ = handle_conn(stream, backend, hooks, state, conn_cancel).await;
                 });
             }
         }
@@ -300,9 +340,10 @@ pub async fn serve_with_shutdown<B: RespBackend>(
     while conns.join_next().await.is_some() {}
 }
 
-async fn handle_conn<B: RespBackend>(
+async fn handle_conn<B: RespBackend, H: RespHooks>(
     stream: TcpStream,
     backend: Arc<B>,
+    hooks: Arc<H>,
     state: Arc<ServerState>,
     cancel: CancellationToken,
 ) -> std::io::Result<()> {
@@ -323,7 +364,7 @@ async fn handle_conn<B: RespBackend>(
         if args.is_empty() {
             continue;
         }
-        let reply = dispatch(&backend, &state, &args).await;
+        let reply = dispatch(&backend, &hooks, &state, &args).await;
         let mut buf = Vec::new();
         encode(&reply, &mut buf);
         wr.write_all(&buf).await?;
@@ -354,12 +395,31 @@ fn is_read_reserved_field(field: &str) -> bool {
         || field.eq_ignore_ascii_case("lease_expires_at")
 }
 
-async fn dispatch<B: RespBackend>(
+async fn dispatch<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
+    hooks: &Arc<H>,
     state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
     let name = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+    if let Some(key) = routing_key_for(&name, args) {
+        let class = drain_class(&name, args);
+        let is_new_claim = is_new_claim_on_drain(class, false);
+        match hooks
+            .route_command(&name, args, key, state.now(), is_new_claim)
+            .await
+        {
+            Ok(RouteDecision::Serve) => {}
+            Ok(RouteDecision::Moved { slot, endpoint }) => {
+                return Resp::Error(format!("MOVED {slot} {endpoint}"));
+            }
+            Ok(RouteDecision::NoPerm) => return Resp::Error("NOPERM unauthorized".into()),
+            Ok(RouteDecision::Unavailable) => {
+                return Resp::Error("ERR pqueue unavailable".into());
+            }
+            Err(e) => return err_reply(&e),
+        }
+    }
     match name.as_str() {
         "PING" => Resp::Simple("PONG".into()),
         // DEFERRED (Phase 4): handshake + group commands are benign no-ops. No group state is
@@ -368,19 +428,34 @@ async fn dispatch<B: RespBackend>(
         "COMMAND" => Resp::Array(vec![]),
         "CLUSTER" => cluster_cmd(state, args),
         "XGROUP" => Resp::Simple("OK".into()),
-        "XADD" => xadd(backend, state, args).await,
-        "XREADGROUP" => xreadgroup(backend, state, args).await,
-        "XACK" => xack(backend, state, args).await,
+        "XADD" => xadd(backend, hooks, state, args).await,
+        "XREADGROUP" => xreadgroup(backend, hooks, state, args).await,
+        "XACK" => xack(backend, hooks, state, args).await,
         "XPENDING" => xpending(backend, state, args).await,
-        "XAUTOCLAIM" => xautoclaim(backend, state, args).await,
-        "XCLAIM" => xclaim(backend, state, args).await,
+        "XAUTOCLAIM" => xautoclaim(backend, hooks, state, args).await,
+        "XCLAIM" => xclaim(backend, hooks, state, args).await,
         "XLEN" => xlen(backend, args).await,
-        "XDEL" => xdel(backend, state, args).await,
+        "XDEL" => xdel(backend, hooks, state, args).await,
         "XINFO" => xinfo(backend, args).await,
         "PQ.MGET" => pq_mget(backend, args).await,
         "PQ.HGETALL" => pq_hgetall(backend, args).await,
         "PQ.HMGET" => pq_hmget(backend, args).await,
         other => Resp::Error(format!("ERR unknown command '{other}'")),
+    }
+}
+
+fn routing_key_for<'a>(name: &str, args: &'a [Vec<u8>]) -> Option<&'a [u8]> {
+    match name {
+        "XREADGROUP" => {
+            let streams_at = args
+                .iter()
+                .position(|a| a.eq_ignore_ascii_case(b"STREAMS"))?;
+            args.get(streams_at + 1).map(Vec::as_slice)
+        }
+        "XINFO" => args.get(2).map(Vec::as_slice),
+        "XADD" | "XACK" | "XPENDING" | "XAUTOCLAIM" | "XCLAIM" | "XLEN" | "XDEL" | "PQ.MGET"
+        | "PQ.HGETALL" | "PQ.HMGET" => args.get(1).map(Vec::as_slice),
+        _ => None,
     }
 }
 
@@ -407,8 +482,9 @@ fn cluster_cmd(state: &Arc<ServerState>, args: &[Vec<u8>]) -> Resp {
 }
 
 /// `XADD key <*|id> field value [field value ...]` - insert one item (container-object fields).
-async fn xadd<B: RespBackend>(
+async fn xadd<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
+    hooks: &Arc<H>,
     state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
@@ -417,6 +493,11 @@ async fn xadd<B: RespBackend>(
     }
     let shard = match parse_shard(&args[1]) {
         Ok(s) => s,
+        Err(e) => return err_reply(&e),
+    };
+    let now = state.now();
+    let expected_epoch = match hooks.expected_epoch_for_write(&shard, now, false).await {
+        Ok(epoch) => epoch,
         Err(e) => return err_reply(&e),
     };
     if !(args.len() - 3).is_multiple_of(2) {
@@ -498,8 +579,8 @@ async fn xadd<B: RespBackend>(
                     payload,
                     fields,
                     metadata,
-                    state.now(),
-                    None,
+                    now,
+                    expected_epoch,
                 )
                 .await
             {
@@ -523,7 +604,7 @@ async fn xadd<B: RespBackend>(
                 cohort_size: None, // RESP XADD has no cohort declaration (library-only, plan §3)
                 gate_keys: Vec::new(), // RESP XADD carries no gate keys (library-only)
             };
-            match backend.push(&shard, vec![spec], state.now(), None).await {
+            match backend.push(&shard, vec![spec], now, expected_epoch).await {
                 Ok(ids) => Resp::Bulk(ids[0].to_string().into_bytes()),
                 Err(e) => err_reply(&e),
             }
@@ -532,8 +613,9 @@ async fn xadd<B: RespBackend>(
 }
 
 /// `XREADGROUP GROUP g consumer [COUNT n] [BLOCK ms] STREAMS key id` - priority claim for `id == >`.
-async fn xreadgroup<B: RespBackend>(
+async fn xreadgroup<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
+    hooks: &Arc<H>,
     state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
@@ -579,6 +661,10 @@ async fn xreadgroup<B: RespBackend>(
         Err(e) => return err_reply(&e),
     };
     let lease = state.next();
+    let expected_epoch = match hooks.expected_epoch_for_write(&shard, now, true).await {
+        Ok(epoch) => epoch,
+        Err(e) => return err_reply(&e),
+    };
     let req = ClaimRequest {
         shard,
         worker_id: WorkerId::new("resp").expect("w"),
@@ -588,7 +674,7 @@ async fn xreadgroup<B: RespBackend>(
         now,
         // RESP XREADGROUP is an item-level claim; group/cohort compatibility is library-only (plan §3).
         compatibility: pqueue_engine::ClaimCompatibility::default(),
-        expected_epoch: None,
+        expected_epoch,
     };
     match backend.claim(req).await {
         Ok(claimed) if claimed.items.is_empty() => Resp::NullArray, // Redis returns nil when none
@@ -853,8 +939,9 @@ async fn pq_hmget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
 /// a superseded id → `-ERR pqueue superseded`, a non-leased id → `-ERR pqueue invalid`, NOTHING is
 /// committed, and the reply is the acked count only on full success. (Per-id partial results +
 /// lease-token/PEL ownership are a later refinement, TD-006 §3.)
-async fn xack<B: RespBackend>(
+async fn xack<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
+    hooks: &Arc<H>,
     state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
@@ -874,7 +961,15 @@ async fn xack<B: RespBackend>(
         .iter()
         .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
         .collect();
-    match backend.finalize(&shard, outcomes, state.now(), None).await {
+    let now = state.now();
+    let expected_epoch = match hooks.expected_epoch_for_write(&shard, now, false).await {
+        Ok(epoch) => epoch,
+        Err(e) => return err_reply(&e),
+    };
+    match backend
+        .finalize(&shard, outcomes, now, expected_epoch)
+        .await
+    {
         Ok(()) => Resp::Int(ids.len() as i64),
         Err(e) => err_reply(&e),
     }
@@ -1006,8 +1101,9 @@ async fn xpending<B: RespBackend>(
 ///   ack/fence/purge invalidates any of them between the snapshot and the reassign, the whole page errors
 ///   and reclaims nothing (a safe failure — nothing wrong is committed; the client simply retries). Redis
 ///   is per-entry best-effort here; the third reply element (deleted ids) is therefore always empty.
-async fn xautoclaim<B: RespBackend>(
+async fn xautoclaim<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
+    hooks: &Arc<H>,
     state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
@@ -1070,6 +1166,14 @@ async fn xautoclaim<B: RespBackend>(
         .filter(|lv| lv.lease_expires_at < now)
         .map(|lv| lv.item_id)
         .collect();
+    let reassign_epoch = if expired_ids.is_empty() {
+        None
+    } else {
+        match hooks.expected_epoch_for_write(&shard, now, true).await {
+            Ok(epoch) => epoch,
+            Err(e) => return err_reply(&e),
+        }
+    };
     if !expired_ids.is_empty()
         && let Err(e) = backend
             .reassign(
@@ -1078,7 +1182,7 @@ async fn xautoclaim<B: RespBackend>(
                 consumer_token,
                 add_millis(now, lease_ms),
                 now,
-                None,
+                reassign_epoch,
             )
             .await
     {
@@ -1130,8 +1234,9 @@ async fn xautoclaim<B: RespBackend>(
 /// and the commit), the client gets the error yet the first disposition's effects are already durable
 /// (PARTIAL EFFECTS POSSIBLE on a mixed-batch error). Reply: the claimed entries
 /// (`[id, [field value …]]`), or just the ids with `JUSTID`.
-async fn xclaim<B: RespBackend>(
+async fn xclaim<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
+    hooks: &Arc<H>,
     state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
@@ -1199,16 +1304,39 @@ async fn xclaim<B: RespBackend>(
     };
     let new_expiry = add_millis(now, lease_ms);
 
+    let renew_epoch = if renew_ids.is_empty() {
+        None
+    } else {
+        match hooks.expected_epoch_for_write(&shard, now, false).await {
+            Ok(epoch) => epoch,
+            Err(e) => return err_reply(&e),
+        }
+    };
     if !renew_ids.is_empty()
         && let Err(e) = backend
-            .renew(&shard, renew_ids, new_expiry, now, None)
+            .renew(&shard, renew_ids, new_expiry, now, renew_epoch)
             .await
     {
         return err_reply(&e);
     }
+    let reassign_epoch = if reassign_ids.is_empty() {
+        None
+    } else {
+        match hooks.expected_epoch_for_write(&shard, now, true).await {
+            Ok(epoch) => epoch,
+            Err(e) => return err_reply(&e),
+        }
+    };
     if !reassign_ids.is_empty()
         && let Err(e) = backend
-            .reassign(&shard, reassign_ids, consumer_token, new_expiry, now, None)
+            .reassign(
+                &shard,
+                reassign_ids,
+                consumer_token,
+                new_expiry,
+                now,
+                reassign_epoch,
+            )
             .await
     {
         return err_reply(&e);
@@ -1247,8 +1375,9 @@ async fn xlen<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
 /// `XDEL key id [id ...]` — hard-delete the named entries via [`PurgePort`] (`force = true`, like Redis
 /// which deletes regardless of PEL/lease state). Reply: the count actually removed (absent ids are
 /// no-ops). Distinct from `XACK` (which completes a lease); `XDEL` removes the item outright.
-async fn xdel<B: RespBackend>(
+async fn xdel<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
+    hooks: &Arc<H>,
     state: &Arc<ServerState>,
     args: &[Vec<u8>],
 ) -> Resp {
@@ -1266,7 +1395,12 @@ async fn xdel<B: RespBackend>(
             Err(_) => return Resp::Error("ERR pqueue invalid".into()),
         }
     }
-    match backend.purge(&shard, ids, true, state.now(), None).await {
+    let now = state.now();
+    let expected_epoch = match hooks.expected_epoch_for_write(&shard, now, false).await {
+        Ok(epoch) => epoch,
+        Err(e) => return err_reply(&e),
+    };
+    match backend.purge(&shard, ids, true, now, expected_epoch).await {
         Ok(n) => Resp::Int(n as i64),
         Err(e) => err_reply(&e),
     }

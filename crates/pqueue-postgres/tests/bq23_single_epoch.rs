@@ -1,8 +1,6 @@
-//! ADR-009 boundary (formerly BQ-23): the control plane records ownership in its OWN authority table and
-//! NEVER writes the storage backend's tables; the storage backend's `acquire_epoch` is the single
-//! authority for the append-fence epoch. The control-plane lease epoch and the storage fence epoch are
-//! advanced one-per-acquire by `acquire_and_fence`, so a session's `fence_epoch == lease_epoch` even though
-//! they are two independently-owned counters in two tables (no cross-table write, no pg_attribute sniffing).
+//! BQ-23 postgres binding: when the postgres control plane and storage backend share one schema,
+//! `acquire_queue_lease` advances the storage append-fence epoch in the same transaction as the owner row.
+//! `acquire_and_fence` then reuses that already-bound epoch instead of double-incrementing it.
 //!
 //! Env-gated on `PQUEUE_PG_TEST_URL` (LOUD-skips without a DB). A NON-tokio executor
 //! (`futures::executor::block_on`) drives the sync postgres client.
@@ -55,12 +53,10 @@ fn pair(name: &str) -> Option<(PostgresBackend, PostgresControlPlane)> {
     Some((backend, cp))
 }
 
-/// BOUNDARY: the control-plane acquire records ownership in its own authority table ONLY and does NOT touch
-/// the storage backend's append-fence epoch. (In the pre-cleanup BQ-23 code this advanced `queues`/
-/// `relational_cursor.assignment_epoch` via a cross-table write — that write is gone.)
+/// The postgres acquire transaction binds the owner row and the storage append fence to one epoch.
 #[test]
-fn cp_acquire_does_not_write_storage_epoch() {
-    let Some((backend, cp)) = pair("cp_acquire_no_cross_write") else {
+fn cp_acquire_writes_storage_epoch_in_same_schema() {
+    let Some((backend, cp)) = pair("cp_acquire_binds_storage_epoch") else {
         return;
     };
     bo(backend.create_queue(qdef())).unwrap();
@@ -78,21 +74,17 @@ fn cp_acquire_does_not_write_storage_epoch() {
     };
     assert_eq!(lease.assignment_epoch, 1, "first acquire is lease epoch 1");
 
-    // The control-plane acquire alone leaves the storage fence epoch untouched — the CP never writes the
-    // backend's tables. The storage fence is advanced separately by `acquire_epoch` (the authority).
     assert_eq!(
         bo(backend.current_epoch(&qk())).unwrap(),
-        0,
-        "the control plane does NOT write the storage backend's fence epoch (boundary respected)"
+        lease.assignment_epoch,
+        "the control-plane acquire binds the storage append-fence epoch in the same transaction"
     );
 }
 
-/// `acquire_and_fence` advances the STORAGE fence epoch (the single authority) and yields a session whose
-/// `fence_epoch` matches the backend's durable epoch; lease and fence epochs advance in lock-step, so they
-/// are equal — two independently-owned counters, not one cross-written value.
+/// `acquire_and_fence` reuses the storage fence epoch already bound by the postgres acquire transaction.
 #[test]
-fn acquire_and_fence_storage_owns_the_fence() {
-    let Some((backend, cp)) = pair("acquire_and_fence_storage_owns") else {
+fn acquire_and_fence_reuses_bound_postgres_epoch() {
+    let Some((backend, cp)) = pair("acquire_and_fence_reuses_bound") else {
         return;
     };
     bo(backend.create_queue(qdef())).unwrap();
@@ -107,14 +99,11 @@ fn acquire_and_fence_storage_owns_the_fence() {
     assert_eq!(
         bo(backend.current_epoch(&qk())).unwrap(),
         session.fence_epoch,
-        "the storage backend's durable epoch is the session's fence epoch (storage owns the fence)"
+        "the storage backend's durable epoch is the session's fence epoch"
     );
     assert_eq!(
         session.fence_epoch, session.lease_epoch,
-        "lease + fence epochs advance one-per-acquire in lock-step, so they are equal"
+        "the lease and fence epochs are one bound postgres value"
     );
-    assert!(
-        session.fence_epoch >= 1,
-        "the first acquire advances the fence past genesis"
-    );
+    assert_eq!(session.fence_epoch, 1, "the first acquire advances once");
 }

@@ -13,10 +13,9 @@
 //!   lease_expires_at, state)`. A missing row materializes as the genesis `unassigned`/epoch-0 lease.
 //! - `pqueue_workers` — `(owner_id, heartbeat_at)`; an owner is live while `heartbeat_at + ttl > now`.
 //!
-//! BINDING TO THE STORAGE FENCE (BQ-23): the `assignment_epoch` here is the durable ownership epoch. Making
-//! a storage append validate against THIS row (so a stale owner's claim is fenced end-to-end, one epoch
-//! value per TD-003 step 1) is the server wiring (BQ-23); today the control-plane epoch and the BQ-20
-//! storage `assignment_epoch` are still separate durable values.
+//! BINDING TO THE STORAGE FENCE (BQ-23): when a postgres storage schema is present in the same search path,
+//! acquire advances that schema's append-fence `assignment_epoch` inside the same transaction as the owner
+//! row. A stale owner is therefore fenced by one durable epoch value before the new owner serves.
 
 use std::sync::Mutex;
 
@@ -145,6 +144,43 @@ fn upsert_lease(
             &expires,
         ],
     ))?;
+    Ok(())
+}
+
+fn table_exists(tx: &mut postgres::Transaction<'_>, table_name: &str) -> EngineResult<bool> {
+    let row = st(tx.query_one(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+         WHERE table_schema = current_schema() AND table_name = $1)",
+        &[&table_name],
+    ))?;
+    Ok(row.get(0))
+}
+
+fn bind_storage_epoch_if_present(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    epoch: u64,
+) -> EngineResult<()> {
+    let epoch = epoch as i64;
+    if table_exists(tx, "queues")? {
+        let updated = st(tx.execute(
+            "UPDATE queues SET assignment_epoch=$3 WHERE tenant=$1 AND queue=$2",
+            &[&t, &q, &epoch],
+        ))?;
+        if updated == 0 {
+            return Err(EngineError::NotFound);
+        }
+    }
+    if table_exists(tx, "relational_cursor")? {
+        let updated = st(tx.execute(
+            "UPDATE relational_cursor SET assignment_epoch=$3 WHERE tenant=$1 AND queue=$2",
+            &[&t, &q, &epoch],
+        ))?;
+        if updated == 0 {
+            return Err(EngineError::NotFound);
+        }
+    }
     Ok(())
 }
 
@@ -312,11 +348,10 @@ impl QueueControlPlane for PostgresControlPlane {
         let current = Self::lease_for_update(&mut tx, &t, &q)?;
         let outcome = lease_decide_acquire(&current, owner, now, self.config.lease_ttl_ms);
         if let AcquireOutcome::Acquired(ref acquired) = outcome {
-            // The control plane records ownership in its OWN authority table only (ADR-009 boundary): it
-            // never writes the storage backend's tables. The data-plane fence epoch is advanced separately
-            // and authoritatively by `ControlPlaneStore::acquire_epoch` on the paired storage backend (see
-            // `acquire_and_fence`), which `acquire_and_fence` calls right after this grant. The two counters
-            // advance in lock-step per acquire, so the session's lease epoch equals its fence epoch.
+            // Postgres-native TD-003 binding: when a paired postgres storage schema is available in this
+            // transaction's search_path, the acquire transaction is also the durable append fence. CP-only
+            // tests that create no storage schema still exercise the lease state machine without a bind.
+            bind_storage_epoch_if_present(&mut tx, &t, &q, acquired.assignment_epoch)?;
             upsert_lease(&mut tx, &t, &q, acquired)?;
         }
         st(tx.commit())?;

@@ -9,11 +9,17 @@ use pqueue_core::{
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
-use pqueue_engine::{ClaimPort, ClaimRequest, Clock, ProjectionRead, PushPort, PushSpec, QueueKey};
+use pqueue_engine::{
+    ClaimPort, ClaimRequest, Clock, ControlPlaneStore, EngineError, InMemoryControlPlane,
+    ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
+};
 use pqueue_memory::{ManualClock, MemoryBackend};
-use pqueue_resp::SystemClock;
-use pqueue_server::{Backend, Config, start, start_with};
+use pqueue_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
+use pqueue_server::{Backend, Config, OwnershipRuntime, start, start_with};
 use redis::streams::StreamReadReply;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -23,6 +29,9 @@ fn shard() -> QueueKey {
 }
 fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()
+}
+fn owner(s: &str) -> pqueue_core::OwnerId {
+    pqueue_core::OwnerId::new(s).unwrap()
 }
 
 fn qdef() -> QueueDefinition {
@@ -49,6 +58,419 @@ fn qdef() -> QueueDefinition {
         max_eligible_group_size: None,
         secondary_indexes: vec![],
     }
+}
+
+fn endpoint(addr: std::net::SocketAddr) -> String {
+    format!("127.0.0.1:{}", addr.port())
+}
+
+async fn raw_resp(addr: std::net::SocketAddr, parts: &[&str]) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut request = format!("*{}\r\n", parts.len()).into_bytes();
+    for part in parts {
+        request.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
+        request.extend_from_slice(part.as_bytes());
+        request.extend_from_slice(b"\r\n");
+    }
+    stream.write_all(&request).await.unwrap();
+    let mut buf = vec![0; 512];
+    let n = stream.read(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf[..n]).to_string()
+}
+
+#[tokio::test]
+async fn ownership_runtime_routes_wrong_node_to_moved() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let a = Arc::new(OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    ));
+    let b = OwnershipRuntime::new(
+        backend,
+        cp.clone(),
+        owner("node-b"),
+        "10.0.0.2:7000".to_string(),
+    );
+    b.set_owner_endpoint(owner("node-a"), "10.0.0.1:7000");
+
+    a.register_owner(ts(0)).unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    b.register_owner(ts(1)).unwrap();
+
+    let decision = b
+        .route_command("XADD", &[], b"t1:q1", ts(1), false)
+        .await
+        .unwrap();
+    assert!(matches!(
+        decision,
+        RouteDecision::Moved { endpoint, .. } if endpoint == "10.0.0.1:7000"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resp_misrouted_write_emits_moved_to_active_owner() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let a = OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    a.register_owner(ts(0)).unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let clock = Arc::new(ManualClock::at(1));
+    let b = Arc::new(OwnershipRuntime::new(
+        backend.clone(),
+        cp,
+        owner("node-b"),
+        endpoint(addr),
+    ));
+    b.set_owner_endpoint(owner("node-a"), "10.0.0.1:7000");
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(serve_with_shutdown_and_hooks(
+        listener,
+        backend,
+        b,
+        clock as Arc<dyn Clock>,
+        cancel.clone(),
+    ));
+
+    let response = raw_resp(addr, &["XADD", "t1:q1", "*", "priority", "1"]).await;
+    assert!(
+        response.starts_with("-MOVED "),
+        "expected MOVED, got {response:?}"
+    );
+    assert!(
+        response.contains("10.0.0.1:7000"),
+        "redirect must name the active owner endpoint: {response:?}"
+    );
+    cancel.cancel();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn cached_owner_epoch_fences_real_push_path_after_reassignment() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let a = OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    let b = OwnershipRuntime::new(
+        backend.clone(),
+        cp,
+        owner("node-b"),
+        "10.0.0.2:7000".to_string(),
+    );
+    a.register_owner(ts(0)).unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    let stale_epoch = a
+        .expected_epoch_for_write(&qkey(), ts(1), false)
+        .await
+        .unwrap()
+        .unwrap();
+
+    b.register_owner(ts(20)).unwrap();
+    b.acquire_queue(&qkey(), ts(20)).await.unwrap();
+    let err = backend
+        .push(
+            &qkey(),
+            vec![PushSpec {
+                priority: Some(PriorityValue::Int64(5)),
+                ..Default::default()
+            }],
+            ts(21),
+            Some(stale_epoch),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EpochFenced));
+}
+
+#[tokio::test]
+async fn cached_owner_epoch_fences_real_claim_path_after_reassignment() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let a = OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    let b = OwnershipRuntime::new(
+        backend.clone(),
+        cp,
+        owner("node-b"),
+        "10.0.0.2:7000".to_string(),
+    );
+    a.register_owner(ts(0)).unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    let stale_epoch = a
+        .expected_epoch_for_write(&qkey(), ts(1), false)
+        .await
+        .unwrap()
+        .unwrap();
+    backend
+        .push(
+            &qkey(),
+            vec![PushSpec {
+                priority: Some(PriorityValue::Int64(5)),
+                ..Default::default()
+            }],
+            ts(1),
+            Some(stale_epoch),
+        )
+        .await
+        .unwrap();
+
+    b.register_owner(ts(20)).unwrap();
+    b.acquire_queue(&qkey(), ts(20)).await.unwrap();
+    let err = backend
+        .claim(ClaimRequest {
+            shard: qkey(),
+            worker_id: WorkerId::new("stale").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("stale-lease").unwrap(),
+            lease_expires_at: ts(80),
+            now: ts(21),
+            compatibility: pqueue_engine::ClaimCompatibility::default(),
+            expected_epoch: Some(stale_epoch),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EpochFenced));
+}
+
+#[tokio::test]
+async fn standby_owner_acquires_managed_queue_after_expiry() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let a = OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    let b = OwnershipRuntime::new(backend, cp, owner("node-b"), "10.0.0.2:7000".to_string());
+    a.register_owner(ts(0)).unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    b.watch_queue(qkey());
+    b.register_owner(ts(1)).unwrap();
+    b.renew_sessions(ts(1)).await.unwrap();
+    assert!(matches!(
+        b.expected_epoch_for_write(&qkey(), ts(1), false).await,
+        Err(EngineError::Unavailable)
+    ));
+
+    b.renew_sessions(ts(20)).await.unwrap();
+    assert_eq!(
+        b.expected_epoch_for_write(&qkey(), ts(20), false)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+}
+
+#[tokio::test]
+async fn draining_owner_releases_managed_queue_after_inflight_clears() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let a = OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    let b = OwnershipRuntime::new(
+        backend,
+        cp.clone(),
+        owner("node-b"),
+        "10.0.0.2:7000".to_string(),
+    );
+    a.watch_queue(qkey());
+    a.register_owner(ts(0)).unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    b.watch_queue(qkey());
+    b.register_owner(ts(1)).unwrap();
+    cp.begin_drain(&qkey(), 1, &owner("node-b"), ts(1)).unwrap();
+
+    a.renew_sessions(ts(2)).await.unwrap();
+    let released = cp.resolve_queue_owner(&qkey(), ts(2)).unwrap();
+    assert_eq!(released.active_owner, None);
+    assert_eq!(released.state, pqueue_engine::LeaseState::Unassigned);
+
+    b.renew_sessions(ts(20)).await.unwrap();
+    assert_eq!(
+        b.expected_epoch_for_write(&qkey(), ts(20), false)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resp_xclaim_drain_split_renews_inflight_and_refuses_reassign() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let clock = Arc::new(ManualClock::at(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hooks = Arc::new(OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        endpoint(addr),
+    ));
+    hooks.register_owner(ts(0)).unwrap();
+    hooks.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(serve_with_shutdown_and_hooks(
+        listener,
+        backend.clone(),
+        hooks,
+        clock.clone() as Arc<dyn Clock>,
+        cancel.clone(),
+    ));
+    let client = redis::Client::open(format!("redis://{}", addr)).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(2)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let first: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c1")
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let second: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c2")
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let id1 = first.keys[0].ids[0].id.clone();
+    let id2 = second.keys[0].ids[0].id.clone();
+    let before = backend.pending(&qkey()).await.unwrap();
+    let id1_before = before
+        .iter()
+        .find(|lease| lease.item_id.to_string() == id1)
+        .unwrap();
+    let id1_token = id1_before.lease_token.as_str().to_string();
+    let id1_before_expiry = id1_before.lease_expires_at;
+    let id2_before = before
+        .iter()
+        .find(|lease| lease.item_id.to_string() == id2)
+        .unwrap();
+    let id2_token = id2_before.lease_token.as_str().to_string();
+    let id2_before_expiry = id2_before.lease_expires_at;
+
+    cp.begin_drain(&qkey(), 1, &owner("node-b"), ts(1)).unwrap();
+    clock.set(10);
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("XCLAIM")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&id1_token)
+        .arg(0)
+        .arg(&id1)
+        .arg(&id2)
+        .arg("JUSTID")
+        .query_async(&mut con)
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("pqueue unavailable"),
+        "drain reassign half should be refused, got {err}"
+    );
+
+    let after = backend.pending(&qkey()).await.unwrap();
+    let id1_after = after
+        .iter()
+        .find(|lease| lease.item_id.to_string() == id1)
+        .unwrap();
+    let id2_after = after
+        .iter()
+        .find(|lease| lease.item_id.to_string() == id2)
+        .unwrap();
+    assert_eq!(id1_after.lease_token.as_str(), id1_token);
+    assert!(
+        id1_after.lease_expires_at > id1_before_expiry,
+        "same-consumer XCLAIM renew must still commit during drain"
+    );
+    assert_eq!(id2_after.lease_token.as_str(), id2_token);
+    assert_eq!(
+        id2_after.lease_expires_at, id2_before_expiry,
+        "cross-consumer XCLAIM reassign must not commit during drain"
+    );
+    drop(con);
+    cancel.cancel();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn draining_owner_refuses_new_claim_but_serves_inflight_epoch() {
+    let backend = Arc::new(MemoryBackend::new());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let a = OwnershipRuntime::new(
+        backend,
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    let b = owner("node-b");
+    a.register_owner(ts(0)).unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    cp.begin_drain(&qkey(), 1, &b, ts(1)).unwrap();
+
+    let new_claim = a.expected_epoch_for_write(&qkey(), ts(2), true).await;
+    assert!(matches!(new_claim, Err(EngineError::Unavailable)));
+    let in_flight = a
+        .expected_epoch_for_write(&qkey(), ts(2), false)
+        .await
+        .unwrap();
+    assert_eq!(in_flight, Some(1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
