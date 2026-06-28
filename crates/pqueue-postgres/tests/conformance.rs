@@ -61,6 +61,8 @@ pg_conformance!(
     upsert_inserts_then_replaces_pending,
     upsert_rejects_claimed_and_terminal,
     upsert_preserves_group_delay_and_payload_in_claim_shape,
+    update_fields_merges_and_cas,
+    reclaim_expired_sweeps_per_queue,
     tick_reclaims_expired_lease_with_no_client_traffic,
     tick_lease_boundary_is_half_open,
     paused_queue_yields_no_claims,

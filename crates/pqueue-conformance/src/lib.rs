@@ -58,8 +58,8 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
     CommandId, ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem,
-    QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SnapshotStore,
-    UpsertPort,
+    QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
+    SnapshotStore, UpdateFieldsPort, UpsertPort,
 };
 
 pub mod scenarios;
@@ -77,9 +77,11 @@ pub trait ConformanceCore:
     + ProjectionRead
     + ClaimPort
     + UpsertPort
+    + UpdateFieldsPort
     + FinalizePort
     + RenewLeasePort
     + ReassignLeasePort
+    + ReclaimPort
     + PurgePort
     + ReclaimDriver
 {
@@ -91,9 +93,11 @@ impl<T> ConformanceCore for T where
         + ProjectionRead
         + ClaimPort
         + UpsertPort
+        + UpdateFieldsPort
         + FinalizePort
         + RenewLeasePort
         + ReassignLeasePort
+        + ReclaimPort
         + PurgePort
         + ReclaimDriver
 {
@@ -285,6 +289,8 @@ macro_rules! core_suite {
             upsert_inserts_then_replaces_pending,
             upsert_rejects_claimed_and_terminal,
             upsert_preserves_group_delay_and_payload_in_claim_shape,
+            update_fields_merges_and_cas,
+            reclaim_expired_sweeps_per_queue,
             claim_compatibility_is_resolved_and_gated,
             stale_epoch_append_is_fenced,
             epoch_fence_closes_pre_segment_window,
@@ -310,6 +316,8 @@ macro_rules! core_suite {
             purge_removes_present_items_and_gates_leased,
             finalize_of_nonleased_item_is_rejected_without_appending,
             upsert_is_unavailable,
+            update_fields_is_unavailable,
+            reclaim_expired_sweeps_per_queue,
             claim_compatibility_is_resolved_and_gated,
             stale_epoch_append_is_fenced,
             epoch_fence_closes_pre_segment_window,

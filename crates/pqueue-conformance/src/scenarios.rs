@@ -9,8 +9,8 @@ use pqueue_core::{ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Priori
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, CommandPosition, EngineError, EngineResult,
     FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
-    ProjectionSnapshot, PushCommand, QueueCommand, ReplacePendingCommand, UnfenceLeaseCommand,
-    UpsertOutcome,
+    PayloadUpdate, ProjectionSnapshot, PushCommand, QueueCommand, ReplacePendingCommand,
+    UnfenceLeaseCommand, UpsertOutcome,
 };
 
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
@@ -45,6 +45,202 @@ pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
         EngineError::Unavailable,
         "eventual-apply backends must refuse upsert with Unavailable (Invariant 2)"
     );
+}
+
+/// FAC-1 (atomic class): `update_fields` merges a LIVE item's hot-storage fields/payload in place
+/// (set + remove), bumps `item_version`, honors the `expected_item_version` CAS (`Conflict` on mismatch),
+/// and rejects unknown/terminal ids — the write half of the `live_items` read.
+pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() -> B) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "1" leased
+    let id = ItemId::new("1").unwrap();
+    let key = ClientItemKey::new("ka").unwrap();
+
+    // Set two fields + payload on the leased item; version bumps off the genesis 1.
+    let v = b
+        .update_fields(
+            &shard(),
+            id,
+            BTreeMap::from([
+                ("state".to_string(), Some(Bytes::from_static(b"sent"))),
+                ("n".to_string(), Some(Bytes::from_static(b"1"))),
+            ]),
+            PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
+            None,
+            ts(20),
+            None,
+        )
+        .await
+        .unwrap();
+    let live = b
+        .live_items(&shard(), std::slice::from_ref(&key))
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("live");
+    assert_eq!(live.fields.get("state").map(|x| x.as_ref()), Some(&b"sent"[..]));
+    assert_eq!(live.payload.as_deref(), Some(&b"body"[..]));
+    assert_eq!(live.item_version, v);
+
+    // Merge: remove a key, add another, KEEP payload; CAS on the current version.
+    let v2 = b
+        .update_fields(
+            &shard(),
+            id,
+            BTreeMap::from([
+                ("n".to_string(), None),
+                ("attempts".to_string(), Some(Bytes::from_static(b"2"))),
+            ]),
+            PayloadUpdate::Keep,
+            Some(v),
+            ts(21),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(v2 > v, "version advances on each update");
+    let live = b
+        .live_items(&shard(), &[key])
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("live");
+    assert!(!live.fields.contains_key("n"), "removed key is gone");
+    assert_eq!(live.fields.get("attempts").map(|x| x.as_ref()), Some(&b"2"[..]));
+    assert_eq!(
+        live.fields.get("state").map(|x| x.as_ref()),
+        Some(&b"sent"[..]),
+        "untouched key survives the merge"
+    );
+    assert_eq!(live.payload.as_deref(), Some(&b"body"[..]), "Keep left the payload");
+
+    // Stale CAS -> Conflict, nothing changes.
+    assert_eq!(
+        b.update_fields(
+            &shard(),
+            id,
+            BTreeMap::from([("state".to_string(), Some(Bytes::from_static(b"x")))]),
+            PayloadUpdate::Keep,
+            Some(v),
+            ts(22),
+            None,
+        )
+        .await,
+        Err(EngineError::Conflict)
+    );
+    // Unknown id -> NotFound.
+    assert_eq!(
+        b.update_fields(
+            &shard(),
+            ItemId::new("90").unwrap(),
+            BTreeMap::new(),
+            PayloadUpdate::Keep,
+            None,
+            ts(23),
+            None,
+        )
+        .await,
+        Err(EngineError::NotFound)
+    );
+
+    // After completion the item is Terminal and rejects further updates.
+    b.finalize(
+        &shard(),
+        vec![FinalizeOutcome {
+            item_id: id,
+            kind: FinalizeKind::Complete,
+        }],
+        ts(30),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        b.update_fields(&shard(), id, BTreeMap::new(), PayloadUpdate::Keep, None, ts(31), None)
+            .await,
+        Err(EngineError::Terminal)
+    );
+}
+
+/// FAC-1 (eventual-apply class): the read-your-write field mutation is refused with `Unavailable`
+/// (parity with `upsert_is_unavailable`).
+pub async fn update_fields_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    assert_eq!(
+        b.update_fields(&shard(), ItemId::new("1").unwrap(), BTreeMap::new(), PayloadUpdate::Keep, None, ts(20), None)
+            .await,
+        Err(EngineError::Unavailable)
+    );
+}
+
+/// FAC-2 (every class): `reclaim_expired` is the per-queue, host-driven lease sweep — expired leases
+/// return to Pending (claimable again), the reclaimed ids are returned, and it is idempotent + half-open.
+pub async fn reclaim_expired_sweeps_per_queue<B: ConformanceCore>(make: impl Fn() -> B) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+    b.claim(claim_req(1, 500, 10)).await.unwrap(); // leased, expires ts(500)
+    let id = ItemId::new("1").unwrap();
+
+    // Half-open: at exactly the expiry the lease is still valid — nothing reclaimed.
+    assert!(
+        b.reclaim_expired(&shard(), None, ts(500), None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
+
+    // Past expiry: the id is returned and the item is Pending again.
+    assert_eq!(
+        b.reclaim_expired(&shard(), None, ts(600), None).await.unwrap(),
+        vec![id]
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+    // Idempotent: a second sweep finds nothing.
+    assert!(
+        b.reclaim_expired(&shard(), None, ts(700), None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Claimable again.
+    assert_eq!(b.claim(claim_req(1, 1000, 800)).await.unwrap().items.len(), 1);
 }
 
 /// `ProjectionRead::peek` — non-destructive, priority-ordered eligible view (fails if it returns a

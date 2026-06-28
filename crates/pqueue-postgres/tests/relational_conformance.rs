@@ -79,6 +79,8 @@ pg_relational!(
     upsert_inserts_then_replaces_pending,
     upsert_rejects_claimed_and_terminal,
     upsert_preserves_group_delay_and_payload_in_claim_shape,
+    update_fields_merges_and_cas,
+    reclaim_expired_sweeps_per_queue,
     reconnect_after_crash_preserves_committed_state,
     reconnect_preserves_terminal_and_pending_state,
     reconnect_preserves_leased_item_state,
