@@ -81,6 +81,7 @@ fn qdef_attempts(
         recurrence: RecurrencePolicy::default(),
         request_id_retention_ms: 600_000,
         client_item_key_retention_ms: 600_000,
+        terminal_retention_ms: 60_000,
         max_lease_duration_ms: 3_600_000,
         retry_policy: RetryPolicy { max_attempts },
         max_push_batch_size: 1_000_000,
@@ -1202,9 +1203,9 @@ async fn marketo_group_batching_e2e() {
 // ---------------------------------------------------------------------------
 
 /// A cohort-enabled queue definition (cohort_policy with the given enable flag + completion_bound_ms). NOTE:
-/// this is a CLAIM-VALIDATION fixture — it sets only the fields `validate_claim_compatibility` inspects
-/// (`enabled`/`completion_bound_ms`); the fuller create-path cohort validator (which also requires
-/// on_incomplete + max_cohort_size) is not exercised here (whole-cohort selection is deferred to BQ-14c).
+/// this is a CLAIM-VALIDATION fixture for the generic facade family — it sets only the fields
+/// `validate_claim_compatibility` inspects (`enabled`/`completion_bound_ms`); relational backends exercise
+/// the full create-path cohort validator and lifecycle separately.
 fn cohort_qdef(
     tenant: &str,
     queue: &str,
@@ -1226,10 +1227,10 @@ fn cohort_qdef(
     d
 }
 
-/// AC-E2E-3 (TP-003): model `actions_scheduled` callback batches on a cohort-enabled queue. The whole-cohort
-/// SELECTION (claim/finalize complete cohorts atomically; incomplete cohorts hidden from claim/discovery;
-/// expiry-to-failed) is NOT yet implemented; this validates the whole_cohort claim-compatibility CONTRACT +
-/// item-level parity and defers the selection. (FR-32a..32c, FR-47a, FR-47c, FR-48.)
+/// AC-E2E-3 (TP-003): model `actions_scheduled` callback batches on a cohort-enabled queue through the
+/// generic facade/in-memory family. Relational backends implement whole-cohort selection/lifecycle; this
+/// test keeps the generic-family claim-compatibility contract pinned so a well-formed non-item claim is not
+/// silently downgraded to item-level delivery. (FR-32a..32c, FR-47a, FR-47c, FR-48.)
 ///
 /// COVERED via the lib facade (each assertion bites a DISTINCT cause):
 ///   - item-level claim still works on a cohort-enabled queue (parity);
@@ -1238,10 +1239,9 @@ fn cohort_qdef(
 ///   - whole_cohort with completion_bound_ms (90s) > progress_bound_ms (60s) -> Invalid("...<= progress_bound_ms");
 ///   - whole_cohort COMBINED with group_key -> Invalid("cannot be combined...");
 ///   - a well-formed whole_cohort claim is RECOGNIZED (ClaimUnit::WholeCohort) and refused with Unavailable
-///     (selection unimplemented -> BQ-14c), NOT silently item-claimed.
-/// DEFERRED (-> BQ-14c): atomic whole-cohort claim under one shared lease, incomplete-cohort hiding from
-/// claim/discovery (eligible_candidates ignores cohorts in the in-memory family), INV-7 (0 cohort leaks),
-/// and expired-incomplete -> terminal failed with reason. NOT asserted, NOT claimed in the row.
+///     by this backend family, NOT silently item-claimed.
+/// NOT asserted here: relational whole-cohort atomic claim, incomplete-cohort hiding, INV-7 (0 cohort
+/// leaks), and expired-incomplete -> terminal failed with reason; those live in the relational suites.
 #[tokio::test]
 async fn callback_cohort_e2e() {
     let (pq, _clock) = deployment();
@@ -1334,18 +1334,18 @@ async fn callback_cohort_e2e() {
         "whole_cohort cannot be combined with group_key: {combined:?}"
     );
 
-    // (e) a WELL-FORMED whole_cohort claim is recognized (ClaimUnit::WholeCohort) and refused with Unavailable
-    // (selection unimplemented -> BQ-14c), NOT silently item-claimed.
+    // (e) a WELL-FORMED whole_cohort claim is recognized (ClaimUnit::WholeCohort) and refused with
+    // Unavailable by the generic/in-memory family, NOT silently item-claimed.
     let well_formed = pq.claim_with(&cohort_q, 10, 60_000, whole_cohort()).await;
     assert!(
         matches!(well_formed, Err(EngineError::Unavailable)),
-        "a well-formed whole_cohort claim is refused with Unavailable (selection unimplemented -> BQ-14c): {well_formed:?}"
+        "a well-formed whole_cohort claim is refused with Unavailable by this backend family: {well_formed:?}"
     );
 
     emit_ac(
         "AC-E2E-3",
         &[],
-        "item-level claim parity on a cohort-enabled queue; the whole_cohort claim-compatibility contract is enforced with distinct errors (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined); well-formed -> Unavailable, selection unimplemented). [DEFERRED -> BQ-14c: atomic whole-cohort claim, incomplete-cohort hiding, INV-7 0-cohort-leaks, expiry->failed]",
+        "item-level claim parity on a cohort-enabled queue; the generic-family whole_cohort claim-compatibility contract is enforced with distinct errors (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined); well-formed -> Unavailable rather than item-level downgrade). Relational suites cover atomic whole-cohort claim, incomplete-cohort hiding, INV-7 0-cohort-leaks, and expiry->failed.",
         BTreeMap::from([
             (
                 "item_level_claim_len".into(),

@@ -61,6 +61,7 @@ struct ReclaimCounters {
     ticks: AtomicU64,
     errors: AtomicU64,
     leases_reclaimed: AtomicU64,
+    cohorts_expired: AtomicU64,
 }
 
 /// A point-in-time snapshot of the reclaim loop's counters.
@@ -69,6 +70,7 @@ pub struct ReclaimStats {
     pub ticks: u64,
     pub errors: u64,
     pub leases_reclaimed: u64,
+    pub cohorts_expired: u64,
 }
 
 /// A running server: the bound address + the two background tasks (RESP accept loop + reclaim ticker).
@@ -97,12 +99,14 @@ impl Server {
             && self.reclaim_task.as_ref().is_some_and(|t| !t.is_finished())
     }
 
-    /// A snapshot of the background reclaim loop's counters (ticks run, tick errors, leases reclaimed).
+    /// A snapshot of the background reclaim loop's counters (ticks run, tick errors, leases reclaimed,
+    /// cohorts expired).
     pub fn reclaim_stats(&self) -> ReclaimStats {
         ReclaimStats {
             ticks: self.reclaim.ticks.load(Ordering::Relaxed),
             errors: self.reclaim.errors.load(Ordering::Relaxed),
             leases_reclaimed: self.reclaim.leases_reclaimed.load(Ordering::Relaxed),
+            cohorts_expired: self.reclaim.cohorts_expired.load(Ordering::Relaxed),
         }
     }
 
@@ -268,6 +272,11 @@ async fn reclaim_loop<B: RespBackend>(
                     counters
                         .leases_reclaimed
                         .fetch_add(report.leases_reclaimed, Ordering::Relaxed);
+                }
+                if report.cohorts_expired > 0 {
+                    counters
+                        .cohorts_expired
+                        .fetch_add(report.cohorts_expired, Ordering::Relaxed);
                 }
             }
             Err(_) => {

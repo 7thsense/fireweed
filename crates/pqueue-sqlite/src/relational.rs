@@ -50,22 +50,24 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel, PriorityValue,
-    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
+    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel,
+    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, is_retry_exhausted,
+    priority_sort,
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
     ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
-    ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort,
-    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter, PayloadUpdate,
-    ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, build_push_items, project_scopes, validate_claim_compatibility,
-    validate_purge_force,
+    ClaimedItem, CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand,
+    CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand, CohortRenewLeasePort,
+    CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity,
+    DiscoveryPort, DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand,
+    LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
+    project_scopes, validate_claim_compatibility, validate_purge_force,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -174,16 +176,28 @@ CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
 );
 CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
     ON pqueue_request_idempotency (expires_at);
--- BQ-14c: the cohort projection (TD-002 §cohort). The cohort key IS the group_key; `cohort_size` is the
--- declared total member count (set by the first cohort member's push). Completeness + per-member
--- eligibility are evaluated LIVE from pqueue_items at whole_cohort claim time (this row is the
--- authoritative size + a discovery anchor). The richer lifecycle (cohort lease token, forming/leased/
--- terminal state, retention, divergent-size conflict) is deferred — see pqueue-a162438c.
+-- TD-002 §cohort lifecycle projection. The group_key is the logical cohort key; cohort_id is the stable
+-- generation identity returned to callers and changes only after terminal retention permits group reuse.
 CREATE TABLE IF NOT EXISTS pqueue_cohorts (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
-    cohort_size INTEGER NOT NULL, created_at INTEGER NOT NULL,
+    cohort_id TEXT NOT NULL,
+    cohort_size INTEGER NOT NULL,
+    member_count INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    cohort_created_at INTEGER NOT NULL,
+    first_eligible_at INTEGER,
+    expire_command_pos INTEGER,
+    cohort_lease_token_hash BLOB,
+    retention_until INTEGER,
+    created_at INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, group_key)
 );
+CREATE INDEX IF NOT EXISTS pqueue_cohorts_claim_idx
+    ON pqueue_cohorts (tenant_id, queue_id, state)
+    WHERE state='complete';
+CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx
+    ON pqueue_cohorts (tenant_id, queue_id, cohort_created_at)
+    WHERE state IN ('forming','complete');
 -- BQ-14d: gates (TD-002 §gate / API-001 g2). `pqueue_item_gates` is the item↔gate-key membership
 -- (inserted on Push); `pqueue_gate_state` is the queue's BLOCKED gate keys (one row per blocked key,
 -- maintained by SetGates). An item is gate-blocked (ineligible) iff any of its gate keys is in
@@ -382,6 +396,65 @@ fn ensure_item_metadata_column(conn: &Connection) -> EngineResult<()> {
     ensure_item_text_column(conn, "metadata", "{}")
 }
 
+fn ensure_cohort_column(conn: &Connection, column: &str, definition: &str) -> EngineResult<()> {
+    if !column
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(EngineError::Invalid("column name must be [A-Za-z0-9_]"));
+    }
+    let sql = format!("ALTER TABLE pqueue_cohorts ADD COLUMN {column} {definition}");
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(EngineError::Storage(e.to_string())),
+    }
+}
+
+fn ensure_cohort_lifecycle_columns(conn: &Connection) -> EngineResult<()> {
+    ensure_cohort_column(conn, "cohort_id", "TEXT")?;
+    ensure_cohort_column(conn, "member_count", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_cohort_column(conn, "state", "TEXT NOT NULL DEFAULT 'forming'")?;
+    ensure_cohort_column(conn, "cohort_created_at", "INTEGER")?;
+    ensure_cohort_column(conn, "first_eligible_at", "INTEGER")?;
+    ensure_cohort_column(conn, "expire_command_pos", "INTEGER")?;
+    ensure_cohort_column(conn, "cohort_lease_token_hash", "BLOB")?;
+    ensure_cohort_column(conn, "retention_until", "INTEGER")?;
+    st(conn.execute(
+        "UPDATE pqueue_cohorts SET cohort_id=group_key WHERE cohort_id IS NULL",
+        [],
+    ))?;
+    st(conn.execute(
+        "UPDATE pqueue_cohorts SET cohort_created_at=created_at WHERE cohort_created_at IS NULL",
+        [],
+    ))?;
+    st(conn.execute(
+        "UPDATE pqueue_cohorts SET member_count=(SELECT COUNT(*) FROM pqueue_items i \
+         WHERE i.tenant_id=pqueue_cohorts.tenant_id AND i.queue_id=pqueue_cohorts.queue_id \
+         AND i.group_key=pqueue_cohorts.group_key AND i.superseded=0 AND i.cohort_size IS NOT NULL \
+         AND i.lifecycle_state NOT IN ('Complete','Failed'))",
+        [],
+    ))?;
+    st(conn.execute(
+        "UPDATE pqueue_cohorts SET state=CASE \
+         WHEN member_count >= cohort_size THEN 'complete' ELSE 'forming' END \
+         WHERE state IS NULL OR state='forming' OR state='complete'",
+        [],
+    ))?;
+    st(conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS pqueue_cohorts_claim_idx \
+             ON pqueue_cohorts (tenant_id, queue_id, state) WHERE state='complete';\
+         CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx \
+             ON pqueue_cohorts (tenant_id, queue_id, cohort_created_at) \
+             WHERE state IN ('forming','complete');",
+    ))?;
+    Ok(())
+}
+
 fn parts(shard: &QueueKey) -> (String, String) {
     (
         shard.tenant_id.as_str().to_string(),
@@ -555,6 +628,7 @@ impl Inner {
 /// Max rows per dynamically-built multi-row / `IN (...)` statement. Each `pqueue_items` row binds 17
 /// params; 256 rows ≈ 4.4k params, well under sqlite's 32766 bound-variable ceiling (bundled SQLite).
 const SQLITE_BATCH: usize = 256;
+const COHORT_EXPIRY_SWEEP_LIMIT: usize = 128;
 const GROUP_DUE_REFRESH_LIMIT: i64 = 128;
 
 fn opt_text(v: Option<String>) -> Value {
@@ -574,6 +648,7 @@ fn opt_blob(v: Option<Vec<u8>>) -> Value {
 /// the per-item path; `created_seq` is bulk-allocated (`base + i`) so the FIFO order is preserved.
 fn insert_items(
     tx: &Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
     model: &PriorityModel,
     shard: &QueueKey,
     items: &[PushItem],
@@ -635,7 +710,7 @@ fn insert_items(
         st(tx.execute(&sql, params_from_iter(flat)))?;
     }
     insert_gates(tx, &t, &q, items)?;
-    upsert_cohorts(tx, &t, &q, items, now_n)?;
+    upsert_cohorts(tx, queues, shard, &t, &q, items, now_n)?;
     Ok(())
 }
 
@@ -673,42 +748,156 @@ fn insert_gates(tx: &Transaction<'_>, t: &str, q: &str, items: &[PushItem]) -> E
     Ok(())
 }
 
-/// Batch the cohort upserts (BQ-14c) into one multi-row `ON CONFLICT DO NOTHING`. Group keys are deduped
-/// (first declaration authoritative — divergent later size never overwrites, same as the per-item path).
+fn cohort_id_for(group_key: &str, now_n: i64) -> String {
+    format!("coh:{group_key}:{now_n}")
+}
+
+fn cohort_retention_until(
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    now_n: i64,
+) -> EngineResult<i64> {
+    let retention_ms = queues
+        .get(shard)
+        .map(|d| d.terminal_retention_ms)
+        .ok_or(EngineError::NotFound)?;
+    Ok(now_n.saturating_add((retention_ms as i64).saturating_mul(1_000_000)))
+}
+
+fn cohort_expiry_deadline(
+    definition: &QueueDefinition,
+    cohort_created_at: i64,
+    first_eligible_at: Option<i64>,
+) -> Option<i64> {
+    let bound_ms = definition.cohort_policy.as_ref()?.completion_bound_ms?;
+    let start = first_eligible_at
+        .map(|first| cohort_created_at.min(first))
+        .unwrap_or(cohort_created_at);
+    Some(start.saturating_add((bound_ms as i64).saturating_mul(1_000_000)))
+}
+
+fn cohort_member_count_state(count: i64, size: i64) -> &'static str {
+    if count >= size { "complete" } else { "forming" }
+}
+
+/// Maintain TD-002 cohort lifecycle projection for newly accepted cohort members.
 fn upsert_cohorts(
     tx: &Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
     t: &str,
     q: &str,
     items: &[PushItem],
     now_n: i64,
 ) -> EngineResult<()> {
-    let mut cohorts: Vec<(String, i64)> = Vec::new();
+    let mut cohorts: BTreeMap<String, (i64, i64)> = BTreeMap::new();
     for item in items {
         if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
             let gk = group.as_str().to_string();
-            if !cohorts.iter().any(|(k, _)| k == &gk) {
-                cohorts.push((gk, size as i64));
+            let size = size as i64;
+            let entry = cohorts.entry(gk).or_insert((size, 0));
+            if entry.0 != size {
+                return Err(EngineError::Conflict);
             }
+            entry.1 += 1;
         }
     }
     if cohorts.is_empty() {
         return Ok(());
     }
-    for chunk in cohorts.chunks(SQLITE_BATCH) {
-        let values = vec!["(?,?,?,?,?)"; chunk.len()].join(",");
-        let sql = format!(
-            "INSERT INTO pqueue_cohorts (tenant_id,queue_id,group_key,cohort_size,created_at) \
-             VALUES {values} ON CONFLICT(tenant_id,queue_id,group_key) DO NOTHING"
-        );
-        let mut p: Vec<Value> = Vec::with_capacity(chunk.len() * 5);
-        for (gk, size) in chunk {
-            p.push(Value::Text(t.to_string()));
-            p.push(Value::Text(q.to_string()));
-            p.push(Value::Text(gk.clone()));
-            p.push(Value::Integer(*size));
-            p.push(Value::Integer(now_n));
+    let _ = cohort_retention_until(queues, shard, now_n)?;
+    for (gk, (size, added)) in cohorts {
+        let existing: Option<(i64, i64, String, Option<i64>)> = st(tx
+            .query_row(
+                "SELECT cohort_size, member_count, state, retention_until FROM pqueue_cohorts \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                params![t, q, gk],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional())?;
+        match existing {
+            None => {
+                if added > size {
+                    return Err(EngineError::Conflict);
+                }
+                let state = cohort_member_count_state(added, size);
+                let first_eligible_at = if state == "complete" {
+                    Some(now_n)
+                } else {
+                    None
+                };
+                st(tx.execute(
+                    "INSERT INTO pqueue_cohorts \
+                     (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
+                      cohort_created_at,first_eligible_at,created_at) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?8)",
+                    params![
+                        t,
+                        q,
+                        gk,
+                        cohort_id_for(&gk, now_n),
+                        size,
+                        added,
+                        state,
+                        now_n,
+                        first_eligible_at,
+                    ],
+                ))?;
+            }
+            Some((existing_size, member_count, state, retention_until)) => {
+                if state == "terminal" {
+                    if retention_until.is_some_and(|until| until > now_n) {
+                        return Err(EngineError::Conflict);
+                    }
+                    if added > size {
+                        return Err(EngineError::Conflict);
+                    }
+                    let next_state = cohort_member_count_state(added, size);
+                    let first_eligible_at = if next_state == "complete" {
+                        Some(now_n)
+                    } else {
+                        None
+                    };
+                    st(tx.execute(
+                        "UPDATE pqueue_cohorts SET cohort_id=?4, cohort_size=?5, member_count=?6, \
+                         state=?7, cohort_created_at=?8, first_eligible_at=?9, expire_command_pos=NULL, \
+                         cohort_lease_token_hash=NULL, retention_until=NULL, created_at=?8 \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                        params![
+                            t,
+                            q,
+                            gk,
+                            cohort_id_for(&gk, now_n),
+                            size,
+                            added,
+                            next_state,
+                            now_n,
+                            first_eligible_at,
+                        ],
+                    ))?;
+                    continue;
+                }
+                if existing_size != size {
+                    return Err(EngineError::Conflict);
+                }
+                if member_count + added > existing_size {
+                    return Err(EngineError::Conflict);
+                }
+                let next_count = member_count + added;
+                let next_state = if state == "leased" {
+                    state.as_str()
+                } else {
+                    cohort_member_count_state(next_count, existing_size)
+                };
+                let set_first = next_state == "complete";
+                st(tx.execute(
+                    "UPDATE pqueue_cohorts SET member_count=?4, state=?5, \
+                     first_eligible_at=CASE WHEN ?6 AND first_eligible_at IS NULL THEN ?7 ELSE first_eligible_at END \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                    params![t, q, gk, next_count, next_state, set_first, now_n],
+                ))?;
+            }
         }
-        st(tx.execute(&sql, params_from_iter(p.iter())))?;
     }
     Ok(())
 }
@@ -797,6 +986,40 @@ fn groups_of(
         }
     }
     Ok(seen)
+}
+
+fn cohort_group_for_id(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    cohort_id: &CohortId,
+) -> EngineResult<GroupKey> {
+    let (t, q) = parts(shard);
+    let group: String = st(tx.query_row(
+        "SELECT group_key FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+        params![t, q, cohort_id.as_str()],
+        |row| row.get(0),
+    ))?;
+    GroupKey::new(group).map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+fn cohort_item_ids(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    cohort_id: &CohortId,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let group = cohort_group_for_id(tx, shard, cohort_id)?;
+    let mut stmt = st(tx.prepare(
+        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+         AND superseded=0 AND cohort_size IS NOT NULL AND lifecycle_state NOT IN ('Complete','Failed') \
+         ORDER BY priority_sort, created_seq",
+    ))?;
+    let mapped = st(stmt.query_map(params![t, q, group.as_str()], |row| row.get::<_, String>(0)))?;
+    let mut out = Vec::new();
+    for r in mapped {
+        out.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(out)
 }
 
 /// Recompute `pqueue_group_summary` for one group from `pqueue_items` (exact aggregate over the group's
@@ -901,7 +1124,7 @@ fn apply_command_sql(
                 .get(shard)
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
-            insert_items(tx, &model, shard, &c.items, seq, now)?;
+            insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
             let mut groups: Vec<GroupKey> = Vec::new();
             for it in &c.items {
                 if let Some(g) = &it.group_key
@@ -942,6 +1165,38 @@ fn apply_command_sql(
             }
             Ok(())
         }
+        QueueCommand::CohortClaim(c) => {
+            let hash = lease_hash(&c.lease_token);
+            let exp = ts_nanos(c.lease_expires_at);
+            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            exec_items_in(
+                tx,
+                "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?, \
+                 lease_expires_at=?, retry_count=retry_count+1, item_version=item_version+1, \
+                 updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                &[
+                    Value::Blob(hash.clone()),
+                    Value::Integer(exp),
+                    Value::Integer(now_n),
+                    Value::Integer(seq as i64),
+                ],
+                &t,
+                &q,
+                &ids,
+            )?;
+            st(tx.execute(
+                "UPDATE pqueue_cohorts SET state='leased', cohort_lease_token_hash=?4 \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+                params![t, q, c.cohort_id.as_str(), hash],
+            ))?;
+            for id in &c.item_ids {
+                token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
+            }
+            for g in groups_of(tx, shard, &c.item_ids)? {
+                refresh_group_summary(tx, shard, &g, now)?;
+            }
+            Ok(())
+        }
         QueueCommand::RenewLease(c) => {
             let exp = ts_nanos(c.lease_expires_at);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
@@ -957,6 +1212,25 @@ fn apply_command_sql(
                 &t,
                 &q,
                 &ids,
+            )?;
+            Ok(())
+        }
+        QueueCommand::CohortRenewLease(c) => {
+            let ids = cohort_item_ids(tx, shard, &c.cohort_id)?;
+            let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+            let exp = ts_nanos(c.lease_expires_at);
+            exec_items_in(
+                tx,
+                "UPDATE pqueue_items SET lease_expires_at=?, item_version=item_version+1, \
+                 updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                &[
+                    Value::Integer(exp),
+                    Value::Integer(now_n),
+                    Value::Integer(seq as i64),
+                ],
+                &t,
+                &q,
+                &id_strs,
             )?;
             Ok(())
         }
@@ -1189,6 +1463,45 @@ fn apply_command_sql(
             }
             Ok(())
         }
+        QueueCommand::CohortFinalize(c) => {
+            let ids = cohort_item_ids(tx, shard, &c.cohort_id)?;
+            if ids.is_empty() {
+                return Err(EngineError::NotFound);
+            }
+            let outcomes: Vec<FinalizeOutcome> = ids
+                .iter()
+                .map(|item_id| FinalizeOutcome {
+                    item_id: *item_id,
+                    kind: c.kind,
+                    not_before: c.not_before,
+                })
+                .collect();
+            apply_command_sql(
+                tx,
+                queues,
+                token_ops,
+                shard,
+                seq,
+                now,
+                &QueueCommand::Finalize(FinalizeCommand { outcomes }),
+            )?;
+            let next_state = match c.kind {
+                FinalizeKind::Complete | FinalizeKind::Fail => "terminal",
+                FinalizeKind::Retry | FinalizeKind::Release => "complete",
+                FinalizeKind::Rearm => return Err(EngineError::Invalid("cohort rearm is invalid")),
+            };
+            let retention_until = if next_state == "terminal" {
+                Some(cohort_retention_until(queues, shard, now_n)?)
+            } else {
+                None
+            };
+            st(tx.execute(
+                "UPDATE pqueue_cohorts SET state=?4, cohort_lease_token_hash=NULL, retention_until=?5 \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+                params![t, q, c.cohort_id.as_str(), next_state, retention_until],
+            ))?;
+            Ok(())
+        }
         QueueCommand::ReplacePending(c) => {
             // Supersede the old pending item (drops it from the active partial-unique index + eligibility),
             // then insert the replacement under the same client_item_key.
@@ -1203,6 +1516,7 @@ fn apply_command_sql(
                 .ok_or(EngineError::NotFound)?;
             insert_items(
                 tx,
+                queues,
                 &model,
                 shard,
                 std::slice::from_ref(&c.replacement),
@@ -1277,6 +1591,18 @@ fn apply_command_sql(
             for id in &ids {
                 token_ops.push(TokenOp::Clear(*id));
             }
+            st(tx.execute(
+                "UPDATE pqueue_cohorts SET state='terminal', expire_command_pos=?4, \
+                 cohort_lease_token_hash=NULL, retention_until=?5 \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                params![
+                    t,
+                    q,
+                    c.group_key.as_str(),
+                    seq as i64,
+                    cohort_retention_until(queues, shard, now_n)?,
+                ],
+            ))?;
             // The whole cohort (group) is now terminal — refresh its summary to empty.
             refresh_group_summary(tx, shard, &c.group_key, now)?;
             Ok(())
@@ -1478,7 +1804,7 @@ fn select_eligible_sql(
     // the CTE's `created_at, item_id` FIFO tiebreak.
     let mut stmt = st(conn.prepare(
         "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-         AND lifecycle_state='Pending' AND superseded=0 \
+         AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
          AND (not_before IS NULL OR not_before<=?3) \
          AND eligible_since IS NOT NULL \
          AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
@@ -1578,7 +1904,7 @@ fn group_eligible_items(
     let (t, q) = parts(shard);
     let mut stmt = st(conn.prepare(
         "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-         AND lifecycle_state='Pending' AND superseded=0 \
+         AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
          AND (not_before IS NULL OR not_before<=?4) AND eligible_since IS NOT NULL \
          AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
@@ -1663,24 +1989,33 @@ fn select_same_group(
 /// non-superseded member count equals `cohort_size`; it is claimable only when every member is also
 /// pending+due (no member leased/terminal). The whole cohort leases together, or the cohort is skipped.
 /// `BatchTooLarge` if the selected cohort exceeds `max_items`. Paused → empty.
+#[derive(Debug, Clone)]
+struct SelectedCohort {
+    cohort_id: CohortId,
+    item_ids: Vec<ItemId>,
+}
+
 fn select_whole_cohort(
     conn: &Connection,
     shard: &QueueKey,
     now: UtcTimestamp,
     max_items: usize,
-) -> EngineResult<Vec<ItemId>> {
+) -> EngineResult<Option<SelectedCohort>> {
     if queue_paused(conn, shard)? {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let (t, q) = parts(shard);
-    // Declared cohorts, oldest-first.
-    let cohorts: Vec<(String, i64)> = {
+    let cohorts: Vec<(String, String, i64)> = {
         let mut stmt = st(conn.prepare(
-            "SELECT group_key, cohort_size FROM pqueue_cohorts \
-             WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_at, group_key",
+            "SELECT group_key, cohort_id, cohort_size FROM pqueue_cohorts \
+             WHERE tenant_id=?1 AND queue_id=?2 AND state='complete' ORDER BY cohort_created_at, group_key",
         ))?;
         let rows = st(stmt.query_map(params![t, q], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         }))?;
         let mut out = Vec::new();
         for r in rows {
@@ -1688,15 +2023,13 @@ fn select_whole_cohort(
         }
         out
     };
-    for (gk, size) in cohorts {
+    for (gk, cohort_id, size) in cohorts {
         let size = size as usize;
         let group = GroupKey::new(gk).map_err(|e| EngineError::Storage(e.to_string()))?;
-        // COHORT members are the items that DECLARED cohort membership (`cohort_size IS NOT NULL`), NOT all
-        // items sharing the group_key — so a plain (non-cohort) push to the same key neither inflates the
-        // count nor strands the cohort (fresh-eyes F1). Live non-superseded member count (any state).
         let members: i64 = st(conn.query_row(
             "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-             AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL",
+             AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL \
+             AND lifecycle_state NOT IN ('Complete','Failed')",
             params![t, q, group.as_str()],
             |row| row.get(0),
         ))?;
@@ -1711,9 +2044,12 @@ fn select_whole_cohort(
         if size > max_items {
             return Err(EngineError::BatchTooLarge); // the selected complete cohort exceeds the ceiling
         }
-        return Ok(elig); // lease the whole cohort
+        return Ok(Some(SelectedCohort {
+            cohort_id: CohortId::new(cohort_id).map_err(|e| EngineError::Storage(e.to_string()))?,
+            item_ids: elig,
+        }));
     }
-    Ok(Vec::new())
+    Ok(None)
 }
 
 /// The live currently-eligible COHORT members of one group (`cohort_size IS NOT NULL`), in claim order,
@@ -2058,14 +2394,14 @@ fn item_flags_map(
     conn: &Connection,
     shard: &QueueKey,
     ids: &[ItemId],
-) -> EngineResult<HashMap<String, (ItemState, bool, bool)>> {
+) -> EngineResult<HashMap<String, (ItemState, bool, bool, bool)>> {
     let (t, q) = parts(shard);
     let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
     let mut map = HashMap::with_capacity(ids.len());
     for chunk in id_strs.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT item_id, lifecycle_state, fenced, superseded FROM pqueue_items \
+            "SELECT item_id, lifecycle_state, fenced, superseded, cohort_size IS NOT NULL FROM pqueue_items \
              WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -2079,11 +2415,20 @@ fn item_flags_map(
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
             ))
         }))?;
         for r in mapped {
-            let (id, s, fenced, superseded) = st(r)?;
-            map.insert(id, (parse_state(&s)?, fenced != 0, superseded != 0));
+            let (id, s, fenced, superseded, cohort_member) = st(r)?;
+            map.insert(
+                id,
+                (
+                    parse_state(&s)?,
+                    fenced != 0,
+                    superseded != 0,
+                    cohort_member != 0,
+                ),
+            );
         }
     }
     Ok(map)
@@ -2098,14 +2443,46 @@ fn validate_leased(conn: &Connection, shard: &QueueKey, ids: &[ItemId]) -> Engin
     for id in ids {
         match flags.get(&id.to_string()) {
             None => return Err(EngineError::NotFound),
-            Some((_, true, _)) => return Err(EngineError::StaleLease),
-            Some((s, _, _)) if s.is_terminal() => return Err(EngineError::Terminal),
-            Some((_, _, true)) => return Err(EngineError::Superseded),
-            Some((s, _, _)) if *s != ItemState::Leased => {
+            Some((_, true, _, _)) => return Err(EngineError::StaleLease),
+            Some((s, _, _, _)) if s.is_terminal() => return Err(EngineError::Terminal),
+            Some((_, _, true, _)) => return Err(EngineError::Superseded),
+            Some((_, _, _, true)) => {
+                return Err(EngineError::Invalid("cohort member requires cohort lease"));
+            }
+            Some((s, _, _, _)) if *s != ItemState::Leased => {
                 return Err(EngineError::Invalid("item is not leased"));
             }
             Some(_) => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_cohort_lease(
+    conn: &Connection,
+    shard: &QueueKey,
+    target: &CohortLeaseTarget,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let row: Option<(String, Option<Vec<u8>>)> = st(conn
+        .query_row(
+            "SELECT state, cohort_lease_token_hash FROM pqueue_cohorts \
+             WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+            params![t, q, target.cohort_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional())?;
+    let Some((state, hash)) = row else {
+        return Err(EngineError::NotFound);
+    };
+    if state == "terminal" {
+        return Err(EngineError::Terminal);
+    }
+    if state != "leased" {
+        return Err(EngineError::Invalid("cohort is not leased"));
+    }
+    if hash.as_deref() != Some(lease_hash(&target.cohort_lease_token).as_slice()) {
+        return Err(EngineError::StaleLease);
     }
     Ok(())
 }
@@ -2147,6 +2524,7 @@ impl SqliteRelationalBackend {
         st(conn.execute_batch(RELATIONAL_SCHEMA))?;
         ensure_item_fields_column(&conn)?;
         ensure_item_metadata_column(&conn)?;
+        ensure_cohort_lifecycle_columns(&conn)?;
         let mut inner = Inner {
             conn,
             queues: HashMap::new(),
@@ -2698,6 +3076,7 @@ impl ClaimPort for SqliteRelationalBackend {
             }
             // Candidate selection inside the claim transaction (serialized under the backend Mutex). The
             // item-level path is the strict-claim order; the group/cohort paths consume their projections.
+            let mut selected_cohort: Option<CohortId> = None;
             let candidates = match unit {
                 ClaimUnit::Item => select_eligible_sql(&tx, &req.shard, req.now, req.max_items)?,
                 ClaimUnit::WholeGroup => {
@@ -2713,7 +3092,13 @@ impl ClaimPort for SqliteRelationalBackend {
                     select_same_group(&tx, &req.shard, req.now, req.max_items)?
                 }
                 ClaimUnit::WholeCohort => {
-                    select_whole_cohort(&tx, &req.shard, req.now, req.max_items)?
+                    match select_whole_cohort(&tx, &req.shard, req.now, req.max_items)? {
+                        Some(selected) => {
+                            selected_cohort = Some(selected.cohort_id);
+                            selected.item_ids
+                        }
+                        None => Vec::new(),
+                    }
                 }
             };
             if candidates.is_empty() {
@@ -2729,6 +3114,20 @@ impl ClaimPort for SqliteRelationalBackend {
                 .optional())?
             .ok_or(EngineError::NotFound)?;
             let mut token_ops = Vec::new();
+            let claim_command = if let Some(cohort_id) = selected_cohort.clone() {
+                QueueCommand::CohortClaim(CohortClaimCommand {
+                    cohort_id,
+                    item_ids: candidates.clone(),
+                    lease_token: req.lease_token.clone(),
+                    lease_expires_at: req.lease_expires_at,
+                })
+            } else {
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: candidates.clone(),
+                    lease_token: req.lease_token.clone(),
+                    lease_expires_at: req.lease_expires_at,
+                })
+            };
             apply_command_sql(
                 &tx,
                 queues,
@@ -2736,11 +3135,7 @@ impl ClaimPort for SqliteRelationalBackend {
                 &req.shard,
                 seq as u64,
                 req.now,
-                &QueueCommand::Claim(ClaimCommand {
-                    item_ids: candidates.clone(),
-                    lease_token: req.lease_token.clone(),
-                    lease_expires_at: req.lease_expires_at,
-                }),
+                &claim_command,
             )?;
             st(tx.execute(
                 "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
@@ -2765,7 +3160,8 @@ impl ClaimPort for SqliteRelationalBackend {
             };
             if matches!(unit, ClaimUnit::WholeCohort) {
                 claimed.cohort_lease_token = Some(req.lease_token.clone());
-                claimed.cohort_id = apply_whole_cohort_response_shape(&mut claimed.items);
+                let _ = apply_whole_cohort_response_shape(&mut claimed.items);
+                claimed.cohort_id = selected_cohort;
             }
             Ok(claimed)
         })();
@@ -2917,6 +3313,38 @@ impl FinalizePort for SqliteRelationalBackend {
     }
 }
 
+impl CohortFinalizePort for SqliteRelationalBackend {
+    fn finalize_cohort(
+        &self,
+        shard: &QueueKey,
+        target: CohortLeaseTarget,
+        kind: FinalizeKind,
+        not_before: Option<UtcTimestamp>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            if matches!(kind, FinalizeKind::Rearm) {
+                return Err(EngineError::Invalid("cohort rearm is invalid"));
+            }
+            let mut g = self.inner.lock().expect("poisoned");
+            validate_cohort_lease(&g.conn, shard, &target)?;
+            g.commit_command(
+                shard,
+                QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                    cohort_id: target.cohort_id,
+                    kind,
+                    not_before,
+                }),
+                now,
+                expected_epoch,
+            )?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
 impl RenewLeasePort for SqliteRelationalBackend {
     fn renew(
         &self,
@@ -2933,6 +3361,33 @@ impl RenewLeasePort for SqliteRelationalBackend {
                 shard,
                 QueueCommand::RenewLease(RenewLeaseCommand {
                     item_ids,
+                    lease_expires_at: new_lease_expires_at,
+                }),
+                now,
+                expected_epoch,
+            )?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl CohortRenewLeasePort for SqliteRelationalBackend {
+    fn renew_cohort(
+        &self,
+        shard: &QueueKey,
+        target: CohortLeaseTarget,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            validate_cohort_lease(&g.conn, shard, &target)?;
+            g.commit_command(
+                shard,
+                QueueCommand::CohortRenewLease(CohortRenewLeaseCommand {
+                    cohort_id: target.cohort_id,
                     lease_expires_at: new_lease_expires_at,
                 }),
                 now,
@@ -2992,7 +3447,7 @@ impl PurgePort for SqliteRelationalBackend {
                 if present.contains(id) {
                     continue; // de-dup: remove + count once (XDEL semantics)
                 }
-                if let Some((state, _, _)) = flags.get(&id.to_string()) {
+                if let Some((state, _, _, _)) = flags.get(&id.to_string()) {
                     validate_purge_force(*state == ItemState::Leased, force)?;
                     present.push(*id);
                 }
@@ -3185,6 +3640,63 @@ impl ReclaimDriver for SqliteRelationalBackend {
                     None,
                 )?;
             }
+            let due_cohorts: Vec<(QueueKey, GroupKey, u64)> = {
+                let mut stmt = st(g.conn.prepare(
+                    "SELECT c.tenant_id, c.queue_id, c.group_key, c.cohort_created_at, \
+                     c.first_eligible_at, r.assignment_epoch \
+                     FROM pqueue_cohorts c \
+                     JOIN relational_cursor r ON r.tenant=c.tenant_id AND r.queue=c.queue_id \
+                     WHERE c.state IN ('forming','complete') \
+                     ORDER BY c.tenant_id, c.queue_id, c.group_key \
+                     LIMIT ?1",
+                ))?;
+                let rows = st(
+                    stmt.query_map(params![COHORT_EXPIRY_SWEEP_LIMIT as i64], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    }),
+                )?;
+                let mut out = Vec::new();
+                for r in rows {
+                    let (t, q, group, cohort_created_at, first_eligible_at, epoch) = st(r)?;
+                    let shard = QueueKey::new(
+                        TenantId::new(t).map_err(|e| EngineError::Storage(e.to_string()))?,
+                        QueueId::new(q).map_err(|e| EngineError::Storage(e.to_string()))?,
+                    );
+                    let Some(definition) = g.queues.get(&shard) else {
+                        continue;
+                    };
+                    let Some(deadline) =
+                        cohort_expiry_deadline(definition, cohort_created_at, first_eligible_at)
+                    else {
+                        continue;
+                    };
+                    if deadline <= now_n {
+                        out.push((
+                            shard,
+                            GroupKey::new(group)
+                                .map_err(|e| EngineError::Storage(e.to_string()))?,
+                            epoch as u64,
+                        ));
+                    }
+                }
+                out
+            };
+            for (shard, group_key, epoch) in due_cohorts {
+                g.commit_command(
+                    &shard,
+                    QueueCommand::CohortExpired(CohortExpiredCommand { group_key }),
+                    now,
+                    Some(epoch),
+                )?;
+                report.cohorts_expired += 1;
+            }
             Ok(report)
         })();
         std::future::ready(result)
@@ -3218,6 +3730,7 @@ mod group_summary_tests {
             recurrence: RecurrencePolicy::default(),
             request_id_retention_ms: 60_000,
             client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
             max_lease_duration_ms: 60_000,
             retry_policy: RetryPolicy { max_attempts: 3 },
             max_push_batch_size: 100,

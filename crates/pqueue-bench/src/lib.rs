@@ -255,6 +255,7 @@ pub fn bench_qdef(tenant: &str, queue: &str, shape: &Shape) -> QueueDefinition {
         recurrence: RecurrencePolicy::default(),
         request_id_retention_ms: 60_000,
         client_item_key_retention_ms: 60_000,
+        terminal_retention_ms: 60_000,
         max_lease_duration_ms: 3_600_000,
         retry_policy: RetryPolicy {
             max_attempts: 1_000_000,

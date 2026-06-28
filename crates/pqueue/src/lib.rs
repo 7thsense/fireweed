@@ -32,7 +32,7 @@ use pqueue_engine::{
 // ---------------------------------------------------------------------------
 pub use bytes::Bytes;
 pub use pqueue_core::{
-    ClientItemKey, CohortOnIncomplete, CohortPolicy, CreateQueue, CreateQueueError,
+    ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, CreateQueue, CreateQueueError,
     CreateQueueErrorKind, DecimalValue, EligibilityPolicy, GateKeyPolicy, GroupKey,
     IdentifierError, IndexSpec, ItemId, Metadata, MetadataValue, OrderingMode, OwnerId,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
@@ -533,8 +533,8 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Claim with API-001 compatibility options (group_batching / whole_cohort / same_group_key /
     /// group_key / metadata_equals). `ClaimCompatibility::default()` is the item-level claim (see
-    /// [`claim`](Self::claim)); group/cohort selection units are honored once their backend selection
-    /// lands (BQ-14b/c) — until then a non-item unit is refused with the structured `Unavailable`.
+    /// [`claim`](Self::claim)); backends that do not implement a requested non-item unit refuse it with
+    /// the structured `Unavailable` rather than silently downgrading to item-level delivery.
     pub async fn claim_with(
         &self,
         queue: &QueueKey,

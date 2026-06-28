@@ -16,15 +16,16 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
 use pqueue_core::{
-    ClientItemKey, CohortPolicy, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition,
-    UtcTimestamp, WorkerId,
+    ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, GroupKey, ItemId, LeaseToken,
+    PriorityValue, QueueDefinition, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand,
-    ControlPlaneStore, DiscoveryGranularity, DiscoveryPort, FenceLeaseCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, GroupBatching, ProjectionRead, PurgePort, PushCommand, PushItem,
-    PushPort, PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
-    SetGatesCommand, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
+    CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, ControlPlaneStore,
+    DiscoveryGranularity, DiscoveryPort, FenceLeaseCommand, FinalizeKind, FinalizeOutcome,
+    FinalizePort, GroupBatching, ProjectionRead, PurgePort, PushCommand, PushItem, PushPort,
+    PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SetGatesCommand,
+    UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -63,7 +64,7 @@ fn qdef_cohort() -> QueueDefinition {
         cohort_policy: Some(CohortPolicy {
             enabled: true,
             completion_bound_ms: Some(30_000),
-            on_incomplete: None,
+            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
             max_cohort_size: Some(10),
         }),
         ..qdef()
@@ -1036,9 +1037,9 @@ async fn whole_cohort_leases_a_complete_cohort() {
         "whole-cohort claims carry the shared lease token at the response top level"
     );
     assert_eq!(
-        claimed.cohort_id,
-        Some(GroupKey::new("c1").unwrap()),
-        "whole-cohort claims identify the leased cohort at the response top level"
+        claimed.cohort_id.as_ref().map(|id| id.as_str()),
+        Some("coh:c1:0"),
+        "whole-cohort claims identify the stored cohort generation at the response top level"
     );
     assert!(
         claimed.items.iter().all(|item| item.lease_token.is_none()),
@@ -1083,17 +1084,18 @@ async fn whole_cohort_skips_an_incomplete_cohort() {
 async fn whole_cohort_skips_when_a_member_is_not_eligible() {
     let b = make();
     b.create_queue(qdef_cohort()).await.unwrap();
-    let ids = b
-        .push(
-            &shard(),
-            vec![cspec(10, "c1", 3), cspec(11, "c1", 3), cspec(12, "c1", 3)],
-            ts(0),
-            None,
-        )
-        .await
-        .unwrap();
-    // Item-level claim one member → it is leased, so the cohort is no longer all-eligible.
-    b.claim(claim_req(1, 500, 50)).await.unwrap();
+    let delayed = PushSpec {
+        not_before: Some(ts(200)),
+        ..cspec(11, "c1", 3)
+    };
+    b.push(
+        &shard(),
+        vec![cspec(10, "c1", 3), delayed, cspec(12, "c1", 3)],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
     let claimed = b
         .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
         .await
@@ -1102,7 +1104,6 @@ async fn whole_cohort_skips_when_a_member_is_not_eligible() {
         claimed.items.is_empty(),
         "a cohort with a non-eligible member is not claimable whole"
     );
-    let _ = ids;
 }
 
 /// A complete cohort larger than `max_items` → `BatchTooLarge`, leasing nothing.
@@ -1132,6 +1133,191 @@ async fn whole_cohort_oversized_is_batch_too_large() {
         3,
         "nothing leased"
     );
+}
+
+#[tokio::test]
+async fn cohort_push_rejects_divergent_size_and_overfill() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+
+    assert!(
+        matches!(
+            b.push(
+                &shard(),
+                vec![cspec(10, "c1", 3), cspec(11, "c1", 4)],
+                ts(0),
+                None
+            )
+            .await,
+            Err(pqueue_engine::EngineError::Conflict)
+        ),
+        "same-batch divergent cohort_size is a conflict"
+    );
+
+    b.push(&shard(), vec![cspec(10, "c1", 3)], ts(0), None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            b.push(&shard(), vec![cspec(11, "c1", 4)], ts(1), None)
+                .await,
+            Err(pqueue_engine::EngineError::Conflict)
+        ),
+        "later divergent cohort_size is a conflict"
+    );
+    b.push(
+        &shard(),
+        vec![cspec(12, "c1", 3), cspec(13, "c1", 3)],
+        ts(2),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            b.push(&shard(), vec![cspec(14, "c1", 3)], ts(3), None)
+                .await,
+            Err(pqueue_engine::EngineError::Conflict)
+        ),
+        "member_count cannot overfill cohort_size"
+    );
+}
+
+#[tokio::test]
+async fn item_level_finalize_and_renew_reject_cohort_members() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    b.push(
+        &shard(),
+        vec![cspec(10, "c1", 2), cspec(11, "c1", 2)],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+        .await
+        .unwrap();
+    let item_id = claimed.items[0].item_id;
+
+    assert!(
+        matches!(
+            b.renew(&shard(), vec![item_id], ts(600), ts(110), None)
+                .await,
+            Err(pqueue_engine::EngineError::Invalid(_))
+        ),
+        "cohort members do not expose item-level renew"
+    );
+    assert!(
+        matches!(
+            b.finalize(
+                &shard(),
+                vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+                ts(120),
+                None
+            )
+            .await,
+            Err(pqueue_engine::EngineError::Invalid(_))
+        ),
+        "cohort members do not expose item-level finalize"
+    );
+}
+
+#[tokio::test]
+async fn cohort_renew_and_finalize_release_as_a_unit() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    b.push(
+        &shard(),
+        vec![cspec(10, "c1", 2), cspec(11, "c1", 2)],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+        .await
+        .unwrap();
+    let target = CohortLeaseTarget {
+        cohort_id: claimed.cohort_id.clone().unwrap(),
+        cohort_lease_token: claimed.cohort_lease_token.clone().unwrap(),
+    };
+
+    b.renew_cohort(&shard(), target.clone(), ts(900), ts(110), None)
+        .await
+        .unwrap();
+    b.finalize_cohort(&shard(), target, FinalizeKind::Release, None, ts(120), None)
+        .await
+        .unwrap();
+
+    let reclaimed = b
+        .claim(claim_req_compat(10, 700, 130, whole_cohort_compat()))
+        .await
+        .unwrap();
+    assert_eq!(
+        reclaimed.items.len(),
+        2,
+        "release returns the cohort to complete and claimable"
+    );
+}
+
+#[tokio::test]
+async fn terminal_cohort_retention_blocks_then_allows_group_reuse_with_new_id() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    b.push(
+        &shard(),
+        vec![cspec(10, "c1", 2), cspec(11, "c1", 2)],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, whole_cohort_compat()))
+        .await
+        .unwrap();
+    let first_id = claimed.cohort_id.clone().unwrap();
+    let target = CohortLeaseTarget {
+        cohort_id: first_id.clone(),
+        cohort_lease_token: claimed.cohort_lease_token.clone().unwrap(),
+    };
+    b.finalize_cohort(
+        &shard(),
+        target,
+        FinalizeKind::Complete,
+        None,
+        ts(120),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(
+            b.push(&shard(), vec![cspec(20, "c1", 2)], ts(130), None)
+                .await,
+            Err(pqueue_engine::EngineError::Conflict)
+        ),
+        "group_key reuse is blocked during terminal cohort retention"
+    );
+    b.push(
+        &shard(),
+        vec![cspec(20, "c1", 2), cspec(21, "c1", 2)],
+        ts(181),
+        None,
+    )
+    .await
+    .unwrap();
+    let second = b
+        .claim(claim_req_compat(10, 700, 182, whole_cohort_compat()))
+        .await
+        .unwrap();
+    let second_id = second.cohort_id.unwrap();
+    assert_ne!(first_id, second_id, "reused group gets a fresh cohort_id");
+    assert_eq!(second_id, CohortId::new("coh:c1:181000000000").unwrap());
 }
 
 /// F1 (fresh-eyes): a plain (non-cohort) push to a cohort's group_key does NOT strand the cohort — only
@@ -1343,6 +1529,39 @@ async fn blocked_gate_on_a_cohort_member_blocks_the_whole_cohort() {
             .len(),
         3,
         "clearing the gate restores the whole-cohort claim"
+    );
+}
+
+/// The reclaim tick expires incomplete cohorts through the durable `CohortExpired` command path.
+#[tokio::test]
+async fn reclaim_tick_expires_incomplete_cohort() {
+    let b = make();
+    b.create_queue(qdef_cohort()).await.unwrap();
+    b.push(&shard(), vec![cspec(10, "c1", 2)], ts(0), None)
+        .await
+        .unwrap();
+
+    let before = b.tick(ts(29)).await.unwrap();
+    assert!(
+        before.is_empty(),
+        "cohort is still inside its completion bound"
+    );
+
+    let expired = b.tick(ts(30)).await.unwrap();
+    assert_eq!(expired.cohorts_expired, 1);
+    let metrics = b.metrics(&qkey()).await.unwrap();
+    assert_eq!(
+        (metrics.pending, metrics.failed),
+        (0, 1),
+        "the incomplete member is terminal failed"
+    );
+    assert!(
+        b.claim(claim_req_compat(10, 500, 31, whole_cohort_compat()))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "expired cohorts do not become claimable"
     );
 }
 

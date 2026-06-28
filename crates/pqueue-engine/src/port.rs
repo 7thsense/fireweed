@@ -10,12 +10,12 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 
 use crate::claim_validation::ClaimCompatibility;
-use crate::command::{CommandEnvelope, CommandId, FinalizeOutcome};
+use crate::command::{CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome};
 use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
@@ -275,7 +275,13 @@ pub struct ClaimedItem {
 pub struct Claimed {
     pub items: Vec<ClaimedItem>,
     pub cohort_lease_token: Option<LeaseToken>,
-    pub cohort_id: Option<GroupKey>,
+    pub cohort_id: Option<CohortId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CohortLeaseTarget {
+    pub cohort_id: CohortId,
+    pub cohort_lease_token: LeaseToken,
 }
 
 /// A backend that leases candidates atomically with selection (TD-007 §2.2). The engine is the
@@ -394,6 +400,21 @@ pub trait RenewLeasePort: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 
+#[doc(hidden)]
+pub trait CohortRenewLeasePort: Send + Sync {
+    fn renew_cohort(
+        &self,
+        shard: &QueueKey,
+        target: CohortLeaseTarget,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let _ = (shard, target, new_lease_expires_at, now, expected_epoch);
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
 /// Transfer an in-flight lease to a NEW consumer (RESP cross-consumer `XCLAIM`): swap the lease token and
 /// charge exactly one delivery. Pre-validated identically to renew (`reassign_validate`): the items must
 /// be Leased + not fenced/superseded/terminal, else a structured rejection with NOTHING appended. The
@@ -444,6 +465,22 @@ pub trait FinalizePort: Send + Sync {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
+}
+
+#[doc(hidden)]
+pub trait CohortFinalizePort: Send + Sync {
+    fn finalize_cohort(
+        &self,
+        shard: &QueueKey,
+        target: CohortLeaseTarget,
+        kind: FinalizeKind,
+        not_before: Option<UtcTimestamp>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let _ = (shard, target, kind, not_before, now, expected_epoch);
+        std::future::ready(Err(EngineError::Unavailable))
+    }
 }
 
 /// In-place merge of a **live** item's hot-storage `fields`/`payload` — the write half of the

@@ -6,8 +6,8 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueueDefinition,
-    RequestId, UtcTimestamp,
+    ClientItemKey, CohortId, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, RequestId, UtcTimestamp,
 };
 
 use crate::QueueKey;
@@ -34,12 +34,15 @@ pub enum QueueCommand {
     CreateQueue(CreateQueueCommand),
     Push(PushCommand),
     Claim(ClaimCommand),
+    CohortClaim(CohortClaimCommand),
     RenewLease(RenewLeaseCommand),
+    CohortRenewLease(CohortRenewLeaseCommand),
     /// Transfer an in-flight lease to a new consumer (RESP cross-consumer `XCLAIM`): swap the lease token
     /// AND charge one delivery (it is a re-delivery to a different worker). Same-consumer `XCLAIM` is a
     /// no-charge [`RenewLeaseCommand`] instead.
     ReassignLease(ReassignLeaseCommand),
     Finalize(FinalizeCommand),
+    CohortFinalize(CohortFinalizeCommand),
     /// Pending-item replacement (RESP `XADD`-on-key upsert, Invariant 2). Atomic class only.
     ReplacePending(ReplacePendingCommand),
     /// In-place merge of a live (Pending or Leased) item's hot-storage `fields`/`payload` with no lifecycle
@@ -195,8 +198,22 @@ pub struct ClaimCommand {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CohortClaimCommand {
+    pub cohort_id: CohortId,
+    pub item_ids: Vec<ItemId>,
+    pub lease_token: LeaseToken,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RenewLeaseCommand {
     pub item_ids: Vec<ItemId>,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CohortRenewLeaseCommand {
+    pub cohort_id: CohortId,
     pub lease_expires_at: UtcTimestamp,
 }
 
@@ -211,6 +228,14 @@ pub struct ReassignLeaseCommand {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FinalizeCommand {
     pub outcomes: Vec<FinalizeOutcome>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CohortFinalizeCommand {
+    pub cohort_id: CohortId,
+    pub kind: FinalizeKind,
+    #[serde(default)]
+    pub not_before: Option<UtcTimestamp>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

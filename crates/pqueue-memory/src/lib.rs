@@ -162,9 +162,9 @@ impl ClaimPort for MemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
-            // BQ-14a: resolve the claim unit from the compatibility options. Item-level (the default) is
-            // unchanged; a group/cohort/same-group unit is refused with `Unavailable` until its selection
-            // lands (BQ-14b/c). The item-level hot path skips this entirely (byte-identical).
+            // Resolve the claim unit from the compatibility options. Item-level (the default) is unchanged;
+            // this backend refuses richer claim units with `Unavailable` rather than silently downgrading
+            // them to item-level delivery. The item-level hot path skips this entirely (byte-identical).
             if req.compatibility != ClaimCompatibility::default() {
                 let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
                 require_item_level_claim(&req.compatibility, req.max_items as u64, def)?;

@@ -40,10 +40,11 @@ pub use operator::{OperationHandle, OperationId, OperatorOperationState, Operato
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
 pub use command::{
-    ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
-    CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
-    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
+    ClaimCommand, CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand,
+    CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId, CreateQueueCommand,
+    FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand,
+    PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters,
+    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
     UnfenceLeaseCommand, UpdateFieldsCommand, build_push_items,
 };
 pub use error::{EngineError, EngineResult};
@@ -52,12 +53,13 @@ pub use finalize_validation::{
     validate_rearm,
 };
 pub use port::{
-    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
-    CreateQueueOutcome, DiscoveryPort, FinalizePort, IdGen, IndexHit, IndexQueryPort, ItemView,
-    LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CohortFinalizePort,
+    CohortLeaseTarget, CohortRenewLeasePort, CommandPage, ControlPlaneStore, CreateQueueOutcome,
+    DiscoveryPort, FinalizePort, IdGen, IndexHit, IndexQueryPort, ItemView, LeaseView,
+    LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
+    PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort,
 };
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
 

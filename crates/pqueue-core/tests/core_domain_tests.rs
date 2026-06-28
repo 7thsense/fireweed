@@ -20,6 +20,7 @@ fn valid_create_queue() -> CreateQueue {
         recurrence: RecurrencePolicy::default(),
         request_id_retention_ms: 3_600_000,
         client_item_key_retention_ms: 86_400_000,
+        terminal_retention_ms: 60_000,
         max_lease_duration_ms: 60_000,
         retry_policy: RetryPolicy { max_attempts: 5 },
         max_push_batch_size: 100,

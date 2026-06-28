@@ -90,6 +90,7 @@ identifier_type!(RequestId);
 identifier_type!(ClientItemKey);
 identifier_type!(LeaseToken);
 identifier_type!(GroupKey);
+identifier_type!(CohortId);
 identifier_type!(WorkerId);
 identifier_type!(OwnerId);
 
@@ -565,6 +566,7 @@ pub struct CreateQueue {
     pub recurrence: RecurrencePolicy,
     pub request_id_retention_ms: u64,
     pub client_item_key_retention_ms: u64,
+    pub terminal_retention_ms: u64,
     pub max_lease_duration_ms: u64,
     pub retry_policy: RetryPolicy,
     pub max_push_batch_size: u64,
@@ -586,6 +588,8 @@ pub struct QueueDefinition {
     pub recurrence: RecurrencePolicy,
     pub request_id_retention_ms: u64,
     pub client_item_key_retention_ms: u64,
+    #[serde(default = "default_terminal_retention_ms")]
+    pub terminal_retention_ms: u64,
     pub max_lease_duration_ms: u64,
     pub retry_policy: RetryPolicy,
     pub max_push_batch_size: u64,
@@ -595,6 +599,10 @@ pub struct QueueDefinition {
     /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
     #[serde(default)]
     pub secondary_indexes: Vec<IndexSpec>,
+}
+
+fn default_terminal_retention_ms() -> u64 {
+    60_000
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -623,6 +631,12 @@ impl CreateQueue {
         if self.client_item_key_retention_ms == 0 {
             return Err(CreateQueueError::invalid_request(
                 "client_item_key_retention_ms must be greater than 0",
+            ));
+        }
+
+        if self.terminal_retention_ms == 0 {
+            return Err(CreateQueueError::invalid_request(
+                "terminal_retention_ms must be greater than 0",
             ));
         }
 
@@ -826,6 +840,7 @@ impl CreateQueue {
             recurrence: self.recurrence,
             request_id_retention_ms: self.request_id_retention_ms,
             client_item_key_retention_ms: self.client_item_key_retention_ms,
+            terminal_retention_ms: self.terminal_retention_ms,
             max_lease_duration_ms: self.max_lease_duration_ms,
             retry_policy: self.retry_policy,
             max_push_batch_size: self.max_push_batch_size,

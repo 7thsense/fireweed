@@ -474,6 +474,16 @@ impl ProjectionData {
                 }
                 Ok(())
             }
+            QueueCommand::CohortClaim(c) => {
+                for id in &c.item_ids {
+                    self.transition(id, ItemEvent::Claim)?;
+                    let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
+                    rec.lease_token = Some(c.lease_token.clone());
+                    rec.lease_expires_at = Some(c.lease_expires_at);
+                    rec.attempt_count += 1;
+                }
+                Ok(())
+            }
             QueueCommand::RenewLease(c) => {
                 for id in &c.item_ids {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
@@ -493,6 +503,7 @@ impl ProjectionData {
                 }
                 Ok(())
             }
+            QueueCommand::CohortRenewLease(_) => Ok(()),
             QueueCommand::ReassignLease(c) => {
                 for id in &c.item_ids {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
@@ -609,6 +620,7 @@ impl ProjectionData {
                 }
                 Ok(())
             }
+            QueueCommand::CohortFinalize(_) => Ok(()),
             QueueCommand::ReplacePending(c) => {
                 // Supersede the old pending item; the old id thereafter reads as deleted/superseded.
                 let model = self.priority_model;
