@@ -66,8 +66,14 @@ use pqueue_engine::{
 use pqueue_projection::ProjectionData;
 
 mod control_plane;
+mod credential;
 mod relational;
 pub use control_plane::PostgresControlPlane;
+pub use credential::{
+    Credential, DatabricksAuth, DatabricksCliCommand, DatabricksCredentialConfig,
+    DatabricksCredentialProvider, RefreshingCredentialProvider, databricks_fetcher_with_runner,
+    parse_databricks_credential_response,
+};
 pub use relational::PostgresRelationalBackend;
 
 const SCHEMA: &str = r#"
