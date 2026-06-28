@@ -310,45 +310,15 @@ impl QueueControlPlane for PostgresControlPlane {
         let current = Self::lease_for_update(&mut tx, &t, &q)?;
         let outcome = lease_decide_acquire(&current, owner, now, self.config.lease_ttl_ms);
         if let AcquireOutcome::Acquired(ref acquired) = outcome {
+            // The control plane records ownership in its OWN authority table only (ADR-009 boundary): it
+            // never writes the storage backend's tables. The data-plane fence epoch is advanced separately
+            // and authoritatively by `ControlPlaneStore::acquire_epoch` on the paired storage backend (see
+            // `acquire_and_fence`), which `acquire_and_fence` calls right after this grant. The two counters
+            // advance in lock-step per acquire, so the session's lease epoch equals its fence epoch.
             upsert_lease(&mut tx, &t, &q, acquired)?;
-            // BQ-23: bind the storage append-fence epoch to the lease epoch in the SAME transaction, so the
-            // single durable epoch advances ATOMICALLY at acquire (closing the two-counter crash window).
-            // The fence-epoch column is the paired PostgresBackend's: `queues.assignment_epoch` for the
-            // log-replay backend, `relational_cursor.assignment_epoch` for the relational (postgres_native)
-            // backend. We bind whichever exists on this search_path (a deployment pairs the CP with exactly
-            // one); the control-plane-only test harness has neither, where this is a guarded no-op.
-            let e = acquired.assignment_epoch as i64;
-            // Bind the fence epoch in whichever paired-backend table carries it: `queues.assignment_epoch`
-            // (log-replay) or `relational_cursor.assignment_epoch` (relational/postgres_native). The
-            // relational backend ALSO has a `queues` table (queue defs) WITHOUT an assignment_epoch column,
-            // so we gate on the COLUMN existing (via pg_attribute on this search_path), not just the table.
-            // Table names are hardcoded literals (not user input) — safe to interpolate.
-            for table in ["queues", "relational_cursor"] {
-                let has_epoch_col: bool = st(tx.query_one(
-                    "SELECT EXISTS (SELECT 1 FROM pg_attribute a \
-                     WHERE a.attrelid = to_regclass($1) AND a.attname = 'assignment_epoch' \
-                     AND NOT a.attisdropped)",
-                    &[&table],
-                ))?
-                .get(0);
-                if has_epoch_col {
-                    st(tx.execute(
-                        &format!(
-                            "UPDATE {table} SET assignment_epoch = $3 WHERE tenant = $1 AND queue = $2"
-                        ),
-                        &[&t, &q, &e],
-                    ))?;
-                }
-            }
         }
         st(tx.commit())?;
         Ok(outcome)
-    }
-
-    fn binds_storage_epoch(&self) -> bool {
-        // BQ-23: the acquire transaction advances `queues.assignment_epoch` to the lease epoch atomically,
-        // so the lease epoch IS the storage fence epoch — no separate, non-atomic storage `acquire_epoch`.
-        true
     }
 
     fn renew_queue_lease(

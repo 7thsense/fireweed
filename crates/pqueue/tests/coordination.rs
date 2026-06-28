@@ -209,21 +209,3 @@ async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
     assert_eq!(a.metrics(&qkey()).await.unwrap().complete, 1, "in-flight finalize served during drain");
 }
 
-/// Runtime-refuse (ADR-009 D5 / N4a / OD-2): the durable multi-instance constructor REJECTS a control plane
-/// that does not present the atomic acquire->fence capability — the in-memory reference plane is
-/// single-process only, so passing an instance id with it is a misconfiguration, not a silent footgun.
-#[tokio::test]
-async fn durable_multi_instance_refuses_non_binding_control_plane() {
-    let backend = Arc::new(MemoryBackend::new());
-    let clock = Arc::new(ManualClock::at(0));
-    let cp: Arc<dyn QueueControlPlane> =
-        Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
-    // The in-memory control plane does not bind the storage epoch (binds_storage_epoch == false).
-    assert!(!cp.binds_storage_epoch());
-    let refused =
-        Pqueue::with_control_plane(backend, clock, OwnerId::new("inst-1").unwrap(), cp);
-    assert!(
-        matches!(refused, Err(EngineError::Invalid(_))),
-        "durable multi-instance must refuse a non-atomic-acquire control plane"
-    );
-}

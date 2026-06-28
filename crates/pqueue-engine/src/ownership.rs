@@ -90,18 +90,12 @@ where
     match control_plane.acquire_queue_lease(queue, owner, now)? {
         AcquireOutcome::Rejected(held) => Ok(OwnershipOutcome::Rejected(held)),
         AcquireOutcome::Acquired(lease) => {
-            // Durable fence BEFORE the owner serves. After this, any prior owner's cached `fence_epoch` is
-            // stale and its next append is `EpochFenced`.
-            let fence_epoch = if control_plane.binds_storage_epoch() {
-                // BQ-23: the acquire transaction ALREADY advanced the storage fence epoch to the lease epoch
-                // atomically (one durable value) — so the lease epoch IS the fence epoch, with no separate,
-                // non-transactional `acquire_epoch` and therefore no two-counter crash window.
-                lease.assignment_epoch
-            } else {
-                // Reference path (in-memory / sqlite, no transactional binding): advance the storage epoch as
-                // a second step. The two-counter crash HAZARD (module doc) lives here, not on a bound plane.
-                storage.acquire_epoch(queue).await?
-            };
+            // Durable fence BEFORE the owner serves: the STORAGE backend's `acquire_epoch` is the single
+            // authority for the append-fence epoch (ADR-009). The control plane records ownership in its own
+            // table; it never writes the storage's. The two counters advance one-per-acquire in lock-step,
+            // so `fence_epoch == lease_epoch` in practice — but only the storage value gates appends. After
+            // this, any prior owner's cached `fence_epoch` is stale and its next append is `EpochFenced`.
+            let fence_epoch = storage.acquire_epoch(queue).await?;
             Ok(OwnershipOutcome::Owned(OwnedSession {
                 owner: owner.clone(),
                 queue: queue.clone(),

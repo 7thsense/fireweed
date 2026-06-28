@@ -161,23 +161,19 @@ impl<B: LibBackend> Pqueue<B> {
     /// resolves ownership and operates under an acquired, epoch-fenced session, so a superseded instance is
     /// rejected `EpochFenced` at commit.
     ///
-    /// **Runtime-refuse (ADR-009 D5 / N4a / TD-003):** returns `EngineError::Invalid` for a control plane
-    /// that does NOT present the atomic acquire→fence capability ([`QueueControlPlane::binds_storage_epoch`])
-    /// — e.g. the in-memory reference plane — because cross-process competition is only safe on a binding
-    /// (postgres) control plane. (In-process coordination *logic* without that capability uses the
-    /// doc-hidden [`Pqueue::with_control_plane_in_process`].)
+    /// **Fencing model (ADR-009 / TD-003):** the append-fence epoch is owned authoritatively by the
+    /// *storage backend* (`acquire_epoch`), not the control plane — so cross-process competition is safe as
+    /// long as the control plane and the backend are both **shared** across the instances (e.g. a postgres
+    /// control plane paired with a postgres backend over one database). A non-shared (in-memory) control
+    /// plane only coordinates handles within one process; passing one here is admissible but does not give
+    /// cross-process competition. Returns `EngineResult` for signature stability — it does not currently
+    /// reject (the removed `binds_storage_epoch` capability gate is obsolete now that storage owns the fence).
     pub fn with_control_plane(
         backend: Arc<B>,
         clock: Arc<dyn Clock>,
         instance_id: OwnerId,
         control_plane: Arc<dyn QueueControlPlane>,
     ) -> EngineResult<Self> {
-        if !control_plane.binds_storage_epoch() {
-            return Err(EngineError::Invalid(
-                "durable multi-instance requires an atomic acquire->fence control plane (e.g. postgres); \
-                 the in-memory reference control plane is single-process only",
-            ));
-        }
         Ok(Self::with_control_plane_in_process(
             backend,
             clock,
