@@ -507,8 +507,8 @@ pub trait ReclaimPort: Send + Sync {
 ///
 /// PAUSE: discovery reports INTRINSIC eligibility and does not short-circuit on a paused queue (it shows
 /// pause-induced buildup, mirroring the pause-agnostic summary) — a deliberate divergence from the claim
-/// path. KNOWN LIMITATION (tracked pqueue-64351bdd): the summary's `oldest_eligible_at` lags a pure
-/// `not_before` crossing, so discovery can under-report time-triggered starvation until the next mutation.
+/// path. KNOWN LIMITATION: read-only discovery cannot refresh groups made eligible by pure time passage, so
+/// it can under-report time-triggered starvation until a mutation or background due-sweep refreshes them.
 ///
 /// RELATIONAL-ONLY: the in-memory log-replay family maintains no per-group summary, so it does not
 /// implement this port (a relational-class feature, kept out of the shared core suite — parity preserved).

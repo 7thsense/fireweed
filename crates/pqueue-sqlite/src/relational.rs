@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS pqueue_items_active_key
     ON pqueue_items (tenant_id, queue_id, client_item_key) WHERE superseded = 0;
+CREATE INDEX IF NOT EXISTS pqueue_items_group_due_idx
+    ON pqueue_items (tenant_id, queue_id, lifecycle_state, group_key, not_before, priority_sort, created_seq)
+    WHERE group_key IS NOT NULL AND superseded = 0;
 CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     next_seq INTEGER NOT NULL,        -- command-position sequence (last_command_sequence source)
@@ -552,6 +555,7 @@ impl Inner {
 /// Max rows per dynamically-built multi-row / `IN (...)` statement. Each `pqueue_items` row binds 17
 /// params; 256 rows ≈ 4.4k params, well under sqlite's 32766 bound-variable ceiling (bundled SQLite).
 const SQLITE_BATCH: usize = 256;
+const GROUP_DUE_REFRESH_LIMIT: i64 = 128;
 
 fn opt_text(v: Option<String>) -> Value {
     v.map_or(Value::Null, Value::Text)
@@ -798,15 +802,15 @@ fn groups_of(
 /// Recompute `pqueue_group_summary` for one group from `pqueue_items` (exact aggregate over the group's
 /// currently-eligible items, in the SAME transaction as the mutation that touched it). The representative
 /// is the would-be-first-claimed eligible item (strict-claim key `priority_sort, created_seq`), matching
-/// the claim selection; `rep_progress_guard_sort`/`at_risk_count` stay NULL/0 while the progress-guard
-/// derivation is deferred (parity with the strict claim ordering, BQ-14).
+/// the claim selection, including live gate state; `rep_progress_guard_sort`/`at_risk_count` stay NULL/0
+/// while the progress-guard derivation is deferred (parity with the strict claim ordering, BQ-14).
 ///
 /// EXACT AT MUTATION TIME, lagged across a time-only `not_before` crossing: the aggregate filters
 /// `not_before<=now`, so a deferred item that becomes due WITHOUT a subsequent mutation is not reflected
 /// in `oldest_eligible_at`/`rep_*`/`eligible_item_count` until the next mutation refreshes its group. The
 /// per-item `select_eligible` path re-evaluates `not_before` on read and is unaffected. BQ-14 g1/g4
-/// consumers MUST re-apply the `not_before` gate on read (or a due-sweep must refresh) rather than trust
-/// the stored value as live across time alone.
+/// consumers refresh due groups before mutation-backed group claims; read-only discovery still cannot
+/// mutate and therefore may under-report until a due sweep or later mutation refreshes the group.
 fn refresh_group_summary(
     tx: &Transaction<'_>,
     shard: &QueueKey,
@@ -819,7 +823,11 @@ fn refresh_group_summary(
     let (count, oldest): (i64, Option<i64>) = st(tx.query_row(
         "SELECT COUNT(*), MIN(eligible_since) FROM pqueue_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-         AND lifecycle_state='Pending' AND superseded=0 AND (not_before IS NULL OR not_before<=?4)",
+         AND lifecycle_state='Pending' AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+             AND ig.item_id=pqueue_items.item_id)",
         params![t, q, group_key.as_str(), now_n],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ))?;
@@ -829,6 +837,10 @@ fn refresh_group_summary(
             "SELECT priority_sort, created_at, item_id FROM pqueue_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
              AND lifecycle_state='Pending' AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                 ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+                 WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+                 AND ig.item_id=pqueue_items.item_id) \
              ORDER BY priority_sort, created_seq LIMIT 1",
             params![t, q, group_key.as_str(), now_n],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -1497,11 +1509,8 @@ fn select_eligible_sql(
 /// Candidate groups for the queue, ordered by each group's representative claim key (TD-002 g1:
 /// `rep_progress_guard_sort` NULL today → `rep_priority_sort, rep_created_at, rep_item_id`). Only groups
 /// with a current representative (`oldest_eligible_at IS NOT NULL`) are candidates; the live eligibility is
-/// re-read per group at claim time (the summary is the ordering hint; the items are the authority).
-/// KNOWN LIMITATION (tracked, pqueue-64351bdd): `oldest_eligible_at` is the BQ-11c mutation-time value
-/// (lagged across a `not_before` crossing), so a group made eligible ONLY by time passing — with no
-/// subsequent mutation — is not discovered by a group claim until its next mutation. Item-level claims read
-/// `pqueue_items` live and are unaffected.
+/// re-read per group at claim time (the summary is the ordering hint; the items are the authority). Before
+/// group-aware claims call this, they refresh a bounded set of groups that became due by time alone.
 fn candidate_groups(conn: &Connection, shard: &QueueKey) -> EngineResult<Vec<GroupKey>> {
     let (t, q) = parts(shard);
     let mut stmt = st(conn.prepare(
@@ -1515,6 +1524,46 @@ fn candidate_groups(conn: &Connection, shard: &QueueKey) -> EngineResult<Vec<Gro
         out.push(GroupKey::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
     }
     Ok(out)
+}
+
+/// Refresh a bounded set of groups that became eligible by time alone (`not_before <= now`) since their
+/// last mutation-time summary refresh. Runs only inside mutating group-aware claims; discovery stays
+/// read-only and may still under-report until a mutation/tick refreshes the row.
+fn refresh_due_group_summaries(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let mut stmt = st(tx.prepare(
+        "SELECT DISTINCT i.group_key \
+         FROM pqueue_items i \
+         LEFT JOIN pqueue_group_summary gs \
+           ON gs.tenant_id=i.tenant_id AND gs.queue_id=i.queue_id AND gs.group_key=i.group_key \
+         WHERE i.tenant_id=?1 AND i.queue_id=?2 \
+           AND i.lifecycle_state='Pending' AND i.superseded=0 AND i.group_key IS NOT NULL \
+           AND i.eligible_since IS NOT NULL AND (i.not_before IS NULL OR i.not_before<=?3) \
+           AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gstate \
+             ON gstate.tenant_id=ig.tenant_id AND gstate.queue_id=ig.queue_id AND gstate.gate_key=ig.gate_key \
+             WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+           AND (gs.group_key IS NULL OR gs.oldest_eligible_at IS NULL OR gs.rep_item_id IS NULL) \
+         ORDER BY i.group_key LIMIT ?4",
+    ))?;
+    let mapped = st(
+        stmt.query_map(params![t, q, now_n, GROUP_DUE_REFRESH_LIMIT], |row| {
+            row.get::<_, String>(0)
+        }),
+    )?;
+    let mut groups = Vec::new();
+    for r in mapped {
+        groups.push(GroupKey::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    drop(stmt);
+    for group in groups {
+        refresh_group_summary(tx, shard, &group, now)?;
+    }
+    Ok(())
 }
 
 /// The live currently-eligible items of one group (pending, not superseded, due at `now`), in claim order,
@@ -1747,11 +1796,9 @@ fn peek_sql(conn: &Connection, shard: &QueueKey, limit: usize) -> EngineResult<V
 /// is pause-agnostic, so discovery mirrors it. (A read of a queue that does not exist yields an empty list,
 /// not `NotFound` — a discovery read of an unknown queue simply has no active scopes.)
 ///
-/// KNOWN LIMITATION (shared with the group-claim path, tracked pqueue-64351bdd): `oldest_eligible_at` is
-/// the BQ-11c mutation-time value (lagged across a pure `not_before` crossing). A group made eligible ONLY
-/// by time passing — with no subsequent mutation — keeps `oldest_eligible_at = NULL` and is NOT discovered
-/// until its next mutation or a due-sweep refresh. So discovery can UNDER-report time-triggered starvation;
-/// it never over-reports (an item present in the summary as eligible truly was at its last mutation).
+/// KNOWN LIMITATION: read-only discovery does not run the mutating due-refresh used by group-aware claims.
+/// A group made eligible ONLY by time passing can keep `oldest_eligible_at = NULL` until its next mutation
+/// or a background due-sweep refresh, so discovery can UNDER-report time-triggered starvation.
 fn discover_active_scopes_sql(
     conn: &Connection,
     shard: &QueueKey,
@@ -2646,6 +2693,9 @@ impl ClaimPort for SqliteRelationalBackend {
             if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
                 return Err(EngineError::EpochFenced);
             }
+            if matches!(unit, ClaimUnit::WholeGroup | ClaimUnit::SameGroupKey) {
+                refresh_due_group_summaries(&tx, &req.shard, req.now)?;
+            }
             // Candidate selection inside the claim transaction (serialized under the backend Mutex). The
             // item-level path is the strict-claim order; the group/cohort paths consume their projections.
             let candidates = match unit {
@@ -3147,10 +3197,10 @@ mod group_summary_tests {
     //! (it has no read port yet; BQ-14 consumes it), driving state through the public ports.
     use super::*;
     use pqueue_core::{
-        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModelKind, PriorityTieBreaker,
-        QueueId, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
+        EligibilityPolicy, GateKeyPolicy, OrderingMode, PriorityDirection, PriorityModelKind,
+        PriorityTieBreaker, QueueId, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
     };
-    use pqueue_engine::{ClaimRequest, CommandChecksum, CommandId};
+    use pqueue_engine::{ClaimRequest, CommandChecksum, CommandId, GroupBatching, SetGatesCommand};
 
     fn qdef() -> QueueDefinition {
         QueueDefinition {
@@ -3176,6 +3226,17 @@ mod group_summary_tests {
             secondary_indexes: vec![],
         }
     }
+    fn qdef_gates() -> QueueDefinition {
+        QueueDefinition {
+            eligibility_policy: EligibilityPolicy {
+                gate_keys: GateKeyPolicy::Dynamic,
+                max_gate_keys_per_item: Some(8),
+                max_gates_per_request: Some(8),
+                ..EligibilityPolicy::default()
+            },
+            ..qdef()
+        }
+    }
 
     fn shard() -> QueueKey {
         QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -3190,6 +3251,23 @@ mod group_summary_tests {
             ..Default::default()
         }
     }
+    fn grouped_not_before(priority: i64, group: &str, not_before: i64) -> PushSpec {
+        PushSpec {
+            not_before: Some(ts(not_before)),
+            ..grouped(priority, group)
+        }
+    }
+    fn gated_grouped_not_before(
+        priority: i64,
+        group: &str,
+        not_before: i64,
+        gate: &str,
+    ) -> PushSpec {
+        PushSpec {
+            gate_keys: vec![gate.to_string()],
+            ..grouped_not_before(priority, group, not_before)
+        }
+    }
     fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
         ClaimRequest {
             shard: shard(),
@@ -3201,6 +3279,39 @@ mod group_summary_tests {
             compatibility: ClaimCompatibility::default(),
             expected_epoch: None,
         }
+    }
+    fn claim_req_compat(
+        max: usize,
+        exp: i64,
+        now: i64,
+        compatibility: ClaimCompatibility,
+    ) -> ClaimRequest {
+        ClaimRequest {
+            compatibility,
+            ..claim_req(max, exp, now)
+        }
+    }
+
+    async fn set_gate(b: &SqliteRelationalBackend, gate_key: &str, blocked: bool, now: i64) {
+        let env = CommandEnvelope {
+            command_id: CommandId::new(format!("gate-{gate_key}-{blocked}")),
+            request_id: None,
+            item_ids: vec![],
+            command: QueueCommand::SetGates(SetGatesCommand {
+                gate_keys: vec![gate_key.to_string()],
+                blocked,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: ts(now),
+        };
+        let epoch = b.current_epoch(&shard()).await.unwrap();
+        b.write(move |lw, pw| {
+            let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
+            pw.apply(&pos, std::slice::from_ref(&env))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     /// (oldest_eligible_at, eligible_item_count, rep_item_id) for the group, or None if no row exists.
@@ -3299,6 +3410,158 @@ mod group_summary_tests {
 
         assert_ne!(second, first);
         assert_eq!(next_seq(&b), 2);
+    }
+
+    #[tokio::test]
+    async fn same_group_claim_discovers_group_that_becomes_due_by_time() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let ids = b
+            .push(
+                &shard(),
+                vec![grouped_not_before(10, "deferred", 10)],
+                ts(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let early = b
+            .claim(claim_req_compat(
+                10,
+                500,
+                9,
+                ClaimCompatibility {
+                    same_group_key: true,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(early.items.is_empty(), "not_before is half-open before due");
+
+        let due = b
+            .claim(claim_req_compat(
+                10,
+                500,
+                10,
+                ClaimCompatibility {
+                    same_group_key: true,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            due.items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids,
+            "same_group_key sees the group exactly at not_before with no intervening mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_batching_discovers_group_that_becomes_due_by_time() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(5),
+            ..qdef()
+        })
+        .await
+        .unwrap();
+        let ids = b
+            .push(
+                &shard(),
+                vec![
+                    grouped_not_before(10, "deferred", 10),
+                    grouped_not_before(11, "deferred", 10),
+                ],
+                ts(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let claimed = b
+            .claim(claim_req_compat(
+                10,
+                500,
+                10,
+                ClaimCompatibility {
+                    group_batching: Some(GroupBatching { max_groups: 1 }),
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            claimed
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids,
+            "group_batching refreshes and leases the whole due group"
+        );
+    }
+
+    #[tokio::test]
+    async fn due_refresh_keeps_gate_blocked_groups_unclaimable() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef_gates()).await.unwrap();
+        let ids = b
+            .push(
+                &shard(),
+                vec![gated_grouped_not_before(10, "deferred", 10, "hold")],
+                ts(0),
+                None,
+            )
+            .await
+            .unwrap();
+        set_gate(&b, "hold", true, 1).await;
+
+        let blocked = b
+            .claim(claim_req_compat(
+                10,
+                500,
+                10,
+                ClaimCompatibility {
+                    same_group_key: true,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(
+            blocked.items.is_empty(),
+            "due refresh must not make a gate-blocked group claimable"
+        );
+
+        set_gate(&b, "hold", false, 11).await;
+        let unblocked = b
+            .claim(claim_req_compat(
+                10,
+                500,
+                12,
+                ClaimCompatibility {
+                    same_group_key: true,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            unblocked
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids,
+            "clearing the gate lets the due group refresh and claim"
+        );
     }
 
     #[tokio::test]
