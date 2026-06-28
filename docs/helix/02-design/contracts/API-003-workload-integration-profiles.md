@@ -6,12 +6,12 @@ ddx:
     - api-native-client-interface
     - api-operator-repair-contract
   review:
-    self_hash: ffe476dda307011c7d0974a14df3309b4c42402af183af001e76e2cab0a2a611
+    self_hash: 3f166d11c53bb55286a458b8c48cba7252deb79c39788d06186e8123e54797e0
     deps:
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      api-native-client-interface: 948b2d97220a65b5b985d83dd73b511c25fa3c793fec1903344cc88487af076c
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-    reviewed_at: "2026-06-25T04:21:18Z"
+    reviewed_at: "2026-06-28T16:41:59Z"
 ---
 
 # Contract
@@ -116,7 +116,7 @@ The adapter SHOULD create one queue per logical delivery stream with:
 The example nouns above (*sender*, *provider*, *domain*) are illustrative
 caller-owned keys, not pqueue concepts.
 
-### Producer Obligations
+### Producer obligations
 
 The producing side (the scheduler/ingest) MUST:
 
@@ -134,7 +134,7 @@ The producing side (the scheduler/ingest) MUST:
 5. Reschedule still-pending work with `BatchUpdate` (priority / `not_before` /
    metadata) rather than re-pushing; `BatchUpdate` applies to pending items only.
 
-### Worker Obligations
+### Worker obligations
 
 The claiming side (the delivery workers) MUST:
 
@@ -196,45 +196,44 @@ This contract does not change any API-002 behavior; it only points to it.
 
 ## Profile: Embedded Engine Integration
 
-This profile covers **embedded mode** (ADR-006): a host application links
-`pqueue-core` + `pqueue-storage` in-process and drives the engine directly,
-rather than calling the API-001 client operations over HTTP/SDK. It is the mode a
-same-process delivery host uses for in-process latency and control. The surface
-it binds (`pqueue-core`; `pqueue-storage::{traits, commands, types}`) is the
-public, versioned embedding contract declared in ADR-006.
+This profile covers **embedded mode** (ADR-006): a host application links the
+top-level `pqueue` crate in-process and drives the public facade directly,
+rather than calling a remote API binding. It is the mode a same-process delivery
+host uses for in-process latency and control. The facade types re-exported by
+`pqueue` are the public, versioned embedding contract declared in ADR-006; raw
+storage ports and backend internals remain outside the application interface.
 
 ### Backend selection (durability is mandatory)
 
-The embedder constructs a backend and MUST use a **durable** one in production —
-`postgres_native`, `object_log_sqlite_projection`, or standalone `sqlite`
-(ADR-006). The in-memory backend (`pqueue_storage::memory`) is dev/test only: it
-has no durable ack boundary and loses all enqueued/leased/finalized state on
-restart. An embedded host MUST NOT back production delivery work with it.
+The embedder constructs a facade with a backend constructor such as
+`open_sqlite`, `open_postgres`, or `open_memory` and MUST use a **durable**
+backend in production — standalone `sqlite`, `postgres_native`, or another
+documented durable backend profile (ADR-006). The in-memory backend is dev/test
+only: it has no durable ack boundary and loses all enqueued/leased/finalized
+state on restart. An embedded host MUST NOT back production delivery work with
+it.
 
 ### Driving the engine
 
-The embedder maps each workload action onto a native `QueueCommand` and drives
-the same log → projection → claim loop the service would:
+The embedder maps each workload action onto the public facade operations:
 
-1. **Create queue** via `ControlPlaneStore::create_queue` with a validated
+1. **Create queue** via `Pqueue::create_queue` with a validated
    `QueueDefinition` (queue-creation recommendations from the Scheduled Batch
    Delivery profile apply unchanged).
-2. **Enqueue / update / finalize**: build the matching `QueueCommand`
-   (`BatchPush` / `BatchUpdate` / `BatchFinalize`, etc.) in a `CommandEnvelope`,
-   `LogStore::append_batch` it to obtain a durable `CommandPosition`, then
-   `ProjectionStore::apply_committed` that committed page. Append is the durable
-   ack boundary; an embedder MUST treat work acknowledged only after
-   `append_batch` returns on a durable backend.
-3. **Claim** via `ProjectionStore::batch_claim` (`ClaimRequest`), which applies
-   the single Eligibility Precedence and returns the claimed-item set (API-001
-   "Claimed Item Response Shape").
+2. **Enqueue / update / finalize** through the matching facade operation
+   (`upsert` / batch push, `update_fields`, `ack` / `nack` / `fail` / `rearm`,
+   etc.). The facade/backend commit is the durable ack boundary; an embedder MUST
+   treat work as acknowledged only after the durable facade operation returns.
+3. **Claim** via `Pqueue::claim`, which applies the single Eligibility
+   Precedence and returns the claimed-item set (API-001 "Claimed Item Response
+   Shape").
 
 Producer/worker obligations, the **finalize-outcome mapping** (the five outcomes
 only), the **dynamic-gate** usage, and the **downstream-rate non-goal** are
 identical to the Scheduled Batch Delivery profile above — this profile changes
-only *where the boundary is bound* (storage traits in-process vs API-001
-operations), not the semantics. The embedder MUST NOT reinterpret command or
-finalize semantics; it constructs native commands and lets the engine apply them.
+only *where the boundary is bound* (the in-process `pqueue` facade vs another
+API-001 binding), not the semantics. The embedder MUST NOT reinterpret finalize
+semantics; it calls native facade operations and lets the engine apply them.
 
 ### Conformance
 
