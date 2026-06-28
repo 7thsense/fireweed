@@ -151,7 +151,9 @@ async fn finalize(b: &PostgresRelationalBackend, shard: &QueueKey, ids: &[ItemId
         .iter()
         .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
         .collect();
-    b.finalize(shard, outcomes, ts(2), None).await.expect("finalize");
+    b.finalize(shard, outcomes, ts(2), None)
+        .await
+        .expect("finalize");
 }
 
 fn pct(latencies_ms: &mut [f64], p: f64) -> f64 {

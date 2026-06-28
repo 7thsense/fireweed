@@ -73,7 +73,10 @@ async fn coordinated_owner_acquires_and_operates() {
 
     // The control plane records this instance as the live active owner at a granted (>= 1) epoch.
     let res = cp.resolve_queue_owner(&qkey(), clock.now()).unwrap();
-    assert_eq!(res.active_owner.as_ref().map(|o| o.as_str()), Some("owner-A"));
+    assert_eq!(
+        res.active_owner.as_ref().map(|o| o.as_str()),
+        Some("owner-A")
+    );
     assert!(res.assignment_epoch.unwrap_or(0) >= 1);
 }
 
@@ -106,7 +109,10 @@ async fn superseded_owner_is_fenced_on_data_path() {
 
     // While A holds a LIVE lease, B cannot take the queue (single active lease) — owned elsewhere.
     assert!(
-        matches!(b.push(&qkey(), item(6)).await, Err(EngineError::Forbidden(_))),
+        matches!(
+            b.push(&qkey(), item(6)).await,
+            Err(EngineError::Forbidden(_))
+        ),
         "a peer cannot operate on a queue a live owner holds"
     );
 
@@ -118,7 +124,10 @@ async fn superseded_owner_is_fenced_on_data_path() {
     // A still holds its cached session (e1); its next op stamps the stale epoch and is fenced at commit,
     // regardless of the fact that A never re-resolved.
     assert!(
-        matches!(a.push(&qkey(), item(8)).await, Err(EngineError::EpochFenced)),
+        matches!(
+            a.push(&qkey(), item(8)).await,
+            Err(EngineError::EpochFenced)
+        ),
         "a superseded owner must self-fence on the data path"
     );
     // The fence dropped A's stale session; A's NEXT op re-resolves and discovers the queue is owned
@@ -200,12 +209,18 @@ async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
 
     // A now REFUSES a new claim with a retryable Unavailable...
     assert!(
-        matches!(a.claim(&qkey(), 10, 1_000).await, Err(EngineError::Unavailable)),
+        matches!(
+            a.claim(&qkey(), 10, 1_000).await,
+            Err(EngineError::Unavailable)
+        ),
         "a draining owner refuses a new claim"
     );
     // ...but still serves in-flight work: finalizing the already-leased item, and pushes, continue.
     a.ack(&qkey(), [leased]).await.unwrap();
     a.push(&qkey(), item(6)).await.unwrap();
-    assert_eq!(a.metrics(&qkey()).await.unwrap().complete, 1, "in-flight finalize served during drain");
+    assert_eq!(
+        a.metrics(&qkey()).await.unwrap().complete,
+        1,
+        "in-flight finalize served during drain"
+    );
 }
-

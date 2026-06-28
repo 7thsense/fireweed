@@ -209,9 +209,7 @@ async fn downstream_pacing_non_goal_e2e() {
             next_priority += 1;
         }
         max_batch_seen = max_batch_seen.max(got.len());
-        pq.ack(&q, got.iter().map(|c| c.item_id))
-            .await
-            .unwrap();
+        pq.ack(&q, got.iter().map(|c| c.item_id)).await.unwrap();
         claimed_total += got.len() as u64;
         remaining -= got.len() as i64;
         batches += 1;
@@ -219,9 +217,7 @@ async fn downstream_pacing_non_goal_e2e() {
     // Drain whatever remains so we can prove the totals.
     while pq.metrics(&q).await.unwrap().pending > 0 {
         let got = pq.claim(&q, 100, 3_600_000).await.unwrap();
-        pq.ack(&q, got.iter().map(|c| c.item_id))
-            .await
-            .unwrap();
+        pq.ack(&q, got.iter().map(|c| c.item_id)).await.unwrap();
         claimed_total += got.len() as u64;
         batches += 1;
     }
@@ -297,9 +293,7 @@ async fn drain_priorities(pq: &Pqueue<MemoryBackend>, q: &QueueKey, batch: usize
             );
             order.push(pri);
         }
-        pq.ack(q, got.iter().map(|c| c.item_id))
-            .await
-            .unwrap();
+        pq.ack(q, got.iter().map(|c| c.item_id)).await.unwrap();
     }
     order
 }
@@ -509,9 +503,7 @@ async fn scheduled_action_delivery_e2e() {
         "exactly the one due action is deliverable at t=15"
     );
     record(&batch, &mut delivered_order, &mut delivered_ids);
-    pq.ack(&q, batch.iter().map(|c| c.item_id))
-        .await
-        .unwrap();
+    pq.ack(&q, batch.iter().map(|c| c.item_id)).await.unwrap();
 
     // clock=100 → the remaining actions (20, 30) are eligible; delivered in ascending schedule order.
     clock.set(100);
@@ -539,9 +531,7 @@ async fn scheduled_action_delivery_e2e() {
         2,
         "renew preserves the lease (items still leased, claimable for finalize)"
     );
-    pq.ack(&q, batch.iter().map(|c| c.item_id))
-        .await
-        .unwrap();
+    pq.ack(&q, batch.iter().map(|c| c.item_id)).await.unwrap();
 
     // Schedule order == timestamp order (INV: ordering), and each action delivered exactly once (INV-1).
     assert_eq!(
@@ -759,9 +749,13 @@ async fn jobs_connectors_recurring_e2e() {
     for _ in 0..2 {
         let got = pq.claim(&retry_q, 1, 60_000).await.unwrap();
         assert_eq!(got.len(), 1);
-        pq.nack(&retry_q, got.iter().map(|c| c.item_id), Nack::Retry { not_before: None })
-            .await
-            .unwrap();
+        pq.nack(
+            &retry_q,
+            got.iter().map(|c| c.item_id),
+            Nack::Retry { not_before: None },
+        )
+        .await
+        .unwrap();
     }
     let retry_terminal = pq.metrics(&retry_q).await.unwrap();
     assert_eq!(
@@ -899,13 +893,9 @@ async fn marketo_group_batching_e2e() {
         10,
         "item-level claim works on a group-batching queue"
     );
-    pq.nack(
-        &q,
-        item_claim.iter().map(|c| c.item_id),
-        Nack::Release,
-    )
-    .await
-    .unwrap();
+    pq.nack(&q, item_claim.iter().map(|c| c.item_id), Nack::Release)
+        .await
+        .unwrap();
 
     // --- group-batching claim-compatibility CONTRACT (implemented validation; each error is distinct) ---
     let whole_group = |max_groups: u32| ClaimCompatibility {
@@ -1269,13 +1259,9 @@ async fn noisy_neighbor_scale_e2e() {
             .all(|c| c.payload.as_deref() == Some(b"small".as_ref())),
         "the small queue delivers only its own items (no hot/active leakage)"
     );
-    pq.nack(
-        &small,
-        from_small.iter().map(|c| c.item_id),
-        Nack::Release,
-    )
-    .await
-    .unwrap();
+    pq.nack(&small, from_small.iter().map(|c| c.item_id), Nack::Release)
+        .await
+        .unwrap();
     let from_hot = pq.claim(&hot, 10, 60_000).await.unwrap();
     assert_eq!(
         from_hot.len(),
@@ -1288,13 +1274,9 @@ async fn noisy_neighbor_scale_e2e() {
             .all(|c| c.payload.as_deref() == Some(b"hot".as_ref())),
         "the hot queue delivers only its own items"
     );
-    pq.nack(
-        &hot,
-        from_hot.iter().map(|c| c.item_id),
-        Nack::Release,
-    )
-    .await
-    .unwrap();
+    pq.nack(&hot, from_hot.iter().map(|c| c.item_id), Nack::Release)
+        .await
+        .unwrap();
 
     // K queues independently claimable: each returns only its own marker.
     for i in 0..k {
@@ -1328,9 +1310,7 @@ async fn noisy_neighbor_scale_e2e() {
             break;
         }
         drained += got.len() as u64;
-        pq.ack(&small, got.iter().map(|c| c.item_id))
-            .await
-            .unwrap();
+        pq.ack(&small, got.iter().map(|c| c.item_id)).await.unwrap();
     }
     let small_rate = drained as f64 / t.elapsed().as_secs_f64();
     assert_eq!(
@@ -1422,9 +1402,7 @@ async fn worker_crash_recovery_e2e() {
         pq.push_batch(&q, items).await.unwrap();
         // Ack `acked` (acknowledged commands), leave `leased` leased, the rest pending.
         let to_ack = pq.claim(&q, acked as usize, 3_600_000).await.unwrap();
-        pq.ack(&q, to_ack.iter().map(|c| c.item_id))
-            .await
-            .unwrap();
+        pq.ack(&q, to_ack.iter().map(|c| c.item_id)).await.unwrap();
         let _still_leased = pq.claim(&q, leased as usize, 3_600_000).await.unwrap(); // left leased
         let m = pq.metrics(&q).await.unwrap();
         assert_eq!(m.complete, acked, "acked items complete before crash");

@@ -89,9 +89,7 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     assert_eq!((m.pending, m.leased), (1, 2));
 
     // ack them → complete.
-    pq.ack(&q, claimed.iter().map(|c| c.item_id))
-        .await
-        .unwrap();
+    pq.ack(&q, claimed.iter().map(|c| c.item_id)).await.unwrap();
     let m = pq.metrics(&q).await.unwrap();
     assert_eq!((m.complete, m.leased), (2, 0));
 
@@ -99,9 +97,13 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     let last = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(last.len(), 1);
     assert_eq!(last[0].attempt_count, 1);
-    pq.nack(&q, last.iter().map(|c| c.item_id), Nack::Retry { not_before: None })
-        .await
-        .unwrap();
+    pq.nack(
+        &q,
+        last.iter().map(|c| c.item_id),
+        Nack::Retry { not_before: None },
+    )
+    .await
+    .unwrap();
     let again = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(again.len(), 1, "retried item is claimable again");
     assert!(again[0].attempt_count > 1, "redelivery bumps attempt_count");
@@ -358,7 +360,13 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
         ("c".to_string(), Some(Bytes::from_static(b"3"))), // add
     ]);
     let v = pq
-        .update_fields(&q, id, ops, PayloadUpdate::Set(Some(Bytes::from_static(b"p1"))), None)
+        .update_fields(
+            &q,
+            id,
+            ops,
+            PayloadUpdate::Set(Some(Bytes::from_static(b"p1"))),
+            None,
+        )
         .await
         .unwrap();
     assert!(v >= 2, "item_version bumped past the genesis 1");
@@ -383,7 +391,10 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
         .await;
     assert!(matches!(stale, Err(EngineError::Conflict)));
     let live2 = pq.live_item(&q, key).await.unwrap().expect("live");
-    assert_eq!(live2.item_version, v, "rejected CAS left the item unchanged");
+    assert_eq!(
+        live2.item_version, v,
+        "rejected CAS left the item unchanged"
+    );
     assert_eq!(live2.fields.get("a").map(|b| b.as_ref()), Some(&b"9"[..]));
 }
 

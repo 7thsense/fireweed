@@ -47,7 +47,11 @@ impl Clock for ManualClock {
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 fn fresh_schema() -> String {
-    format!("b5_{}_{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst))
+    format!(
+        "b5_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    )
 }
 
 #[test]
@@ -88,11 +92,18 @@ fn two_instances_compete_over_shared_postgres() {
 
     // A acquires the queue (epoch 1 — BQ-23 binds the storage fence epoch atomically) and operates.
     bo(a.push(&qk(), NewItem::default())).unwrap();
-    assert_eq!(bo(a.metrics(&qk())).unwrap().pending, 1, "A's own write is visible to A");
+    assert_eq!(
+        bo(a.metrics(&qk())).unwrap().pending,
+        1,
+        "A's own write is visible to A"
+    );
 
     // While A holds a live lease, B cannot operate on the queue — owned elsewhere.
     assert!(
-        matches!(bo(b.push(&qk(), NewItem::default())), Err(EngineError::Forbidden(_))),
+        matches!(
+            bo(b.push(&qk(), NewItem::default())),
+            Err(EngineError::Forbidden(_))
+        ),
         "a peer cannot operate on a queue a live owner holds"
     );
     assert!(
@@ -108,12 +119,18 @@ fn two_instances_compete_over_shared_postgres() {
     // A is superseded. Its NEXT op stamps its cached (stale) epoch and is EpochFenced AT COMMIT, durably,
     // over the shared postgres store — the full B1+B2+B4 fence, across connections (not an in-process check).
     assert!(
-        matches!(bo(a.push(&qk(), NewItem::default())), Err(EngineError::EpochFenced)),
+        matches!(
+            bo(a.push(&qk(), NewItem::default())),
+            Err(EngineError::EpochFenced)
+        ),
         "a superseded instance must be durably fenced over the shared postgres store"
     );
     // The fence dropped A's stale session; A re-resolves and sees the queue is owned elsewhere.
     assert!(
-        matches!(bo(a.push(&qk(), NewItem::default())), Err(EngineError::Forbidden(_))),
+        matches!(
+            bo(a.push(&qk(), NewItem::default())),
+            Err(EngineError::Forbidden(_))
+        ),
         "a fenced instance re-resolves to owned-elsewhere"
     );
     // B, the current owner, keeps operating.
@@ -164,18 +181,28 @@ fn relational_multi_instance_has_item_visibility_and_fence() {
     );
 
     // While A's lease is live, B is owned-elsewhere.
-    assert!(matches!(bo(b.push(&qk(), NewItem::default())), Err(EngineError::Forbidden(_))));
+    assert!(matches!(
+        bo(b.push(&qk(), NewItem::default())),
+        Err(EngineError::Forbidden(_))
+    ));
 
     // After A's lease expires, B reclaims the queue (epoch 2) and CLAIMS A's pending item across the
     // instance boundary — proving DB-authoritative cross-instance work handoff (no new item minted, so this
     // sidesteps the per-connection push-id limitation noted below).
     clock.set(20);
     let claimed = bo(b.claim(&qk(), 10, 1_000)).unwrap();
-    assert_eq!(claimed.len(), 1, "B claims A's pending item across the instance boundary");
+    assert_eq!(
+        claimed.len(),
+        1,
+        "B claims A's pending item across the instance boundary"
+    );
 
     // A is superseded → its next data-plane op is durably fenced on the relational backend too.
     assert!(
-        matches!(bo(a.push(&qk(), NewItem::default())), Err(EngineError::EpochFenced)),
+        matches!(
+            bo(a.push(&qk(), NewItem::default())),
+            Err(EngineError::EpochFenced)
+        ),
         "a superseded instance is durably fenced on the relational backend"
     );
 }

@@ -486,7 +486,8 @@ async fn xadd<B: RespBackend>(
                     not_before,
                     payload,
                     fields,
-                    state.now(), None
+                    state.now(),
+                    None,
                 )
                 .await
             {
@@ -702,9 +703,7 @@ fn live_field_value(item: &LiveItemView, field: &[u8]) -> Option<Vec<u8>> {
     } else if arg_eq(field, "payload") {
         item.payload.as_ref().map(|p| p.to_vec())
     } else if arg_eq(field, "group_key") {
-        item.group_key
-            .as_ref()
-            .map(|g| g.to_string().into_bytes())
+        item.group_key.as_ref().map(|g| g.to_string().into_bytes())
     } else if arg_eq(field, "not_before") {
         item.not_before.map(|ts| ts_ms(ts).to_string().into_bytes())
     } else {
@@ -1036,7 +1035,8 @@ async fn xautoclaim<B: RespBackend>(
                 expired_ids.clone(),
                 consumer_token,
                 add_millis(now, lease_ms),
-                now, None
+                now,
+                None,
             )
             .await
     {
@@ -1158,7 +1158,9 @@ async fn xclaim<B: RespBackend>(
     let new_expiry = add_millis(now, lease_ms);
 
     if !renew_ids.is_empty()
-        && let Err(e) = backend.renew(&shard, renew_ids, new_expiry, now, None).await
+        && let Err(e) = backend
+            .renew(&shard, renew_ids, new_expiry, now, None)
+            .await
     {
         return err_reply(&e);
     }

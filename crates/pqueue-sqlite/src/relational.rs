@@ -62,9 +62,9 @@ use pqueue_engine::{
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
     LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, QueueCounters, ReplacePendingCommand, TickReport,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport,
     UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
     project_scopes, validate_claim_compatibility, validate_purge_force,
 };
@@ -1634,8 +1634,9 @@ impl SqliteRelationalBackend {
     /// no log to replay). `observe` decodes `(epoch, counter)` from each packed id and only advances.
     fn restore_counters(&self) -> EngineResult<()> {
         let g = self.inner.lock().expect("poisoned");
-        let mut stmt =
-            st(g.conn.prepare("SELECT tenant_id, queue_id, item_id FROM pqueue_items"))?;
+        let mut stmt = st(g
+            .conn
+            .prepare("SELECT tenant_id, queue_id, item_id FROM pqueue_items"))?;
         let rows = st(stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -1988,7 +1989,8 @@ impl PushPort for SqliteRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Push(PushCommand { items: push_items }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(ids)
         })();
@@ -2196,7 +2198,8 @@ impl UpsertPort for SqliteRelationalBackend {
                     g.commit_command(
                         shard,
                         QueueCommand::Push(PushCommand { items: vec![item] }),
-                        now, expected_epoch
+                        now,
+                        expected_epoch,
                     )?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
@@ -2214,7 +2217,8 @@ impl UpsertPort for SqliteRelationalBackend {
                                     superseded_item_id: existing_id,
                                     replacement: item,
                                 }),
-                                now, expected_epoch
+                                now,
+                                expected_epoch,
                             )?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
@@ -2248,7 +2252,8 @@ impl FinalizePort for SqliteRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Finalize(FinalizeCommand { outcomes }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(())
         })();
@@ -2274,7 +2279,8 @@ impl RenewLeasePort for SqliteRelationalBackend {
                     item_ids,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(())
         })();
@@ -2302,7 +2308,8 @@ impl ReassignLeasePort for SqliteRelationalBackend {
                     lease_token: new_lease_token,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(())
         })();
@@ -2341,7 +2348,8 @@ impl PurgePort for SqliteRelationalBackend {
                     item_ids: present,
                     force,
                 }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(count)
         })();
@@ -2441,9 +2449,8 @@ impl ReclaimPort for SqliteRelationalBackend {
                     }
                 } else {
                     let mut stmt = st(g.conn.prepare(base))?;
-                    let rows = st(stmt.query_map(params![t, q, now_n], |row| {
-                        row.get::<_, String>(0)
-                    }))?;
+                    let rows =
+                        st(stmt.query_map(params![t, q, now_n], |row| row.get::<_, String>(0)))?;
                     for r in rows {
                         out.push(st(r)?);
                     }
@@ -2515,7 +2522,8 @@ impl ReclaimDriver for SqliteRelationalBackend {
                 g.commit_command(
                     &shard,
                     QueueCommand::LeaseExpired(LeaseExpiredCommand { item_ids: ids }),
-                    now, None
+                    now,
+                    None,
                 )?;
             }
             Ok(report)
@@ -2609,7 +2617,12 @@ mod group_summary_tests {
 
         // Push two grouped items (priorities 10, 20) — rep is the priority-10 item, count 2.
         let ids = b
-            .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0), None)
+            .push(
+                &shard(),
+                vec![grouped(10, "g"), grouped(20, "g")],
+                ts(0),
+                None,
+            )
             .await
             .unwrap();
         let (oldest, count, rep) = summary(&b, "g").expect("summary row created on grouped push");
@@ -2679,7 +2692,8 @@ mod group_summary_tests {
         b.finalize(
             &shard(),
             vec![FinalizeOutcome::new(ids[0], FinalizeKind::Release)],
-            ts(20), None
+            ts(20),
+            None,
         )
         .await
         .unwrap();
@@ -2692,9 +2706,14 @@ mod group_summary_tests {
     async fn cohort_expired_drains_the_group_summary() {
         let b = SqliteRelationalBackend::in_memory().unwrap();
         b.create_queue(qdef()).await.unwrap();
-        b.push(&shard(), vec![grouped(5, "g"), grouped(6, "g")], ts(0), None)
-            .await
-            .unwrap();
+        b.push(
+            &shard(),
+            vec![grouped(5, "g"), grouped(6, "g")],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(summary(&b, "g").unwrap().1, 2);
 
         // Force the whole cohort terminal -> the group's eligible summary drains to empty.
@@ -2721,7 +2740,8 @@ mod group_summary_tests {
                 None,
                 None,
                 BTreeMap::new(),
-                ts(0), None
+                ts(0),
+                None,
             )
             .await
             .unwrap()
@@ -2730,7 +2750,9 @@ mod group_summary_tests {
             _ => panic!("insert"),
         };
         // Purge a PENDING item (not terminal) -> no retention tombstone, so the key is freely reusable.
-        b.purge(&shard(), vec![id], false, ts(1), None).await.unwrap();
+        b.purge(&shard(), vec![id], false, ts(1), None)
+            .await
+            .unwrap();
         assert!(
             matches!(
                 b.replace_if_pending(
@@ -2742,7 +2764,8 @@ mod group_summary_tests {
                     None,
                     BTreeMap::new(),
                     ts(2),
-                None)
+                    None
+                )
                 .await
                 .unwrap(),
                 UpsertOutcome::Inserted { .. }
@@ -2789,7 +2812,12 @@ mod group_summary_tests {
             let a = SqliteRelationalBackend::open(&path).unwrap();
             a.create_queue(qdef()).await.unwrap();
             let ids = a
-                .push(&shard(), vec![grouped(10, "g"), grouped(20, "g")], ts(0), None)
+                .push(
+                    &shard(),
+                    vec![grouped(10, "g"), grouped(20, "g")],
+                    ts(0),
+                    None,
+                )
                 .await
                 .unwrap();
             let (_, count, rep) = summary(&a, "g").unwrap();

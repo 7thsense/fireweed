@@ -51,7 +51,11 @@ async fn claim_fences_superseded_owner_epoch() {
         ..claim_req(10, 500, 100)
     };
     let claimed = b.claim(ok).await.unwrap();
-    assert_eq!(claimed.items.len(), 1, "current-epoch owner claims the item");
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "current-epoch owner claims the item"
+    );
 }
 
 /// B1b (ADR-009 / TD-003): the cached-epoch fence applies to `PushPort::push` on the sqlite log path too.
@@ -67,7 +71,8 @@ async fn push_fences_superseded_owner_epoch() {
 
     assert!(
         matches!(
-            b.push(&shard(), vec![PushSpec::default()], ts(0), Some(0)).await,
+            b.push(&shard(), vec![PushSpec::default()], ts(0), Some(0))
+                .await,
             Err(EngineError::EpochFenced)
         ),
         "a superseded owner's push must be EpochFenced"

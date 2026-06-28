@@ -113,5 +113,8 @@ fn acquire_and_fence_storage_owns_the_fence() {
         session.fence_epoch, session.lease_epoch,
         "lease + fence epochs advance one-per-acquire in lock-step, so they are equal"
     );
-    assert!(session.fence_epoch >= 1, "the first acquire advances the fence past genesis");
+    assert!(
+        session.fence_epoch >= 1,
+        "the first acquire advances the fence past genesis"
+    );
 }

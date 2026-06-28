@@ -270,7 +270,7 @@ async fn claim_ack<B: pqueue::LibBackend>(
             break;
         }
         claim_lat.push(cd);
-        let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id.clone()).collect();
+        let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id).collect();
         let n = ids.len() as u64;
         let ta = Instant::now();
         pq.ack(q, ids).await.expect("ack");

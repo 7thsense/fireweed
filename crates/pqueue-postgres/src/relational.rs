@@ -59,12 +59,12 @@ use pqueue_engine::{
     Claimed, ClaimedItem, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, ItemView, LeaseExpiredCommand,
-    LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgeItemsCommand,
-    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
-    RenewLeasePort, QueueCounters, ReplacePendingCommand, TickReport, UpsertOutcome, UpsertPort,
-    PayloadUpdate, UpdateFieldsCommand, UpdateFieldsPort, build_push_items, project_scopes,
-    validate_claim_compatibility, validate_purge_force,
+    LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
+    project_scopes, validate_claim_compatibility, validate_purge_force,
 };
 use sha2::{Digest, Sha256};
 
@@ -1889,7 +1889,8 @@ impl PushPort for PostgresRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Push(PushCommand { items: push_items }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(ids)
         })();
@@ -2107,7 +2108,8 @@ impl UpsertPort for PostgresRelationalBackend {
                     g.commit_command(
                         shard,
                         QueueCommand::Push(PushCommand { items: vec![item] }),
-                        now, expected_epoch
+                        now,
+                        expected_epoch,
                     )?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
@@ -2127,7 +2129,8 @@ impl UpsertPort for PostgresRelationalBackend {
                                     superseded_item_id: existing_id,
                                     replacement: item,
                                 }),
-                                now, expected_epoch
+                                now,
+                                expected_epoch,
                             )?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
@@ -2161,7 +2164,8 @@ impl FinalizePort for PostgresRelationalBackend {
             g.commit_command(
                 shard,
                 QueueCommand::Finalize(FinalizeCommand { outcomes }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(())
         })();
@@ -2187,7 +2191,8 @@ impl RenewLeasePort for PostgresRelationalBackend {
                     item_ids,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(())
         })();
@@ -2331,7 +2336,8 @@ impl ReassignLeasePort for PostgresRelationalBackend {
                     lease_token: new_lease_token,
                     lease_expires_at: new_lease_expires_at,
                 }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(())
         })();
@@ -2370,7 +2376,8 @@ impl PurgePort for PostgresRelationalBackend {
                     item_ids: present,
                     force,
                 }),
-                now, expected_epoch
+                now,
+                expected_epoch,
             )?;
             Ok(count)
         })();
@@ -2413,7 +2420,8 @@ impl ReclaimDriver for PostgresRelationalBackend {
                 g.commit_command(
                     &shard,
                     QueueCommand::LeaseExpired(LeaseExpiredCommand { item_ids: ids }),
-                    now, None
+                    now,
+                    None,
                 )?;
             }
             Ok(report)
@@ -2612,7 +2620,8 @@ mod gated_group_summary_tests {
                 g2(30, "g3"),
             ],
             ts(0),
-        None))
+            None,
+        ))
         .unwrap();
         // group_batching max_groups=2 → the two oldest groups (g1, g2) leased whole (4 items); g3 stays.
         let req = ClaimRequest {

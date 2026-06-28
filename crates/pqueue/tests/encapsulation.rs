@@ -49,10 +49,13 @@ fn qdef() -> QueueDefinition {
 async fn open_memory_builds_a_usable_pqueue() {
     let pq = pqueue::open_memory(Arc::new(ManualClock::at(0)));
     pq.create_queue(qdef()).await.unwrap();
-    pq.push(&qkey(), pqueue::NewItem {
-        priority: Some(PriorityValue::Int64(5)),
-        ..Default::default()
-    })
+    pq.push(
+        &qkey(),
+        pqueue::NewItem {
+            priority: Some(PriorityValue::Int64(5)),
+            ..Default::default()
+        },
+    )
     .await
     .unwrap();
     let claimed = pq.claim(&qkey(), 10, 1_000).await.unwrap();
@@ -106,9 +109,9 @@ fn public_surface_exposes_no_port_or_backend() {
     // The backend-injection constructor `Pqueue::new(Arc<B>, …)` must stay `#[doc(hidden)]` so the
     // documented construction surface is only the `open_*` builders (which never expose a backend type).
     let lines: Vec<&str> = src.lines().collect();
-    let new_is_hidden = lines.windows(2).any(|w| {
-        w[0].trim() == "#[doc(hidden)]" && w[1].trim_start().starts_with("pub fn new(")
-    });
+    let new_is_hidden = lines
+        .windows(2)
+        .any(|w| w[0].trim() == "#[doc(hidden)]" && w[1].trim_start().starts_with("pub fn new("));
     assert!(
         new_is_hidden,
         "Pqueue::new must be #[doc(hidden)] — open_* is the only documented construction path (ADR-009 L6)"

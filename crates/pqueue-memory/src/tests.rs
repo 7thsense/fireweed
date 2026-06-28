@@ -39,8 +39,14 @@ async fn distinct_node_ids_never_collide_on_concurrent_push() {
     b.create_queue(qdef()).await.unwrap();
 
     // Both writers push the FIRST item into the same queue at the genesis epoch (counter base 0 on each).
-    let ida = a.push(&shard(), vec![PushSpec::default()], ts(0), None).await.unwrap()[0];
-    let idb = b.push(&shard(), vec![PushSpec::default()], ts(0), None).await.unwrap()[0];
+    let ida = a
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap()[0];
+    let idb = b
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap()[0];
 
     assert_ne!(ida, idb, "same epoch+counter on two nodes must not collide");
     assert_eq!((ida.node(), ida.counter()), (1, 0));
@@ -99,7 +105,11 @@ async fn claim_fences_superseded_owner_epoch() {
         ..claim_req(10, 500, 100)
     };
     let claimed = b.claim(ok).await.unwrap();
-    assert_eq!(claimed.items.len(), 1, "current-epoch owner claims the item");
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "current-epoch owner claims the item"
+    );
 }
 
 /// B1b (ADR-009 / TD-003): the same cached-epoch fence applies to `PushPort::push` — a superseded owner's
@@ -117,7 +127,8 @@ async fn push_fences_superseded_owner_epoch() {
     // Stale-epoch push is fenced and appends nothing.
     assert!(
         matches!(
-            b.push(&shard(), vec![PushSpec::default()], ts(0), Some(0)).await,
+            b.push(&shard(), vec![PushSpec::default()], ts(0), Some(0))
+                .await,
             Err(EngineError::EpochFenced)
         ),
         "a superseded owner's push must be EpochFenced"
@@ -175,7 +186,8 @@ async fn finalize_fences_superseded_owner_epoch() {
 
     assert!(
         matches!(
-            b.finalize(&shard(), outcomes.clone(), ts(20), Some(0)).await,
+            b.finalize(&shard(), outcomes.clone(), ts(20), Some(0))
+                .await,
             Err(EngineError::EpochFenced)
         ),
         "a superseded owner's finalize must be EpochFenced"
@@ -186,6 +198,8 @@ async fn finalize_fences_superseded_owner_epoch() {
         "a fenced finalize must make no transition"
     );
 
-    b.finalize(&shard(), outcomes, ts(20), Some(e1)).await.unwrap();
+    b.finalize(&shard(), outcomes, ts(20), Some(e1))
+        .await
+        .unwrap();
     assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }

@@ -117,7 +117,7 @@ fn run_owner(
                 if claimed.is_empty() {
                     break;
                 }
-                let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id.clone()).collect();
+                let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id).collect();
                 drained += ids.len() as u64;
                 pq.ack(&qk, ids).await.unwrap();
             }

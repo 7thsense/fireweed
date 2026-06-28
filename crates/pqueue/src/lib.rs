@@ -21,8 +21,8 @@ use pqueue_core::{LeaseToken, WorkerId};
 use pqueue_engine::{
     ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
     LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort, UpsertPort,
-    acquire_and_fence,
+    QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort,
+    UpsertPort, acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,9 @@ pub enum Nack {
     /// Return to Pending for re-claim. `not_before` is an optional **queue-native retry backoff**: the item
     /// stays ineligible until that absolute timestamp. `None` re-eligibles it immediately. (Use
     /// [`Pqueue::nack_retry_after`] for a relative delay.)
-    Retry { not_before: Option<UtcTimestamp> },
+    Retry {
+        not_before: Option<UtcTimestamp>,
+    },
     Release,
 }
 
@@ -267,7 +269,11 @@ impl<B: LibBackend> Pqueue<B> {
         // A DIFFERENT live owner holds the queue → owned elsewhere; never contend a live lease (TD-003:
         // online handoff is begin_drain, not a contended acquire). Surface it (callers inspect via
         // `ownership`); the explicit redirect is the RESP server's `-MOVED`.
-        if res.active_owner.as_ref().is_some_and(|active| active != owner_id) {
+        if res
+            .active_owner
+            .as_ref()
+            .is_some_and(|active| active != owner_id)
+        {
             return Err(EngineError::Forbidden("queue owned by another live owner"));
         }
         // Target-affinity (ADR-009 / TD-003): only the rendezvous `target_owner` acquires an unowned/expired
@@ -275,8 +281,14 @@ impl<B: LibBackend> Pqueue<B> {
         if res.target_owner.as_ref() != Some(owner_id) {
             return Err(EngineError::Forbidden("queue targets another owner"));
         }
-        match acquire_and_fence(control_plane.as_ref(), self.backend.as_ref(), queue, owner_id, now)
-            .await?
+        match acquire_and_fence(
+            control_plane.as_ref(),
+            self.backend.as_ref(),
+            queue,
+            owner_id,
+            now,
+        )
+        .await?
         {
             OwnershipOutcome::Owned(session) => {
                 let epoch = session.fence_epoch;
@@ -424,7 +436,10 @@ impl<B: LibBackend> Pqueue<B> {
             })
             .collect();
         let epoch = self.session_epoch(queue).await?;
-        let r = self.backend.push(queue, specs, self.clock.now(), epoch).await;
+        let r = self
+            .backend
+            .push(queue, specs, self.clock.now(), epoch)
+            .await;
         self.note(queue, r)
     }
 
@@ -507,7 +522,8 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
     ) -> EngineResult<()> {
-        self.finalize(queue, ids, FinalizeKind::Complete, None).await
+        self.finalize(queue, ids, FinalizeKind::Complete, None)
+            .await
     }
 
     /// Return leased items to the queue: `Retry` (optionally with a backoff `not_before`) or `Release`.
@@ -663,7 +679,15 @@ impl<B: LibBackend> Pqueue<B> {
         let now = self.clock.now();
         let r = self
             .backend
-            .update_fields(queue, item_id, field_ops, payload, expected_item_version, now, epoch)
+            .update_fields(
+                queue,
+                item_id,
+                field_ops,
+                payload,
+                expected_item_version,
+                now,
+                epoch,
+            )
             .await;
         self.note(queue, r)
     }

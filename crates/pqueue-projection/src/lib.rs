@@ -28,8 +28,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind,
-    FinalizeOutcome, ItemView, LeaseView, LiveItemView, PayloadUpdate, ProjectionSnapshot, PushItem,
-    QueueCommand, QueueKey, QueueMetrics, SnapshotRef,
+    FinalizeOutcome, ItemView, LeaseView, LiveItemView, PayloadUpdate, ProjectionSnapshot,
+    PushItem, QueueCommand, QueueKey, QueueMetrics, SnapshotRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -310,8 +310,7 @@ impl ProjectionData {
             superseded: false,
         };
         self.eligible.insert(elig_key(&rec, &self.priority_model));
-        self.by_key
-            .insert(rec.client_item_key.clone(), rec.item_id);
+        self.by_key.insert(rec.client_item_key.clone(), rec.item_id);
         self.items.insert(rec.item_id, rec);
     }
 
@@ -403,7 +402,10 @@ impl ProjectionData {
                 Ok(())
             }
             QueueCommand::UpdateFields(c) => {
-                let rec = self.items.get_mut(&c.item_id).ok_or(EngineError::NotFound)?;
+                let rec = self
+                    .items
+                    .get_mut(&c.item_id)
+                    .ok_or(EngineError::NotFound)?;
                 // Bare field/payload merge (no lifecycle change), so it relies on `update_fields_validate`
                 // having run pre-commit. Assert the pre-condition so a divergent replay is LOUD in
                 // debug/test (apply stays infallible in release).

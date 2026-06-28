@@ -196,7 +196,8 @@ async fn reassign_swaps_token_and_charges_delivery() {
         vec![id],
         LeaseToken::new("lease-2").unwrap(),
         ts(800),
-        ts(20), None
+        ts(20),
+        None,
     )
     .await
     .unwrap();
@@ -219,13 +220,9 @@ async fn finalize_complete_and_fail_are_terminal() {
             .unwrap();
         let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
         let id = claimed.items[0].item_id;
-        b.finalize(
-            &shard(),
-            vec![FinalizeOutcome::new(id, kind)],
-            ts(20), None
-        )
-        .await
-        .unwrap();
+        b.finalize(&shard(), vec![FinalizeOutcome::new(id, kind)], ts(20), None)
+            .await
+            .unwrap();
 
         let m = b.metrics(&qkey()).await.unwrap();
         if expect_complete {
@@ -252,7 +249,8 @@ async fn finalize_retry_respects_attempt_bound() {
         b.finalize(
             &shard(),
             vec![FinalizeOutcome::new(id, FinalizeKind::Retry)],
-            ts(10 * attempt), None
+            ts(10 * attempt),
+            None,
         )
         .await
         .unwrap();
@@ -268,7 +266,8 @@ async fn finalize_retry_respects_attempt_bound() {
     b.finalize(
         &shard(),
         vec![FinalizeOutcome::new(id, FinalizeKind::Retry)],
-        ts(100), None
+        ts(100),
+        None,
     )
     .await
     .unwrap();
@@ -290,12 +289,12 @@ async fn finalize_release_and_rearm_return_to_pending() {
     b.push(&shard(), vec![PushSpec::default()], ts(0), None)
         .await
         .unwrap();
-    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id;
+    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0].item_id;
     b.finalize(
         &shard(),
         vec![FinalizeOutcome::new(id, FinalizeKind::Release)],
-        ts(20), None
+        ts(20),
+        None,
     )
     .await
     .unwrap();
@@ -311,12 +310,12 @@ async fn finalize_release_and_rearm_return_to_pending() {
     b.push(&shard(), vec![PushSpec::default()], ts(0), None)
         .await
         .unwrap();
-    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id;
+    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0].item_id;
     b.finalize(
         &shard(),
         vec![FinalizeOutcome::new(id, FinalizeKind::Rearm)],
-        ts(20), None
+        ts(20),
+        None,
     )
     .await
     .unwrap();
@@ -357,15 +356,12 @@ async fn fence_then_unfence_gate_finalize() {
     b.push(&shard(), vec![PushSpec::default()], ts(0), None)
         .await
         .unwrap();
-    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id;
+    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0].item_id;
 
     commit(
         &b,
         envelope(
-            QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![id],
-            }),
+            QueueCommand::FenceLease(FenceLeaseCommand { item_ids: vec![id] }),
             vec![id],
         ),
     )
@@ -375,7 +371,8 @@ async fn fence_then_unfence_gate_finalize() {
             &shard(),
             vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
             ts(20),
-        None)
+            None
+        )
         .await
         .is_err(),
         "fenced lease cannot be finalized"
@@ -384,9 +381,7 @@ async fn fence_then_unfence_gate_finalize() {
     commit(
         &b,
         envelope(
-            QueueCommand::UnfenceLease(UnfenceLeaseCommand {
-                item_ids: vec![id],
-            }),
+            QueueCommand::UnfenceLease(UnfenceLeaseCommand { item_ids: vec![id] }),
             vec![id],
         ),
     )
@@ -394,7 +389,8 @@ async fn fence_then_unfence_gate_finalize() {
     b.finalize(
         &shard(),
         vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
-        ts(30), None
+        ts(30),
+        None,
     )
     .await
     .expect("unfenced lease finalizes");
@@ -505,7 +501,8 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             Some(Bytes::from_static(b"v1")),
             BTreeMap::new(),
-            ts(0), None
+            ts(0),
+            None,
         )
         .await
         .unwrap()
@@ -525,7 +522,8 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             Some(Bytes::from_static(b"v2")),
             BTreeMap::new(),
-            ts(1), None
+            ts(1),
+            None,
         )
         .await
         .unwrap()
@@ -551,7 +549,8 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             BTreeMap::new(),
             ts(2),
-        None)
+            None
+        )
         .await
         .is_err(),
         "upsert collides with a claimed item"
@@ -577,7 +576,8 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
-            ts(0), None
+            ts(0),
+            None,
         )
         .await
         .unwrap()
@@ -588,7 +588,8 @@ async fn purged_terminal_key_is_retained_against_repush() {
     b.finalize(
         &shard(),
         vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
-        ts(2), None
+        ts(2),
+        None,
     )
     .await
     .unwrap();
@@ -610,7 +611,8 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             BTreeMap::new(),
             ts(10),
-        None)
+            None
+        )
         .await
         .is_err(),
         "purged terminal key is retained -> re-push rejected as a duplicate"
@@ -626,7 +628,8 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             None,
             BTreeMap::new(),
-            ts(70), None
+            ts(70),
+            None,
         )
         .await
         .unwrap();
@@ -705,17 +708,18 @@ async fn released_item_keeps_its_fifo_slot() {
     let order: Vec<ItemId> = b
         .select_eligible(&shard(), ts(100), 10)
         .await
-        .unwrap().to_vec();
+        .unwrap()
+        .to_vec();
     let first = order[0];
 
     // Claim + release the FIRST item (its last_command_sequence advances well past the second item's).
-    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id;
+    let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0].item_id;
     assert_eq!(id, first, "claim takes the FIFO head");
     b.finalize(
         &shard(),
         vec![FinalizeOutcome::new(id, FinalizeKind::Release)],
-        ts(20), None
+        ts(20),
+        None,
     )
     .await
     .unwrap();
@@ -724,7 +728,8 @@ async fn released_item_keeps_its_fifo_slot() {
     let after: Vec<ItemId> = b
         .select_eligible(&shard(), ts(100), 10)
         .await
-        .unwrap().to_vec();
+        .unwrap()
+        .to_vec();
     assert_eq!(
         after, order,
         "released item keeps its original FIFO position"
@@ -754,7 +759,8 @@ async fn group_batching_leases_whole_groups_oldest_first() {
                 gspec(30, "g3"),
             ],
             ts(0),
-        None)
+            None,
+        )
         .await
         .unwrap();
 
@@ -790,7 +796,8 @@ async fn same_group_key_leases_one_server_selected_group() {
             &shard(),
             vec![gspec(10, "g1"), gspec(11, "g1"), gspec(20, "g2")],
             ts(0),
-        None)
+            None,
+        )
         .await
         .unwrap();
 
@@ -830,7 +837,8 @@ async fn group_batching_respects_the_max_items_ceiling() {
                 gspec(21, "g2"),
             ],
             ts(0),
-        None)
+            None,
+        )
         .await
         .unwrap();
 
@@ -890,9 +898,14 @@ async fn group_batching_empty_and_invalid() {
 async fn group_claim_yields_nothing_while_paused() {
     let b = make();
     b.create_queue(qdef_groups(5)).await.unwrap();
-    b.push(&shard(), vec![gspec(10, "g1"), gspec(11, "g1")], ts(0), None)
-        .await
-        .unwrap();
+    b.push(
+        &shard(),
+        vec![gspec(10, "g1"), gspec(11, "g1")],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
     commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
 
     let compat = ClaimCompatibility {
@@ -949,7 +962,8 @@ async fn group_batching_oversized_group_is_batch_too_large() {
         &shard(),
         vec![gspec(10, "g1"), gspec(11, "g1"), gspec(12, "g1")],
         ts(0),
-    None)
+        None,
+    )
     .await
     .unwrap();
 
@@ -992,7 +1006,8 @@ async fn whole_cohort_leases_a_complete_cohort() {
             &shard(),
             vec![cspec(10, "c1", 3), cspec(11, "c1", 3), cspec(12, "c1", 3)],
             ts(0),
-        None)
+            None,
+        )
         .await
         .unwrap();
 
@@ -1018,7 +1033,8 @@ async fn whole_cohort_skips_an_incomplete_cohort() {
         &shard(),
         vec![cspec(10, "c1", 3), cspec(11, "c1", 3)],
         ts(0),
-    None)
+        None,
+    )
     .await
     .unwrap();
     let claimed = b
@@ -1043,7 +1059,8 @@ async fn whole_cohort_skips_when_a_member_is_not_eligible() {
             &shard(),
             vec![cspec(10, "c1", 3), cspec(11, "c1", 3), cspec(12, "c1", 3)],
             ts(0),
-        None)
+            None,
+        )
         .await
         .unwrap();
     // Item-level claim one member → it is leased, so the cohort is no longer all-eligible.
@@ -1068,7 +1085,8 @@ async fn whole_cohort_oversized_is_batch_too_large() {
         &shard(),
         vec![cspec(10, "c1", 3), cspec(11, "c1", 3), cspec(12, "c1", 3)],
         ts(0),
-    None)
+        None,
+    )
     .await
     .unwrap();
     // max_items=2 < cohort size 3.
@@ -1104,7 +1122,8 @@ async fn whole_cohort_ignores_non_cohort_group_members() {
                 gspec(13, "c1"), // plain group member, not a cohort member
             ],
             ts(0),
-        None)
+            None,
+        )
         .await
         .unwrap();
     let claimed = b
@@ -1200,7 +1219,8 @@ async fn ungated_items_are_unaffected_by_a_blocked_gate() {
             &shard(),
             vec![gatespec(10, &["g"]), spec(20)], // one gated (older), one ungated
             ts(0),
-        None)
+            None,
+        )
         .await
         .unwrap();
 
@@ -1265,7 +1285,8 @@ async fn blocked_gate_on_a_cohort_member_blocks_the_whole_cohort() {
         &shard(),
         vec![cspec(10, "c1", 3), gated_member, cspec(12, "c1", 3)],
         ts(0),
-    None)
+        None,
+    )
     .await
     .unwrap();
 
@@ -1309,9 +1330,14 @@ async fn discover_group_granularity_ranks_oldest_first() {
     let b = make();
     b.create_queue(qdef_groups(5)).await.unwrap();
     // g1 (2 items) eligible since t=10, g2 since t=20, g3 since t=30 (later push = younger age).
-    b.push(&shard(), vec![gspec(10, "g1"), gspec(11, "g1")], ts(10), None)
-        .await
-        .unwrap();
+    b.push(
+        &shard(),
+        vec![gspec(10, "g1"), gspec(11, "g1")],
+        ts(10),
+        None,
+    )
+    .await
+    .unwrap();
     b.push(&shard(), vec![gspec(20, "g2")], ts(20), None)
         .await
         .unwrap();
@@ -1400,9 +1426,14 @@ async fn discover_unknown_queue_is_empty_not_error() {
 async fn discover_queue_granularity_rolls_up_to_one_scope() {
     let b = make();
     b.create_queue(qdef_groups(5)).await.unwrap();
-    b.push(&shard(), vec![gspec(10, "g1"), gspec(11, "g1")], ts(10), None)
-        .await
-        .unwrap();
+    b.push(
+        &shard(),
+        vec![gspec(10, "g1"), gspec(11, "g1")],
+        ts(10),
+        None,
+    )
+    .await
+    .unwrap();
     b.push(&shard(), vec![gspec(20, "g2")], ts(20), None)
         .await
         .unwrap();

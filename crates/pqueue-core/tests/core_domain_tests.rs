@@ -392,7 +392,10 @@ fn core_domain_tests_exercises_result_identifier_variants() {
     // ItemId is a packed u64 `[epoch:24][node:8][counter:32]` (ADR-009): mint decodes back to its parts,
     // renders as the decimal of the packed value, and parses (the `Display` inverse) for read-from-storage.
     let item_id = ItemId::mint(7, 3, 42);
-    assert_eq!((item_id.epoch(), item_id.node(), item_id.counter()), (7, 3, 42));
+    assert_eq!(
+        (item_id.epoch(), item_id.node(), item_id.counter()),
+        (7, 3, 42)
+    );
     assert_eq!(item_id.as_u64(), (7u64 << 40) | (3u64 << 32) | 42);
     assert_eq!(ItemId::new(item_id.to_string()).unwrap(), item_id);
     assert_eq!(ItemId::from_u64(item_id.as_u64()), item_id);

@@ -129,7 +129,7 @@ async fn run_hot<B: pqueue::LibBackend>(
         if claimed.is_empty() {
             break;
         }
-        let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id.clone()).collect();
+        let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id).collect();
         drained += ids.len() as u64;
         pq.ack(key, ids).await.unwrap();
     }
@@ -245,7 +245,7 @@ fn measure_hot_under_concurrent_load(
                             if c.is_empty() {
                                 break;
                             }
-                            let ids: Vec<ItemId> = c.iter().map(|x| x.item_id.clone()).collect();
+                            let ids: Vec<ItemId> = c.iter().map(|x| x.item_id).collect();
                             d += ids.len() as u64;
                             pq.ack(q, ids).await.unwrap();
                         }
