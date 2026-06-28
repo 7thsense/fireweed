@@ -117,7 +117,7 @@ async fn retention_tombstone_survives_reopen() {
         a.finalize(
             &shard(),
             vec![FinalizeOutcome {
-                item_id: id.clone(),
+                item_id: id,
                 kind: FinalizeKind::Complete,
             }],
             ts(2), None
@@ -164,13 +164,13 @@ async fn reopened_queue_accepts_new_push_and_claim() {
             .push(&shard(), vec![PushSpec::default()], ts(0), None)
             .await
             .unwrap();
-        pre_id = ids[0].clone();
+        pre_id = ids[0];
         // Claim + complete it so the pre-reopen item is terminal (not eligible) after reopen.
         a.claim(claim_req(1, 500, 1)).await.unwrap();
         a.finalize(
             &shard(),
             vec![FinalizeOutcome {
-                item_id: pre_id.clone(),
+                item_id: pre_id,
                 kind: FinalizeKind::Complete,
             }],
             ts(2), None

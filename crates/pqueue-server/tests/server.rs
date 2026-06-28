@@ -126,6 +126,7 @@ async fn start_provisions_queues_and_serves_end_to_end() {
     // provisions the config's queues. Boot it, then drive it with a stock client (no out-of-band setup).
     let server = start(Config {
         backend: Backend::Memory,
+        node_id: 0,
         listen: "127.0.0.1:0".to_string(),
         reclaim_interval: Duration::from_secs(60),
         queues: vec![qdef()],
@@ -266,4 +267,22 @@ async fn shutdown_and_drain_drains_in_flight_then_stops_accepting() {
         refused,
         "server stopped accepting connections after the drain"
     );
+}
+
+/// `resolve_node_id` (ADR-009 service seam): a configured small integer is used verbatim; an out-of-range
+/// number or an arbitrary string (a hostname / pod identity the deployment wires in) is hashed into a byte;
+/// distinct identities map to distinct node ids in the common case, keeping the app infra-agnostic.
+#[test]
+fn resolve_node_id_uses_small_ints_verbatim_and_hashes_the_rest() {
+    use pqueue_server::resolve_node_id;
+    assert_eq!(resolve_node_id("0"), 0);
+    assert_eq!(resolve_node_id("7"), 7);
+    assert_eq!(resolve_node_id("255"), 255);
+    assert_eq!(resolve_node_id("  3 "), 3, "trimmed");
+    // Out of u8 range / non-numeric -> hashed into range (stable, and distinct here).
+    let a = resolve_node_id("256");
+    let b = resolve_node_id("pqueue-statefulset-0");
+    let c = resolve_node_id("pqueue-statefulset-1");
+    assert_ne!(b, c, "distinct pod identities map to distinct node ids");
+    let _ = a; // just must not panic / must be in range (u8 by construction)
 }

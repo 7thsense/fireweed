@@ -209,7 +209,7 @@ async fn downstream_pacing_non_goal_e2e() {
             next_priority += 1;
         }
         max_batch_seen = max_batch_seen.max(got.len());
-        pq.ack(&q, got.iter().map(|c| c.item_id.clone()))
+        pq.ack(&q, got.iter().map(|c| c.item_id))
             .await
             .unwrap();
         claimed_total += got.len() as u64;
@@ -219,7 +219,7 @@ async fn downstream_pacing_non_goal_e2e() {
     // Drain whatever remains so we can prove the totals.
     while pq.metrics(&q).await.unwrap().pending > 0 {
         let got = pq.claim(&q, 100, 3_600_000).await.unwrap();
-        pq.ack(&q, got.iter().map(|c| c.item_id.clone()))
+        pq.ack(&q, got.iter().map(|c| c.item_id))
             .await
             .unwrap();
         claimed_total += got.len() as u64;
@@ -297,7 +297,7 @@ async fn drain_priorities(pq: &Pqueue<MemoryBackend>, q: &QueueKey, batch: usize
             );
             order.push(pri);
         }
-        pq.ack(q, got.iter().map(|c| c.item_id.clone()))
+        pq.ack(q, got.iter().map(|c| c.item_id))
             .await
             .unwrap();
     }
@@ -509,7 +509,7 @@ async fn scheduled_action_delivery_e2e() {
         "exactly the one due action is deliverable at t=15"
     );
     record(&batch, &mut delivered_order, &mut delivered_ids);
-    pq.ack(&q, batch.iter().map(|c| c.item_id.clone()))
+    pq.ack(&q, batch.iter().map(|c| c.item_id))
         .await
         .unwrap();
 
@@ -531,7 +531,7 @@ async fn scheduled_action_delivery_e2e() {
     // reclaim-tick seam (deferred to pqueue-7a96f929). Here we prove only that renew succeeds and preserves
     // the lease.
     clock.set(140);
-    pq.renew(&q, batch.iter().map(|c| c.item_id.clone()), 50_000)
+    pq.renew(&q, batch.iter().map(|c| c.item_id), 50_000)
         .await
         .unwrap();
     assert_eq!(
@@ -539,7 +539,7 @@ async fn scheduled_action_delivery_e2e() {
         2,
         "renew preserves the lease (items still leased, claimable for finalize)"
     );
-    pq.ack(&q, batch.iter().map(|c| c.item_id.clone()))
+    pq.ack(&q, batch.iter().map(|c| c.item_id))
         .await
         .unwrap();
 
@@ -662,7 +662,7 @@ fn record(batch: &[pqueue::ClaimedItem], order: &mut Vec<i64>, ids: &mut Vec<Ite
         if let Some(PriorityValue::Int64(n)) = c.priority {
             order.push(n);
         }
-        ids.push(c.item_id.clone());
+        ids.push(c.item_id);
     }
 }
 
@@ -730,7 +730,7 @@ async fn jobs_connectors_recurring_e2e() {
         );
         attempts_per_cycle.push(got[0].attempt_count);
         versions.push(got[0].item_version);
-        pq.rearm(&rec_q, [got[0].item_id.clone()]).await.unwrap();
+        pq.rearm(&rec_q, [got[0].item_id]).await.unwrap();
     }
     assert!(
         versions.windows(2).all(|w| w[1] > w[0]),
@@ -759,7 +759,7 @@ async fn jobs_connectors_recurring_e2e() {
     for _ in 0..2 {
         let got = pq.claim(&retry_q, 1, 60_000).await.unwrap();
         assert_eq!(got.len(), 1);
-        pq.nack(&retry_q, got.iter().map(|c| c.item_id.clone()), Nack::Retry)
+        pq.nack(&retry_q, got.iter().map(|c| c.item_id), Nack::Retry)
             .await
             .unwrap();
     }
@@ -783,14 +783,14 @@ async fn jobs_connectors_recurring_e2e() {
     let pid = pq.push(&purge_q, NewItem::default()).await.unwrap();
     let claimed = pq.claim(&purge_q, 1, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "item leased before operator teardown");
-    let n1 = pq.purge(&purge_q, [pid.clone()], true).await.unwrap(); // force: the item is leased
+    let n1 = pq.purge(&purge_q, [pid], true).await.unwrap(); // force: the item is leased
     assert_eq!(n1, 1, "purge removes the leased item (force)");
-    let n2 = pq.purge(&purge_q, [pid.clone()], true).await.unwrap();
+    let n2 = pq.purge(&purge_q, [pid], true).await.unwrap();
     assert_eq!(
         n2, 0,
         "purge is IDEMPOTENT: a second purge of the same id is a no-op (0 removed)"
     );
-    let late = pq.ack(&purge_q, [pid.clone()]).await;
+    let late = pq.ack(&purge_q, [pid]).await;
     let late_not_found = matches!(late, Err(EngineError::NotFound));
     assert!(
         late_not_found,
@@ -901,7 +901,7 @@ async fn marketo_group_batching_e2e() {
     );
     pq.nack(
         &q,
-        item_claim.iter().map(|c| c.item_id.clone()),
+        item_claim.iter().map(|c| c.item_id),
         Nack::Release,
     )
     .await
@@ -1050,7 +1050,7 @@ async fn callback_cohort_e2e() {
     );
     pq.nack(
         &cohort_q,
-        item_claim.iter().map(|c| c.item_id.clone()),
+        item_claim.iter().map(|c| c.item_id),
         Nack::Release,
     )
     .await
@@ -1271,7 +1271,7 @@ async fn noisy_neighbor_scale_e2e() {
     );
     pq.nack(
         &small,
-        from_small.iter().map(|c| c.item_id.clone()),
+        from_small.iter().map(|c| c.item_id),
         Nack::Release,
     )
     .await
@@ -1290,7 +1290,7 @@ async fn noisy_neighbor_scale_e2e() {
     );
     pq.nack(
         &hot,
-        from_hot.iter().map(|c| c.item_id.clone()),
+        from_hot.iter().map(|c| c.item_id),
         Nack::Release,
     )
     .await
@@ -1311,7 +1311,7 @@ async fn noisy_neighbor_scale_e2e() {
                 .all(|c| c.payload.as_deref() == Some(marker.as_bytes())),
             "active queue {i} delivers only its own items"
         );
-        pq.nack(&q, got.iter().map(|c| c.item_id.clone()), Nack::Release)
+        pq.nack(&q, got.iter().map(|c| c.item_id), Nack::Release)
             .await
             .unwrap();
     }
@@ -1328,7 +1328,7 @@ async fn noisy_neighbor_scale_e2e() {
             break;
         }
         drained += got.len() as u64;
-        pq.ack(&small, got.iter().map(|c| c.item_id.clone()))
+        pq.ack(&small, got.iter().map(|c| c.item_id))
             .await
             .unwrap();
     }
@@ -1422,7 +1422,7 @@ async fn worker_crash_recovery_e2e() {
         pq.push_batch(&q, items).await.unwrap();
         // Ack `acked` (acknowledged commands), leave `leased` leased, the rest pending.
         let to_ack = pq.claim(&q, acked as usize, 3_600_000).await.unwrap();
-        pq.ack(&q, to_ack.iter().map(|c| c.item_id.clone()))
+        pq.ack(&q, to_ack.iter().map(|c| c.item_id))
             .await
             .unwrap();
         let _still_leased = pq.claim(&q, leased as usize, 3_600_000).await.unwrap(); // left leased
@@ -1484,7 +1484,7 @@ async fn worker_crash_recovery_e2e() {
         1,
         "a pending item is claimable on the recovered queue"
     );
-    pq.reassign(&q, [claimed[0].item_id.clone()], 3_600_000)
+    pq.reassign(&q, [claimed[0].item_id], 3_600_000)
         .await
         .unwrap();
     assert_eq!(

@@ -38,6 +38,12 @@ pub enum Backend {
 /// Server configuration.
 pub struct Config {
     pub backend: Backend,
+    /// This instance's node id, packed into the disambiguation byte of every minted `ItemId` (ADR-009) so
+    /// distinct replicas over a shared store never mint a colliding id. It is a *configured* value: the
+    /// deployment is responsible for handing each replica a distinct one (e.g. the Helm chart maps a
+    /// StatefulSet ordinal or pod identity into it) — the application stays infrastructure-agnostic. Build
+    /// it from a configured string via [`resolve_node_id`]. `0` is the single-instance default.
+    pub node_id: u8,
     /// Listen address, e.g. `"127.0.0.1:6380"` (use `":0"` for an ephemeral port in tests).
     pub listen: String,
     /// How often the background reclaim task ticks the engine.
@@ -142,14 +148,33 @@ fn io_err(e: std::io::Error) -> EngineError {
     EngineError::Storage(e.to_string())
 }
 
+/// Resolve a *configured* node-identity string into the 8-bit `node_id` packed into every minted `ItemId`.
+/// A plain integer already in `0..=255` is used verbatim (the clean operator-assigned case); anything else
+/// — an out-of-range number, a hostname, or a pod name/UID the deployment wired in — is hashed into a `u8`.
+/// This keeps the application infrastructure-agnostic: the deployment decides what identity to pass, and
+/// this only guarantees it lands in range. (NOTE: the hash path lives in a 256-value space, so for very
+/// large fleets prefer configuring distinct small integers directly; `node_id` is defense-in-depth anyway.)
+pub fn resolve_node_id(configured: &str) -> u8 {
+    match configured.trim().parse::<u8>() {
+        Ok(n) => n,
+        Err(_) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            configured.trim().hash(&mut h);
+            (h.finish() & 0xFF) as u8
+        }
+    }
+}
+
 /// Construct the configured backend + a `SystemClock`, provision the config's queues, then run the
 /// server. After this returns the server is ready to serve requests against the provisioned queues.
 pub async fn start(config: Config) -> EngineResult<Server> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let node_id = config.node_id;
     match config.backend {
         Backend::Memory => {
             start_with(
-                Arc::new(MemoryBackend::new()),
+                Arc::new(MemoryBackend::new().with_node_id(node_id)),
                 clock,
                 &config.listen,
                 config.reclaim_interval,
@@ -162,7 +187,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
             start_with(
-                Arc::new(SqliteBackend::open(p)?),
+                Arc::new(SqliteBackend::open(p)?.with_node_id(node_id)),
                 clock,
                 &config.listen,
                 config.reclaim_interval,
@@ -172,7 +197,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         Backend::ObjectLog(path) => {
             start_with(
-                Arc::new(ObjectLogBackend::open(path)?),
+                Arc::new(ObjectLogBackend::open(path)?.with_node_id(node_id)),
                 clock,
                 &config.listen,
                 config.reclaim_interval,

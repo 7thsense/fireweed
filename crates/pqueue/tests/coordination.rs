@@ -188,7 +188,7 @@ async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
     a.push(&qkey(), item(5)).await.unwrap(); // A acquires the queue (epoch 1)
     let claimed = a.claim(&qkey(), 10, 1_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "A claims normally before drain");
-    let leased = claimed[0].item_id.clone();
+    let leased = claimed[0].item_id;
 
     // An operator begins draining the queue toward a new target owner B.
     cp.register_owner(&OwnerId::new("owner-B").unwrap(), clock.now())

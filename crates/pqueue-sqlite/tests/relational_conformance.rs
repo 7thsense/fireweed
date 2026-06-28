@@ -160,9 +160,9 @@ async fn renew_extends_lease_deadline() {
         .await
         .unwrap();
     let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
-    let id = claimed.items[0].item_id.clone();
+    let id = claimed.items[0].item_id;
 
-    b.renew(&shard(), vec![id.clone()], ts(900), ts(20), None)
+    b.renew(&shard(), vec![id], ts(900), ts(20), None)
         .await
         .unwrap();
     let pending = b.pending(&shard()).await.unwrap();
@@ -189,11 +189,11 @@ async fn reassign_swaps_token_and_charges_delivery() {
         .await
         .unwrap();
     let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
-    let id = claimed.items[0].item_id.clone();
+    let id = claimed.items[0].item_id;
 
     b.reassign(
         &shard(),
-        vec![id.clone()],
+        vec![id],
         LeaseToken::new("lease-2").unwrap(),
         ts(800),
         ts(20), None
@@ -218,7 +218,7 @@ async fn finalize_complete_and_fail_are_terminal() {
             .await
             .unwrap();
         let claimed = b.claim(claim_req(1, 500, 10)).await.unwrap();
-        let id = claimed.items[0].item_id.clone();
+        let id = claimed.items[0].item_id;
         b.finalize(
             &shard(),
             vec![FinalizeOutcome { item_id: id, kind }],
@@ -248,7 +248,7 @@ async fn finalize_retry_respects_attempt_bound() {
     // Deliveries 1 and 2: retry returns the item to pending (claimable again).
     for attempt in 1..=2 {
         let claimed = b.claim(claim_req(1, 500, 10 * attempt)).await.unwrap();
-        let id = claimed.items[0].item_id.clone();
+        let id = claimed.items[0].item_id;
         b.finalize(
             &shard(),
             vec![FinalizeOutcome {
@@ -267,7 +267,7 @@ async fn finalize_retry_respects_attempt_bound() {
     }
     // Delivery 3 exhausts the bound: retry goes terminal (Failed).
     let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
-    let id = claimed.items[0].item_id.clone();
+    let id = claimed.items[0].item_id;
     b.finalize(
         &shard(),
         vec![FinalizeOutcome {
@@ -297,8 +297,7 @@ async fn finalize_release_and_rearm_return_to_pending() {
         .await
         .unwrap();
     let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id
-        .clone();
+        .item_id;
     b.finalize(
         &shard(),
         vec![FinalizeOutcome {
@@ -322,8 +321,7 @@ async fn finalize_release_and_rearm_return_to_pending() {
         .await
         .unwrap();
     let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id
-        .clone();
+        .item_id;
     b.finalize(
         &shard(),
         vec![FinalizeOutcome {
@@ -372,16 +370,15 @@ async fn fence_then_unfence_gate_finalize() {
         .await
         .unwrap();
     let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id
-        .clone();
+        .item_id;
 
     commit(
         &b,
         envelope(
             QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![id.clone()],
+                item_ids: vec![id],
             }),
-            vec![id.clone()],
+            vec![id],
         ),
     )
     .await;
@@ -389,7 +386,7 @@ async fn fence_then_unfence_gate_finalize() {
         b.finalize(
             &shard(),
             vec![FinalizeOutcome {
-                item_id: id.clone(),
+                item_id: id,
                 kind: FinalizeKind::Complete
             }],
             ts(20),
@@ -403,9 +400,9 @@ async fn fence_then_unfence_gate_finalize() {
         &b,
         envelope(
             QueueCommand::UnfenceLease(UnfenceLeaseCommand {
-                item_ids: vec![id.clone()],
+                item_ids: vec![id],
             }),
-            vec![id.clone()],
+            vec![id],
         ),
     )
     .await;
@@ -609,7 +606,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
     b.finalize(
         &shard(),
         vec![FinalizeOutcome {
-            item_id: item_id.clone(),
+            item_id,
             kind: FinalizeKind::Complete,
         }],
         ts(2), None
@@ -729,16 +726,12 @@ async fn released_item_keeps_its_fifo_slot() {
     let order: Vec<ItemId> = b
         .select_eligible(&shard(), ts(100), 10)
         .await
-        .unwrap()
-        .iter()
-        .copied()
-        .collect();
+        .unwrap().to_vec();
     let first = order[0];
 
     // Claim + release the FIRST item (its last_command_sequence advances well past the second item's).
     let id = b.claim(claim_req(1, 500, 10)).await.unwrap().items[0]
-        .item_id
-        .clone();
+        .item_id;
     assert_eq!(id, first, "claim takes the FIFO head");
     b.finalize(
         &shard(),
@@ -755,10 +748,7 @@ async fn released_item_keeps_its_fifo_slot() {
     let after: Vec<ItemId> = b
         .select_eligible(&shard(), ts(100), 10)
         .await
-        .unwrap()
-        .iter()
-        .copied()
-        .collect();
+        .unwrap().to_vec();
     assert_eq!(
         after, order,
         "released item keeps its original FIFO position"
@@ -1036,7 +1026,7 @@ async fn whole_cohort_leases_a_complete_cohort() {
         .unwrap();
     let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
-    let mut expect: Vec<ItemId> = ids.iter().copied().collect();
+    let mut expect: Vec<ItemId> = ids.to_vec();
     expect.sort();
     assert_eq!(leased, expect, "the whole complete cohort leases together");
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 3);

@@ -121,7 +121,7 @@ async fn main() {
     }
     if env::args().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
+            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
         );
         return;
     }
@@ -131,6 +131,7 @@ async fn main() {
     let projection_backend = env_or("PQUEUE_PROJECTION_BACKEND", "inmemory");
     let config = Config {
         backend: parse_backend(),
+        node_id: pqueue_server::resolve_node_id(&env_or("PQUEUE_NODE_ID", "0")),
         listen,
         reclaim_interval: parse_duration_ms("PQUEUE_RECLAIM_INTERVAL_MS", 1_000),
         queues: parse_bootstrap_queues(),

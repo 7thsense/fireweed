@@ -113,13 +113,11 @@ impl MemoryBackend {
         Self::default()
     }
 
-    /// Build a backend tagged with `node_id` — the value packed into the high-disambiguation byte of every
-    /// minted [`ItemId`]. Distinct nodes competing for the same queue MUST pass distinct ids.
-    pub fn with_node_id(node_id: u8) -> Self {
-        Self {
-            node_id,
-            ..Self::default()
-        }
+    /// Tag this backend with `node_id` — the value packed into the disambiguation byte of every minted
+    /// [`ItemId`]. Distinct nodes competing for the same queue MUST pass distinct ids.
+    pub fn with_node_id(mut self, node_id: u8) -> Self {
+        self.node_id = node_id;
+        self
     }
 
     fn make_envelope(

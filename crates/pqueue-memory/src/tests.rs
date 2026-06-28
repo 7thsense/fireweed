@@ -25,6 +25,30 @@ async fn manual_clock_and_idgen_are_real() {
     assert_ne!(a, b, "ids must be unique, not a no-op constant");
 }
 
+/// ADR-009 collision fix: two instances with distinct `node_id`s minting into the same queue at the same
+/// epoch+counter produce DISTINCT ids (the node byte disambiguates). The pre-fix per-connection counter
+/// gave both writers identical ids — this is the regression guard.
+#[tokio::test]
+async fn distinct_node_ids_never_collide_on_concurrent_push() {
+    use pqueue_conformance::{qdef, shard};
+    use pqueue_engine::{PushPort, PushSpec};
+
+    let a = MemoryBackend::new().with_node_id(1);
+    let b = MemoryBackend::new().with_node_id(7);
+    a.create_queue(qdef()).await.unwrap();
+    b.create_queue(qdef()).await.unwrap();
+
+    // Both writers push the FIRST item into the same queue at the genesis epoch (counter base 0 on each).
+    let ida = a.push(&shard(), vec![PushSpec::default()], ts(0), None).await.unwrap()[0];
+    let idb = b.push(&shard(), vec![PushSpec::default()], ts(0), None).await.unwrap()[0];
+
+    assert_ne!(ida, idb, "same epoch+counter on two nodes must not collide");
+    assert_eq!((ida.node(), ida.counter()), (1, 0));
+    assert_eq!((idb.node(), idb.counter()), (7, 0));
+    // The dedup client_item_key (defaulting to the id) is likewise distinct.
+    assert_ne!(ida.to_string(), idb.to_string());
+}
+
 /// B1a (ADR-009 / TD-003 In-Process Library Owner-Runtime): a claim stamped with the owner's *cached*
 /// acquire-time epoch is fenced at commit once a newer epoch is acquired (the owner was superseded), and
 /// leases nothing; the current-epoch owner claims normally; `None` (sole-owner) is unaffected.
@@ -144,7 +168,7 @@ async fn finalize_fences_superseded_owner_epoch() {
         })
         .await
         .unwrap();
-    let id = claimed.items[0].item_id.clone();
+    let id = claimed.items[0].item_id;
 
     let e1 = b.acquire_epoch(&shard()).await.unwrap(); // ownership handoff 0 -> 1
     let outcomes = vec![FinalizeOutcome {

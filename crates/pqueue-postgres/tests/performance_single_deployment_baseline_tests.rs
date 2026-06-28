@@ -150,7 +150,7 @@ async fn finalize(b: &PostgresRelationalBackend, shard: &QueueKey, ids: &[ItemId
     let outcomes = ids
         .iter()
         .map(|id| FinalizeOutcome {
-            item_id: id.clone(),
+            item_id: *id,
             kind: FinalizeKind::Complete,
         })
         .collect();

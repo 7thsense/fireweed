@@ -87,7 +87,7 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     assert_eq!((m.pending, m.leased), (1, 2));
 
     // ack them → complete.
-    pq.ack(&q, claimed.iter().map(|c| c.item_id.clone()))
+    pq.ack(&q, claimed.iter().map(|c| c.item_id))
         .await
         .unwrap();
     let m = pq.metrics(&q).await.unwrap();
@@ -97,7 +97,7 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     let last = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(last.len(), 1);
     assert_eq!(last[0].attempt_count, 1);
-    pq.nack(&q, last.iter().map(|c| c.item_id.clone()), Nack::Retry)
+    pq.nack(&q, last.iter().map(|c| c.item_id), Nack::Retry)
         .await
         .unwrap();
     let again = pq.claim(&q, 1, 30_000).await.unwrap();
@@ -201,7 +201,7 @@ async fn fail_dead_letters_a_claimed_item() {
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
     let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
-    pq.fail(&q, claimed.iter().map(|c| c.item_id.clone()))
+    pq.fail(&q, claimed.iter().map(|c| c.item_id))
         .await
         .unwrap();
     let m = pq.metrics(&q).await.unwrap();
@@ -221,11 +221,11 @@ async fn renew_extends_lease_without_charging_a_delivery() {
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
     let claimed = pq.claim(&q, 1, 30_000).await.unwrap(); // lease_expires_at = 30s, attempt 1
-    let id = claimed[0].item_id.clone();
+    let id = claimed[0].item_id;
     assert_eq!(claimed[0].attempt_count, 1);
 
     // Renew to 60s from now: the lease deadline extends, the delivery count does NOT change.
-    pq.renew(&q, [id.clone()], 60_000).await.unwrap();
+    pq.renew(&q, [id], 60_000).await.unwrap();
     let view = pq.claimed(&q, std::slice::from_ref(&id)).await.unwrap();
     assert_eq!(view.len(), 1);
     assert_eq!(view[0].attempt_count, 1, "renew does not charge a delivery");
@@ -244,9 +244,9 @@ async fn reassign_transfers_and_charges_one_delivery() {
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
     let claimed = pq.claim(&q, 1, 30_000).await.unwrap(); // attempt 1
-    let id = claimed[0].item_id.clone();
+    let id = claimed[0].item_id;
 
-    pq.reassign(&q, [id.clone()], 30_000).await.unwrap();
+    pq.reassign(&q, [id], 30_000).await.unwrap();
     let view = pq.claimed(&q, std::slice::from_ref(&id)).await.unwrap();
     assert_eq!(
         view[0].attempt_count, 2,
@@ -270,7 +270,7 @@ async fn rearm_resets_attempt_and_requeues_the_item() {
     assert_eq!(claimed[0].attempt_count, 1);
 
     // Re-arm: the item returns to pending with attempt_count reset to 0.
-    pq.rearm(&q, claimed.iter().map(|c| c.item_id.clone()))
+    pq.rearm(&q, claimed.iter().map(|c| c.item_id))
         .await
         .unwrap();
     let m = pq.metrics(&q).await.unwrap();
@@ -290,11 +290,11 @@ async fn purge_force_removes_a_leased_item_and_gates_without_force() {
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
     let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
-    let id = claimed[0].item_id.clone();
+    let id = claimed[0].item_id;
 
     // Without force, purging a leased item is a structured Conflict (nothing removed).
     assert_eq!(
-        pq.purge(&q, [id.clone()], false).await.unwrap_err(),
+        pq.purge(&q, [id], false).await.unwrap_err(),
         EngineError::Conflict
     );
     assert_eq!(pq.metrics(&q).await.unwrap().leased, 1);
@@ -314,7 +314,7 @@ async fn claimed_renders_only_leased_items() {
     let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed[0].item_id, lo);
 
-    let view = pq.claimed(&q, &[lo.clone(), hi]).await.unwrap();
+    let view = pq.claimed(&q, &[lo, hi]).await.unwrap();
     assert_eq!(
         view.len(),
         1,

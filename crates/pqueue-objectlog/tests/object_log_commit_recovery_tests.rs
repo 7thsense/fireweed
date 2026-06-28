@@ -199,11 +199,11 @@ async fn object_log_e3_throughput_recovery_and_ack_latency() {
         if claimed.items.is_empty() {
             break;
         }
-        let ids: Vec<ItemId> = claimed.items.iter().map(|c| c.item_id.clone()).collect();
+        let ids: Vec<ItemId> = claimed.items.iter().map(|c| c.item_id).collect();
         let outcomes = ids
             .iter()
             .map(|id| FinalizeOutcome {
-                item_id: id.clone(),
+                item_id: *id,
                 kind: FinalizeKind::Complete,
             })
             .collect();

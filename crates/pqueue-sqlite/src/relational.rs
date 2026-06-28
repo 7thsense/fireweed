@@ -2433,7 +2433,7 @@ mod group_summary_tests {
         );
 
         // Purge the remaining pending grouped item — group drains to empty.
-        b.purge(&shard(), vec![ids[1].clone()], false, ts(20), None)
+        b.purge(&shard(), vec![ids[1]], false, ts(20), None)
             .await
             .unwrap();
         let (oldest, count, rep) = summary(&b, "g").unwrap();
@@ -2477,7 +2477,7 @@ mod group_summary_tests {
         b.finalize(
             &shard(),
             vec![FinalizeOutcome {
-                item_id: ids[0].clone(),
+                item_id: ids[0],
                 kind: FinalizeKind::Release,
             }],
             ts(20), None

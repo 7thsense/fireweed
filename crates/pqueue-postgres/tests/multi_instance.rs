@@ -64,8 +64,14 @@ fn two_instances_compete_over_shared_postgres() {
 
     let clock = Arc::new(ManualClock::at(0));
     // Each instance: its OWN backend + control-plane connection, the SAME schema (one durable store).
-    let make = |owner: &str| -> Pqueue<PostgresBackend> {
-        let backend = Arc::new(PostgresBackend::connect_in_schema(&url, &schema).expect("backend"));
+    let make = |owner: &str, node: u8| -> Pqueue<PostgresBackend> {
+        // Each replica carries a DISTINCT node_id (ADR-009) — as the config-driven service would assign —
+        // so even a split-brain/handoff window cannot mint a colliding id over the shared store.
+        let backend = Arc::new(
+            PostgresBackend::connect_in_schema(&url, &schema)
+                .expect("backend")
+                .with_node_id(node),
+        );
         let cp: Arc<dyn QueueControlPlane> = Arc::new(
             PostgresControlPlane::connect_in_schema(&url, &schema, ControlPlaneConfig::default())
                 .expect("cp"),
@@ -75,10 +81,10 @@ fn two_instances_compete_over_shared_postgres() {
             .expect("postgres control plane presents the atomic acquire->fence capability")
     };
 
-    let a = make("owner-A");
+    let a = make("owner-A", 1);
     bo(a.create_queue(qdef())).unwrap();
     // B connects AFTER the queue exists, so its per-connection projection includes the queue.
-    let b = make("owner-B");
+    let b = make("owner-B", 2);
 
     // A acquires the queue (epoch 1 — BQ-23 binds the storage fence epoch atomically) and operates.
     bo(a.push(&qk(), NewItem::default())).unwrap();
@@ -130,9 +136,12 @@ fn relational_multi_instance_has_item_visibility_and_fence() {
     drop(c);
 
     let clock = Arc::new(ManualClock::at(0));
-    let make = |owner: &str| -> Pqueue<PostgresRelationalBackend> {
-        let backend =
-            Arc::new(PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("backend"));
+    let make = |owner: &str, node: u8| -> Pqueue<PostgresRelationalBackend> {
+        let backend = Arc::new(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema)
+                .expect("backend")
+                .with_node_id(node),
+        );
         let cp: Arc<dyn QueueControlPlane> = Arc::new(
             PostgresControlPlane::connect_in_schema(&url, &schema, ControlPlaneConfig::default())
                 .expect("cp"),
@@ -141,9 +150,9 @@ fn relational_multi_instance_has_item_visibility_and_fence() {
             .expect("postgres binds the storage epoch")
     };
 
-    let a = make("owner-A");
+    let a = make("owner-A", 1);
     bo(a.create_queue(qdef())).unwrap();
-    let b = make("owner-B");
+    let b = make("owner-B", 2);
 
     bo(a.push(&qk(), NewItem::default())).unwrap();
     // Cross-instance item visibility: B reads A's write from the shared DB (impossible on the log-replay
