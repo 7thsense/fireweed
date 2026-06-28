@@ -49,8 +49,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use postgres::Client;
 use postgres::types::ToSql;
+use postgres::{Client, GenericClient};
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel,
     PriorityValue, QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted,
@@ -203,8 +203,13 @@ SET lifecycle_state='Leased', lease_token_hash=$5, lease_expires_at=$6, \
     retry_count=retry_count+1, item_version=item_version+1, updated_at=$7, last_command_sequence=$8 \
 FROM candidates c \
 	WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
-	RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
-	          i.lease_expires_at, i.retry_count, i.payload, i.fields, i.metadata";
+		RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
+		          i.lease_expires_at, i.retry_count, i.payload, i.fields, i.metadata";
+
+pub(crate) const ITEM_GATE_KEYS_BATCH_SQL: &str = "\
+SELECT item_id, gate_key FROM pqueue_item_gates \
+WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3) \
+ORDER BY item_id, gate_key";
 
 // ---------------------------------------------------------------------------
 // small conversions / error mapping
@@ -1818,15 +1823,25 @@ fn claimed_from_row(
     })
 }
 
-fn item_gate_keys(client: &mut Client, shard: &QueueKey, id: &ItemId) -> EngineResult<Vec<String>> {
+fn item_gate_keys_by_id<C: GenericClient>(
+    client: &mut C,
+    shard: &QueueKey,
+    ids: &[ItemId],
+) -> EngineResult<HashMap<String, Vec<String>>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
     let (t, q) = parts(shard);
-    let rows = st(client.query(
-        "SELECT gate_key FROM pqueue_item_gates \
-         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
-         ORDER BY gate_key",
-        &[&t, &q, &id.to_string()],
-    ))?;
-    Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    let rows = st(client.query(ITEM_GATE_KEYS_BATCH_SQL, &[&t, &q, &id_strings]))?;
+    let mut by_id: HashMap<String, Vec<String>> = HashMap::new();
+    for row in rows {
+        by_id
+            .entry(row.get::<_, String>(0))
+            .or_default()
+            .push(row.get(1));
+    }
+    Ok(by_id)
 }
 
 fn apply_whole_cohort_response_shape(items: &mut [ClaimedItem]) -> Option<GroupKey> {
@@ -1845,6 +1860,7 @@ fn render_claimed(
 ) -> EngineResult<Vec<ClaimedItem>> {
     let (t, q) = parts(shard);
     let mut out = Vec::new();
+    let mut gate_keys_by_id = item_gate_keys_by_id(client, shard, ids)?;
     for id in ids {
         let Some(token) = resolve(id) else {
             continue;
@@ -1858,7 +1874,7 @@ fn render_claimed(
         let Some(row) = row else { continue };
         let exp: Option<i64> = row.get(5);
         let Some(exp) = exp else { continue };
-        let gate_keys = item_gate_keys(client, shard, id)?;
+        let gate_keys = gate_keys_by_id.remove(&id.to_string()).unwrap_or_default();
         out.push(claimed_from_row(
             *id,
             token,
@@ -2580,23 +2596,21 @@ impl ClaimPort for PostgresRelationalBackend {
                 if rows.is_empty() {
                     return Ok(Claimed::default()); // roll back — no sequence burned (sqlite parity)
                 }
+                let mut claimed_ids = Vec::with_capacity(rows.len());
+                for row in &rows {
+                    let id: String = row.get(0);
+                    claimed_ids
+                        .push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
+                }
+                let mut gate_keys_by_id = item_gate_keys_by_id(&mut tx, &req.shard, &claimed_ids)?;
                 let mut items = Vec::with_capacity(rows.len());
                 let mut token_ops = Vec::new();
-                let mut claimed_ids = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let id: String = row.get(0);
-                    let item_id =
-                        ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+                for (row, item_id) in rows.into_iter().zip(claimed_ids.iter().copied()) {
                     let exp_row: Option<i64> = row.get(6);
                     let exp_row = exp_row.unwrap_or(exp);
-                    let gate_rows = st(tx.query(
-                        "SELECT gate_key FROM pqueue_item_gates \
-                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
-                         ORDER BY gate_key",
-                        &[&t, &q, &item_id.to_string()],
-                    ))?;
-                    let gate_keys: Vec<String> =
-                        gate_rows.into_iter().map(|row| row.get(0)).collect();
+                    let gate_keys = gate_keys_by_id
+                        .remove(&item_id.to_string())
+                        .unwrap_or_default();
                     items.push(claimed_from_row(
                         item_id,
                         req.lease_token.clone(),
@@ -2613,7 +2627,6 @@ impl ClaimPort for PostgresRelationalBackend {
                         gate_keys,
                     )?);
                     token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));
-                    claimed_ids.push(item_id);
                 }
                 // The CTE bypasses apply_command_sql's Claim arm, so refresh the claimed groups here.
                 for grp in groups_of(&mut tx, &req.shard, &claimed_ids)? {
@@ -3220,6 +3233,18 @@ mod sql_shape_tests {
         assert!(
             CLAIM_CTE.contains("pqueue_item_gates") && CLAIM_CTE.contains("pqueue_gate_state"),
             "BQ-14d: item-level claim MUST anti-join blocked gates (a blocked gate hides its items)"
+        );
+    }
+
+    #[test]
+    fn claimed_gate_key_lookup_is_batched_by_item_id_array() {
+        assert!(
+            ITEM_GATE_KEYS_BATCH_SQL.contains("item_id = ANY($3)"),
+            "claimed response gate keys must be loaded for the whole claimed batch"
+        );
+        assert!(
+            ITEM_GATE_KEYS_BATCH_SQL.contains("ORDER BY item_id, gate_key"),
+            "batched gate lookup must preserve per-item gate-key ordering"
         );
     }
 
