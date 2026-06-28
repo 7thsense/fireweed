@@ -619,6 +619,10 @@ impl PushPort for SqliteBackend {
 /// [`pqueue_engine::EngineError::Unavailable`] so a caller rejects it before activation.
 impl pqueue_engine::CommitTransitionPort for SqliteBackend {}
 
+/// Recovery/explain reads inherit the `Unavailable` default; the authoritative commit boundary lives on
+/// `SqliteRelationalBackend`, not this log-replay backend.
+impl pqueue_engine::RecoveryReadPort for SqliteBackend {}
+
 impl FinalizePort for SqliteBackend {
     fn finalize(
         &self,

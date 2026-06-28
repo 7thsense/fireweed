@@ -247,3 +247,125 @@ async fn finalize_fences_superseded_owner_epoch() {
         .unwrap();
     assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }
+
+/// Acceptance #4 (epic pqueue-2201fd37): the vectorized claimed-work commit path PROPAGATES the caller's
+/// request id into EVERY backend command envelope it appends — `WriteSideRecords`, `AdvanceInstanceFence`,
+/// the lifecycle `Push`, and `Finalize` — and does NOT construct any of them with `request_id: None`.
+///
+/// This is a RUNTIME assertion, not a source grep: it commits one entry that forces all four commit-path
+/// command kinds, then reads the durable log back through [`LogRead`] and asserts each commit-path envelope
+/// carries `request_id == Some(rid)`. The request-id-less input `Push` and the `Claim` are kept in the same
+/// log as negative controls, proving the assertion actually discriminates `Some` from `None`.
+#[tokio::test]
+async fn commit_path_propagates_request_id_into_every_command_envelope() {
+    use pqueue_conformance::{claim_req, qdef, shard, ts};
+    use pqueue_engine::{
+        ClaimPort, ClaimRef, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
+        ControlPlaneStore, FinalizeKind, InstanceFence, LogRead, PushPort, PushSpec, QueueCommand,
+        SideRecord,
+    };
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+
+    // Push one input item WITHOUT a request id: this envelope MUST carry `request_id: None`. It is the
+    // negative control that proves the commit-path assertion below isn't trivially true.
+    b.push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    // Claim it to obtain the lease-token + version-bearing claim_ref the commit validates inside its boundary.
+    let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+    let c = &claimed.items[0];
+    let claim_ref = ClaimRef {
+        item_id: c.item_id,
+        lease_token: c
+            .lease_token
+            .clone()
+            .expect("claimed item carries a lease token"),
+        lease_expires_at: c.lease_expires_at,
+        item_version: c.item_version,
+    };
+
+    // One entry that forces ALL FOUR commit-path envelope kinds in a single transition: a side record
+    // (WriteSideRecords), an instance fence (AdvanceInstanceFence), a lifecycle item (Push), and a finalize
+    // (Finalize). The caller request id must thread into every one of them.
+    let rid = RequestId::new("txn-c10").unwrap();
+    let outcomes = b
+        .commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: Some(rid.clone()),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![SideRecord {
+                        key: b"state/run".to_vec(),
+                        payload: Bytes::from_static(b"opaque"),
+                    }],
+                    lifecycle_items: vec![PushSpec::default()],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: b"wf-1".to_vec(),
+                        expected: 0,
+                        next: 1,
+                    }),
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1, "one entry committed");
+
+    // Read the durable log back and inspect every appended envelope's `request_id`.
+    let page = b.read_from(&shard(), None, 1000).await.unwrap();
+    let mut commit_path_envs = 0;
+    let mut saw_input_push_without_rid = false;
+    let mut saw_claim_without_rid = false;
+    for (_pos, env) in &page.entries {
+        match &env.command {
+            // The three commit-path command kinds that are unambiguous (no non-commit producer in this test).
+            QueueCommand::WriteSideRecords(_)
+            | QueueCommand::AdvanceInstanceFence(_)
+            | QueueCommand::Finalize(_) => {
+                assert_eq!(
+                    env.request_id.as_ref(),
+                    Some(&rid),
+                    "commit-path envelope must carry the caller request id, not None"
+                );
+                commit_path_envs += 1;
+            }
+            // Two pushes reach the log: the request-id-less input push (None) and the commit's lifecycle push
+            // (Some(rid)). Discriminate by request_id — the commit one MUST be Some(rid).
+            QueueCommand::Push(_) => {
+                if env.request_id.is_some() {
+                    assert_eq!(env.request_id.as_ref(), Some(&rid));
+                    commit_path_envs += 1;
+                } else {
+                    saw_input_push_without_rid = true;
+                }
+            }
+            // The claim is NOT on the commit path: it must carry no request id (negative control).
+            QueueCommand::Claim(_) => {
+                assert!(
+                    env.request_id.is_none(),
+                    "non-commit claim envelope carries no request id"
+                );
+                saw_claim_without_rid = true;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        commit_path_envs, 4,
+        "WriteSideRecords + AdvanceInstanceFence + lifecycle Push + Finalize all propagated Some(rid)"
+    );
+    assert!(
+        saw_input_push_without_rid,
+        "the request-id-less input push is the negative control proving None is observable"
+    );
+    assert!(
+        saw_claim_without_rid,
+        "the non-commit claim envelope is a second negative control"
+    );
+}
