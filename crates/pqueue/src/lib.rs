@@ -36,8 +36,8 @@ pub use pqueue_core::{
     CreateQueueErrorKind, DecimalValue, EligibilityPolicy, GateKeyPolicy, GroupKey,
     IdentifierError, IndexSpec, ItemId, Metadata, MetadataValue, OrderingMode, OwnerId,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    QueueCreationPolicy, QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy,
-    TenantId, TimestampError, UtcTimestamp,
+    QueueCreationPolicy, QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RequestId,
+    RetryPolicy, TenantId, TimestampError, UtcTimestamp,
 };
 pub use pqueue_engine::{
     ClaimCompatibility, Claimed, ClaimedItem, Clock, ControlPlaneConfig, CreateQueueOutcome,
@@ -426,10 +426,44 @@ impl<B: LibBackend> Pqueue<B> {
         Ok(ids.into_iter().next().expect("one id per pushed item"))
     }
 
+    /// Enqueue one item under an API-001 request id. Replaying the same request body with the same
+    /// `request_id` returns the original item id on backends that implement durable request replay.
+    pub async fn push_with_request_id(
+        &self,
+        queue: &QueueKey,
+        request_id: RequestId,
+        item: NewItem,
+    ) -> EngineResult<ItemId> {
+        let ids = self
+            .push_batch_with_request_id(queue, request_id, vec![item])
+            .await?;
+        Ok(ids.into_iter().next().expect("one id per pushed item"))
+    }
+
     /// Enqueue a batch of new items in one command (append). Returns the server-assigned ids in order.
     pub async fn push_batch(
         &self,
         queue: &QueueKey,
+        items: Vec<NewItem>,
+    ) -> EngineResult<Vec<ItemId>> {
+        self.push_batch_inner(queue, None, items).await
+    }
+
+    /// Enqueue a batch under an API-001 request id. Replaying the same batch body with the same request id
+    /// returns the original ids in order; a different body returns `RequestIdConflict`.
+    pub async fn push_batch_with_request_id(
+        &self,
+        queue: &QueueKey,
+        request_id: RequestId,
+        items: Vec<NewItem>,
+    ) -> EngineResult<Vec<ItemId>> {
+        self.push_batch_inner(queue, Some(request_id), items).await
+    }
+
+    async fn push_batch_inner(
+        &self,
+        queue: &QueueKey,
+        request_id: Option<RequestId>,
         items: Vec<NewItem>,
     ) -> EngineResult<Vec<ItemId>> {
         let specs: Vec<PushSpec> = items
@@ -447,10 +481,14 @@ impl<B: LibBackend> Pqueue<B> {
             })
             .collect();
         let epoch = self.session_epoch(queue).await?;
-        let r = self
-            .backend
-            .push(queue, specs, self.clock.now(), epoch)
-            .await;
+        let now = self.clock.now();
+        let r = if let Some(request_id) = request_id {
+            self.backend
+                .push_with_request_id(queue, request_id, specs, now, epoch)
+                .await
+        } else {
+            self.backend.push(queue, specs, now, epoch).await
+        };
         self.note(queue, r)
     }
 

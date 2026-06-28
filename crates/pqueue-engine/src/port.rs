@@ -11,12 +11,12 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
-    QueueDefinition, QueueId, TenantId, UtcTimestamp, WorkerId,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 
 use crate::claim_validation::ClaimCompatibility;
 use crate::command::{CommandEnvelope, CommandId, FinalizeOutcome};
-use crate::error::EngineResult;
+use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
 // ---------------------------------------------------------------------------
@@ -327,7 +327,7 @@ pub trait UpsertPort: Send + Sync {
 /// A new-item spec for [`PushPort`]. The backend assigns the `item_id` (unique + restart-safe via its
 /// own command sequence — NOT a caller-side counter, so two handles / a restart can't collide); the
 /// dedup `client_item_key` defaults to that id (a unique append) when `None`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PushSpec {
     pub client_item_key: Option<ClientItemKey>,
     pub priority: Option<PriorityValue>,
@@ -362,6 +362,20 @@ pub trait PushPort: Send + Sync {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+
+    /// Same append operation, but carrying API-001's envelope-level `request_id`. Backends that have not
+    /// implemented durable request replay return `Unavailable` rather than silently accepting a request id
+    /// without idempotency semantics.
+    fn push_with_request_id(
+        &self,
+        _shard: &QueueKey,
+        _request_id: RequestId,
+        _items: Vec<PushSpec>,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
 }
 
 /// Extends the lease on in-flight items, atomically pre-validating exactly like [`FinalizePort`]: a

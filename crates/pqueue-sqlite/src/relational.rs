@@ -23,12 +23,10 @@
 //! the "two families identical on core" invariant holds; BQ-13 must keep retention (and `group_summary`)
 //! a relational-class concern, NOT add it to the shared core suite — else the families would diverge.
 //!
-//! DEFERRED — data-plane request-id idempotency (`pqueue_request_idempotency`, TD-002 §Idempotency): no
-//! orchestration port carries a `request_id` today (every `CommandEnvelope` is built with `request_id:
-//! None`; the facade passes none; `QueueIdempotencyCache` is deliberately operator-repair-only, see
-//! `pqueue_engine::operator`). Building the table now would be unreachable dead code; end-to-end
-//! request-id replay needs a request-id-carrying port (a separate cross-cutting bead), so it is not
-//! implemented here rather than faked. Tracked as a follow-up.
+//! REQUEST-ID IDEMPOTENCY (BQ-11e slice): `pqueue_request_idempotency` is wired for the first
+//! request-id-carrying data-plane path, BatchPush. That proves the TD-002 relational table/replay flow
+//! without claiming full API-001 coverage for every mutating operation. Claim replay and finalize/update
+//! replay remain later request-id-carrying port work.
 //!
 //! ## Lease tokens (TD-004 §security / TD-002 parity)
 //! The durable projection stores only the lease token **hash** (`lease_token_hash`, never the cleartext
@@ -53,7 +51,7 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel, PriorityValue,
-    QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
@@ -158,6 +156,21 @@ CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
     item_id TEXT NOT NULL, expires_at INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, client_item_key)
 );
+-- BQ-11e: API-001 request-id replay for request-id-carrying relational operations. The first wired
+-- operation is BatchPush: same `(tenant,queue,operation,request_id)` + same fingerprint replays the stored
+-- response ids; a different fingerprint is `request-id-conflict`.
+CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, operation TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_fingerprint BLOB NOT NULL,
+    response_payload TEXT NOT NULL,
+    command_positions TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, operation, request_id)
+);
+CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
+    ON pqueue_request_idempotency (expires_at);
 -- BQ-14c: the cohort projection (TD-002 §cohort). The cohort key IS the group_key; `cohort_size` is the
 -- declared total member count (set by the first cohort member's push). Completeness + per-member
 -- eligibility are evaluated LIVE from pqueue_items at whole_cohort claim time (this row is the
@@ -192,6 +205,119 @@ fn st<T>(r: rusqlite::Result<T>) -> EngineResult<T> {
 
 fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
+
+fn push_request_fingerprint(items: &[PushSpec]) -> EngineResult<Vec<u8>> {
+    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+fn request_expires_at(
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> EngineResult<i64> {
+    let retention_ms = queues
+        .get(shard)
+        .map(|d| d.request_id_retention_ms)
+        .ok_or(EngineError::NotFound)?;
+    Ok(ts_nanos(now).saturating_add((retention_ms as i64).saturating_mul(1_000_000)))
+}
+
+fn item_ids_to_json(ids: &[ItemId]) -> EngineResult<String> {
+    let raw: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    to_json(&raw)
+}
+
+fn item_ids_from_json(raw: String) -> EngineResult<Vec<ItemId>> {
+    let decoded: Vec<String> =
+        serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    decoded
+        .into_iter()
+        .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+        .collect()
+}
+
+fn positions_to_json(positions: &[CommandPosition]) -> EngineResult<String> {
+    let raw: Vec<(u64, u64)> = positions
+        .iter()
+        .map(|pos| (pos.backend_epoch, pos.sequence))
+        .collect();
+    to_json(&raw)
+}
+
+fn check_request_idempotency(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    operation: &str,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    now_n: i64,
+) -> EngineResult<Option<Vec<ItemId>>> {
+    let (t, q) = parts(shard);
+    let prior: Option<(Vec<u8>, String, i64)> = st(tx
+        .query_row(
+            "SELECT request_fingerprint, response_payload, expires_at \
+             FROM pqueue_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![t, q, operation, request_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional())?;
+    let Some((prior_fingerprint, response_payload, expires_at)) = prior else {
+        return Ok(None);
+    };
+    if expires_at <= now_n {
+        st(tx.execute(
+            "DELETE FROM pqueue_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![t, q, operation, request_id.as_str()],
+        ))?;
+        return Ok(None);
+    }
+    if prior_fingerprint == fingerprint {
+        return Ok(Some(item_ids_from_json(response_payload)?));
+    }
+    Err(EngineError::RequestIdConflict)
+}
+
+fn record_request_idempotency(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    operation: &str,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    response_ids: &[ItemId],
+    positions: &[CommandPosition],
+    now: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    st(tx.execute(
+        "INSERT INTO pqueue_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+          command_positions,expires_at,created_at) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+          request_fingerprint=excluded.request_fingerprint, \
+          response_payload=excluded.response_payload, \
+          command_positions=excluded.command_positions, \
+          expires_at=excluded.expires_at",
+        params![
+            t,
+            q,
+            operation,
+            request_id.as_str(),
+            fingerprint,
+            item_ids_to_json(response_ids)?,
+            positions_to_json(positions)?,
+            expires_at,
+            ts_nanos(now),
+        ],
+    ))?;
+    Ok(())
 }
 
 fn fields_to_json(fields: &BTreeMap<String, Bytes>) -> EngineResult<String> {
@@ -2378,6 +2504,94 @@ impl PushPort for SqliteRelationalBackend {
         })();
         std::future::ready(result)
     }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let fingerprint = push_request_fingerprint(&items)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let max_attempts = g
+                .queues
+                .get(shard)
+                .map(|d| d.retry_policy.max_attempts)
+                .ok_or(EngineError::NotFound)?;
+            let expires_at = request_expires_at(&g.queues, shard, now)?;
+            let epoch = expected_epoch.unwrap_or(0);
+            let Inner {
+                conn,
+                queues,
+                live_tokens,
+                ..
+            } = &mut *g;
+            let (t, q) = parts(shard);
+            let tx = st(conn.transaction())?;
+            let (seq, cursor_epoch): (i64, i64) = st(tx
+                .query_row(
+                    "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![t, q],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional())?
+            .ok_or(EngineError::NotFound)?;
+            if expected_epoch.is_some_and(|e| e != cursor_epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
+            if let Some(ids) = check_request_idempotency(
+                &tx,
+                shard,
+                IDEMPOTENCY_OPERATION_PUSH,
+                &request_id,
+                &fingerprint,
+                ts_nanos(now),
+            )? {
+                return Ok(ids);
+            }
+
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            let mut token_ops = Vec::new();
+            apply_command_sql(
+                &tx,
+                queues,
+                &mut token_ops,
+                shard,
+                seq as u64,
+                now,
+                &QueueCommand::Push(PushCommand { items: push_items }),
+            )?;
+            st(tx.execute(
+                "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
+                params![t, q, seq + 1],
+            ))?;
+            let positions = [CommandPosition::new(
+                shard.clone(),
+                cursor_epoch as u64,
+                seq as u64,
+            )];
+            record_request_idempotency(
+                &tx,
+                shard,
+                IDEMPOTENCY_OPERATION_PUSH,
+                &request_id,
+                &fingerprint,
+                &ids,
+                &positions,
+                now,
+                expires_at,
+            )?;
+            st(tx.commit())?;
+            apply_token_ops(live_tokens, token_ops);
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
 }
 
 impl ClaimPort for SqliteRelationalBackend {
@@ -3004,6 +3218,87 @@ mod group_summary_tests {
             )
             .optional()
             .unwrap()
+    }
+
+    fn next_seq(b: &SqliteRelationalBackend) -> i64 {
+        let g = b.inner.lock().unwrap();
+        g.conn
+            .query_row(
+                "SELECT next_seq FROM relational_cursor WHERE tenant='t1' AND queue='q1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_id_push_replays_prior_ids_without_second_append() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let request_id = RequestId::new("push-req-1").unwrap();
+        let body = vec![PushSpec::default(), grouped(20, "g")];
+
+        let first = b
+            .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(next_seq(&b), 1);
+
+        let replay = b
+            .push_with_request_id(&shard(), request_id, body, ts(1), None)
+            .await
+            .unwrap();
+        assert_eq!(replay, first, "same request body replays the prior ids");
+        assert_eq!(next_seq(&b), 1, "replay did not append a second command");
+    }
+
+    #[tokio::test]
+    async fn request_id_push_conflicts_on_different_body() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let request_id = RequestId::new("push-req-conflict").unwrap();
+
+        b.push_with_request_id(
+            &shard(),
+            request_id.clone(),
+            vec![PushSpec::default()],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let err = b
+            .push_with_request_id(
+                &shard(),
+                request_id,
+                vec![grouped(99, "other")],
+                ts(1),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, EngineError::RequestIdConflict);
+        assert_eq!(next_seq(&b), 1, "conflict did not append");
+    }
+
+    #[tokio::test]
+    async fn push_without_request_id_still_appends_each_call() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(qdef()).await.unwrap();
+
+        let first = b
+            .push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        let second = b
+            .push(&shard(), vec![PushSpec::default()], ts(1), None)
+            .await
+            .unwrap();
+
+        assert_ne!(second, first);
+        assert_eq!(next_seq(&b), 2);
     }
 
     #[tokio::test]

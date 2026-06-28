@@ -7,7 +7,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pqueue::{
     EngineError, GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, PayloadUpdate, Pqueue,
-    UtcTimestamp,
+    RequestId, UtcTimestamp,
 };
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
@@ -16,6 +16,7 @@ use pqueue_core::{
 };
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_sqlite::SqliteRelationalBackend;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -111,6 +112,56 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     let again = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(again.len(), 1, "retried item is claimable again");
     assert!(again[0].attempt_count > 1, "redelivery bumps attempt_count");
+}
+
+#[tokio::test]
+async fn request_id_push_replays_over_sqlite_relational_facade() {
+    let clock = Arc::new(ManualClock::at(0));
+    let path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-facade-request-id-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&path);
+    let backend = Arc::new(SqliteRelationalBackend::open(&path).unwrap());
+    let pq = Pqueue::new(backend, clock);
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let request_id = RequestId::new("push-req-1").unwrap();
+
+    let first = pq
+        .push_batch_with_request_id(&q, request_id.clone(), vec![at(10), at(20)])
+        .await
+        .unwrap();
+    let replay = pq
+        .push_batch_with_request_id(&q, request_id, vec![at(10), at(20)])
+        .await
+        .unwrap();
+
+    assert_eq!(replay, first);
+    assert_eq!(pq.metrics(&q).await.unwrap().pending, 2);
+    drop(pq);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn request_id_push_is_explicitly_unavailable_on_memory_backend() {
+    let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(0));
+    let pq = Pqueue::new(backend, clock);
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+
+    let err = pq
+        .push_with_request_id(&q, RequestId::new("push-req-unsupported").unwrap(), at(10))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, EngineError::Unavailable);
+    assert_eq!(pq.metrics(&q).await.unwrap().pending, 0);
 }
 
 #[tokio::test]
