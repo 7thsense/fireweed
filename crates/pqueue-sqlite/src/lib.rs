@@ -33,7 +33,8 @@ use pqueue_engine::{
     QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
     ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
     SnapshotRef, SnapshotStore, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, build_push_items, require_item_level_claim, validate_purge_force,
+    UpsertPort, build_push_items, require_item_level_claim, validate_gate_command,
+    validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -144,6 +145,7 @@ impl Inner {
         env: &CommandEnvelope,
         expected_epoch: Option<u64>,
     ) -> EngineResult<CommandPosition> {
+        validate_gate_command(false, &env.command)?;
         let (t, q) = parts(shard);
         let json = to_json(env)?;
         let tx = st(self.conn.transaction())?;
@@ -336,6 +338,9 @@ impl LogWriter for SqlLogWriter<'_> {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
+        for env in commands {
+            validate_gate_command(false, &env.command)?;
+        }
         let (t, q) = parts(shard);
         let mut positions = Vec::with_capacity(commands.len());
         let tx = st(self.conn.transaction())?;
@@ -571,6 +576,7 @@ impl PushPort for SqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
             // Pre-validate the shard exists BEFORE any durable write (commit_locked expects it), so a
             // Push never leaves a durable log row without a projection apply (divergence-safe).

@@ -225,13 +225,16 @@ pub async fn commit<B: Backend + ControlPlaneStore>(backend: &B, env: CommandEnv
 
 /// Run every conformance scenario against fresh backends built by `make`. Panics on the first failure.
 pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
+    let gate_capable = make().supports_gates();
     scenarios::push_then_select_eligible_in_priority_order(&make).await;
     scenarios::claim_then_complete_lifecycle(&make).await;
     scenarios::replace_pending_supersedes_old(&make).await;
     scenarios::high_water_is_monotonic(&make).await;
     scenarios::claim_returns_priority_ordered_rich_items(&make).await;
     scenarios::claim_empty_when_nothing_eligible(&make).await;
-    scenarios::claimed_item_shape_includes_payload_fields_and_gate_keys(&make).await;
+    if gate_capable {
+        scenarios::claimed_item_shape_includes_payload_fields_and_gate_keys(&make).await;
+    }
     scenarios::claimed_item_shape_omits_empty_conditionals(&make).await;
     scenarios::structured_live_items_are_ordered_and_only_live(&make).await;
     scenarios::upsert_inserts_then_replaces_pending(&make).await;
@@ -259,6 +262,16 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::epoch_fence_closes_pre_segment_window(&make).await;
 }
 
+pub async fn claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported<
+    B: ConformanceCore,
+>(
+    make: impl Fn() -> B,
+) {
+    if make().supports_gates() {
+        scenarios::claimed_item_shape_includes_payload_fields_and_gate_keys(&make).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Conformance classes (ADR-008 §2 / TD-001): core (every family) + log-replay
 // (log-bearing) + relational-reconnect (DB-authoritative). Backends compose the
@@ -272,9 +285,12 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
 macro_rules! claimed_item_shape_conformance_tests {
     ($make:expr) => {
         $crate::conformance_suite!(@scenarios $make,
-            claimed_item_shape_includes_payload_fields_and_gate_keys,
             claimed_item_shape_omits_empty_conditionals,
         );
+        #[tokio::test]
+        async fn claimed_item_shape_includes_payload_fields_and_gate_keys() {
+            $crate::claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported($make).await;
+        }
     };
     (@core $make:expr) => {
         $crate::claimed_item_shape_conformance_tests!($make);

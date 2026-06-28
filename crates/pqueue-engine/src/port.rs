@@ -15,7 +15,7 @@ use pqueue_core::{
 };
 
 use crate::claim_validation::ClaimCompatibility;
-use crate::command::{CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome};
+use crate::command::{CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand};
 use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
@@ -63,6 +63,11 @@ pub trait ProjectionWriter {
 /// `EventualApply` the closure has self-read-after-write only (TD-007 §2.1-2.2).
 pub trait Backend: Send + Sync {
     fn durability_class(&self) -> DurabilityClass;
+
+    /// Whether this backend stores gate membership and enforces `SetGates` at claim selection.
+    fn supports_gates(&self) -> bool {
+        false
+    }
 
     /// Run `f` as one unit of work. The closure is synchronous (no `.await` inside); the async
     /// boundary is the method itself.
@@ -380,6 +385,21 @@ pub trait PushPort: Send + Sync {
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
+/// Operator gate-state mutation. Gate support is backend-capability-specific: relational backends
+/// enforce it, while log-replay backends reject it before the command is appended.
+#[doc(hidden)]
+pub trait SetGatesPort: Send + Sync {
+    fn set_gates(
+        &self,
+        _shard: &QueueKey,
+        _command: SetGatesCommand,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }

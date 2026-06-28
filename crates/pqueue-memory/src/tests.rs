@@ -55,6 +55,50 @@ async fn distinct_node_ids_never_collide_on_concurrent_push() {
     assert_ne!(ida.to_string(), idb.to_string());
 }
 
+#[tokio::test]
+async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
+    use pqueue_conformance::{envelope, qdef, qkey, shard, ts};
+    use pqueue_engine::{EngineError, LogWriter, ProjectionWriter, QueueCommand, SetGatesCommand};
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+
+    let err = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                gate_keys: vec!["hold".to_string()],
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0);
+
+    let env = envelope(
+        QueueCommand::SetGates(SetGatesCommand {
+            gate_keys: vec!["hold".to_string()],
+            blocked: true,
+        }),
+        vec![],
+    );
+    let epoch = b.current_epoch(&shard()).await.unwrap();
+    let err = b
+        .write(
+            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
+                let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
+                pw.apply(&pos, std::slice::from_ref(&env))?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+}
+
 /// B1a (ADR-009 / TD-003 In-Process Library Owner-Runtime): a claim stamped with the owner's *cached*
 /// acquire-time epoch is fenced at commit once a newer epoch is acquired (the owner was superseded), and
 /// leases nothing; the current-epoch owner claims normally; `None` (sole-owner) is unaffected.

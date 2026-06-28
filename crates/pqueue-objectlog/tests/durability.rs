@@ -6,6 +6,7 @@ use pqueue_core::{ClientItemKey, ItemId};
 use pqueue_engine::{
     Backend, ClaimPort, ControlPlaneStore, DurabilityClass, EngineError, LogRead, LogWriter,
     ProjectionRead, ProjectionWriter, PushCommand, QueueCommand, ReplacePendingCommand,
+    SetGatesCommand,
 };
 use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend};
 
@@ -173,6 +174,42 @@ async fn replace_pending_command_is_refused_at_the_write_path() {
         Err(EngineError::Unavailable),
         "ReplacePending is refused on the eventual-apply class at the write path"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn raw_setgates_is_rejected_before_any_object_is_written() {
+    // Unsupported gate commands must be rejected before the object log appends anything.
+    let root = tmp_root("setgates");
+    let _ = std::fs::remove_dir_all(&root);
+    let b = ObjectLogBackend::open(&root).expect("open");
+    b.create_queue(qdef()).await.unwrap();
+    let valid = envelope(
+        QueueCommand::Push(PushCommand {
+            items: vec![item("1", "ka", 5)],
+        }),
+        vec![],
+    );
+    let unsupported = envelope(
+        QueueCommand::SetGates(SetGatesCommand {
+            gate_keys: vec!["hold".to_string()],
+            blocked: true,
+        }),
+        vec![],
+    );
+    let epoch = b.current_epoch(&shard()).await.unwrap();
+    let res = b
+        .write(
+            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
+                let pos = lw.append(&shard(), &[valid.clone(), unsupported.clone()], epoch)?;
+                pw.apply(&pos, &[valid, unsupported])?;
+                Ok(())
+            },
+        )
+        .await;
+    assert_eq!(res, Err(EngineError::Unavailable));
+    let page = b.read_from(&shard(), None, 10).await.unwrap();
+    assert!(page.entries.is_empty(), "rejected batch wrote no objects");
     let _ = std::fs::remove_dir_all(&root);
 }
 

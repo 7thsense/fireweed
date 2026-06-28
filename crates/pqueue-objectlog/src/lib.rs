@@ -37,7 +37,7 @@ use pqueue_engine::{
     QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport,
     UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, require_item_level_claim,
-    validate_purge_force,
+    validate_gate_command, validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -121,6 +121,7 @@ fn next_seq(log_dir: &Path) -> EngineResult<u64> {
 /// `ObjLogWriter`): a `ReplacePending` command is refused with `Unavailable` BEFORE any object is
 /// written, so the ban holds at the write path, not just the `replace_if_pending` port.
 fn append_object(root: &Path, shard: &QueueKey, env: &CommandEnvelope) -> EngineResult<(u64, u64)> {
+    validate_gate_command(false, &env.command)?;
     if matches!(env.command, QueueCommand::ReplacePending(_)) {
         return Err(EngineError::Unavailable);
     }
@@ -420,6 +421,9 @@ impl LocalObjectLog {
         {
             return Err(EngineError::Unavailable);
         }
+        for env in commands {
+            validate_gate_command(false, &env.command)?;
+        }
         let mut positions = Vec::with_capacity(commands.len());
         for env in commands {
             let (epoch, seq) = append_object(&inner.root, shard, env)?;
@@ -483,6 +487,9 @@ impl LogWriter for ObjLogWriter {
         // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
         if expected_epoch != read_epoch(&self.root, shard) {
             return Err(EngineError::EpochFenced);
+        }
+        for env in commands {
+            validate_gate_command(false, &env.command)?;
         }
         let mut positions = Vec::with_capacity(commands.len());
         for env in commands {
@@ -631,6 +638,7 @@ impl PushPort for ObjectLogBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
             // Pre-validate the shard exists before any durable object write (commit_locked expects it).
             if !g.projections.contains_key(shard) {

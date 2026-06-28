@@ -65,9 +65,10 @@ use pqueue_engine::{
     LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
     PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
     QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
-    project_scopes, validate_claim_compatibility, validate_purge_force,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand,
+    SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    build_push_items, project_scopes, validate_claim_compatibility, validate_gate_push,
+    validate_purge_force,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -2790,6 +2791,10 @@ impl Backend for SqliteRelationalBackend {
         DurabilityClass::Atomic
     }
 
+    fn supports_gates(&self) -> bool {
+        true
+    }
+
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
     where
         F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
@@ -3101,6 +3106,7 @@ impl PushPort for SqliteRelationalBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
             let max_attempts = g
                 .queues
@@ -3131,6 +3137,7 @@ impl PushPort for SqliteRelationalBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
             let fingerprint = push_request_fingerprint(&items)?;
             let mut g = self.inner.lock().expect("poisoned");
             let max_attempts = g
@@ -3206,6 +3213,22 @@ impl PushPort for SqliteRelationalBackend {
             st(tx.commit())?;
             apply_token_ops(live_tokens, token_ops);
             Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl SetGatesPort for SqliteRelationalBackend {
+    fn set_gates(
+        &self,
+        shard: &QueueKey,
+        command: SetGatesCommand,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            g.commit_command(shard, QueueCommand::SetGates(command), now, expected_epoch)
         })();
         std::future::ready(result)
     }
@@ -3904,7 +3927,9 @@ mod group_summary_tests {
         EligibilityPolicy, GateKeyPolicy, OrderingMode, PriorityDirection, PriorityModelKind,
         PriorityTieBreaker, QueueId, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
     };
-    use pqueue_engine::{ClaimRequest, CommandChecksum, CommandId, GroupBatching, SetGatesCommand};
+    use pqueue_engine::{
+        ClaimRequest, CommandChecksum, CommandId, GroupBatching, SetGatesCommand, SetGatesPort,
+    };
 
     fn qdef() -> QueueDefinition {
         QueueDefinition {
@@ -3998,23 +4023,15 @@ mod group_summary_tests {
     }
 
     async fn set_gate(b: &SqliteRelationalBackend, gate_key: &str, blocked: bool, now: i64) {
-        let env = CommandEnvelope {
-            command_id: CommandId::new(format!("gate-{gate_key}-{blocked}")),
-            request_id: None,
-            item_ids: vec![],
-            command: QueueCommand::SetGates(SetGatesCommand {
+        b.set_gates(
+            &shard(),
+            SetGatesCommand {
                 gate_keys: vec![gate_key.to_string()],
                 blocked,
-            }),
-            checksum: CommandChecksum(0),
-            created_at: ts(now),
-        };
-        let epoch = b.current_epoch(&shard()).await.unwrap();
-        b.write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
+            },
+            ts(now),
+            None,
+        )
         .await
         .unwrap();
     }

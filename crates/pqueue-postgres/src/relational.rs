@@ -66,9 +66,10 @@ use pqueue_engine::{
     LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
     PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
     QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
-    project_scopes, validate_claim_compatibility, validate_purge_force,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand,
+    SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    build_push_items, project_scopes, validate_claim_compatibility, validate_gate_push,
+    validate_purge_force,
 };
 use sha2::{Digest, Sha256};
 
@@ -2233,6 +2234,10 @@ impl Backend for PostgresRelationalBackend {
         DurabilityClass::Atomic
     }
 
+    fn supports_gates(&self) -> bool {
+        true
+    }
+
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
     where
         F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
@@ -2511,6 +2516,7 @@ impl PushPort for PostgresRelationalBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
             let max_attempts = g
                 .queues
@@ -2528,6 +2534,22 @@ impl PushPort for PostgresRelationalBackend {
                 expected_epoch,
             )?;
             Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl SetGatesPort for PostgresRelationalBackend {
+    fn set_gates(
+        &self,
+        shard: &QueueKey,
+        command: SetGatesCommand,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            g.commit_command(shard, QueueCommand::SetGates(command), now, expected_epoch)
         })();
         std::future::ready(result)
     }

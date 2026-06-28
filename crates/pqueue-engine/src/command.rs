@@ -11,6 +11,7 @@ use pqueue_core::{
 };
 
 use crate::QueueKey;
+use crate::error::{EngineError, EngineResult};
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -112,6 +113,35 @@ pub fn build_push_items(
         });
     }
     (items, ids)
+}
+
+/// Reject gate-bearing pushes on backends that do not enforce gate state.
+///
+/// This is deliberately separate from [`crate::DurabilityClass`]: the in-memory reference backend is
+/// atomic, but it is still not gate-capable because its shared log-replay projection does not store or
+/// evaluate gate state.
+pub fn validate_gate_push(supports_gates: bool, specs: &[crate::PushSpec]) -> EngineResult<()> {
+    if !supports_gates && specs.iter().any(|spec| !spec.gate_keys.is_empty()) {
+        return Err(EngineError::Unavailable);
+    }
+    Ok(())
+}
+
+/// Reject gate-state commands on backends that would otherwise log them without enforcing them.
+pub fn validate_gate_command(supports_gates: bool, command: &QueueCommand) -> EngineResult<()> {
+    if supports_gates {
+        return Ok(());
+    }
+    match command {
+        QueueCommand::SetGates(_) => Err(EngineError::Unavailable),
+        QueueCommand::Push(c) if c.items.iter().any(|item| !item.gate_keys.is_empty()) => {
+            Err(EngineError::Unavailable)
+        }
+        QueueCommand::ReplacePending(c) if !c.replacement.gate_keys.is_empty() => {
+            Err(EngineError::Unavailable)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Per-queue item-id counter that **resets when the fence epoch advances**, so the 32-bit `counter` field

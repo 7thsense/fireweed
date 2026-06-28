@@ -15,7 +15,7 @@ use pqueue_engine::{
     LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionWriter, PurgePort, PushCommand,
     PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
     ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort, TickReport, UpsertOutcome,
-    UpsertPort, build_push_items, require_item_level_claim,
+    UpsertPort, build_push_items, require_item_level_claim, validate_gate_push,
 };
 use pqueue_objectlog::LocalObjectLog;
 use pqueue_sqlite::SqliteProjectionStore;
@@ -198,6 +198,7 @@ impl PushPort for ObjectLogSqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         async move {
+            validate_gate_push(self.supports_gates(), &items)?;
             let _guard = self.op_lock.lock().await;
             let definition = self.queue_definition(shard).await?;
             let epoch = expected_epoch.unwrap_or(self.log.current_epoch(shard)?);
