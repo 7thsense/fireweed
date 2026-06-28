@@ -116,10 +116,7 @@ async fn retention_tombstone_survives_reopen() {
         a.claim(claim_req(1, 500, 1)).await.unwrap();
         a.finalize(
             &shard(),
-            vec![FinalizeOutcome {
-                item_id: id,
-                kind: FinalizeKind::Complete,
-            }],
+            vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
             ts(2), None
         )
         .await
@@ -169,10 +166,7 @@ async fn reopened_queue_accepts_new_push_and_claim() {
         a.claim(claim_req(1, 500, 1)).await.unwrap();
         a.finalize(
             &shard(),
-            vec![FinalizeOutcome {
-                item_id: pre_id,
-                kind: FinalizeKind::Complete,
-            }],
+            vec![FinalizeOutcome::new(pre_id, FinalizeKind::Complete)],
             ts(2), None
         )
         .await

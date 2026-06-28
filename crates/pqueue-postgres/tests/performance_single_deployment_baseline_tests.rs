@@ -149,10 +149,7 @@ async fn claim(b: &PostgresRelationalBackend, shard: &QueueKey, n: usize) -> Vec
 async fn finalize(b: &PostgresRelationalBackend, shard: &QueueKey, ids: &[ItemId]) {
     let outcomes = ids
         .iter()
-        .map(|id| FinalizeOutcome {
-            item_id: *id,
-            kind: FinalizeKind::Complete,
-        })
+        .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
         .collect();
     b.finalize(shard, outcomes, ts(2), None).await.expect("finalize");
 }

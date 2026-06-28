@@ -241,6 +241,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::claimed_view_renders_leased_items(&make).await;
     scenarios::purge_removes_present_items_and_gates_leased(&make).await;
     scenarios::retry_beyond_max_attempts_goes_terminal(&make).await;
+    scenarios::retry_with_backoff_defers_eligibility(&make).await;
     scenarios::finalize_of_nonleased_item_is_rejected_without_appending(&make).await;
     scenarios::pause_and_fence_reconstruct_from_log(&make).await;
     scenarios::high_water_advances_on_each_commit(&make).await;
@@ -279,6 +280,7 @@ macro_rules! core_suite {
             fenced_lease_finalize_is_stale,
             claimed_view_renders_leased_items,
             retry_beyond_max_attempts_goes_terminal,
+            retry_with_backoff_defers_eligibility,
             peek_is_priority_ordered_and_nondestructive,
             pending_lists_leased_items,
             renew_extends_lease_and_rejects,
@@ -309,6 +311,7 @@ macro_rules! core_suite {
             fenced_lease_finalize_is_stale,
             claimed_view_renders_leased_items,
             retry_beyond_max_attempts_goes_terminal,
+            retry_with_backoff_defers_eligibility,
             peek_is_priority_ordered_and_nondestructive,
             pending_lists_leased_items,
             renew_extends_lease_and_rejects,

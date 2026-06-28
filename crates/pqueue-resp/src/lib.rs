@@ -831,10 +831,7 @@ async fn xack<B: RespBackend>(
         .collect();
     let outcomes: Vec<FinalizeOutcome> = ids
         .iter()
-        .map(|id| FinalizeOutcome {
-            item_id: *id,
-            kind: FinalizeKind::Complete,
-        })
+        .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
         .collect();
     match backend.finalize(&shard, outcomes, state.now(), None).await {
         Ok(()) => Resp::Int(ids.len() as i64),

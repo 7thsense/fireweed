@@ -212,6 +212,23 @@ pub struct FinalizeCommand {
 pub struct FinalizeOutcome {
     pub item_id: ItemId,
     pub kind: FinalizeKind,
+    /// Queue-native retry backoff: when `kind == Retry` and the item returns to Pending, it is ineligible
+    /// until this timestamp. `None` = immediately re-eligible (the default). Ignored for non-Retry kinds.
+    /// `#[serde(default)]` keeps logs written before retry backoff existed replay-compatible.
+    #[serde(default)]
+    pub not_before: Option<UtcTimestamp>,
+}
+
+impl FinalizeOutcome {
+    /// A finalize outcome with no retry backoff (`not_before: None`) — the common case for
+    /// complete/fail/release/rearm and an immediate retry.
+    pub fn new(item_id: ItemId, kind: FinalizeKind) -> Self {
+        Self {
+            item_id,
+            kind,
+            not_before: None,
+        }
+    }
 }
 
 /// The five finalize dispositions (API-001). Over RESP only `Complete` is a stock `XACK`;
@@ -362,7 +379,8 @@ mod serde_tests {
             QueueCommand::Finalize(FinalizeCommand {
                 outcomes: vec![FinalizeOutcome {
                     item_id: iid("a"),
-                    kind: FinalizeKind::Rearm,
+                    kind: FinalizeKind::Retry,
+                    not_before: Some(ts(500)),
                 }],
             }),
             QueueCommand::ReplacePending(ReplacePendingCommand {

@@ -99,7 +99,7 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     let last = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(last.len(), 1);
     assert_eq!(last[0].attempt_count, 1);
-    pq.nack(&q, last.iter().map(|c| c.item_id), Nack::Retry)
+    pq.nack(&q, last.iter().map(|c| c.item_id), Nack::Retry { not_before: None })
         .await
         .unwrap();
     let again = pq.claim(&q, 1, 30_000).await.unwrap();

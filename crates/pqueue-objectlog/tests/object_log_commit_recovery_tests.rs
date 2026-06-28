@@ -202,10 +202,7 @@ async fn object_log_e3_throughput_recovery_and_ack_latency() {
         let ids: Vec<ItemId> = claimed.items.iter().map(|c| c.item_id).collect();
         let outcomes = ids
             .iter()
-            .map(|id| FinalizeOutcome {
-                item_id: *id,
-                kind: FinalizeKind::Complete,
-            })
+            .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
             .collect();
         let t_ack = Instant::now();
         commit_to(

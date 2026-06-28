@@ -464,6 +464,16 @@ impl ProjectionData {
                     if matches!(o.kind, FinalizeKind::Rearm) {
                         rec.attempt_count = 0;
                     }
+                    // Queue-native retry backoff: a Retry that returned the item to Pending (still under the
+                    // attempt bound) defers its re-eligibility to `not_before`. `eligible_candidates` filters
+                    // `not_before <= now`, and `elig_key` is not_before-independent, so no index update is
+                    // needed. Guarded on Pending so an exhausted Retry (-> Failed) gets no backoff.
+                    if matches!(o.kind, FinalizeKind::Retry)
+                        && rec.state == ItemState::Pending
+                        && let Some(nb) = o.not_before
+                    {
+                        rec.not_before = Some(nb);
+                    }
                 }
                 Ok(())
             }
@@ -912,10 +922,7 @@ mod tests {
             &mut proj,
             &sk,
             env(QueueCommand::Finalize(FinalizeCommand {
-                outcomes: vec![FinalizeOutcome {
-                    item_id: iid("1"),
-                    kind: FinalizeKind::Complete,
-                }],
+                outcomes: vec![FinalizeOutcome::new(iid("1"), FinalizeKind::Complete)],
             })),
             None,
         )

@@ -789,6 +789,22 @@ fn apply_command_sql(
                         seq as i64,
                     ],
                 ))?;
+                // Queue-native retry backoff: a Retry that returned the item to Pending (still under
+                // the attempt bound) defers its re-eligibility to `not_before`. Mirror insert_item's
+                // pairing of not_before + eligible_since so select_eligible's gate (`not_before<=now`)
+                // and ordering (`eligible_since`) both defer. Guarded on Pending so an exhausted Retry
+                // (-> Failed) gets no backoff; Release/Complete/Fail/Rearm never carry one.
+                if matches!(o.kind, FinalizeKind::Retry)
+                    && new_state == ItemState::Pending
+                    && let Some(nb) = o.not_before
+                {
+                    let nb_n = ts_nanos(nb);
+                    st(tx.execute(
+                        "UPDATE pqueue_items SET not_before=?4, eligible_since=?4 \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        params![t, q, o.item_id.to_string(), nb_n],
+                    ))?;
+                }
                 token_ops.push(TokenOp::Clear(o.item_id));
             }
             let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id).collect();
@@ -2662,10 +2678,7 @@ mod group_summary_tests {
         // Release (no-fault give-back) returns the item to pending -> back in the group's eligible count.
         b.finalize(
             &shard(),
-            vec![FinalizeOutcome {
-                item_id: ids[0],
-                kind: FinalizeKind::Release,
-            }],
+            vec![FinalizeOutcome::new(ids[0], FinalizeKind::Release)],
             ts(20), None
         )
         .await

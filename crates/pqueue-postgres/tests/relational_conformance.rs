@@ -69,6 +69,7 @@ pg_relational!(
     fenced_lease_finalize_is_stale,
     claimed_view_renders_leased_items,
     retry_beyond_max_attempts_goes_terminal,
+    retry_with_backoff_defers_eligibility,
     peek_is_priority_ordered_and_nondestructive,
     pending_lists_leased_items,
     renew_extends_lease_and_rejects,

@@ -16,24 +16,48 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
-use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, OwnerId, PriorityValue, QueueDefinition,
-    UtcTimestamp, WorkerId,
-};
+// Internal-only types (not named in the public API surface).
+use pqueue_core::{LeaseToken, WorkerId};
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, Clock, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
+    ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
     LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, QueueKey, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort,
-    UpsertPort, acquire_and_fence,
-};
-// Re-exported so library callers name the engine's structured error + outcome/view types directly.
-pub use pqueue_engine::{
-    ClaimCompatibility, ClaimedItem, CreateQueueOutcome, EngineError, EngineResult, GroupBatching,
-    ItemView, LiveItemView, PayloadUpdate, QueueMetrics, UpsertOutcome,
+    QueueControlPlane, ReassignLeasePort, ReclaimPort, RenewLeasePort, UpdateFieldsPort, UpsertPort,
+    acquire_and_fence,
 };
 
-/// The capabilities the library facade composes over (the worker + control-plane ports).
+// ---------------------------------------------------------------------------
+// PUBLIC DEPENDENCY SURFACE (ADR-009): a consumer depends on `pqueue` ALONE and can name every type its
+// calls need — no direct dependency on `pqueue-core` / `pqueue-engine` required. Everything that appears in
+// a public `Pqueue` signature is re-exported here.
+// ---------------------------------------------------------------------------
+pub use bytes::Bytes;
+pub use pqueue_core::{
+    ClientItemKey, GroupKey, ItemId, OwnerId, PriorityValue, QueueDefinition, UtcTimestamp,
+};
+pub use pqueue_engine::{
+    ClaimCompatibility, ClaimedItem, Clock, ControlPlaneConfig, CreateQueueOutcome, EngineError,
+    EngineResult, GroupBatching, ItemView, LiveItemView, PayloadUpdate, QueueKey, QueueMetrics,
+    UpsertOutcome,
+};
+
+/// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
+/// Tests inject a controllable clock instead (e.g. `pqueue_memory::ManualClock`). Provided here so a
+/// consumer depending on `pqueue` alone has a ready clock without naming `pqueue-engine`.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> UtcTimestamp {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid unix ts")
+    }
+}
+
+/// The capabilities the library facade composes over (the worker + control-plane ports). This is an
+/// INTERNAL composition bound, not a consumer-facing trait: a backend satisfies it automatically (blanket
+/// impl over the engine ports) and a consumer never names or implements it. Hidden from the public docs.
+#[doc(hidden)]
 pub trait LibBackend:
     PushPort
     + ClaimPort
@@ -50,6 +74,7 @@ pub trait LibBackend:
     + Sync
 {
 }
+#[doc(hidden)]
 impl<T> LibBackend for T where
     T: PushPort
         + ClaimPort
@@ -82,7 +107,10 @@ fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
 /// to a fresh delivery without charging the failure differently (`Release`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Nack {
-    Retry,
+    /// Return to Pending for re-claim. `not_before` is an optional **queue-native retry backoff**: the item
+    /// stays ineligible until that absolute timestamp. `None` re-eligibles it immediately. (Use
+    /// [`Pqueue::nack_retry_after`] for a relative delay.)
+    Retry { not_before: Option<UtcTimestamp> },
     Release,
 }
 
@@ -168,6 +196,11 @@ impl<B: LibBackend> Pqueue<B> {
     /// plane only coordinates handles within one process; passing one here is admissible but does not give
     /// cross-process competition. Returns `EngineResult` for signature stability — it does not currently
     /// reject (the removed `binds_storage_epoch` capability gate is obsolete now that storage owns the fence).
+    ///
+    /// Hidden from the public docs: the blessed coordinated path is [`open_postgres_coordinated`], which
+    /// builds the control plane internally so a consumer never names [`QueueControlPlane`]. This lower-level
+    /// constructor (bring-your-own control plane) remains available for advanced/custom planes.
+    #[doc(hidden)]
     pub fn with_control_plane(
         backend: Arc<B>,
         clock: Arc<dyn Clock>,
@@ -474,21 +507,33 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
     ) -> EngineResult<()> {
-        self.finalize(queue, ids, FinalizeKind::Complete).await
+        self.finalize(queue, ids, FinalizeKind::Complete, None).await
     }
 
-    /// Return leased items to the queue: `Retry` or `Release`.
+    /// Return leased items to the queue: `Retry` (optionally with a backoff `not_before`) or `Release`.
     pub async fn nack(
         &self,
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
         how: Nack,
     ) -> EngineResult<()> {
-        let kind = match how {
-            Nack::Retry => FinalizeKind::Retry,
-            Nack::Release => FinalizeKind::Release,
+        let (kind, not_before) = match how {
+            Nack::Retry { not_before } => (FinalizeKind::Retry, not_before),
+            Nack::Release => (FinalizeKind::Release, None),
         };
-        self.finalize(queue, ids, kind).await
+        self.finalize(queue, ids, kind, not_before).await
+    }
+
+    /// `nack(Retry)` with a **relative** backoff: defer the item's re-eligibility by `delay_ms` from now
+    /// (queue-native retry backoff, computed off this handle's clock).
+    pub async fn nack_retry_after(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        delay_ms: u64,
+    ) -> EngineResult<()> {
+        let not_before = Some(add_millis(self.clock.now(), delay_ms));
+        self.nack(queue, ids, Nack::Retry { not_before }).await
     }
 
     async fn finalize(
@@ -496,10 +541,15 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
         kind: FinalizeKind,
+        not_before: Option<UtcTimestamp>,
     ) -> EngineResult<()> {
         let outcomes: Vec<FinalizeOutcome> = ids
             .into_iter()
-            .map(|item_id| FinalizeOutcome { item_id, kind })
+            .map(|item_id| FinalizeOutcome {
+                item_id,
+                kind,
+                not_before,
+            })
             .collect();
         let epoch = self.session_epoch(queue).await?;
         let r = self
@@ -545,7 +595,7 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
     ) -> EngineResult<()> {
-        self.finalize(queue, ids, FinalizeKind::Fail).await
+        self.finalize(queue, ids, FinalizeKind::Fail, None).await
     }
 
     /// Per-state counts for the queue.
@@ -640,7 +690,7 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
     ) -> EngineResult<()> {
-        self.finalize(queue, ids, FinalizeKind::Rearm).await
+        self.finalize(queue, ids, FinalizeKind::Rearm, None).await
     }
 
     /// Hard-delete the given items (operator purge / dead-letter cleanup). A **leased** item requires

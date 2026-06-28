@@ -161,10 +161,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
     // After completion the item is Terminal and rejects further updates.
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: id,
-            kind: FinalizeKind::Complete,
-        }],
+        vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
         ts(30),
         None,
     )
@@ -411,10 +408,7 @@ pub async fn claim_then_complete_lifecycle<B: ConformanceCore>(make: impl Fn() -
 
     // Complete it.
     let fin = QueueCommand::Finalize(FinalizeCommand {
-        outcomes: vec![FinalizeOutcome {
-            item_id: ItemId::new("1").unwrap(),
-            kind: FinalizeKind::Complete,
-        }],
+        outcomes: vec![FinalizeOutcome::new(ItemId::new("1").unwrap(), FinalizeKind::Complete)],
     });
     commit(&b, envelope(fin, vec![ItemId::new("1").unwrap()])).await;
 
@@ -573,10 +567,7 @@ pub async fn structured_live_items_are_ordered_and_only_live<B: ConformanceCore>
 
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: claimed.items[0].item_id,
-            kind: FinalizeKind::Complete,
-        }],
+        vec![FinalizeOutcome::new(claimed.items[0].item_id, FinalizeKind::Complete)],
         ts(20), None
     )
     .await
@@ -689,10 +680,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
         &b,
         envelope(
             QueueCommand::Finalize(FinalizeCommand {
-                outcomes: vec![FinalizeOutcome {
-                    item_id: id1,
-                    kind: FinalizeKind::Complete,
-                }],
+                outcomes: vec![FinalizeOutcome::new(id1, FinalizeKind::Complete)],
             }),
             vec![id1],
         ),
@@ -894,10 +882,7 @@ pub async fn fenced_lease_finalize_is_stale<B: ConformanceCore>(make: impl Fn() 
     )
     .await;
     // The holder's finalize is rejected StaleLease, and nothing is committed (still leased).
-    let outcomes = vec![FinalizeOutcome {
-        item_id: id,
-        kind: FinalizeKind::Complete,
-    }];
+    let outcomes = vec![FinalizeOutcome::new(id, FinalizeKind::Complete)];
     assert_eq!(
         b.finalize(&shard(), outcomes.clone(), ts(20), None).await,
         Err(EngineError::StaleLease)
@@ -1213,10 +1198,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
     .await;
     let id = ItemId::new("1").unwrap();
     let retry_outcome = || {
-        vec![FinalizeOutcome {
-            item_id: ItemId::new("1").unwrap(),
-            kind: FinalizeKind::Retry,
-        }]
+        vec![FinalizeOutcome::new(ItemId::new("1").unwrap(), FinalizeKind::Retry)]
     };
 
     // Delivery 1: claim → attempt_count = 1.
@@ -1268,10 +1250,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
     assert_eq!(
         b.finalize(
             &shard(),
-            vec![FinalizeOutcome {
-                item_id: id,
-                kind: FinalizeKind::Complete,
-            }],
+            vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
             ts(60),
         None)
         .await,
@@ -1293,10 +1272,7 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
     b.claim(claim_req(1, 500, 70)).await.unwrap(); // delivery 1 (attempt_count = 1 == max)
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: ItemId::new("2").unwrap(),
-            kind: FinalizeKind::Retry,
-        }],
+        vec![FinalizeOutcome::new(ItemId::new("2").unwrap(), FinalizeKind::Retry)],
         ts(80), None
     )
     .await
@@ -1305,6 +1281,70 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
         b.metrics(&qkey()).await.unwrap().failed,
         2,
         "max_attempts=1: the very first retry exhausts → Failed (b joins the earlier a)"
+    );
+}
+
+pub async fn retry_with_backoff_defers_eligibility<B: ConformanceCore>(make: impl Fn() -> B) {
+    // Queue-native retry backoff: a `Finalize{Retry}` carrying `not_before` returns the item to Pending
+    // (still under the attempt bound) but DEFERS its re-eligibility until that timestamp. The item shows
+    // up Pending in metrics, yet `select_eligible` skips it until `now >= not_before` (half-open `<= now`).
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+
+    // Delivery 1: claim (lease to ts(500)), then Retry under the bound with a backoff to ts(100).
+    b.claim(claim_req(1, 500, 10)).await.unwrap();
+    b.finalize(
+        &shard(),
+        vec![FinalizeOutcome {
+            item_id: ItemId::new("1").unwrap(),
+            kind: FinalizeKind::Retry,
+            not_before: Some(ts(100)),
+        }],
+        ts(20),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Back to Pending (not terminal).
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!(
+        (m.pending, m.leased),
+        (1, 0),
+        "retry under max → pending, not terminal"
+    );
+
+    // Still deferred: 50 < 100, so nothing is eligible yet.
+    assert!(
+        b.select_eligible(&shard(), ts(50), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "backed off before not_before — not eligible"
+    );
+    // Eligible AT the boundary (half-open `<= now` convention).
+    assert!(
+        !b.select_eligible(&shard(), ts(100), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "eligible at the not_before boundary"
+    );
+    // And actually claimable once the backoff elapses.
+    assert_eq!(
+        b.claim(claim_req(1, 600, 100)).await.unwrap().items.len(),
+        1,
+        "claimable at the not_before boundary"
     );
 }
 
@@ -1325,10 +1365,7 @@ pub async fn finalize_of_nonleased_item_is_rejected_without_appending<B: Conform
     .await;
     let id = ItemId::new("1").unwrap();
     // Item is Pending (never claimed) -> finalize rejected, and NOTHING is appended (no divergence, B1).
-    let outcomes = vec![FinalizeOutcome {
-        item_id: id,
-        kind: FinalizeKind::Complete,
-    }];
+    let outcomes = vec![FinalizeOutcome::new(id, FinalizeKind::Complete)];
     assert_eq!(
         b.finalize(&shard(), outcomes, ts(10), None).await,
         Err(EngineError::Invalid("item is not leased"))
@@ -1388,10 +1425,7 @@ pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: i
             .is_empty(),
         "pause reconstructed"
     );
-    let outcomes = vec![FinalizeOutcome {
-        item_id: aid,
-        kind: FinalizeKind::Complete,
-    }];
+    let outcomes = vec![FinalizeOutcome::new(aid, FinalizeKind::Complete)];
     assert_eq!(
         b.finalize(&shard(), outcomes, ts(60), None).await,
         Err(EngineError::StaleLease),
@@ -1504,10 +1538,7 @@ pub async fn reconnect_preserves_terminal_and_pending_state<B: ConformanceCore>(
     assert_eq!(claimed.items[0].item_id.to_string(), "2");
     a.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: ItemId::new("2").unwrap(),
-            kind: FinalizeKind::Complete,
-        }],
+        vec![FinalizeOutcome::new(ItemId::new("2").unwrap(), FinalizeKind::Complete)],
         ts(20), None
     )
     .await
@@ -1615,10 +1646,7 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
     let _ = b
         .finalize(
             &shard(),
-            vec![FinalizeOutcome {
-                item_id: ItemId::new("4").unwrap(),
-                kind: FinalizeKind::Complete,
-            }],
+            vec![FinalizeOutcome::new(ItemId::new("4").unwrap(), FinalizeKind::Complete)],
             ts(20), None
         )
         .await; // pending, not leased → Invalid
@@ -1735,10 +1763,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         .await
         .unwrap();
     parity(&a, &b, 100, "after renew b").await;
-    let fin_b = vec![FinalizeOutcome {
-        item_id: ItemId::new("2").unwrap(),
-        kind: FinalizeKind::Complete,
-    }];
+    let fin_b = vec![FinalizeOutcome::new(ItemId::new("2").unwrap(), FinalizeKind::Complete)];
     a.finalize(&shard(), fin_b.clone(), ts(30), None).await.unwrap();
     b.finalize(&shard(), fin_b, ts(30), None).await.unwrap();
     parity(&a, &b, 100, "after complete b").await;
@@ -1767,10 +1792,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     .await
     .unwrap();
     parity(&a, &b, 100, "after reassign c").await;
-    let retry_c = vec![FinalizeOutcome {
-        item_id: ItemId::new("3").unwrap(),
-        kind: FinalizeKind::Retry,
-    }];
+    let retry_c = vec![FinalizeOutcome::new(ItemId::new("3").unwrap(), FinalizeKind::Retry)];
     a.finalize(&shard(), retry_c.clone(), ts(60), None).await.unwrap();
     b.finalize(&shard(), retry_c, ts(60), None).await.unwrap();
     parity(&a, &b, 100, "after retry c").await;
@@ -1786,10 +1808,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
         }),
     )
     .await;
-    let fin_c = vec![FinalizeOutcome {
-        item_id: ItemId::new("3").unwrap(),
-        kind: FinalizeKind::Complete,
-    }];
+    let fin_c = vec![FinalizeOutcome::new(ItemId::new("3").unwrap(), FinalizeKind::Complete)];
     assert!(a.finalize(&shard(), fin_c.clone(), ts(80), None).await.is_err());
     assert!(b.finalize(&shard(), fin_c, ts(80), None).await.is_err());
     parity(&a, &b, 100, "after fenced-finalize reject").await;

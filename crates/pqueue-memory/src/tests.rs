@@ -171,10 +171,7 @@ async fn finalize_fences_superseded_owner_epoch() {
     let id = claimed.items[0].item_id;
 
     let e1 = b.acquire_epoch(&shard()).await.unwrap(); // ownership handoff 0 -> 1
-    let outcomes = vec![FinalizeOutcome {
-        item_id: id,
-        kind: FinalizeKind::Complete,
-    }];
+    let outcomes = vec![FinalizeOutcome::new(id, FinalizeKind::Complete)];
 
     assert!(
         matches!(

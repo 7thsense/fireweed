@@ -221,7 +221,7 @@ async fn finalize_complete_and_fail_are_terminal() {
         let id = claimed.items[0].item_id;
         b.finalize(
             &shard(),
-            vec![FinalizeOutcome { item_id: id, kind }],
+            vec![FinalizeOutcome::new(id, kind)],
             ts(20), None
         )
         .await
@@ -251,10 +251,7 @@ async fn finalize_retry_respects_attempt_bound() {
         let id = claimed.items[0].item_id;
         b.finalize(
             &shard(),
-            vec![FinalizeOutcome {
-                item_id: id,
-                kind: FinalizeKind::Retry,
-            }],
+            vec![FinalizeOutcome::new(id, FinalizeKind::Retry)],
             ts(10 * attempt), None
         )
         .await
@@ -270,10 +267,7 @@ async fn finalize_retry_respects_attempt_bound() {
     let id = claimed.items[0].item_id;
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: id,
-            kind: FinalizeKind::Retry,
-        }],
+        vec![FinalizeOutcome::new(id, FinalizeKind::Retry)],
         ts(100), None
     )
     .await
@@ -300,10 +294,7 @@ async fn finalize_release_and_rearm_return_to_pending() {
         .item_id;
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: id,
-            kind: FinalizeKind::Release,
-        }],
+        vec![FinalizeOutcome::new(id, FinalizeKind::Release)],
         ts(20), None
     )
     .await
@@ -324,10 +315,7 @@ async fn finalize_release_and_rearm_return_to_pending() {
         .item_id;
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: id,
-            kind: FinalizeKind::Rearm,
-        }],
+        vec![FinalizeOutcome::new(id, FinalizeKind::Rearm)],
         ts(20), None
     )
     .await
@@ -385,10 +373,7 @@ async fn fence_then_unfence_gate_finalize() {
     assert!(
         b.finalize(
             &shard(),
-            vec![FinalizeOutcome {
-                item_id: id,
-                kind: FinalizeKind::Complete
-            }],
+            vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
             ts(20),
         None)
         .await
@@ -408,10 +393,7 @@ async fn fence_then_unfence_gate_finalize() {
     .await;
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: id,
-            kind: FinalizeKind::Complete,
-        }],
+        vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
         ts(30), None
     )
     .await
@@ -605,10 +587,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
     b.claim(claim_req(1, 500, 1)).await.unwrap();
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id,
-            kind: FinalizeKind::Complete,
-        }],
+        vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
         ts(2), None
     )
     .await
@@ -735,10 +714,7 @@ async fn released_item_keeps_its_fifo_slot() {
     assert_eq!(id, first, "claim takes the FIFO head");
     b.finalize(
         &shard(),
-        vec![FinalizeOutcome {
-            item_id: id,
-            kind: FinalizeKind::Release,
-        }],
+        vec![FinalizeOutcome::new(id, FinalizeKind::Release)],
         ts(20), None
     )
     .await

@@ -759,7 +759,7 @@ async fn jobs_connectors_recurring_e2e() {
     for _ in 0..2 {
         let got = pq.claim(&retry_q, 1, 60_000).await.unwrap();
         assert_eq!(got.len(), 1);
-        pq.nack(&retry_q, got.iter().map(|c| c.item_id), Nack::Retry)
+        pq.nack(&retry_q, got.iter().map(|c| c.item_id), Nack::Retry { not_before: None })
             .await
             .unwrap();
     }
