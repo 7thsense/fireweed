@@ -41,15 +41,20 @@ fn parse_backend() -> Backend {
             "PQUEUE_OBJECT_LOG_ROOT",
             "/var/lib/pqueue/object-log",
         ))),
+        ("objectlog", "sqlite") => Backend::ObjectLogSqlite {
+            object_root: PathBuf::from(env_or(
+                "PQUEUE_OBJECT_LOG_ROOT",
+                "/var/lib/pqueue/object-log",
+            )),
+            projection_path: PathBuf::from(env_or(
+                "PQUEUE_SQLITE_PROJECTION_PATH",
+                "/var/lib/pqueue/pqueue-projection.db",
+            )),
+        },
         ("postgres", "inmemory") => unsupported_storage(
             &log,
             &projection,
             "postgres log exists as an adapter but is not wired into the tokio RESP server yet",
-        ),
-        ("objectlog", "sqlite") => unsupported_storage(
-            &log,
-            &projection,
-            "objectlog plus sqlite projection is the intended storage shape, but this server still wires the file-backed object log to its in-memory projection",
         ),
         (_, "sqlite" | "postgres") => unsupported_storage(
             &log,
@@ -123,7 +128,7 @@ async fn main() {
     }
     if env::args().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
+            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
         );
         return;
     }

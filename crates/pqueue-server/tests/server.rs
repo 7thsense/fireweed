@@ -64,6 +64,17 @@ fn endpoint(addr: std::net::SocketAddr) -> String {
     format!("127.0.0.1:{}", addr.port())
 }
 
+fn tmp_runtime_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!("pqueue-server-{tag}-{}-obj", std::process::id()));
+    let projection = std::env::temp_dir().join(format!(
+        "pqueue-server-{tag}-{}-projection.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&projection);
+    (root, projection)
+}
+
 async fn raw_resp(addr: std::net::SocketAddr, parts: &[&str]) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut request = format!("*{}\r\n", parts.len()).into_bytes();
@@ -584,6 +595,101 @@ async fn start_provisions_queues_and_serves_end_to_end() {
         "provisioned queue serves a real request"
     );
     server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing() {
+    let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
+    let first_id = {
+        let server = start(Config {
+            backend: Backend::ObjectLogSqlite {
+                object_root: object_root.clone(),
+                projection_path: projection_path.clone(),
+            },
+            node_id: 0,
+            listen: "127.0.0.1:0".to_string(),
+            reclaim_interval: Duration::from_secs(60),
+            queues: vec![qdef()],
+        })
+        .await
+        .unwrap();
+        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let produced: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(7)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let reply: StreamReadReply = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg("g")
+            .arg("c")
+            .arg("STREAMS")
+            .arg("t1:q1")
+            .arg(">")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(reply.keys[0].ids[0].id, produced);
+        let acked: i64 = redis::cmd("XACK")
+            .arg("t1:q1")
+            .arg("g")
+            .arg(&produced)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(acked, 1);
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+        produced
+    };
+
+    let _ = std::fs::remove_file(&projection_path);
+    let server = start(Config {
+        backend: Backend::ObjectLogSqlite {
+            object_root: object_root.clone(),
+            projection_path: projection_path.clone(),
+        },
+        node_id: 0,
+        listen: "127.0.0.1:0".to_string(),
+        reclaim_interval: Duration::from_secs(60),
+        queues: vec![qdef()],
+    })
+    .await
+    .unwrap();
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        empty.is_none(),
+        "acked item was not redelivered after rebuild"
+    );
+    let next_id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(9)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_ne!(
+        next_id, first_id,
+        "post-reopen push must not remint an existing item id"
+    );
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

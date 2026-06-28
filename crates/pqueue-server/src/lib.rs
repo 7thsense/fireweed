@@ -31,6 +31,9 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+mod object_log_sqlite;
+pub use object_log_sqlite::ObjectLogSqliteBackend;
+
 /// Which durable backend the server runs over.
 pub enum Backend {
     /// In-memory reference backend (atomic class; non-durable).
@@ -39,6 +42,11 @@ pub enum Backend {
     Sqlite(PathBuf),
     /// Object-log durable store rooted at `path` (eventual-apply class).
     ObjectLog(PathBuf),
+    /// Local object-log authority plus SQLite materialized projection.
+    ObjectLogSqlite {
+        object_root: PathBuf,
+        projection_path: PathBuf,
+    },
 }
 
 /// Server configuration.
@@ -626,6 +634,29 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         Backend::ObjectLog(path) => {
             let backend = Arc::new(ObjectLogBackend::open(path)?.with_node_id(node_id));
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{node_id}"))
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            start_with_ownership(
+                backend,
+                cp,
+                owner,
+                clock,
+                &config.listen,
+                config.reclaim_interval,
+                &config.queues,
+            )
+            .await
+        }
+        Backend::ObjectLogSqlite {
+            object_root,
+            projection_path,
+        } => {
+            let p = projection_path
+                .to_str()
+                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+            let backend =
+                Arc::new(ObjectLogSqliteBackend::open(object_root, p)?.with_node_id(node_id));
             let cp = Arc::new(InMemoryControlPlane::default());
             let owner = OwnerId::new(format!("node-{node_id}"))
                 .map_err(|e| EngineError::Storage(e.to_string()))?;

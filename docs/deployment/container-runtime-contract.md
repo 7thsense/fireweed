@@ -12,12 +12,18 @@ The release image entrypoint is `pqueue-service`, the RESP server built from
 | `PQUEUE_PROJECTION_BACKEND` | no | `inmemory` | Projection backend axis: `inmemory`, `sqlite`, or `postgres`. |
 | `PQUEUE_OBJECT_LOG_ROOT` | when log is `objectlog` | `/var/lib/pqueue/object-log` | Local object-log root. |
 | `PQUEUE_SQLITE_LOG_PATH` | when log is `sqlite` | `/var/lib/pqueue/pqueue-log.db` | Local SQLite log path. |
+| `PQUEUE_SQLITE_PROJECTION_PATH` | when projection is `sqlite` | `/var/lib/pqueue/pqueue-projection.db` | Local SQLite materialized projection path for `objectlog/sqlite`. |
 | `PQUEUE_BOOTSTRAP_QUEUES` | no | `t1:q1` | Comma-separated `tenant:queue` bootstrap list. |
 | `PQUEUE_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
 
 The current server composition root wires `memory/inmemory`, `sqlite/inmemory`,
-and `objectlog/inmemory`. Other combinations fail at startup with an explicit
-unsupported-storage message.
+`objectlog/inmemory`, and `objectlog/sqlite`. Other combinations fail at startup
+with an explicit unsupported-storage message.
+
+`objectlog/sqlite` is a local single-owner development/runtime profile: the
+object log is the durable command authority and SQLite is rebuilt as a
+materialized projection. It is not the multi-owner S3 release profile until the
+manifest-CAS stale-owner fence work tracked by `pqueue-e5c6d6fc` lands.
 
 The Helm chart exposes storage axes as:
 
