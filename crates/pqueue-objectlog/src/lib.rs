@@ -19,8 +19,11 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::thread;
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -77,20 +80,78 @@ fn read_epoch(root: &Path, shard: &QueueKey) -> u64 {
         .unwrap_or(0)
 }
 
-/// Durably advance a shard's `assignment_epoch` to a strictly-greater value (TD-003 acquire). Returns the
-/// new epoch.
+struct EpochLockGuard {
+    path: PathBuf,
+}
+
+impl Drop for EpochLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Acquire a best-effort local compare-and-swap lock for a shard's epoch manifest.
 ///
-/// SCOPE (BQ-20): this is a plain read-then-overwrite of `epoch.json`, made safe ONLY by the process-wide
-/// `inner` mutex that serializes acquire vs append within one owner. It is NOT yet the TD-004
-/// manifest-CAS epoch-fence entry the real multi-owner S3 model requires (compare-and-swap against the
-/// manifest's recorded epoch, committed before any data segment) — that pairs with the S3-CAS control
-/// plane and the per-entry-epoch object format (see `read_from`), tracked as a follow-up.
-fn advance_epoch_object(root: &Path, shard: &QueueKey) -> EngineResult<u64> {
+/// This is the local-filesystem analogue of the manifest-CAS fence: one writer creates the lock file,
+/// performs the compare+overwrite while holding it, and removes the lock on drop. It serializes local
+/// contenders but does not claim S3-level object-store semantics.
+fn with_epoch_lock<T>(
+    root: &Path,
+    shard: &QueueKey,
+    f: impl FnOnce() -> EngineResult<T>,
+) -> EngineResult<T> {
     let dir = shard_dir(root, shard);
     fs::create_dir_all(&dir).map_err(store)?;
-    let next = read_epoch(root, shard) + 1;
-    fs::write(dir.join("epoch.json"), to_json(&next)?).map_err(store)?;
-    Ok(next)
+    let lock_path = dir.join("epoch.lock");
+    loop {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(_lock) => {
+                let guard = EpochLockGuard {
+                    path: lock_path.clone(),
+                };
+                let result = f();
+                drop(guard);
+                return result;
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                thread::yield_now();
+            }
+            Err(err) => return Err(store(err)),
+        }
+    }
+}
+
+/// Durably advance a shard's `assignment_epoch` to a strictly-greater value (TD-003 acquire). Returns the
+/// new epoch.
+fn advance_epoch_object(root: &Path, shard: &QueueKey) -> EngineResult<u64> {
+    let current = read_epoch(root, shard);
+    let next = current + 1;
+    write_epoch_object(root, shard, next, current)
+}
+
+/// Write a new manifest epoch only if the observed epoch still matches `expected_current`.
+///
+/// The local-file CAS uses a lock file to serialize concurrent writers, then performs the compare and
+/// overwrite while holding that lock.
+fn write_epoch_object(
+    root: &Path,
+    shard: &QueueKey,
+    next_epoch: u64,
+    expected_current: u64,
+) -> EngineResult<u64> {
+    with_epoch_lock(root, shard, || {
+        let dir = shard_dir(root, shard);
+        let current = read_epoch(root, shard);
+        if current != expected_current {
+            return Err(EngineError::EpochFenced);
+        }
+        fs::write(dir.join("epoch.json"), to_json(&next_epoch)?).map_err(store)?;
+        Ok(next_epoch)
+    })
 }
 
 /// The next durable sequence for a shard: `max(existing object index) + 1` (compaction-safe). Empty
@@ -120,24 +181,41 @@ fn next_seq(log_dir: &Path) -> EngineResult<u64> {
 /// durable chokepoint both write paths funnel through (`commit_locked` and `Backend::write` →
 /// `ObjLogWriter`): a `ReplacePending` command is refused with `Unavailable` BEFORE any object is
 /// written, so the ban holds at the write path, not just the `replace_if_pending` port.
-fn append_object(root: &Path, shard: &QueueKey, env: &CommandEnvelope) -> EngineResult<(u64, u64)> {
+fn append_object(
+    root: &Path,
+    shard: &QueueKey,
+    env: &CommandEnvelope,
+    expected_epoch: u64,
+) -> EngineResult<(u64, u64)> {
     validate_gate_command(false, &env.command)?;
     if matches!(env.command, QueueCommand::ReplacePending(_)) {
         return Err(EngineError::Unavailable);
     }
-    let dir = shard_dir(root, shard);
-    let log_dir = dir.join("log");
-    fs::create_dir_all(&log_dir).map_err(store)?;
-    let epoch = read_epoch(root, shard); // in-process owner: stamp the queue's current durable epoch.
-    let seq = next_seq(&log_dir)?;
-    // Object name: zero-padded so lexical order == sequence order.
-    fs::write(log_dir.join(format!("{seq:020}.json")), to_json(env)?).map_err(store)?;
-    fs::write(
-        dir.join("high_water.json"),
-        to_json(&HighWater { epoch, seq })?,
-    )
-    .map_err(store)?;
-    Ok((epoch, seq))
+    with_epoch_lock(root, shard, || {
+        let dir = shard_dir(root, shard);
+        let log_dir = dir.join("log");
+        fs::create_dir_all(&log_dir).map_err(store)?;
+        let epoch = read_epoch(root, shard);
+        if epoch != expected_epoch {
+            return Err(EngineError::EpochFenced);
+        }
+        let seq = next_seq(&log_dir)?;
+        // Object name: zero-padded so lexical order == sequence order.
+        fs::write(
+            log_dir.join(format!("{seq:020}.json")),
+            to_json(&ObjectRecord {
+                epoch,
+                envelope: env.clone(),
+            })?,
+        )
+        .map_err(store)?;
+        fs::write(
+            dir.join("high_water.json"),
+            to_json(&HighWater { epoch, seq })?,
+        )
+        .map_err(store)?;
+        Ok((epoch, seq))
+    })
 }
 
 /// The high-water object payload (a stored field, not recomputed from a possibly-compacted log).
@@ -153,6 +231,19 @@ struct SnapshotObject {
     epoch: u64,
     seq: u64,
     payload: Vec<u8>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ObjectRecord {
+    epoch: u64,
+    envelope: CommandEnvelope,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredObject {
+    Versioned(ObjectRecord),
+    Legacy(CommandEnvelope),
 }
 
 struct Inner {
@@ -199,12 +290,9 @@ impl Inner {
     }
 
     /// Durable append + infallible in-memory apply (the orchestration unit). Caller MUST pre-validate.
-    ///
-    /// BQ-20 NOTE: the data-plane fast path is the in-process owner — it STAMPS the queue's current epoch
-    /// (via `append_object`) but does NOT validate an `expected_epoch`; the TD-003 fence that REJECTS a
-    /// stale epoch lives at the [`ObjLogWriter::append`] seam. Owner-epoch caching on this path is BQ-21.
     fn commit_locked(&mut self, shard: &QueueKey, env: CommandEnvelope) -> EngineResult<()> {
-        append_object(&self.root, shard, &env)?;
+        let expected_epoch = read_epoch(&self.root, shard);
+        append_object(&self.root, shard, &env, expected_epoch)?;
         self.projections
             .get_mut(shard)
             .expect("projection exists for a shard that just accepted a durable commit")
@@ -220,7 +308,7 @@ impl Inner {
     /// (an append interrupted by a crash): since `next_seq` is `max+1`, only the highest-seq object can
     /// be a partial write, and it has no successor, so it is treated as uncommitted and skipped. A parse
     /// failure on any NON-final object is genuine corruption and is propagated.
-    fn read_envelopes(&self, shard: &QueueKey) -> EngineResult<Vec<(u64, CommandEnvelope)>> {
+    fn read_envelopes(&self, shard: &QueueKey) -> EngineResult<Vec<(u64, u64, CommandEnvelope)>> {
         read_envelopes_from_root(&self.root, shard)
     }
 
@@ -255,7 +343,7 @@ impl Inner {
             let shard = key.clone();
             let mut proj =
                 ProjectionData::new(definition.priority_model, &definition.secondary_indexes);
-            for (_seq, env) in self.read_envelopes(&shard)? {
+            for (_seq, _epoch, env) in self.read_envelopes(&shard)? {
                 // Command-id is `obj-{node}-{n}` (or legacy `obj-{n}`); the trailing component is the seq.
                 if let Some(n) = env
                     .command_id
@@ -335,11 +423,12 @@ fn create_queue_metadata(
 fn read_envelopes_from_root(
     root: &Path,
     shard: &QueueKey,
-) -> EngineResult<Vec<(u64, CommandEnvelope)>> {
+) -> EngineResult<Vec<(u64, u64, CommandEnvelope)>> {
     let log_dir = shard_dir(root, shard).join("log");
     if !log_dir.exists() {
         return Ok(Vec::new());
     }
+    let fallback_epoch = read_epoch(root, shard);
     // Collect (seq, path) first, sorted, so "final object" is well-defined before we parse.
     let mut files: Vec<(u64, PathBuf)> = Vec::new();
     for entry in fs::read_dir(&log_dir).map_err(store)? {
@@ -354,11 +443,17 @@ fn read_envelopes_from_root(
     }
     files.sort_by_key(|(seq, _)| *seq);
     let last = files.len().saturating_sub(1);
-    let mut rows: Vec<(u64, CommandEnvelope)> = Vec::with_capacity(files.len());
+    let mut rows: Vec<(u64, u64, CommandEnvelope)> = Vec::with_capacity(files.len());
     for (i, (seq, path)) in files.iter().enumerate() {
         let json = fs::read_to_string(path).map_err(store)?;
-        match serde_json::from_str(&json) {
-            Ok(env) => rows.push((*seq, env)),
+        match serde_json::from_str::<StoredObject>(&json) {
+            Ok(StoredObject::Versioned(record)) => rows.push((*seq, record.epoch, record.envelope)),
+            Ok(StoredObject::Legacy(env)) if fallback_epoch == 0 => rows.push((*seq, 0, env)),
+            Ok(StoredObject::Legacy(_)) => {
+                return Err(EngineError::Invalid(
+                    "legacy object format is ambiguous once the manifest epoch has advanced",
+                ));
+            }
             // Torn trailing object -> uncommitted, skip. Earlier object -> real corruption, fail.
             Err(_) if i == last => continue,
             Err(e) => return Err(store(e)),
@@ -411,10 +506,6 @@ impl LocalObjectLog {
         if !inner.queues.contains_key(shard) {
             return Err(EngineError::NotFound);
         }
-        // TD-003 local-single-owner fence: validate before any object is appended.
-        if expected_epoch != read_epoch(&inner.root, shard) {
-            return Err(EngineError::EpochFenced);
-        }
         if commands
             .iter()
             .any(|env| matches!(env.command, QueueCommand::ReplacePending(_)))
@@ -426,7 +517,7 @@ impl LocalObjectLog {
         }
         let mut positions = Vec::with_capacity(commands.len());
         for env in commands {
-            let (epoch, seq) = append_object(&inner.root, shard, env)?;
+            let (epoch, seq) = append_object(&inner.root, shard, env, expected_epoch)?;
             positions.push(CommandPosition::new(shard.clone(), epoch, seq));
         }
         Ok(positions)
@@ -484,16 +575,12 @@ impl LogWriter for ObjLogWriter {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
-        if expected_epoch != read_epoch(&self.root, shard) {
-            return Err(EngineError::EpochFenced);
-        }
         for env in commands {
             validate_gate_command(false, &env.command)?;
         }
         let mut positions = Vec::with_capacity(commands.len());
         for env in commands {
-            let (epoch, seq) = append_object(&self.root, shard, env)?;
+            let (epoch, seq) = append_object(&self.root, shard, env, expected_epoch)?;
             positions.push(CommandPosition::new(shard.clone(), epoch, seq));
         }
         Ok(positions)
@@ -970,21 +1057,19 @@ impl LogRead for ObjectLogBackend {
             let g = self.inner.lock().expect("poisoned");
             let all = g.read_envelopes(shard)?;
             let total = all.len() as u64;
-            // BQ-20: replayed positions are SEQ-authoritative; the epoch label is non-authoritative here.
-            // The log object (`{seq}.json`) stores only the envelope, not the epoch it was written under, so
-            // a per-entry epoch is not recoverable from the object alone (unlike the sqlite/postgres
-            // `log_entries.epoch` column). Carrying the true per-entry epoch needs the object format to
-            // record it alongside the manifest-CAS epoch fence — tracked with that schema work (see the
-            // `advance_epoch_object` note). The high-water guard is seq-monotonic, and no recovery path
-            // re-derives high-water from a replayed cross-epoch position today, so this is latent.
             let entries: Vec<(CommandPosition, CommandEnvelope)> = all
                 .into_iter()
-                .filter(|(seq, _)| *seq >= start)
+                .filter(|(seq, _, _)| *seq >= start)
                 .take(limit)
-                .map(|(seq, env)| (CommandPosition::new(shard.clone(), 0, seq), env))
+                .map(|(seq, epoch, env)| (CommandPosition::new(shard.clone(), epoch, seq), env))
                 .collect();
             let consumed = start + entries.len() as u64;
-            let next = (consumed < total).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            let cursor_epoch = entries
+                .last()
+                .map(|(pos, _)| pos.backend_epoch)
+                .unwrap_or(0);
+            let next = (consumed < total)
+                .then(|| CommandPosition::new(shard.clone(), cursor_epoch, consumed));
             Ok(CommandPage { entries, next })
         })();
         std::future::ready(result)
@@ -1011,12 +1096,17 @@ impl LogRead for LocalObjectLog {
             let total = all.len() as u64;
             let entries: Vec<(CommandPosition, CommandEnvelope)> = all
                 .into_iter()
-                .filter(|(seq, _)| *seq >= start)
+                .filter(|(seq, _, _)| *seq >= start)
                 .take(limit)
-                .map(|(seq, env)| (CommandPosition::new(shard.clone(), 0, seq), env))
+                .map(|(seq, epoch, env)| (CommandPosition::new(shard.clone(), epoch, seq), env))
                 .collect();
             let consumed = start + entries.len() as u64;
-            let next = (consumed < total).then(|| CommandPosition::new(shard.clone(), 0, consumed));
+            let cursor_epoch = entries
+                .last()
+                .map(|(pos, _)| pos.backend_epoch)
+                .unwrap_or(0);
+            let next = (consumed < total)
+                .then(|| CommandPosition::new(shard.clone(), cursor_epoch, consumed));
             Ok(CommandPage { entries, next })
         })();
         std::future::ready(result)
