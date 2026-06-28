@@ -49,6 +49,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
+use postgres::types::ToSql;
 use postgres::{Client, NoTls};
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, PriorityModel, PriorityValue,
@@ -366,13 +367,19 @@ fn alloc_seq(tx: &mut postgres::Transaction<'_>, t: &str, q: &str) -> EngineResu
     Ok(seq as u64)
 }
 
-/// Allocate ONE stable per-queue item insertion sequence (`created_seq`), atomically (same rationale as
-/// [`alloc_seq`]).
-fn alloc_item_seq(tx: &mut postgres::Transaction<'_>, t: &str, q: &str) -> EngineResult<i64> {
+/// Bulk-allocate `n` consecutive stable per-queue item insertion sequences (`created_seq`) in ONE atomic
+/// `UPDATE … RETURNING` (same rationale as [`alloc_seq`]); the i-th batched item takes `base + i`, preserving
+/// the per-item FIFO order the former one-at-a-time allocator produced — in a single round-trip.
+fn alloc_item_seqs(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    n: i64,
+) -> EngineResult<i64> {
     let row = st(tx.query_one(
-        "UPDATE relational_cursor SET next_item_seq = next_item_seq + 1 WHERE tenant=$1 AND queue=$2 \
-         RETURNING next_item_seq - 1",
-        &[&t, &q],
+        "UPDATE relational_cursor SET next_item_seq = next_item_seq + $3 WHERE tenant=$1 AND queue=$2 \
+         RETURNING next_item_seq - $3",
+        &[&t, &q, &n],
     ))?;
     Ok(row.get(0))
 }
@@ -408,21 +415,23 @@ fn groups_of(
     shard: &QueueKey,
     ids: &[ItemId],
 ) -> EngineResult<Vec<GroupKey>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let (t, q) = parts(shard);
-    let mut seen: Vec<GroupKey> = Vec::new();
-    for id in ids {
-        let row = st(tx.query_opt(
-            "SELECT group_key FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-            &[&t, &q, &id.to_string()],
-        ))?;
-        if let Some(row) = row {
-            let g: Option<String> = row.get(0);
-            if let Some(g) = g {
-                let gk = GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?;
-                if !seen.contains(&gk) {
-                    seen.push(gk);
-                }
-            }
+    let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+    // One set-based round-trip (was one SELECT per item): the distinct non-null group keys of these ids.
+    let rows = st(tx.query(
+        "SELECT DISTINCT group_key FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+         AND item_id = ANY($3) AND group_key IS NOT NULL",
+        &[&t, &q, &id_strs],
+    ))?;
+    let mut seen: Vec<GroupKey> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let g: String = row.get(0);
+        let gk = GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?;
+        if !seen.contains(&gk) {
+            seen.push(gk);
         }
     }
     Ok(seen)
@@ -489,92 +498,223 @@ fn refresh_group_summary(
 // apply: the 14-arm command -> SQL projection write
 // ---------------------------------------------------------------------------
 
-fn insert_item(
+/// One materialized row for the batched `pqueue_items` insert. Owns its values so the param slice can
+/// borrow them across the multi-row statement build.
+struct ItemRow {
+    item_id: String,
+    key: String,
+    priority_json: Option<String>,
+    sort: Vec<u8>,
+    not_before: Option<i64>,
+    eligible_since: i64,
+    group_key: Option<String>,
+    cohort_size: Option<i64>,
+    payload: Option<Vec<u8>>,
+    fields: String,
+    max_attempts: i64,
+    created_seq: i64,
+}
+
+/// Max `pqueue_items` rows per INSERT statement: 12 bound params/row + 4 shared; 1000 rows ≈ 12k params,
+/// well under postgres' 65535 bound-parameter ceiling.
+const PG_INSERT_CHUNK: usize = 1000;
+
+/// Batch-insert all `items` of a Push (or the single ReplacePending replacement) as set-based statements:
+/// one (chunked) multi-row INSERT into `pqueue_items`, one multi-row INSERT into `pqueue_item_gates`, and
+/// one multi-row upsert into `pqueue_cohorts` — replacing the former per-item `insert_item` (N+ round-trips
+/// → a handful). Column values, the `fields` TEXT-JSON encoding, and the `eligible_since`/`not_before`
+/// pairing are identical to the per-item path; `created_seq` is bulk-allocated (`base + i`) so FIFO order is
+/// preserved.
+fn insert_items(
     tx: &mut postgres::Transaction<'_>,
     model: &PriorityModel,
     shard: &QueueKey,
-    item: &PushItem,
+    items: &[PushItem],
     seq: u64,
     now: UtcTimestamp,
 ) -> EngineResult<()> {
-    let (t, q) = parts(shard);
-    let sort = elig_sort(&item.priority, model);
-    let priority_json = item.priority.as_ref().map(to_json).transpose()?;
-    let not_before = ts_nanos_opt(item.not_before);
-    let eligible_since = not_before.unwrap_or_else(|| ts_nanos(now));
-    let payload = item.payload.as_ref().map(|b| b.to_vec());
-    let fields = fields_to_json(&item.fields)?;
-    let created_seq = alloc_item_seq(tx, &t, &q)?;
-    let now_n = ts_nanos(now);
-    let seq = seq as i64;
-    let max_attempts = item.max_attempts as i64;
-    let gk = item.group_key.as_ref().map(|g| g.as_str().to_string());
-    let item_id = item.item_id.to_string();
-    let key = item.client_item_key.as_str().to_string();
-    let cohort_size = item.cohort_size.map(|s| s as i64);
-    st(tx.execute(
-        "INSERT INTO pqueue_items \
-         (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-          not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,retry_count,item_version,\
-          lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,updated_at,\
-          terminal_at,fenced,superseded,max_attempts,created_seq) \
-         VALUES ($1,$2,$3,$4,'Pending',$5,$6,$7,$8,$9,$16,$10,$15,'{}',0,1,NULL,NULL,NULL,$11,$12,$12,NULL,\
-                 false,false,$13,$14)",
-        &[
-            &t,
-            &q,
-            &item_id,
-            &key,
-            &priority_json,
-            &sort,
-            &not_before,
-            &eligible_since,
-            &gk,
-            &payload,
-            &seq,
-            &now_n,
-            &max_attempts,
-            &created_seq,
-            &fields,
-            &cohort_size,
-        ],
-    ))?;
-    // BQ-14c: a cohort member (group_key + cohort_size) forms/updates its pqueue_cohorts row.
-    if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
-        upsert_cohort(tx, shard, group, size, now)?;
+    if items.is_empty() {
+        return Ok(());
     }
-    // BQ-14d: record this item's gate-key membership (the anti-join source).
-    for gate_key in &item.gate_keys {
-        let gk_str = gate_key.as_str().to_string();
-        st(tx.execute(
-            "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES ($1,$2,$3,$4) \
-             ON CONFLICT (tenant_id,queue_id,item_id,gate_key) DO NOTHING",
-            &[&t, &q, &item_id, &gk_str],
-        ))?;
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let seqi = seq as i64;
+    let base_seq = alloc_item_seqs(tx, &t, &q, items.len() as i64)?;
+    let mut rows: Vec<ItemRow> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let not_before = ts_nanos_opt(item.not_before);
+        rows.push(ItemRow {
+            item_id: item.item_id.to_string(),
+            key: item.client_item_key.as_str().to_string(),
+            priority_json: item.priority.as_ref().map(to_json).transpose()?,
+            sort: elig_sort(&item.priority, model),
+            not_before,
+            eligible_since: not_before.unwrap_or(now_n),
+            group_key: item.group_key.as_ref().map(|g| g.as_str().to_string()),
+            cohort_size: item.cohort_size.map(|s| s as i64),
+            payload: item.payload.as_ref().map(|b| b.to_vec()),
+            fields: fields_to_json(&item.fields)?,
+            max_attempts: item.max_attempts as i64,
+            created_seq: base_seq + i as i64,
+        });
+    }
+    for chunk in rows.chunks(PG_INSERT_CHUNK) {
+        let mut sql = String::from(
+            "INSERT INTO pqueue_items \
+             (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
+              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,retry_count,\
+              item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
+              updated_at,terminal_at,fenced,superseded,max_attempts,created_seq) VALUES ",
+        );
+        let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q, &seqi, &now_n];
+        for (r, row) in chunk.iter().enumerate() {
+            let b = 5 + r * 12;
+            if r > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!(
+                "($1,$2,${},${},'Pending',${},${},${},${},${},${},${},${},'{{}}',0,1,NULL,NULL,NULL,\
+                 $3,$4,$4,NULL,false,false,${},${})",
+                b,
+                b + 1,
+                b + 2,
+                b + 3,
+                b + 4,
+                b + 5,
+                b + 6,
+                b + 7,
+                b + 8,
+                b + 9,
+                b + 10,
+                b + 11,
+            ));
+            params.push(&row.item_id);
+            params.push(&row.key);
+            params.push(&row.priority_json);
+            params.push(&row.sort);
+            params.push(&row.not_before);
+            params.push(&row.eligible_since);
+            params.push(&row.group_key);
+            params.push(&row.cohort_size);
+            params.push(&row.payload);
+            params.push(&row.fields);
+            params.push(&row.max_attempts);
+            params.push(&row.created_seq);
+        }
+        st(tx.execute(sql.as_str(), &params))?;
+    }
+    insert_gates(tx, &t, &q, items)?;
+    upsert_cohorts(tx, &t, &q, items, now_n)?;
+    Ok(())
+}
+
+/// Batch the per-item gate-membership inserts (BQ-14d) into chunked multi-row INSERTs. Pairs are deduped so
+/// a single statement never proposes the same `(item_id, gate_key)` twice (the per-item path relied on
+/// `ON CONFLICT DO NOTHING` for that).
+fn insert_gates(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    items: &[PushItem],
+) -> EngineResult<()> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for item in items {
+        let id = item.item_id.to_string();
+        for gate_key in &item.gate_keys {
+            let g = gate_key.as_str().to_string();
+            if !pairs.iter().any(|(a, b)| a == &id && b == &g) {
+                pairs.push((id.clone(), g));
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    for chunk in pairs.chunks(5000) {
+        let mut sql = String::from(
+            "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES ",
+        );
+        let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q];
+        for (r, (id, g)) in chunk.iter().enumerate() {
+            let b = 3 + r * 2;
+            if r > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("($1,$2,${},${})", b, b + 1));
+            params.push(id);
+            params.push(g);
+        }
+        sql.push_str(" ON CONFLICT (tenant_id,queue_id,item_id,gate_key) DO NOTHING");
+        st(tx.execute(sql.as_str(), &params))?;
     }
     Ok(())
 }
 
-/// Maintain `pqueue_cohorts` for a cohort member's push (BQ-14c). First declaration sets the authoritative
-/// `cohort_size`; a divergent later size does NOT overwrite (conflict rejection deferred — pqueue follow-up).
-fn upsert_cohort(
+/// Batch the cohort upserts (BQ-14c) into one multi-row `ON CONFLICT DO NOTHING`. Group keys are deduped
+/// (first declaration authoritative — divergent later size never overwrites, same as the per-item path).
+fn upsert_cohorts(
     tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-    group: &GroupKey,
-    cohort_size: u64,
-    now: UtcTimestamp,
+    t: &str,
+    q: &str,
+    items: &[PushItem],
+    now_n: i64,
 ) -> EngineResult<()> {
-    let (t, q) = parts(shard);
+    let mut cohorts: Vec<(String, i64)> = Vec::new();
+    for item in items {
+        if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
+            let gk = group.as_str().to_string();
+            if !cohorts.iter().any(|(k, _)| k == &gk) {
+                cohorts.push((gk, size as i64));
+            }
+        }
+    }
+    if cohorts.is_empty() {
+        return Ok(());
+    }
+    for chunk in cohorts.chunks(5000) {
+        let mut sql = String::from(
+            "INSERT INTO pqueue_cohorts (tenant_id,queue_id,group_key,cohort_size,created_at) VALUES ",
+        );
+        let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q, &now_n];
+        for (r, (gk, size)) in chunk.iter().enumerate() {
+            let b = 4 + r * 2;
+            if r > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("($1,$2,${},${},$3)", b, b + 1));
+            params.push(gk);
+            params.push(size);
+        }
+        sql.push_str(" ON CONFLICT(tenant_id,queue_id,group_key) DO NOTHING");
+        st(tx.execute(sql.as_str(), &params))?;
+    }
+    Ok(())
+}
+
+/// Apply the shared Finalize SET to a whole bucket of item ids in ONE statement (skips an empty bucket).
+/// `state`/`reset`/`terminal_at` are the bucket-invariant disposition values.
+#[allow(clippy::too_many_arguments)]
+fn finalize_update(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    state: &str,
+    reset: bool,
+    terminal_at: Option<i64>,
+    ids: &[String],
+    now_n: i64,
+    seqi: i64,
+) -> EngineResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
     st(tx.execute(
-        "INSERT INTO pqueue_cohorts (tenant_id,queue_id,group_key,cohort_size,created_at) \
-         VALUES ($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,queue_id,group_key) DO NOTHING",
-        &[
-            &t,
-            &q,
-            &group.as_str(),
-            &(cohort_size as i64),
-            &ts_nanos(now),
-        ],
+        "UPDATE pqueue_items SET lifecycle_state=$4, lease_token_hash=NULL, lease_expires_at=NULL, \
+         fenced=false, item_version=item_version+1, \
+         retry_count=CASE WHEN $5 THEN 0 ELSE retry_count END, \
+         terminal_at=$6, updated_at=$7, last_command_sequence=$8 \
+         WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+        &[&t, &q, &ids, &state, &reset, &terminal_at, &now_n, &seqi],
     ))?;
     Ok(())
 }
@@ -600,9 +740,9 @@ fn apply_command_sql(
                 .get(shard)
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
+            insert_items(tx, &model, shard, &c.items, seq, now)?;
             let mut groups: Vec<GroupKey> = Vec::new();
             for it in &c.items {
-                insert_item(tx, &model, shard, it, seq, now)?;
                 if let Some(g) = &it.group_key
                     && !groups.contains(g)
                 {
@@ -617,14 +757,15 @@ fn apply_command_sql(
         QueueCommand::Claim(c) => {
             let hash = lease_hash(&c.lease_token);
             let exp = ts_nanos(c.lease_expires_at);
+            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            st(tx.execute(
+                "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=$4, \
+                 lease_expires_at=$5, retry_count=retry_count+1, item_version=item_version+1, \
+                 updated_at=$6, last_command_sequence=$7 \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &ids, &hash, &exp, &now_n, &seqi],
+            ))?;
             for id in &c.item_ids {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=$4, \
-                     lease_expires_at=$5, retry_count=retry_count+1, item_version=item_version+1, \
-                     updated_at=$6, last_command_sequence=$7 \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string(), &hash, &exp, &now_n, &seqi],
-                ))?;
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
             for g in groups_of(tx, shard, &c.item_ids)? {
@@ -634,14 +775,13 @@ fn apply_command_sql(
         }
         QueueCommand::RenewLease(c) => {
             let exp = ts_nanos(c.lease_expires_at);
-            for id in &c.item_ids {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET lease_expires_at=$4, item_version=item_version+1, \
-                     updated_at=$5, last_command_sequence=$6 \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string(), &exp, &now_n, &seqi],
-                ))?;
-            }
+            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            st(tx.execute(
+                "UPDATE pqueue_items SET lease_expires_at=$4, item_version=item_version+1, \
+                 updated_at=$5, last_command_sequence=$6 \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &ids, &exp, &now_n, &seqi],
+            ))?;
             Ok(())
         }
         QueueCommand::UpdateFields(c) => {
@@ -695,30 +835,52 @@ fn apply_command_sql(
         QueueCommand::ReassignLease(c) => {
             let hash = lease_hash(&c.lease_token);
             let exp = ts_nanos(c.lease_expires_at);
+            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            st(tx.execute(
+                "UPDATE pqueue_items SET lease_token_hash=$4, lease_expires_at=$5, \
+                 retry_count=retry_count+1, item_version=item_version+1, updated_at=$6, \
+                 last_command_sequence=$7 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &ids, &hash, &exp, &now_n, &seqi],
+            ))?;
             for id in &c.item_ids {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET lease_token_hash=$4, lease_expires_at=$5, \
-                     retry_count=retry_count+1, item_version=item_version+1, updated_at=$6, \
-                     last_command_sequence=$7 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string(), &hash, &exp, &now_n, &seqi],
-                ))?;
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
             Ok(())
         }
         QueueCommand::Finalize(c) => {
+            // Resolve Retry-exhaustion for all Retry outcomes in ONE read (was one SELECT per outcome).
+            let retry_ids: Vec<String> = c
+                .outcomes
+                .iter()
+                .filter(|o| matches!(o.kind, FinalizeKind::Retry))
+                .map(|o| o.item_id.to_string())
+                .collect();
+            let mut retry_info: HashMap<String, (i64, i64)> = HashMap::new();
+            if !retry_ids.is_empty() {
+                let rows = st(tx.query(
+                    "SELECT item_id, retry_count, max_attempts FROM pqueue_items \
+                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                    &[&t, &q, &retry_ids],
+                ))?;
+                for row in rows {
+                    let id: String = row.get(0);
+                    retry_info.insert(id, (row.get(1), row.get(2)));
+                }
+            }
+            // Bucket outcomes by the target SET, then issue ONE UPDATE per bucket. The disposition fully
+            // determines (new_state, terminal_at, reset_attempts), so there are at most four buckets.
+            let mut to_complete: Vec<String> = Vec::new();
+            let mut to_failed: Vec<String> = Vec::new();
+            let mut to_pending: Vec<String> = Vec::new();
+            let mut to_pending_rearm: Vec<String> = Vec::new();
+            let mut backoff: BTreeMap<i64, Vec<String>> = BTreeMap::new();
             for o in &c.outcomes {
+                let id = o.item_id.to_string();
                 let new_state = match o.kind {
                     FinalizeKind::Complete => ItemState::Complete,
                     FinalizeKind::Fail => ItemState::Failed,
                     FinalizeKind::Retry => {
-                        let row = st(tx.query_one(
-                            "SELECT retry_count, max_attempts FROM pqueue_items \
-                             WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                            &[&t, &q, &o.item_id.to_string()],
-                        ))?;
-                        let rc: i64 = row.get(0);
-                        let ma: i64 = row.get(1);
+                        let (rc, ma) = retry_info.get(&id).copied().ok_or(EngineError::NotFound)?;
                         if is_retry_exhausted(rc as u32, ma as u32) {
                             ItemState::Failed
                         } else {
@@ -728,42 +890,69 @@ fn apply_command_sql(
                     FinalizeKind::Release => ItemState::Pending,
                     FinalizeKind::Rearm => ItemState::Pending,
                 };
-                let terminal_at: Option<i64> = new_state.is_terminal().then_some(now_n);
-                let reset_attempts = matches!(o.kind, FinalizeKind::Rearm);
-                st(tx.execute(
-                    "UPDATE pqueue_items SET lifecycle_state=$4, lease_token_hash=NULL, \
-                     lease_expires_at=NULL, fenced=false, item_version=item_version+1, \
-                     retry_count=CASE WHEN $5 THEN 0 ELSE retry_count END, \
-                     terminal_at=$6, updated_at=$7, last_command_sequence=$8 \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[
-                        &t,
-                        &q,
-                        &o.item_id.to_string(),
-                        &state_str(new_state),
-                        &reset_attempts,
-                        &terminal_at,
-                        &now_n,
-                        &seqi,
-                    ],
-                ))?;
-                // Queue-native retry backoff: a Retry that returned the item to Pending (still under
-                // the attempt bound) defers its re-eligibility to `not_before`. Mirror insert_item's
-                // pairing of not_before + eligible_since so select_eligible's gate (`not_before<=now`)
-                // and ordering (`eligible_since`) both defer. Guarded on Pending so an exhausted Retry
-                // (-> Failed) gets no backoff; Release/Complete/Fail/Rearm never carry one.
+                match new_state {
+                    ItemState::Complete => to_complete.push(id.clone()),
+                    ItemState::Failed => to_failed.push(id.clone()),
+                    ItemState::Pending if matches!(o.kind, FinalizeKind::Rearm) => {
+                        to_pending_rearm.push(id.clone())
+                    }
+                    ItemState::Pending => to_pending.push(id.clone()),
+                    ItemState::Leased => unreachable!("Finalize never targets Leased"),
+                }
+                // Queue-native retry backoff: a Retry that returned the item to Pending (still under the
+                // attempt bound) defers its re-eligibility to `not_before`. Mirror insert_item's pairing of
+                // not_before + eligible_since. Grouped by identical not_before so each value is one UPDATE.
                 if matches!(o.kind, FinalizeKind::Retry)
                     && new_state == ItemState::Pending
                     && let Some(nb) = o.not_before
                 {
-                    let nb_n = ts_nanos(nb);
-                    st(tx.execute(
-                        "UPDATE pqueue_items SET not_before=$4, eligible_since=$4 \
-                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                        &[&t, &q, &o.item_id.to_string(), &nb_n],
-                    ))?;
+                    backoff.entry(ts_nanos(nb)).or_default().push(id.clone());
                 }
                 token_ops.push(TokenOp::Clear(o.item_id));
+            }
+            let complete = state_str(ItemState::Complete);
+            let failed = state_str(ItemState::Failed);
+            let pending = state_str(ItemState::Pending);
+            finalize_update(
+                tx,
+                &t,
+                &q,
+                complete,
+                false,
+                Some(now_n),
+                &to_complete,
+                now_n,
+                seqi,
+            )?;
+            finalize_update(
+                tx,
+                &t,
+                &q,
+                failed,
+                false,
+                Some(now_n),
+                &to_failed,
+                now_n,
+                seqi,
+            )?;
+            finalize_update(tx, &t, &q, pending, false, None, &to_pending, now_n, seqi)?;
+            finalize_update(
+                tx,
+                &t,
+                &q,
+                pending,
+                true,
+                None,
+                &to_pending_rearm,
+                now_n,
+                seqi,
+            )?;
+            for (nb_n, ids) in &backoff {
+                st(tx.execute(
+                    "UPDATE pqueue_items SET not_before=$4, eligible_since=$4 \
+                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                    &[&t, &q, ids, nb_n],
+                ))?;
             }
             let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id).collect();
             for g in groups_of(tx, shard, &ids)? {
@@ -781,7 +970,14 @@ fn apply_command_sql(
                 .get(shard)
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
-            insert_item(tx, &model, shard, &c.replacement, seq, now)?;
+            insert_items(
+                tx,
+                &model,
+                shard,
+                std::slice::from_ref(&c.replacement),
+                seq,
+                now,
+            )?;
             let mut groups = groups_of(tx, shard, std::slice::from_ref(&c.superseded_item_id))?;
             if let Some(g) = &c.replacement.group_key
                 && !groups.contains(g)
@@ -794,13 +990,14 @@ fn apply_command_sql(
             Ok(())
         }
         QueueCommand::LeaseExpired(c) => {
+            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            st(tx.execute(
+                "UPDATE pqueue_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
+                 lease_expires_at=NULL, item_version=item_version+1, updated_at=$4, \
+                 last_command_sequence=$5 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &ids, &now_n, &seqi],
+            ))?;
             for id in &c.item_ids {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
-                     lease_expires_at=NULL, item_version=item_version+1, updated_at=$4, \
-                     last_command_sequence=$5 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string(), &now_n, &seqi],
-                ))?;
                 token_ops.push(TokenOp::Clear(*id));
             }
             for g in groups_of(tx, shard, &c.item_ids)? {
@@ -815,38 +1012,40 @@ fn apply_command_sql(
                 &[&t, &q, &c.group_key.as_str()],
             ))?;
             let mut ids = Vec::new();
+            let mut id_strs: Vec<String> = Vec::new();
             for row in rows {
                 let id: String = row.get(0);
+                id_strs.push(id.clone());
                 ids.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
             }
+            st(tx.execute(
+                "UPDATE pqueue_items SET lifecycle_state='Failed', item_version=item_version+1, \
+                 terminal_at=$4, updated_at=$4, last_command_sequence=$5 \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &id_strs, &now_n, &seqi],
+            ))?;
             for id in &ids {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET lifecycle_state='Failed', item_version=item_version+1, \
-                     terminal_at=$4, updated_at=$4, last_command_sequence=$5 \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string(), &now_n, &seqi],
-                ))?;
                 token_ops.push(TokenOp::Clear(*id));
             }
             refresh_group_summary(tx, shard, &c.group_key, now)?;
             Ok(())
         }
         QueueCommand::FenceLease(c) => {
-            for id in &c.item_ids {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET fenced=true WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string()],
-                ))?;
-            }
+            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            st(tx.execute(
+                "UPDATE pqueue_items SET fenced=true WHERE tenant_id=$1 AND queue_id=$2 \
+                 AND item_id = ANY($3)",
+                &[&t, &q, &ids],
+            ))?;
             Ok(())
         }
         QueueCommand::UnfenceLease(c) => {
-            for id in &c.item_ids {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET fenced=false WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string()],
-                ))?;
-            }
+            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            st(tx.execute(
+                "UPDATE pqueue_items SET fenced=false WHERE tenant_id=$1 AND queue_id=$2 \
+                 AND item_id = ANY($3)",
+                &[&t, &q, &ids],
+            ))?;
             Ok(())
         }
         QueueCommand::PauseQueue => {
@@ -868,45 +1067,65 @@ fn apply_command_sql(
                 .get(shard)
                 .map(|d| d.client_item_key_retention_ms)
                 .unwrap_or(0);
+            let id_strs: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            // One set-based read of every purged item (was one SELECT per item).
+            let rows = st(tx.query(
+                "SELECT item_id, group_key, client_item_key, lifecycle_state FROM pqueue_items \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &id_strs],
+            ))?;
             let mut groups: Vec<GroupKey> = Vec::new();
-            for id in &c.item_ids {
-                let row = st(tx.query_opt(
-                    "SELECT group_key, client_item_key, lifecycle_state FROM pqueue_items \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string()],
-                ))?;
-                if let Some(row) = row {
-                    let gk: Option<String> = row.get(0);
-                    let ck: String = row.get(1);
-                    let state: String = row.get(2);
-                    if parse_state(&state)?.is_terminal() && retention_ms > 0 {
-                        let expires =
-                            now_n.saturating_add((retention_ms as i64).saturating_mul(1_000_000));
-                        st(tx.execute(
-                            "INSERT INTO pqueue_item_key_retention \
-                             (tenant_id,queue_id,client_item_key,item_id,expires_at) \
-                             VALUES ($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,queue_id,client_item_key) \
-                             DO UPDATE SET item_id=EXCLUDED.item_id, expires_at=EXCLUDED.expires_at",
-                            &[&t, &q, &ck, &id.to_string(), &expires],
-                        ))?;
-                    }
-                    if let Some(g) = gk {
-                        let gk2 =
-                            GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?;
-                        if !groups.contains(&gk2) {
-                            groups.push(gk2);
-                        }
+            // (client_item_key, item_id) tombstones for terminal items, deduped LAST-wins on key so the
+            // batched upsert never touches the same conflict target twice (DO UPDATE cardinality).
+            let mut retention: Vec<(String, String)> = Vec::new();
+            for row in rows {
+                let item_id: String = row.get(0);
+                let gk: Option<String> = row.get(1);
+                let ck: String = row.get(2);
+                let state: String = row.get(3);
+                if parse_state(&state)?.is_terminal() && retention_ms > 0 {
+                    retention.retain(|(k, _)| k != &ck);
+                    retention.push((ck, item_id));
+                }
+                if let Some(g) = gk {
+                    let gk2 = GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?;
+                    if !groups.contains(&gk2) {
+                        groups.push(gk2);
                     }
                 }
-                st(tx.execute(
-                    "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string()],
-                ))?;
-                // BQ-14d: drop the purged item's gate membership (the anti-join source).
-                st(tx.execute(
-                    "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &id.to_string()],
-                ))?;
+            }
+            if !retention.is_empty() {
+                let expires = now_n.saturating_add((retention_ms as i64).saturating_mul(1_000_000));
+                let mut sql = String::from(
+                    "INSERT INTO pqueue_item_key_retention \
+                     (tenant_id,queue_id,client_item_key,item_id,expires_at) VALUES ",
+                );
+                let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q, &expires];
+                for (r, (ck, item_id)) in retention.iter().enumerate() {
+                    let b = 4 + r * 2;
+                    if r > 0 {
+                        sql.push(',');
+                    }
+                    sql.push_str(&format!("($1,$2,${},${},$3)", b, b + 1));
+                    params.push(ck);
+                    params.push(item_id);
+                }
+                sql.push_str(
+                    " ON CONFLICT(tenant_id,queue_id,client_item_key) \
+                     DO UPDATE SET item_id=EXCLUDED.item_id, expires_at=EXCLUDED.expires_at",
+                );
+                st(tx.execute(sql.as_str(), &params))?;
+            }
+            // Set-based deletes (item rows + their gate membership) — one round-trip each.
+            st(tx.execute(
+                "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &id_strs],
+            ))?;
+            st(tx.execute(
+                "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                &[&t, &q, &id_strs],
+            ))?;
+            for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(*id));
             }
             for g in &groups {
@@ -1418,36 +1637,48 @@ fn metrics_sql(client: &mut Client, shard: &QueueKey) -> EngineResult<QueueMetri
     Ok(m)
 }
 
-fn item_flags(
+/// Lifecycle state + flags for a BATCH of items in ONE round-trip (was one SELECT per id), keyed by
+/// `item_id` string. Absent ids are simply missing from the map (the per-id classifier treats a miss as
+/// `NotFound`). Replaces the former per-item `item_flags` helper.
+fn item_flags_map(
     client: &mut Client,
     shard: &QueueKey,
-    id: &ItemId,
-) -> EngineResult<Option<(ItemState, bool, bool)>> {
-    let (t, q) = parts(shard);
-    let row = st(client.query_opt(
-        "SELECT lifecycle_state, fenced, superseded FROM pqueue_items \
-         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-        &[&t, &q, &id.to_string()],
-    ))?;
-    match row {
-        None => Ok(None),
-        Some(row) => {
-            let state: String = row.get(0);
-            let fenced: bool = row.get(1);
-            let superseded: bool = row.get(2);
-            Ok(Some((parse_state(&state)?, fenced, superseded)))
-        }
+    ids: &[ItemId],
+) -> EngineResult<HashMap<String, (ItemState, bool, bool)>> {
+    let mut map = HashMap::with_capacity(ids.len());
+    if ids.is_empty() {
+        return Ok(map);
     }
+    let (t, q) = parts(shard);
+    let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+    let rows = st(client.query(
+        "SELECT item_id, lifecycle_state, fenced, superseded FROM pqueue_items \
+         WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+        &[&t, &q, &id_strs],
+    ))?;
+    for row in rows {
+        let id: String = row.get(0);
+        let state = parse_state(&row.get::<_, String>(1))?;
+        let fenced: bool = row.get(2);
+        let superseded: bool = row.get(3);
+        map.insert(id, (state, fenced, superseded));
+    }
+    Ok(map)
 }
 
+/// Shared "present + Leased + not fenced + not superseded + not terminal" check — identical error
+/// precedence to `ProjectionData::validate_leased` (finalize/renew/reassign pre-commit). Classifies every
+/// id from ONE batched read; precedence is still evaluated per id in request order (first failing id wins),
+/// byte-for-byte as the former per-id SELECT loop did.
 fn validate_leased(client: &mut Client, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
+    let flags = item_flags_map(client, shard, ids)?;
     for id in ids {
-        match item_flags(client, shard, id)? {
+        match flags.get(&id.to_string()) {
             None => return Err(EngineError::NotFound),
             Some((_, true, _)) => return Err(EngineError::StaleLease),
             Some((s, _, _)) if s.is_terminal() => return Err(EngineError::Terminal),
             Some((_, _, true)) => return Err(EngineError::Superseded),
-            Some((s, _, _)) if s != ItemState::Leased => {
+            Some((s, _, _)) if *s != ItemState::Leased => {
                 return Err(EngineError::Invalid("item is not leased"));
             }
             Some(_) => {}
@@ -2356,13 +2587,16 @@ impl PurgePort for PostgresRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            // Classify every candidate from ONE batched read (was one SELECT per id), then preserve the
+            // exact in-order, deduped, force-gated `present` set the per-item loop produced.
+            let flags = item_flags_map(&mut g.client, shard, &item_ids)?;
             let mut present: Vec<ItemId> = Vec::new();
             for id in &item_ids {
                 if present.contains(id) {
                     continue;
                 }
-                if let Some((state, _, _)) = item_flags(&mut g.client, shard, id)? {
-                    validate_purge_force(state == ItemState::Leased, force)?;
+                if let Some((state, _, _)) = flags.get(&id.to_string()) {
+                    validate_purge_force(*state == ItemState::Leased, force)?;
                     present.push(*id);
                 }
             }

@@ -244,3 +244,19 @@ PQUEUE_PG_TEST_URL=postgres://USER:PW@HOST:5432/DB \
   cargo test --manifest-path crates/pqueue-bench/Cargo.toml --test e2e_shapes_tests
 ```
 
+
+## Update — relational write/validate path batched (post-v0.3.0)
+
+The `postgres_relational` per-item statements flagged above were subsequently batched
+(multi-row INSERT for push; `item_id = ANY(...)` for the finalize/claim validation +
+apply). Measured improvement on `postgres_relational` (5k items, batch 500, minimal shape):
+
+| op | before | after |
+|----|--------|-------|
+| ingest | ~140 items/s | **~16,800 items/s** (multi-row INSERT) |
+| ack (finalize) | ~280 items/s | **~30,000 items/s** (batched `validate_leased`) |
+| claim+ack | ~280 items/s | **~1,694 items/s** (~6×) |
+
+Residual: the item-level claim is now bottlenecked on the `FOR UPDATE SKIP LOCKED`
+ordered-scan + gate anti-join in the claim CTE (~1,992 items/s), which is intrinsic to
+the CTE, not a per-item statement — a separate query-plan/indexing optimization.
