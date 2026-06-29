@@ -210,11 +210,13 @@ pub fn make_item(shape: &Shape, idx: u64) -> NewItem {
         _ => None,
     };
     NewItem {
+        client_item_key: None,
         priority: Some(PriorityValue::Int64(priority_for(shape, idx))),
         group_key,
         not_before: None,
         payload,
         fields,
+        metadata: Default::default(),
         cohort_size,
         gate_keys: Vec::new(),
     }
@@ -263,7 +265,8 @@ pub fn bench_qdef(tenant: &str, queue: &str, shape: &Shape) -> QueueDefinition {
         max_push_batch_size: 10_000_000,
         max_claim_batch_size: 10_000_000,
         max_eligible_group_size: None,
-        secondary_indexes: vec![],    }
+        secondary_indexes: vec![],
+    }
 }
 
 /// A bench `QueueKey` in the `bench` tenant.

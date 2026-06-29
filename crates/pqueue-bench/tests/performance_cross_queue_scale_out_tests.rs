@@ -73,7 +73,8 @@ fn qdef(tenant: &str, queue: &str) -> QueueDefinition {
         max_push_batch_size: 10_000_000,
         max_claim_batch_size: 10_000_000,
         max_eligible_group_size: None,
-        secondary_indexes: vec![],    }
+        secondary_indexes: vec![],
+    }
 }
 
 /// Run ONE owner node's full workload (push then claim+ack `items_per_queue` across `queues_per_owner`
