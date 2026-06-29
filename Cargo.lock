@@ -1080,6 +1080,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqueue-loadgen"
+version = "0.3.1"
+dependencies = [
+ "pqueue-release",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pqueue-memory"
 version = "0.3.1"
 dependencies = [

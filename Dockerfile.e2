@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+
+# TP-002 E2 multi-node kind harness image (NOT a production image — see Dockerfile for that). It bakes the
+# production `pqueue-service` binary AND the `pqueue-loadgen` in-cluster RESP load generator into one image,
+# so a kind cluster can run BOTH the CPU-limited owner server pods and a lean, separated in-cluster load Job
+# from a single `kind load docker-image`. The entrypoint defaults to the service; the load Job overrides
+# `command:` to run `pqueue-loadgen`. Built by `scripts/perf/tp002-e2-kind.sh`.
+
+# ---- builder ----
+FROM rust:1.92-bookworm AS builder
+WORKDIR /build
+COPY . .
+# Cache mounts keep the cargo registry + target dir between iterative harness rebuilds (BuildKit). The
+# target is copied out before the layer ends because a cache mount is not present in the final image.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p pqueue-server --bin pqueue-service \
+ && cargo build --release -p pqueue-loadgen --bin pqueue-loadgen \
+ && mkdir -p /out \
+ && cp target/release/pqueue-service target/release/pqueue-loadgen /out/
+
+# ---- runtime ----
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --user-group --no-create-home pqueue
+
+COPY --from=builder /out/pqueue-service /usr/local/bin/pqueue-service
+COPY --from=builder /out/pqueue-loadgen /usr/local/bin/pqueue-loadgen
+
+USER pqueue
+ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
+    PQUEUE_LOG_BACKEND=objectlog \
+    PQUEUE_PROJECTION_BACKEND=inmemory
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/pqueue-service"]

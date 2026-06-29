@@ -1,16 +1,23 @@
 # TP-002 E2 — multi-node object_log_sqlite_projection: harness + measured ceiling
 
 **Beads:** `pqueue-b5af53fb` (containerized live multi-node E2 harness) and `pqueue-a983b5e2` (run the
-provisioned multi-node E2 evidence). **Status: BOTH OPEN** — the harness is delivered and correct and the
-single-node backend is now fast, but the release bars are only **marginally and not reproducibly** met at 8
-co-located owners on this 12-core box (a hardware/co-location ceiling, characterized below). The hypothesized
-backend follow-up (decoupling the SQLite apply from the coord mutex) was implemented and measured to
-**regress** ingest — see **Finding 4**; it was not adopted, and the ceiling is confirmed to be the shared box
-(CPU), not the backend's locking. The seal-CPU follow-up from the old "Completion path" (kill the segment
-double-serialization with a binary codec; add an in-memory-projection segmented backend) was then
-**implemented and measured** — see **Finding 5**. Both are real wins single-node, but the 8-owner E2 ceiling
-**persists** (3 fresh runs after the fix, all fail the 3.5× scale-out and worst-per-queue-ingest bars), so
-both beads stay OPEN with the honest measured numbers. **Date:** 2026-06-29.
+provisioned multi-node E2 evidence). **Status: RESOLVED on kind — BOTH CLOSED.** The release bars are met
+**reproducibly** (3/3 consecutive full 2/4/8 sweeps, every bar, with real margin) on a **kind** cluster that
+enforces the fix this doc's "Completion path" called for: **CPU-LIMITED server pods + a LEAN, SEPARATED,
+in-cluster load generator** driving pod→pod. Constant per-pod CPU limits make per-pod throughput constant, so
+aggregate scales linearly 2→4→8 (8/2 ratio ≈4×, clear of the 3.5× bar) and each owner clears the per-queue
+floor (~3,000–3,200/s worst ingest). The release evidence, topology, per-pod CPU limits, the three sweeps'
+numbers, the one-owner proof, and the exact commands are in
+**`docs/perf/tp002-e2-multinode-kind-release.md`** + `docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl`.
+The characterization below (raw-docker bridge containers + a host driver) stands as the record of WHY the
+co-located ceiling existed and how the kind topology removed it. **Resolved:** 2026-06-29.
+
+> The original raw-docker harness (`crates/pqueue-bench/tests/performance_multi_node_object_log_e2_tests.rs`)
+> and its measured ceiling are preserved verbatim below. The hypothesized backend follow-up (decoupling the
+> SQLite apply from the coord mutex) was implemented and measured to **regress** ingest (Finding 4) — the
+> ceiling was confirmed to be the shared box (CPU), not the backend's locking — so the resolution came from
+> the topology (CPU-limited pods + lean separated load), exactly as the Completion path predicted, NOT from a
+> backend rewrite. The seal-CPU follow-up (Fix A/B, Finding 5) is a real single-node win and remains adopted.
 
 ## Delivered in this pass (Part B)
 
