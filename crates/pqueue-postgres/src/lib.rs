@@ -72,8 +72,8 @@ mod control_plane;
 mod credential;
 mod relational;
 pub use connect::{
-    CredentialProvider, PostgresConnectConfig, PostgresSslMode, connect,
-    default_max_connection_lifetime,
+    ConnectorChoice, CredentialProvider, PostgresConnectConfig, PostgresSslMode, connect,
+    default_max_connection_lifetime, select_connector,
 };
 pub use control_plane::PostgresControlPlane;
 pub use credential::{
@@ -310,7 +310,14 @@ impl PostgresBackend {
     /// Connect to `url` (using the connection's default `search_path`), ensure the schema, and rebuild the
     /// in-memory projection of every known queue by replaying its durable log.
     pub fn connect(url: &str) -> EngineResult<Self> {
-        let client = connect(PostgresConnectConfig::new(url))?;
+        Self::connect_with_config(PostgresConnectConfig::new(url))
+    }
+
+    /// Connect using a fully-built [`PostgresConnectConfig`] — the credential-provider-aware path the
+    /// `pqueue-server` composition root uses for Lakebase (a libpq/native-password DSN plus, optionally, a
+    /// Databricks service-principal/PAT [`CredentialProvider`] that injects the user/password at connect).
+    pub fn connect_with_config(config: PostgresConnectConfig) -> EngineResult<Self> {
+        let client = connect(config)?;
         Self::from_client(client)
     }
 

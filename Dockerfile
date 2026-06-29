@@ -15,10 +15,25 @@ WORKDIR /build
 # target/, VCS, and execution evidence stay out.
 COPY . .
 
-RUN cargo build --release --bin pqueue-service --bin pqueue-verify-ledger
+# Optional cargo features for the service binary. The default image ships no extra features; pass
+# `--build-arg CARGO_FEATURES=tls` (or `postgres,tls`) to build the Lakebase / cloud-postgres TLS runtime:
+#   docker build --build-arg CARGO_FEATURES=tls -t pqueue:tls .
+# The `tls` feature implies `postgres`, so it wires `Backend::PostgresNative` over native-tls.
+ARG CARGO_FEATURES=""
+
+RUN cargo build --release --bin pqueue-verify-ledger \
+ && cargo build --release -p pqueue-server --bin pqueue-service \
+        ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
 
 # ---- runtime ----
 FROM debian:bookworm-slim AS runtime
+
+# Runtime libraries: `ca-certificates` + `libssl3` are required when the service is built `--features tls`
+# (the native-tls / OpenSSL connector dynamically links libssl and verifies the Lakebase / cloud-postgres
+# server certificate against the system trust store). They are harmless for the default (no-tls) image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+ && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root system user.
 RUN useradd --system --uid 10001 --user-group --no-create-home pqueue

@@ -27,6 +27,17 @@ startup with a message naming the required feature build. Other unsupported
 combinations also fail loudly at startup instead of being hidden behind a synthetic
 combined backend name.
 
+### Databricks Lakebase (postgres over TLS)
+
+When `storage.log.backend=postgres`, the chart renders the log DSN Secret ref into
+`PQUEUE_POSTGRES_LOG_DATABASE_URL`. With a `tls`-built image this is a **real runtime
+path** (no longer render-only): a DSN with `sslmode=require` connects to Lakebase /
+cloud postgres over native-tls, and a service-principal/PAT credential provider
+injects the postgres user/password when the `DATABRICKS_*` envs are supplied. Build the
+TLS image with `docker build --build-arg CARGO_FEATURES=tls ...`. An `sslmode=require`
+DSN on a non-tls image fails closed at startup (no plaintext downgrade). The live
+Lakebase provider-certification run remains tracked separately (`pqueue-ea625701`).
+
 ## Default Values
 
 ```yaml

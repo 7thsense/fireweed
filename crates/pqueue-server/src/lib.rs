@@ -75,10 +75,63 @@ pub enum Backend {
     },
     /// SYNC postgres durable-log adapter (atomic class), driven through the blocking-safe
     /// [`PostgresNativeBackend`] wrapper so no sync postgres client call runs on a Tokio worker thread.
-    /// `url` is a libpq/postgres connection string; with the `tls` feature an `sslmode=require|prefer`
-    /// url connects over native-tls (Lakebase / cloud postgres). Requires the `postgres` cargo feature.
+    /// `url` is a libpq/postgres connection string (URL or `key=value` DSN, with a native password); with the
+    /// `tls` feature an `sslmode=require|prefer` url connects over native-tls (Lakebase / cloud postgres).
+    /// `credentials` optionally injects a Databricks service-principal/PAT credential at connect (the
+    /// user/password is set from the provider instead of the DSN). Requires the `postgres` cargo feature.
     #[cfg(feature = "postgres")]
-    PostgresNative { url: String },
+    PostgresNative {
+        url: String,
+        credentials: Option<pqueue_postgres::CredentialProvider>,
+    },
+}
+
+/// Resolve the postgres `Backend` from the runtime environment, using the env names the Helm Lakebase
+/// profile renders. The DSN secret is `PQUEUE_POSTGRES_LOG_DATABASE_URL` (the chart's log-backend Secret
+/// ref); `PQUEUE_PG_URL` is the local/dev fallback, and the documented default is the last resort. A
+/// Databricks service-principal/PAT credential provider is attached when `DATABRICKS_HOST` is present.
+///
+/// No plaintext fallback: if the DSN demands `sslmode=require` but this binary was built WITHOUT the `tls`
+/// feature, this fails at config time rather than letting the runtime silently downgrade to `NoTls`.
+///
+/// This is a pure function over an env map (no live DB, no process env) so the composition-root config
+/// layer is unit-testable.
+#[cfg(feature = "postgres")]
+pub fn resolve_postgres_backend(
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<Backend, String> {
+    let nonempty = |key: &str| env.get(key).filter(|s| !s.is_empty()).cloned();
+    let url = nonempty("PQUEUE_POSTGRES_LOG_DATABASE_URL")
+        .or_else(|| nonempty("PQUEUE_PG_URL"))
+        .unwrap_or_else(|| "postgres://postgres@127.0.0.1:5432/postgres".to_string());
+
+    // Fail closed before connecting if the DSN requires TLS but this build cannot provide it.
+    let ssl_mode = pqueue_postgres::PostgresConnectConfig::new(&url)
+        .parsed_ssl_mode()
+        .map_err(|e| format!("invalid postgres DSN: {e}"))?;
+    #[cfg(not(feature = "tls"))]
+    if matches!(ssl_mode, pqueue_postgres::PostgresSslMode::Require) {
+        return Err(
+            "DSN requests sslmode=require but this binary was built without the `tls` feature; rebuild \
+             `--features postgres,tls` (no plaintext downgrade)"
+                .to_string(),
+        );
+    }
+    let _ = ssl_mode;
+
+    // Databricks service-principal / PAT credential injection: present iff DATABRICKS_HOST is set. The
+    // provider supersedes any DSN password (and sets the postgres user for service-principal OAuth).
+    let credentials = if nonempty("DATABRICKS_HOST").is_some() {
+        let config = pqueue_postgres::DatabricksCredentialConfig::from_env_map(env.clone())
+            .map_err(|e| format!("invalid Databricks credential configuration: {e}"))?;
+        let provider = pqueue_postgres::DatabricksCredentialProvider::from_config(config)
+            .map_err(|e| format!("could not build Databricks credential provider: {e}"))?;
+        Some(pqueue_postgres::CredentialProvider::Databricks(provider))
+    } else {
+        None
+    };
+
+    Ok(Backend::PostgresNative { url, credentials })
 }
 
 /// Server configuration.
@@ -804,13 +857,18 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .await
         }
         #[cfg(feature = "postgres")]
-        Backend::PostgresNative { url } => {
+        Backend::PostgresNative { url, credentials } => {
             // The sync postgres `connect` (client handshake + log replay) MUST run off the reactor: the
             // postgres client drives its own internal runtime per call, so connecting on a Tokio worker
             // would panic ("cannot start a runtime from within a runtime"). Connect inside `spawn_blocking`,
             // then drive the backend only through the blocking-safe wrapper.
             let backend = tokio::task::spawn_blocking(move || {
-                pqueue_postgres::PostgresBackend::connect(&url).map(|b| b.with_node_id(node_id))
+                let mut connect_config = pqueue_postgres::PostgresConnectConfig::new(url);
+                if let Some(provider) = credentials {
+                    connect_config = connect_config.with_credential_provider(provider);
+                }
+                pqueue_postgres::PostgresBackend::connect_with_config(connect_config)
+                    .map(|b| b.with_node_id(node_id))
             })
             .await
             .map_err(|e| {

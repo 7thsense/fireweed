@@ -17,7 +17,9 @@ The release image entrypoint is `pqueue-service`, the RESP server built from
 | `PQUEUE_SEGMENT_TARGET_BYTES` | no | `262144` | `segmented`: byte-size seal trigger. |
 | `PQUEUE_SEGMENT_MAX_LATENCY_MS` | no | `20` | `segmented`: latency seal trigger. |
 | `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` | no | `1000000` | `objectlog/sqlite` recovery-window budget. A reopen recovers from the SQLite projection snapshot + its recorded high-water and replays only the object-log tail beyond it (not the full genesis log). A tail longer than this budget is logged as a recovery-window warning (the projection has fallen far behind the durable log). |
-| `PQUEUE_PG_URL` | when log is `postgres` | `postgres://postgres@127.0.0.1:5432/postgres` | libpq/postgres connection string for the `postgres/inmemory` backend. With `sslmode=require` (or `prefer`) the binary must be built `--features postgres,tls` to connect over native-tls; otherwise only `disable`/`prefer`-plaintext connect. |
+| `PQUEUE_POSTGRES_LOG_DATABASE_URL` | when log is `postgres` (Helm) | _(none)_ | The DSN the Helm postgres/Lakebase profile renders from the log-backend Secret. Takes precedence over `PQUEUE_PG_URL`. A libpq URL **or** `key=value` DSN, with a native password; `sslmode=require` selects the native-tls path. |
+| `PQUEUE_PG_URL` | when log is `postgres` (local/dev) | `postgres://postgres@127.0.0.1:5432/postgres` | libpq/postgres connection string (URL or `key=value` DSN) for the `postgres/inmemory` backend; the fallback when `PQUEUE_POSTGRES_LOG_DATABASE_URL` is unset. With `sslmode=require` (or `prefer`) the binary must be built `--features postgres,tls` to connect over native-tls; on a non-tls build an `sslmode=require` DSN fails closed at startup (no plaintext downgrade). |
+| `DATABRICKS_HOST`, `DATABRICKS_DATABASE_INSTANCE_NAME`, `DATABRICKS_CLIENT_ID`+`DATABRICKS_CLIENT_SECRET` (service principal) or `DATABRICKS_TOKEN`+`PQUEUE_DATABRICKS_POSTGRES_USER` (PAT) | when using Databricks Lakebase credentials | _(none)_ | Optional Databricks credential injection for the `postgres` backend: when `DATABRICKS_HOST` is set, a service-principal/PAT credential provider supplies the postgres user/password at connect instead of the DSN password. |
 | `PQUEUE_BOOTSTRAP_QUEUES` | no | `t1:q1` | Comma-separated `tenant:queue` bootstrap list. |
 | `PQUEUE_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
 
@@ -31,6 +33,29 @@ The default release image does **not** build that feature, so in the shipped ima
 `postgres` still fails at startup with an explicit message pointing at the required
 feature build. Other combinations fail at startup with an explicit
 unsupported-storage message.
+
+### Databricks Lakebase (postgres over TLS)
+
+Lakebase is a **real runtime path**, not render-only: build the service image with the
+`tls` feature and point it at the rendered DSN. The Helm postgres/Lakebase profile
+renders the DSN Secret as `PQUEUE_POSTGRES_LOG_DATABASE_URL` (consumed in preference
+to `PQUEUE_PG_URL`). A `key=value` or URL DSN with `sslmode=require` connects over the
+native-tls connector; an `sslmode=require` DSN on a non-tls build fails closed at
+startup (it never silently downgrades to plaintext). When `DATABRICKS_HOST` and the
+service-principal (`DATABRICKS_CLIENT_ID`/`DATABRICKS_CLIENT_SECRET`) or PAT
+(`DATABRICKS_TOKEN`/`PQUEUE_DATABRICKS_POSTGRES_USER`) envs are present, a credential
+provider injects the postgres user/password at connect instead of the DSN password.
+
+Build the TLS image with the documented build arg:
+
+```sh
+docker build --build-arg CARGO_FEATURES=tls -t pqueue:tls .
+```
+
+(or `PQUEUE_FEATURES=tls scripts/release/package-binaries.sh` for the binary tarball).
+The runtime image installs `ca-certificates` + `libssl3` so the native-tls connector
+can verify the Lakebase server certificate. This wires the connection path only; the
+live Lakebase provider-certification run remains separate (`pqueue-ea625701`).
 
 `objectlog/sqlite` is a local single-owner development/runtime profile: the
 object log is the durable command authority and SQLite is rebuilt as a

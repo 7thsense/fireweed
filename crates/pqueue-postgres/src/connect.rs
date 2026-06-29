@@ -126,6 +126,38 @@ impl PostgresConnectConfig {
     }
 }
 
+/// Which transport [`connect`] selects for a parsed `sslmode`. A pure decision so the connector-selection
+/// policy is unit-testable without a live database (the whole point of the `tls`-feature proof).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectorChoice {
+    /// Plaintext `NoTls` transport (`sslmode=disable`, or `prefer` on a non-tls build).
+    NoTls,
+    /// A native-tls connector (`sslmode=require|prefer` on a `tls` build): the Lakebase / cloud-postgres path.
+    NativeTls,
+    /// `sslmode=require` on a build WITHOUT the `tls` feature: fail closed. Never silently downgrade to
+    /// plaintext — the caller surfaces [`EngineError::Unavailable`] instead of connecting `NoTls`.
+    FailClosedRequireWithoutTls,
+}
+
+/// Pure connector-selection policy. With the `tls` feature any non-`disable` `sslmode` selects the native-tls
+/// connector; without it, `require` fails closed (no plaintext fallback) and everything else is `NoTls`.
+pub fn select_connector(ssl_mode: PostgresSslMode) -> ConnectorChoice {
+    #[cfg(feature = "tls")]
+    {
+        match ssl_mode {
+            PostgresSslMode::Disable => ConnectorChoice::NoTls,
+            PostgresSslMode::Prefer | PostgresSslMode::Require => ConnectorChoice::NativeTls,
+        }
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        match ssl_mode {
+            PostgresSslMode::Require => ConnectorChoice::FailClosedRequireWithoutTls,
+            PostgresSslMode::Disable | PostgresSslMode::Prefer => ConnectorChoice::NoTls,
+        }
+    }
+}
+
 /// Build one sync postgres client through the centralized pqueue-postgres connection helper.
 ///
 /// Without the `tls` feature the adapter is `NoTls`-only: an `sslmode=require` URL fails closed
@@ -133,26 +165,30 @@ impl PostgresConnectConfig {
 /// connect over plaintext.
 ///
 /// With the `tls` feature a non-`disable` `sslmode` connects over a native-tls connector (the Lakebase /
-/// cloud-postgres path); only `sslmode=disable` uses `NoTls`.
+/// cloud-postgres path); only `sslmode=disable` uses `NoTls`. The transport choice is the pure
+/// [`select_connector`] policy.
 pub fn connect(config: PostgresConnectConfig) -> EngineResult<Client> {
     let ssl_mode = config.parsed_ssl_mode()?;
     let pg_config = config.postgres_config(now())?;
-    #[cfg(feature = "tls")]
-    {
-        if matches!(ssl_mode, PostgresSslMode::Disable) {
-            return st(pg_config.connect(NoTls));
+    match select_connector(ssl_mode) {
+        ConnectorChoice::NoTls => st(pg_config.connect(NoTls)),
+        ConnectorChoice::FailClosedRequireWithoutTls => Err(EngineError::Unavailable),
+        ConnectorChoice::NativeTls => {
+            #[cfg(feature = "tls")]
+            {
+                let connector = native_tls::TlsConnector::new().map_err(|e| {
+                    EngineError::Storage(format!("native-tls connector build failed: {e}"))
+                })?;
+                let connector = postgres_native_tls::MakeTlsConnector::new(connector);
+                st(pg_config.connect(connector))
+            }
+            // Unreachable without the `tls` feature (`select_connector` never returns `NativeTls` there),
+            // but the arm must still compile on a non-tls build.
+            #[cfg(not(feature = "tls"))]
+            {
+                Err(EngineError::Unavailable)
+            }
         }
-        let connector = native_tls::TlsConnector::new()
-            .map_err(|e| EngineError::Storage(format!("native-tls connector build failed: {e}")))?;
-        let connector = postgres_native_tls::MakeTlsConnector::new(connector);
-        st(pg_config.connect(connector))
-    }
-    #[cfg(not(feature = "tls"))]
-    {
-        if matches!(ssl_mode, PostgresSslMode::Require) {
-            return Err(EngineError::Unavailable);
-        }
-        st(pg_config.connect(NoTls))
     }
 }
 
@@ -252,5 +288,59 @@ mod tests {
         ));
 
         assert!(matches!(result, Err(EngineError::Unavailable)));
+    }
+
+    // Without the `tls` feature the connector-selection policy proves the no-plaintext-downgrade contract:
+    // `require` fails closed, while `disable`/`prefer` still pick `NoTls`.
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn selects_fail_closed_for_require_without_tls() {
+        assert_eq!(
+            select_connector(PostgresSslMode::Require),
+            ConnectorChoice::FailClosedRequireWithoutTls
+        );
+        assert_eq!(
+            select_connector(PostgresSslMode::Disable),
+            ConnectorChoice::NoTls
+        );
+        assert_eq!(
+            select_connector(PostgresSslMode::Prefer),
+            ConnectorChoice::NoTls
+        );
+    }
+
+    // The `tls`-feature proof (acceptance 1): an `sslmode=require` DSN — given as both a libpq URL and a
+    // libpq `key=value` string — selects the native-tls connector, never `NoTls` and never the fail-closed
+    // rejection. `sslmode=disable` still selects `NoTls` even with the feature on.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn require_sslmode_selects_native_tls_connector_for_url_and_keyvalue_dsn() {
+        for dsn in [
+            "postgres://app:native-password@lakebase.example.cloud:5432/db?sslmode=require",
+            "host=lakebase.example.cloud port=5432 user=app password=native-password \
+             dbname=db sslmode=require",
+        ] {
+            let ssl_mode = PostgresConnectConfig::new(dsn).parsed_ssl_mode().unwrap();
+            assert_eq!(ssl_mode, PostgresSslMode::Require, "dsn={dsn}");
+            let choice = select_connector(ssl_mode);
+            assert_eq!(choice, ConnectorChoice::NativeTls, "dsn={dsn}");
+            assert_ne!(choice, ConnectorChoice::NoTls, "dsn={dsn}");
+            assert_ne!(
+                choice,
+                ConnectorChoice::FailClosedRequireWithoutTls,
+                "tls build must not fail closed: dsn={dsn}"
+            );
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn disable_sslmode_uses_no_tls_even_with_tls_feature() {
+        let ssl_mode =
+            PostgresConnectConfig::new("postgres://app:pw@localhost:5432/db?sslmode=disable")
+                .parsed_ssl_mode()
+                .unwrap();
+        assert_eq!(ssl_mode, PostgresSslMode::Disable);
+        assert_eq!(select_connector(ssl_mode), ConnectorChoice::NoTls);
     }
 }

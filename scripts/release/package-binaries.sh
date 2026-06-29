@@ -22,7 +22,16 @@ ARCHIVE="${DIST_DIR}/pqueue-${VERSION}-${TARGET_TRIPLE}.tar.gz"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" "$DIST_DIR"
 
-cargo +1.92.0 build --release --bin pqueue-service --bin pqueue-verify-ledger
+# Optional cargo features for the service binary (e.g. PQUEUE_FEATURES=tls for the Lakebase /
+# cloud-postgres native-tls runtime). Empty by default — the stock release ships no extra features.
+PQUEUE_FEATURES="${PQUEUE_FEATURES:-}"
+SERVICE_FEATURE_ARGS=()
+if [[ -n "$PQUEUE_FEATURES" ]]; then
+    SERVICE_FEATURE_ARGS=(-p pqueue-server --features "$PQUEUE_FEATURES")
+fi
+
+cargo +1.92.0 build --release --bin pqueue-verify-ledger
+cargo +1.92.0 build --release --bin pqueue-service "${SERVICE_FEATURE_ARGS[@]}"
 
 cp "target/release/pqueue-service" "$STAGE_DIR/"
 cp "target/release/pqueue-verify-ledger" "$STAGE_DIR/"
@@ -36,6 +45,7 @@ Binaries:
 
 Build command:
 cargo +1.92.0 build --release --bin pqueue-service --bin pqueue-verify-ledger
+  (set PQUEUE_FEATURES=tls for the Lakebase / cloud-postgres native-tls service build)
 EOF
 
 tar -C "$(dirname "$STAGE_DIR")" -czf "$ARCHIVE" "$(basename "$STAGE_DIR")"
