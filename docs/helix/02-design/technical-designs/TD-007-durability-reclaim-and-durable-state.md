@@ -34,7 +34,7 @@ ddx:
 Specify the engine-side contracts the hexagonal cutover depends on, so backends and the RESP/library
 adapters can be built against fixed semantics:
 
-1. the **two durability classes** and which guarantees the engine may rely on;
+1. the **two internal durability classes** and how they preserve the same external transaction contract;
 2. the **unit-of-work / claim / upsert** atomicity model (`Backend`, `ClaimPort`, `UpsertPort`);
 3. the **ReclaimDriver** (timed lifecycle transitions);
 4. the **durable-state** design for logic migrated off the in-memory HTTP service
@@ -47,26 +47,27 @@ state below is **per-`(tenant, queue)`** on that single owner. Horizontal scale 
 
 ## 1. Durability classes
 
-Every driven adapter declares one class. The engine relies only on the **weakest** guarantee a given
-backend declares.
+Every driven adapter declares one class. The class describes internal append/apply mechanics only.
+It does not create a weaker external API. API-001 still requires success-visible,
+rejection-no-effect, and unknown-outcome replay semantics for every selectable backend.
 
 | Class | Backends | Append+apply | Guarantee the engine may assume |
 |---|---|---|---|
 | **Atomic** | `memory` (lock), `sqlite`, `postgres` (one txn) | committed together | post-commit projection is globally consistent; Invariant 1 & 2 hold strictly |
-| **Eventual-apply** | `objectlog` | log commit acks; projection applies within a bounded window | **self-read-after-write only** (an operation observes its own committed effect); priority order and no-double-claim are "over applied state, eventual"; **upsert unavailable** |
+| **Log-then-apply** | `objectlog` | manifest commit makes acknowledgement eligible; projection/response barrier completes before success returns | the engine must route every public success through the operation's own visibility barrier; unrelated concurrent effects may have bounded apply lag, but no caller-observable success may be invisible or duplicated |
 
-Rationale: object-log mode (TD-004) cannot wrap an S3 manifest commit and a SQLite projection apply
-in one transaction. Rather than pretend a single seam unifies all backends, the engine branches on
-the declared class. A backend MUST NOT declare `atomic` unless append and apply commit in one
-transaction observable to the claim path.
+Rationale: object-log mode (TD-004) cannot wrap an S3 manifest commit and a local projection apply
+in one transaction. The engine therefore branches on the declared class to implement the correct
+response barrier and failure handling. A backend MUST NOT declare `atomic` unless append and apply
+commit in one transaction observable to the claim path.
 
 ## 2. Unit of work, claim, upsert
 
 **2.1 `Backend::write`.** The atomic seam is a closure unit of work:
 `write(|log: &mut dyn LogWriter, proj: &mut dyn ProjectionWriter| -> Result<R>) -> Result<R>`.
 On atomic backends the closure body's log append and projection apply commit together (one lock / one
-SQL txn). On eventual-apply backends `write` provides self-RAW: the closure's own appended commands
-are visible to its own subsequent reads, but global consistency is not promised after return.
+SQL txn). On log-then-apply backends `write` does not return public success until the command is
+durable and the operation's own accepted effects are visible or reconstructable from committed state.
 
 **2.2 `ClaimPort`.** The engine is the single *logical* claim authority, but a backend MAY implement
 claim atomically (postgres `FOR UPDATE SKIP LOCKED` CTE) behind `ClaimPort::claim(req) -> Claimed`.
@@ -83,9 +84,10 @@ unit of work** as candidate selection — no item is selected-but-not-leased.
 - If the colliding item is **claimed (leased, non-terminal)**: reject with `-ERR pqueue invalid`
   (lifecycle transition not allowed on in-flight work). If the colliding item is **terminal**: reject
   with `-ERR pqueue terminal`. Never desync a PEL entry. (Mirrored verbatim in TD-006 §3 `XADD`.)
-- On **eventual-apply** backends: **not implemented** — the engine returns `-ERR pqueue unavailable`
-  for a colliding-key `XADD`, because the claim reads a lagging projection and the upsert↔claim race
-  cannot be closed. (Absent `client_item_key` ⇒ plain append on all backends.)
+- On **log-then-apply** backends: colliding-key replacement is selectable only if the backend closes
+  the upsert/claim race under the same external transaction contract. Until then, the engine returns
+  `-ERR pqueue unavailable` for a colliding-key `XADD`. (Absent `client_item_key` ⇒ plain append on
+  all backends.)
 - A later `XACK`/`XCLAIM` of a **superseded** old id returns `-ERR pqueue superseded` — never a silent
   `nil` (preserves at-least-once "no silent drop"; TD-006 §3).
 
@@ -141,8 +143,10 @@ key→shard routing to keep it local, and no multi-shard uniqueness concern.
 - **Reclaim-no-traffic:** an item is reclaimed/expired with zero client commands on its queue (§3).
 - **Upsert↔claim exclusion:** concurrent `replace_if_pending` and claim on one item never both
   succeed; superseded-id `XACK` returns `-ERR pqueue superseded`.
-- **Class guarantees:** atomic backends assert strict Invariant 1 & 2; eventual-apply asserts the
-  weaker "over applied state, eventual" and returns `-ERR pqueue unavailable` for colliding-key `XADD`.
+- **Class guarantees:** atomic and log-then-apply backends both satisfy API-001's external transaction
+  contract. Log-then-apply additionally proves its response barrier, crash-point matrix, and
+  `request_id` replay behavior; colliding-key `XADD` returns `-ERR pqueue unavailable` until the
+  backend can close the replacement/claim race.
 - **Durable-state replay:** each §4 row reconstructs identically after projection drop + log replay.
 - **No-stub behavioral:** every port method (`ClaimPort`, `UpsertPort`, `Backend::write`,
   `ReclaimDriver`/`tick`) has a test that fails if the impl returns a default/no-op.

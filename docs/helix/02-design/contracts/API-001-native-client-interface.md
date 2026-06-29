@@ -55,6 +55,33 @@ Compatibility adapters, such as an SQS-shaped API, are separate secondary
 surfaces. They MUST NOT replace the native API because they cannot represent
 mutable priority, mutable schedule, or pqueue's full batch/update semantics.
 
+## External Transaction Contract
+
+The native API is the only contract callers depend on. Implementation choices
+MAY change latency, cost, capacity, and recovery time, but MUST NOT change the
+following externally visible guarantees:
+
+1. Mutations are batch-first. Single-item bindings, when present, are convenience
+   wrappers over the same batch operation semantics and error rules.
+2. Each queue exposes a serializable mutation history for all accepted queue
+   state transitions. Claims, leases, finalization, eligibility changes, and
+   idempotency replay are interpreted against that history.
+3. A successful mutating response means the accepted effects are durable and
+   visible to later reads, claims, idempotency replays, and recovery from durable
+   state.
+4. A structured envelope rejection means no item in that envelope is durably
+   committed. A per-item rejection means that item has no durable effect while
+   other accepted items in the same batch follow normal success semantics.
+5. If a client loses the response, times out, or sees transport failure after
+   submitting a mutating request, retrying the same `request_id` MUST resolve to
+   the original committed result when the request committed, or to a fresh
+   execution when it did not commit. It MUST NOT duplicate a state-machine
+   transition.
+6. Local projections, caches, segment buffering, manifest publication, and log
+   replay are internal mechanisms. They MUST NOT expose read-after-success gaps,
+   duplicate active leases, lost accepted items, or backend-specific recovery
+   instructions to callers.
+
 ## Scope and Boundaries
 
 - In scope: native client operations for queue creation, item write/update,
@@ -92,6 +119,15 @@ message, endpoint, or payload element named here is part of the contract.
 | `cohort_size` | integer | conditional | Required on every item of a queue with `cohort_policy.enabled=true`; MUST NOT be present otherwise (else per-item `invalid`). MUST be greater than 0. MUST be identical for every item sharing one `group_key`; a conflicting value on a later member MUST be rejected per item with `conflict`. Fixed at the first accepted member of the `group_key` and immutable thereafter. | Expected complete-cohort member count (analogue of `batch_checksum`). The cohort key is `group_key`; cohort identity = all items sharing a `group_key` on a cohort-enabled queue. |
 | `lifecycle_state` | enum | response | MUST be one of `pending`, `leased`, `complete`, `failed`. Retry is represented as pending with retry metadata and `not_before`. A **recurring** item (see Queue Definition `recurrence`) cycles between `pending` and `leased` indefinitely and reaches `complete`/`failed` only on an explicit terminal finalize. After `recurrence.until` the item stops being re-armed but does **not** change lifecycle state until a terminal finalize occurs or the item is removed by `PurgeItems`. | Recurring items never auto-terminate. |
 | `item_result.status` | enum | response | MUST be one of `accepted`, `updated`, `duplicate`, `claimed`, `renewed`, `completed`, `failed`, `retried`, `released`, `rearmed`, `purged`, `not_found`, `invalid`, `conflict`, `stale_lease`, `terminal`, `rate_limited`, `unavailable`. | Per-item outcome. `rearmed` is the per-item success status of a `rearm` finalize; `purged` is the per-item success status of a `PurgeItems` removal. `rate_limited` denotes a pqueue deployment/tenant capacity limit only (P1) — specifically the partial-batch case where pqueue accepts some items and declines others of one request under a capacity control; whole-request capacity rejection uses the envelope rate-limit error instead. `rate_limited` is never a downstream-API rate signal. |
+
+### Batch-Centric Operation Shape
+
+Every native mutating operation accepts an explicit batch and returns per-item
+results in request order. This shape is intentional: durable-log profiles use
+batching and group commit to trade mutation latency against log/object-store
+request cost. A transport or SDK MAY expose single-item helpers only when those
+helpers preserve the same `request_id`, idempotency, durability, visibility, and
+per-item result semantics as a one-item batch.
 
 ### Tenant and Authorization Rules
 
@@ -839,7 +875,7 @@ HTTP. Library bindings SHOULD map the same `code` values to typed errors.
 | `expected_item_version` does not match current version | Per-item `conflict` | yes after refresh | Read/claim current item state or retry with updated version. |
 | Target item is terminal | Per-item `terminal` | no | Do not update/finalize terminal items except through repair APIs. |
 | Lease token is stale, missing, or expired | Per-item `stale_lease` | no for same token | Re-claim if item becomes eligible. |
-| Item not found by `item_id` or `client_item_key` | Per-item `not_found` | maybe | Verify reference or wait for eventual visibility only if backend documents it. |
+| Item not found by `item_id` or `client_item_key` | Per-item `not_found` | maybe | Verify the reference, retention window, terminal/purge state, or tenant/queue. Successful prior mutations must already be visible on the authoritative owner. |
 | Item pushed without `group_key` to a queue that requires it (`cohort_policy.enabled` or group batching) | Per-item `invalid` | yes after fix | Supply `group_key`. |
 | `group_batching` combined with `same_group_key` or explicit `group_key`, or `max_groups` <= 0, or used on a queue without `max_eligible_group_size` | Envelope error `invalid-request` | yes after fix | Use one claim mode; enable `group_batching` only on queues that define `max_eligible_group_size`. |
 | Next selected whole group exceeds `max_items` for a `group_batching` claim | Envelope error `batch-too-large` | yes after fix | Raise `max_items` so one whole group fits; ensure `max_eligible_group_size <= max_claim_batch_size`. |
@@ -1135,8 +1171,9 @@ MUST NOT be conflated.
 Postgres-native deployments may implement every operation directly in Postgres.
 S3/object-log deployments may buffer commands until a durable segment commit
 boundary is reached, but commands must not be acknowledged before that durable
-commit boundary. All storage modes must preserve the same client semantics once
-a response is returned.
+commit boundary and the operation's accepted effects are externally visible. All
+storage modes must preserve the same client semantics once a response is
+returned.
 
 The client claim contract is backend-agnostic. Because the queue is the unit of
 sharding (ADR-008), every claim is served by the queue's single owner against its

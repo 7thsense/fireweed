@@ -15,7 +15,7 @@ The release image entrypoint is `pqueue-service`, the RESP server built from
 | `PQUEUE_SQLITE_PROJECTION_PATH` | when projection is `sqlite` | `/var/lib/pqueue/pqueue-projection.db` | Local SQLite materialized projection path for `objectlog/sqlite`. |
 | `PQUEUE_OBJECT_LOG_MODE` | no | `file` | `objectlog` substrate: `file` (per-command) or `segmented` (group-commit, the production form). |
 | `PQUEUE_SEGMENT_TARGET_BYTES` | no | `262144` | `segmented`: byte-size seal trigger. |
-| `PQUEUE_SEGMENT_MAX_LATENCY_MS` | no | `20` | `segmented`: latency seal trigger. |
+| `PQUEUE_SEGMENT_MAX_LATENCY_MS` | no | `20` | `segmented`: latency seal trigger and implementation of the object-log commit-latency-bound knob (`max_commit_latency_ms`). Lower values reduce mutation latency and increase object/log request cost; higher values improve batch density and increase latency. This knob must not weaken transaction integrity. |
 | `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` | no | `1000000` | `objectlog/sqlite` recovery-window budget. A reopen recovers from the SQLite projection snapshot + its recorded high-water and replays only the object-log tail beyond it (not the full genesis log). A tail longer than this budget is logged as a recovery-window warning (the projection has fallen far behind the durable log). |
 | `PQUEUE_POSTGRES_LOG_DATABASE_URL` | when log is `postgres` (Helm) | _(none)_ | The DSN the Helm postgres/Lakebase profile renders from the log-backend Secret. Takes precedence over `PQUEUE_PG_URL`. A libpq URL **or** `key=value` DSN, with a native password; `sslmode=require` selects the native-tls path. |
 | `PQUEUE_PG_URL` | when log is `postgres` (local/dev) | `postgres://postgres@127.0.0.1:5432/postgres` | libpq/postgres connection string (URL or `key=value` DSN) for the `postgres/inmemory` backend; the fallback when `PQUEUE_POSTGRES_LOG_DATABASE_URL` is unset. With `sslmode=require` (or `prefer`) the binary must be built `--features postgres,tls` to connect over native-tls; on a non-tls build an `sslmode=require` DSN fails closed at startup (no plaintext downgrade). |
@@ -57,10 +57,29 @@ The runtime image installs `ca-certificates` + `libssl3` so the native-tls conne
 can verify the Lakebase server certificate. This wires the connection path only; the
 live Lakebase provider-certification run remains separate (`pqueue-ea625701`).
 
-`objectlog/sqlite` is a local single-owner development/runtime profile: the
-object log is the durable command authority and SQLite is rebuilt as a
-materialized projection. It is not the multi-owner S3 release profile until the
-manifest-CAS stale-owner fence work tracked by `pqueue-e5c6d6fc` lands.
+## Transaction and Storage-Combination Contract
+
+The storage axes are implementation choices, not API variants. Any executable
+combination MUST preserve the same native pqueue transaction contract:
+
+- a successful mutating response means accepted effects are durable and visible
+  to subsequent reads, claims, idempotency replay, and restart recovery;
+- a rejected envelope has no committed item effect, and a rejected item in a
+  partial batch has no committed effect for that item;
+- a transport failure, timeout, or service crash after submission is resolved by
+  retrying the same `request_id`, never by caller-side log repair;
+- local projections, segment buffering, and replay are internal implementation
+  details.
+
+Unsupported or not-yet-verified log/projection combinations fail closed at
+startup. They must not silently downgrade to a weaker durability or projection
+profile.
+
+`objectlog/inmemory` and `objectlog/sqlite` are local single-owner
+development/runtime profiles today: the object log is the durable command
+authority and the local projection is rebuilt from committed state. They are not
+the multi-owner S3 release profile until the manifest-CAS stale-owner fence work
+and the TP-003 external transaction-contract matrix land.
 
 ### Snapshot-tail recovery (object_log_sqlite_projection)
 

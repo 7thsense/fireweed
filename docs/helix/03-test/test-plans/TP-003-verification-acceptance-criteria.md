@@ -95,6 +95,9 @@ Violation count MUST be **0**.
 | INV-9 | Group co-residency by construction (ADR-008) | The queue is the unit of sharding, so a `group_key` whose members are split across more than one owner = **0** (co-residency holds by construction; no placement flag). |
 | INV-10 | Durable ack (ADR-001/TD-001) | Acknowledged commands missing after crash + replay = **0** (kill-after-ack). |
 | INV-11 | Lease fence on operator action (API-002) | Operator mutation of a leased item that leaves the old lease usable = **0**. |
+| INV-12 | Success visibility (API-001 external transaction contract) | A successful mutating response whose accepted effects are not visible to the next read/claim/idempotency replay on the authoritative owner = **0**. |
+| INV-13 | Rejection no-effect (API-001 external transaction contract) | A structured envelope rejection with any durable item effect, or a per-item rejection with a durable effect for that item = **0** after restart/replay. |
+| INV-14 | Unknown outcome resolves once (API-001 external transaction contract) | Retrying an interrupted/timed-out mutating `request_id` produces more than one committed state-machine transition, or fails to resolve a committed original result within retention = **0**. |
 
 ## 3. Acceptance Criteria by Area
 
@@ -188,7 +191,25 @@ scale/density/horizontal magnitude is TP-002 E0–E3; these are the per-op gates
 |----|-------|-----------|----------|
 | AC-OBS-1 metrics ground truth | `S∈{10K,1M}`, mixed pending/future/leased/retry/complete/failed/recurring states, both backend profiles, telemetry enabled | `GetQueueMetrics` lifecycle counts, active leases, retry backlog, recurring counters, throughput/latency buckets, and progress-bound risk are compared to a ground-truth scan/checkpoint for the test fixture; `oldest_eligible_age_ms` is exact-on-read as of the reported frontier | exact fields have 0 mismatches; approximate count fields converge within `L_metrics`; throughput/latency values match the harness-recorded operation log within documented aggregation tolerance |
 
-### 3.10 Product end-to-end workflow validation
+### 3.10 External transaction contract under duress
+
+These criteria are the release gate for API-001's backend-independent mutation
+contract. They run against every implemented profile combination, including
+memory/dev where present, SQLite, `postgres_native`, `object_log_inmemory_projection`,
+`object_log_sqlite_projection`, and segmented object-log variants. A profile that
+does not pass this section is not selectable outside the explicitly documented
+test/dev scope.
+
+| AC | Setup | Assertion | Pass bar |
+|----|-------|-----------|----------|
+| AC-TXN-1 success durable + visible | For each mutating operation (`CreateQueue`, `BatchPush`, `BatchUpdate`, `SetGates`, `BatchClaim`, `BatchRenewLeases`, `BatchFinalize`, `PurgeItems`), inject process kill/restart immediately after success return and then read/replay/claim from recovered state | INV-10 and INV-12 | 0 missing acknowledged commands; 0 read-after-success gaps on the authoritative owner |
+| AC-TXN-2 rejection no-effect | Generate envelope-invalid batches, per-item invalid/conflict/stale cases, capacity/unavailable paths, and commit-timeout paths; restart and replay from durable state | INV-13 | 0 durable effects for rejected envelopes or rejected items; accepted siblings in partial batches retain normal success semantics |
+| AC-TXN-3 unknown outcome replay | Drop responses, time out clients, kill service processes, and duplicate retry each mutating `request_id` across before-append, after-append-before-commit, after-commit-before-apply, after-apply-before-response, and after-response cut points | INV-5 and INV-14 | same `request_id` resolves to exactly one committed result or a fresh execution when no original commit exists; 0 duplicate state transitions |
+| AC-TXN-4 object-log crash-point matrix | For object-log profiles and each commit-latency-bound setting from TP-002 E3, inject failures before segment write, after segment write before manifest, after manifest before projection apply, during projection apply, after projection apply before response, during snapshot write, during owner reassignment, and during manifest CAS/fallback commit | INV-1, INV-2, INV-10, INV-12, INV-14 | 0 lost accepted items; 0 duplicate active leases; committed commands replay exactly once; orphan segments ignored or reconciled per TD-004; stale-epoch commits rejected |
+| AC-TXN-5 implementation-combination parity | Run the same generated operation history and failure schedule across all profile combinations, then compare final visible queue state, idempotency records, terminal outcomes, active leases, and metrics exact fields | backend-independent API semantics | no semantic divergence except documented latency/cost/recovery metadata; pqueue callers need no backend-specific repair path |
+| AC-TXN-6 latency-bound is not a correctness knob | Repeat AC-TXN-1..5 across the TP-002 E3 commit-latency-bound sweep | invariants unchanged by latency/cost setting | 0 invariant deltas across lower-latency vs cost-optimized settings |
+
+### 3.11 Product end-to-end workflow validation
 
 These are the product-facing "does pqueue work?" gates. Lower-level ACs prove
 individual primitives; these workflows prove those primitives compose through the
@@ -278,13 +299,17 @@ Every `LogStore`/`ProjectionStore`/`SnapshotStore`/`ControlPlaneStore`
 implementation MUST pass **100%** of the TD-001 shared conformance scenarios (durable
 append, commit-timeout retry, request-id conflict, duplicate push, mutable
 schedule, leased-update conflict, single active lease, stale-lease finalize, claim
-replay, snapshot recovery, progress-bound risk, tenant isolation, group
-co-residency by construction, cohort, gates, queue ownership/fence/routing) before
-that backend is selectable by backend profile (the core / log / relational-
-reconnect conformance classes per ADR-008). A backend at <100% conformance is not
-v1-eligible. Both committed
-profiles (`postgres_native`, `object_log_sqlite_projection`) run the identical
-suite.
+replay, success-visible, rejection-no-effect, unknown-outcome replay, snapshot
+recovery, progress-bound risk, tenant isolation, group co-residency by
+construction, cohort, gates, queue ownership/fence/routing) before that backend is
+selectable by backend profile (the core / transaction contract / log /
+relational-reconnect conformance classes per ADR-008). A backend at <100%
+conformance is not v1-eligible. The committed profiles
+(`postgres_native`, `object_log_inmemory_projection`, and
+`object_log_sqlite_projection`) run the identical transaction-contract suite;
+profile-specific suites add only substrate obligations such as reconnect
+durability, replay, snapshots, segment/manifest fencing, and latency-bound cost
+evidence.
 
 ## 5. CI Quality Gates (the green set)
 
@@ -310,13 +335,14 @@ but not sufficient.
 | Latency micro-bars `AC-LAT-1..4` | meet stated p95/p99 | release |
 | Operator suites (`operator_repair/redrive/purge/async/auth` + `AC-OP-1..9`) | 100% pass | operator-enabled release |
 | Backend conformance (§4) — both committed profiles | 100% of scenarios | release |
+| External transaction contract (§3.10) — all profile combinations | AC-TXN-1..6 green; INV-12..INV-14 = 0 | release |
 | Coverage — `pqueue-storage` conformance scenarios | 100% executed | release |
 | Loom (each custom concurrent structure) | exhaustive to the bounded preemption depth; 0 failing interleavings | release |
 | Property + fuzz (nightly tier) | ≥ `props`/`fuzz` nightly values; 0 falsifications/crashes | release |
 | Flaky rate | < 0.1% over 100 CI repeats of the suite | release |
-| P0/core safety invariants INV-1..INV-10 | 0 violations under the §2 stress matrix | release |
+| P0/core safety invariants INV-1..INV-10 and INV-12..INV-14 | 0 violations under the §2 stress matrix and §3.10 duress matrix | release |
 | Operator safety invariant INV-11 | 0 violations under the §2 stress matrix with operator repair/purge actions enabled | operator-enabled release |
-| TP-002 E0 (per-queue floor ≥10M items/hr), E1, E2 (cross-queue scale-out + ≥1000-queue density), E3 (object-log cost/ack/recovery) | pass at TP-002 bars | release |
+| TP-002 E0 (per-queue floor ≥10M items/hr), E1, E2 (cross-queue scale-out + ≥1000-queue density), E3 (object-log latency/cost/recovery) | pass at TP-002 bars | release |
 | `AC-SEN` P0/core product workflow aggregate | AC-E2E-1..6 and AC-E2E-8..9 green with ledger evidence; INV-1..INV-10 = 0 where applicable | release |
 | Operator product workflow aggregate | AC-E2E-7 green with ledger evidence; INV-8 and INV-11 = 0 | operator-enabled release |
 
@@ -346,13 +372,13 @@ criteria touch storage, concurrency, claim, lease, operator, or scale behavior
 
 pqueue P0/core v1 is "verified" when:
 
-1. INV-1..INV-10 hold with 0 violations across the §2 stress matrix on both
-   committed backend profiles.
+1. INV-1..INV-10 and INV-12..INV-14 hold with 0 violations across the §2 stress
+   matrix and §3.10 duress matrix on every committed backend profile.
 2. Every `AC-*` in §3 passes at its stated bar, recorded in the ledger.
-3. The §4 backend conformance gate is 100% for both committed profiles.
+3. The §4 backend conformance gate is 100% for every committed profile.
 4. The §5 CI quality gates are green.
 5. TP-002 E0 (per-queue floor ≥10M items/hr), E1, E2 (cross-queue scale-out + ≥1000-queue
-   density), and E3 (object-log cost/ack/recovery) pass.
+   density), and E3 (object-log latency/cost/recovery) pass.
 6. AC-SEN — the product validation suite (`product_validation_tests`) runs the
    P0/core product workflows AC-E2E-1 through AC-E2E-6 plus AC-E2E-8 and
    AC-E2E-9 at their release bars, proving the scheduled

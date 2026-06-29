@@ -80,7 +80,14 @@ and projection in one transactional backend.
   commit latency, replay, conditional writes, and query semantics for a single
   generic store interface.
 - **Command log is the ack boundary**: mutating API calls may return success
-  only after their commands reach the configured durable boundary.
+  only after their commands reach the configured durable boundary and accepted
+  effects are externally visible through the serving projection or equivalent
+  committed response state.
+- **External transaction contract is invariant**: backend profiles may differ in
+  latency, cost, capacity, and recovery time, but every supported combination
+  must preserve API-001 success, structured rejection, unknown-outcome
+  `request_id` replay, read-after-success visibility, and single-active-lease
+  guarantees.
 - **Projection is rebuildable unless the backend is transactional-authoritative**:
   SQLite or local projection state may accelerate claims, but the command log
   plus snapshots must recover acknowledged state after node loss.
@@ -118,6 +125,10 @@ and projection in one transactional backend.
 - **Conformance tests define backend eligibility**: no backend implementation is
   usable until it passes the same durability, idempotency, lease, replay, and
   progress-bound scenarios.
+- **Commit-latency bound is a profile knob, not a correctness knob**:
+  durable-log profiles expose a group-commit latency bound that trades mutation
+  latency against log/object-store request cost and batch density. The knob must
+  be covered by scale evidence and must never weaken transaction integrity.
 
 **Trade-offs**:
 
@@ -165,19 +176,22 @@ and projection in one transactional backend.
 | Profile | LogStore | ProjectionStore | SnapshotStore | ControlPlaneStore |
 |---------|----------|-----------------|---------------|-------------------|
 | `postgres_native` | Postgres | Postgres (relational family) | Optional Postgres/object storage | Postgres |
+| `object_log_inmemory_projection` | S3-compatible object log | In-memory local/rebuildable (log-replay family) | S3-compatible object storage | Postgres |
 | `object_log_sqlite_projection` | S3-compatible object log | SQLite local/rebuildable (relational family) | S3-compatible object storage | Postgres |
 | `kafka_log_sqlite_projection` | Kafka/Redpanda partition log | SQLite local/rebuildable | Object storage or Postgres checkpoint | Postgres |
 | `dynamodb_authority` | DynamoDB transaction/log table | DynamoDB query tables or local projection | DynamoDB/object storage | Postgres |
 
 `postgres_native` (TD-002) is the reference correctness backend and is
 implemented first; it delivers the single-deployment envelope.
-`object_log_sqlite_projection` is the second backend committed for v1 to
-substantiate horizontal-scale and cost claims; it is specified by TD-004 and
-delivers the horizontal envelope's cost/scale profile (cross-queue scale-out,
-ADR-008). The remaining profiles (`kafka_log_sqlite_projection`,
-`dynamodb_authority`) define design targets and conformance expectations only.
-Every profile, including the two committed ones, becomes usable for a queue only
-after it passes the shared backend conformance suite defined in this document.
+The object-log profiles are the committed high-scale path for v1. The in-memory
+projection variant is the low-latency serving reference for object-log replay;
+the SQLite projection variant is the durable local-index profile for larger hot
+sets and process restarts. TD-004 owns their shared object-log semantics and
+projection-specific recovery requirements. The remaining profiles
+(`kafka_log_sqlite_projection`, `dynamodb_authority`) define design targets and
+conformance expectations only. Every profile, including committed ones, becomes
+usable for a queue only after it passes the shared backend conformance suite
+defined in this document.
 
 ### Projection Families and Conformance as Contract
 
@@ -196,12 +210,14 @@ The conformance suite partitions into capability classes:
 | Suite | What it asserts | Who runs it |
 |-------|-----------------|-------------|
 | **core** | Observable queue behavior independent of durability substrate: ordering, eligibility (API-001 Eligibility Precedence), claim atomicity, single-active-lease, idempotency (`request_id` + `client_item_key`), lease renewal/expiry/reclaim, epoch fencing, and the per-queue progress bound. | **Every** projection family / backend. |
-| **log** | Replay-from-log, snapshot + log-tail recovery, and segment/manifest group-commit fencing. | Log-bearing backends only (`object_log_sqlite_projection`, kafka). |
+| **transaction contract** | Success is durable and visible; structured envelope rejection has no committed effect; per-item rejection has no effect for that item; unknown outcomes resolve exactly once by `request_id`; crashes at every append/apply/response boundary preserve the same visible history. | **Every** supported implementation combination. |
+| **log** | Replay-from-log, snapshot + log-tail recovery, segment/manifest group-commit fencing, orphan-segment handling, and commit-latency-bound behavior. | Log-bearing backends only (`object_log_inmemory_projection`, `object_log_sqlite_projection`, kafka). |
 | **relational durability** | Reconnect-after-crash durability — the relational substitute for replay-from-log: after process loss the DB-resident projection still holds acknowledged state. | Relational-family backends that are transactional-authoritative (`postgres_native`). |
 
-A backend is admissible for a queue only after it passes **core** plus whichever
-of **log** / **relational durability** matches its durability class. Durability
-class follows the durability **substrate, not the projection family**: a
+A backend is admissible for a queue only after it passes **core**,
+**transaction contract**, and whichever of **log** / **relational durability**
+matches its durability class. Durability class follows the durability
+**substrate, not the projection family**: a
 relational-family projection that is rebuilt from a log (the SQLite local
 projection under `object_log_sqlite_projection`) discharges its durability
 obligation via **log** (replay/snapshot+tail), not **relational durability**;

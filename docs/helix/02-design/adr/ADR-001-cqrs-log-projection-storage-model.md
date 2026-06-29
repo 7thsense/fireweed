@@ -58,14 +58,16 @@ log backend to achieve lower commit latency for small batches.
   configuration across all data-plane storage profiles.
 - Let users choose a latency/cost profile for durable commits.
 - Preserve a simple correctness model: no acknowledged command is lost after
-  node failure.
+  node failure, and no successful response is externally visible as anything
+  other than committed queue state.
 - Keep local SQLite useful for priority scans and claim performance without
   making local disk the source of truth.
 - Make Postgres-native operation a first-class mode for small deployments and
   teams with a strong managed Postgres provider.
 - Bound replay cost through snapshots and log retention.
 - Require object-storage log backends to batch commands into durable segments so
-  they preserve a reasonable cost profile.
+  they preserve a reasonable cost profile, with a configurable commit-latency
+  bound that directly controls the latency/cost tradeoff.
 - Support multiple durable log implementations, including Postgres, Kafka,
   S3-compatible object storage, DynamoDB, Aurora, and Redpanda-like systems.
 
@@ -150,8 +152,10 @@ including:
 - repair or administrative state transition
 
 pqueue acknowledges a command only after the configured `LogStore` durability
-profile says the command is committed. The chosen backend defines the latency
-and cost tradeoff:
+profile says the command is committed and the operation's accepted effects are
+visible through the serving projection or equivalent response barrier. The
+chosen backend defines the latency and cost tradeoff; it does not define a
+weaker API contract:
 
 - A Postgres-native backend can combine the command log, operational queue
   indexes, leases, idempotency state, and control-plane metadata in one managed
@@ -161,6 +165,12 @@ and cost tradeoff:
   and trades lower cost for higher acknowledgement latency.
 - A transactional backend can combine log, claim, and lease authority, but must
   still be deployable without centralizing the whole data plane.
+
+Every backend profile MUST preserve API-001's external transaction contract:
+success means durable and visible; structured rejection means no committed effect
+for the rejected scope; and unknown outcomes are resolved by `request_id`
+without duplicate state-machine transitions. Local projections, segment buffers,
+manifest publication, and replay are internal mechanisms only.
 
 The storage API must be capability-based rather than one flat generic store:
 
@@ -215,10 +225,15 @@ For S3-compatible object storage, the intended model is group commit:
 2. Seal a segment with checksums and monotonic command positions.
 3. Write the segment to object storage.
 4. Commit a manifest entry or equivalent durable segment pointer.
-5. Acknowledge all commands in the committed segment.
-6. Apply committed commands to the local SQLite projection.
-7. Periodically snapshot SQLite to object storage at a committed log position.
-8. Expire log segments only after a valid snapshot and recovery window cover
+5. Treat the manifest commit as the durable boundary that makes commands
+   eligible for acknowledgement.
+6. Apply committed commands to the local SQLite or in-memory projection, or
+   otherwise construct the operation's response from committed state.
+7. Acknowledge a command only after that command's accepted effects are durable
+   and externally visible to later reads, claims, idempotency replay, and
+   recovery.
+8. Periodically snapshot SQLite to object storage at a committed log position.
+9. Expire log segments only after a valid snapshot and recovery window cover
    those positions.
 
 This design makes S3 viable for cost-optimized workloads that can send large
@@ -226,6 +241,12 @@ client batches and tolerate batched acknowledgement latency. S3 adapters should
 reject or strongly discourage production configurations that write one object
 per command; that shape has poor request cost, poor object-count behavior, and
 does not use S3's economics correctly.
+
+The object-log profile exposes a commit-latency bound (implemented by segment
+time/size thresholds such as `segment_max_latency_ms`) so operators can choose
+the point on the latency/cost curve. Lower latency bounds create more segments
+and object-store requests; higher bounds improve batch density at the cost of
+mutation latency. This knob is never a correctness knob.
 
 ### Scale Claim Scoping
 
@@ -242,14 +263,14 @@ This ADR's backend menu maps to two **delivered v1** envelopes:
   **`object_log_sqlite_projection`** second backend (TD-004) and/or independent
   `postgres_native` deployments. A single deployment alone MUST NOT be cited as
   evidence for this envelope. Evidence: TP-002 E2 (cross-queue scale-out) and E3
-  (object-log cost/ack + recovery).
+  (object-log latency/cost + recovery).
 
 | Claim | Substantiated by (committed v1) | Evidence record |
 |-------|--------------------------------|-----------------|
 | Single-deployment per-queue throughput >= floor (>=10M items/hr/queue) | `postgres_native` (TD-002) | E1 vs E0 |
 | Write/claim load scales beyond one deployment by distributing queues across nodes; per-queue floor preserved for every queue at any scale | cross-queue placement + per-queue ownership (TD-003) + object-log backend (TD-004) | E2 |
 | Per-queue progress bound holds on the queue's single owner | per-queue oldest-eligible tracking (TD-003); queue-local, no cross-shard aggregation | E1 |
-| Lower $/command + bounded recovery at high volume | `object_log_sqlite_projection` group commit + SQLite projection rebuild (TD-004) | E3 |
+| Lower $/command + bounded recovery at high volume | `object_log_sqlite_projection` and local-projection object-log variants using group commit + projection rebuild (TD-004) | E3 |
 
 ### Napkin Cost Comparison
 

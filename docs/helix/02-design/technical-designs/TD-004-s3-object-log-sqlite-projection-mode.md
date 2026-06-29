@@ -32,33 +32,42 @@ ddx:
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
 
-**Contract**: API-001 | **ADR**: ADR-001, ADR-004, ADR-008 | **Depends on**: TD-001, TD-002, TD-003 | **Scope**: `object_log_sqlite_projection` backend
+**Contract**: API-001 | **ADR**: ADR-001, ADR-004, ADR-008 | **Depends on**: TD-001, TD-002, TD-003 | **Scope**: object-log local-projection backends
 
 ## Scope
 
 This technical design defines the second committed v1 storage backend for pqueue:
-`object_log_sqlite_projection`. In this mode an S3-compatible object store is the durable command
-log (the ack boundary), a local SQLite database is the rebuildable operational projection, the same
-object store holds periodic projection snapshots, and Postgres remains the control plane. Per ADR-008
-the queue is the unit of sharding: a whole queue is owned by exactly one node, so the object log, the
-manifest, and the SQLite projection are all **per-`(tenant, queue)`**, and there is no intra-queue
-sharding or cross-shard command machinery.
+the object-log local-projection profile. In this mode an S3-compatible object
+store is the durable command log, a local in-memory or SQLite projection serves
+hot queue operations, the same object store holds periodic projection snapshots,
+and Postgres remains the control plane. `object_log_inmemory_projection` is the
+fast local replay profile; `object_log_sqlite_projection` is the larger
+rebuildable local-index profile. Per ADR-008 the queue is the unit of sharding:
+a whole queue is owned by exactly one node, so the object log, the manifest, and
+the local projection are all **per-`(tenant, queue)`**, and there is no
+intra-queue sharding or cross-shard command machinery.
 
 This backend exists to substantiate pqueue's horizontal-scale and cost claims with a profile whose
 durable-commit cost scales with *segments*, not with *commands* (see ADR-001 napkin cost comparison).
-Horizontal scale is **cross-queue** (ADR-008): many queues across many owners. This is the
-cost-optimized counterpart to the latency-optimized `postgres_native` reference mode (TD-002), and the
-relational projection family's log-bearing member (the SQLite projection is rebuilt from the log).
+Horizontal scale is **cross-queue** (ADR-008): many queues across many owners.
+This is the cost-optimized counterpart to the latency-optimized
+`postgres_native` reference mode (TD-002), and the profile that should deliver
+Redis-level hot serving behavior with object-store durability when callers can
+batch mutations. SQLite is the relational projection family's log-bearing
+member; the in-memory projection is the log-replay serving member.
 
 In scope:
 
 - Group-commit pipeline: per `tenant/queue` command buffering, segment sealing with checksums
-  and monotonic command positions, segment write, manifest commit, ack, SQLite projection apply.
+  and monotonic command positions, segment write, manifest commit, ack-eligibility, and local projection apply.
 - The in-flight claim **reservation** model: how `BatchClaim` selects candidates, prevents duplicate
   local claims while a segment is pending, and rolls back on CAS/timeout/fence (see "Claim Reservation").
 - Object layout for segments, manifests, and snapshots (logical; exact byte framing in implementation).
 - Replay-response idempotency model (ack only after durable manifest commit) and the read-after-write
   / apply-ordering contract that keeps API-001 satisfied once a response returns.
+- The backend-independent transaction contract: success is durable and visible,
+  structured rejection has no committed effect for the rejected scope, and
+  unknown outcomes resolve by `request_id`.
 - SQLite projection schema mapping from TD-001 logical projection records and TD-002 column semantics.
 - Periodic SQLite snapshot to object storage at a committed log position.
 - Bounded replay and recovery: snapshot + log-tail, with safe segment expiry.
@@ -91,17 +100,21 @@ Out of scope:
 
 ## Technical Approach
 
-`object_log_sqlite_projection` is a **replay-response** backend (TD-001 §"Durable Ack and Response
+The object-log local-projection profile is a **replay-response** backend (TD-001 §"Durable Ack and Response
 Replay"). The durable commit boundary is a committed manifest entry that names a sealed, checksummed
 segment in object storage. No command is acknowledged before its segment's manifest entry is durably
-committed. After commit, commands are applied to a local SQLite projection that serves claim planning,
-lease state, idempotency lookup, and metrics. SQLite is rebuildable: snapshot + log tail reproduce
-acknowledged state after node loss.
+committed. After commit, commands are applied to the local projection that serves claim planning,
+lease state, idempotency lookup, and metrics. The projection is rebuildable:
+snapshot + log tail reproduce acknowledged state after node loss.
 
 This backend deliberately trades acknowledgement latency for cost: durable-commit cost scales with the
-number of sealed segments, not with the number of commands, so large client batches plus a configured
-group-commit window yield the cost floor described in ADR-001. Small, latency-sensitive commits should
-use `postgres_native` (TD-002) or a fast log backend instead.
+number of sealed segments, not with the number of commands, so large client
+batches plus a configured group-commit window yield the cost floor described in
+ADR-001. The operator-facing commit-latency bound is implemented by
+`segment_max_latency_ms` and related size thresholds. Lower values reduce
+mutation latency and increase object-store request cost; higher values improve
+batch density and increase mutation latency. Small, latency-sensitive commits
+should use `postgres_native` (TD-002) or a fast log backend instead.
 
 It follows TD-001's capability boundaries unchanged:
 
@@ -111,14 +124,17 @@ It follows TD-001's capability boundaries unchanged:
   this backend still uses the Postgres control plane. TD-004 *reads* the current `assignment_epoch`
   from it on the manifest-commit path (see Epoch Fencing).
 - `LogStore`: S3-compatible object log with group-commit sealed segments and a per-queue manifest.
-- `ProjectionStore`: local SQLite, rebuildable, applied only from committed commands (relational
-  projection family, log-bearing member).
+- `ProjectionStore`: local in-memory or SQLite, rebuildable, applied only from
+  committed commands. In-memory is the log-replay serving family; SQLite is the
+  relational projection family's log-bearing member.
 - `SnapshotStore`: S3-compatible object storage holding SQLite snapshots at committed positions.
 
 **Key decisions**
 
 - **Manifest entry is the ack boundary.** A command is durable when, and only when, the manifest entry
-  naming its segment is committed via a conditional (compare-and-set) object write.
+  naming its segment is committed via a conditional (compare-and-set) object write. Success remains illegal
+  until the operation's accepted effects are also visible through the local projection or equivalent
+  committed response state.
 - **Fencing is enforced against the current control-plane epoch.** The manifest commit is the
   enforcement point of TD-001 `append_batch(expected_epoch)`. The CAS guards the manifest tail; the
   epoch check validates against the epoch currently recorded in the Postgres control plane for the
@@ -146,8 +162,8 @@ This realizes the 8-step ADR-001 §"S3/Object-Log Commit Model" sequence. Each s
 | 2. Seal | A segment MUST seal when EITHER the buffered byte size reaches `segment_target_bytes` OR the oldest buffered command's age reaches `segment_max_latency_ms`, whichever comes first. Sealing assigns each command a monotonic per-queue `sequence` (TD-001 `CommandPosition.sequence`) contiguous with the prior segment, and computes a per-segment `checksum` plus per-command `checksum` (TD-001 `CommandEnvelope.checksum`). |
 | 3. Write segment | The sealed, immutable segment MUST be written to object storage under a deterministic key (see "Object Layout") before any manifest commit references it. The write SHOULD use an idempotent PUT keyed by `(queue, first_sequence)` so retried writes do not create divergent objects. |
 | 4. Commit manifest | A manifest entry naming the segment, its `[first_sequence, last_sequence]` range, its checksum, and the writer's `assignment_epoch` MUST be appended via a conditional write that succeeds only if (a) the manifest's tail still equals the writer's expected tail AND (b) the writer's `assignment_epoch` is the **current** epoch for the queue (see "Manifest Commit and Epoch Fencing"). A failed CAS MUST abort the commit, roll back the in-flight reservation, and the writer MUST treat itself as raced or fenced. |
-| 5. Ack | Only after the manifest entry is durably committed MAY the commands in that segment be acknowledged to the caller. Acknowledgement returns a response derived from committed command state (replay-response model). |
-| 6. Apply | After ack-eligibility, committed commands MUST be applied to the SQLite projection in `sequence` order, exactly once, idempotently keyed by `last_command_sequence` (no command at or below the projection's applied position is reapplied). The apply-vs-return ordering contract is in "Response / Apply Ordering". |
+| 5. Ack-eligibility | Only after the manifest entry is durably committed MAY the commands in that segment become eligible for acknowledgement. Manifest commit alone is not permission to return success before the operation's own visibility barrier is satisfied. |
+| 6. Apply / response barrier | After ack-eligibility, committed commands MUST be applied to the local projection in `sequence` order, exactly once, idempotently keyed by `last_command_sequence` (no command at or below the projection's applied position is reapplied), or the operation response MUST otherwise be reconstructed from committed log state. The operation's own accepted effects MUST be externally visible before success returns. |
 | 7. Snapshot | The writer MUST periodically snapshot the SQLite projection to object storage at a committed log position (see "Snapshots"). |
 | 8. Expire | A log segment MAY be expired (deleted) only after a committed snapshot covers its entire `[first_sequence, last_sequence]` range AND the configured `log_recovery_window_ms` past that snapshot has elapsed (see "Retention and Expiry"). |
 
@@ -327,25 +343,26 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 |---------|------|
 | Reject 1-object-per-command | A backend configuration that would seal one command per segment in production MUST be rejected at queue/backend configuration time with `invalid-request` (API-001). It is available only behind an explicit `dev_unsafe_one_command_segments` flag for tests; that flag MUST NOT be settable in a production deployment profile. |
 | Reject missing CAS | If the configured object store lacks a usable conditional-write primitive and the deployment has not selected the Postgres-manifest-pointer fallback, queue/backend configuration MUST be rejected with `invalid-request` (see "Object-Store Capability Requirements"). |
-| Window sanity | `segment_max_latency_ms` MUST be `> 0`; the effective claim/ack latency budget MUST be documented to callers because it bounds API-001 commit latency for this profile. |
+| Window sanity | `segment_max_latency_ms` MUST be `> 0`; it is the implementation of the profile's `max_commit_latency_ms` / commit-latency-bound knob. The effective claim/ack latency budget MUST be documented to callers because it bounds API-001 commit latency for this profile. |
 | Snapshot vs recovery window | `log_recovery_window_ms` MUST be `>= snapshot_interval_ms` so an unexpired snapshot always exists before its covered segments can expire. |
 
 ## Commit-Latency / Cost Tradeoff (normative statement)
 
 This profile's durable-commit cost scales with sealed-segment count, not command count (ADR-001 napkin
 cost). The deliberate tradeoff: acknowledgement of a mutating operation MAY be delayed up to
-`segment_max_latency_ms` (plus segment write + manifest commit time) so that many commands share one
-durable object write. This is the lever that produces the S3 cost floor.
+the configured commit-latency bound, implemented as `segment_max_latency_ms`
+(plus segment write + manifest commit + own-operation apply/response-barrier
+time), so that many commands share one durable object write. This is the lever
+that produces the S3 cost floor.
 
 API-001 still holds **once a response returns**: the response is derived only from committed command
-state (replay-response); per-item outcomes, ordering, idempotency, and lease semantics are identical to
-`postgres_native`, and the operation's own effect is applied before its response returns (see "Response
-/ Apply Ordering"). The client-visible differences are (1) higher and configurable acknowledgement
-latency, and (2) the cross-operation apply-lag bound for *unrelated* concurrent operations' visibility to
-*other* readers — both within the bounds API-001 §"Non-Normative Notes" and the Performance section
-permit for object-log profiles. There is no weakening of FR-9/FR-12: the progress bound is computed from
-`eligible_since`, which is unaffected by commit batching (an item is not eligible until its push command
-is committed and applied, and progress age accrues from eligibility, FR-10).
+state (replay-response); per-item outcomes, ordering, idempotency, read-after-success visibility, and
+lease semantics are identical to `postgres_native`, and the operation's own effect is applied before its
+response returns (see "Response / Apply Ordering"). The client-visible differences are higher and
+configurable acknowledgement latency plus different cost/recovery curves. There is no weakening of
+FR-9/FR-12: the progress bound is computed from `eligible_since`, which is unaffected by commit batching
+(an item is not eligible until its push command is committed and applied, and progress age accrues from
+eligibility, FR-10).
 
 ## Security and Tenancy
 
@@ -466,7 +483,7 @@ The following cases define the required evidence surface:
 - Conformance parity: this backend passes the SAME TD-001 shared backend conformance suite as
   `postgres_native`, including the object-log–specific rows added to TD-001.
 - **Scale/cost evidence (D4(d)):** the object-log scale/cost + recovery evidence record is TP-002 **E3**
-  (object-log cost/ack + recovery), measured against the per-queue throughput floor TP-002 **E0**
+  (object-log latency/cost + recovery), measured against the per-queue throughput floor TP-002 **E0**
   (>=10M items/hr per queue, preserved for every queue at any scale). E3 MUST report sustained items/hr
   at or above the E0 floor, ack-latency distribution at the configured window,
   durable-commit cost per million commands, and 10M-item recovery (snapshot + replay) time. A recurrence

@@ -65,12 +65,12 @@ sharding, create more queues."**
    That is an internal TD-002 **storage** optimization, **not** an ownership, routing, or client-visible
    unit, and it does not bound how many nodes the queue population spreads across.)
 
-2. **Two projection families, one behavior contract.** The system supports (a) the **in-memory log-replay**
+2. **Two projection families, one behavior and transaction contract.** The system supports (a) the **in-memory log-replay**
    projection (embedded / object-log) and (b) the **relational / DB-resident** projection (`pqueue_items` +
    SQL claim, sqlite/postgres). They share **behavior, not code**: the **conformance suite is the contract**
    that holds them identical. Partition principle: the **core** suite is all observable queue behavior
    *independent of durability substrate* — ordering, eligibility, claim atomicity, idempotency, lease/epoch
-   fencing, and the per-queue progress bound — which **every** projection passes; the **log** suite is
+   fencing, success/error/unknown-outcome semantics, read-after-success visibility, and the per-queue progress bound — which **every** projection passes; the **log** suite is
    replay-from-log, snapshot+tail recovery, and segment/manifest commit, which only log-bearing backends run;
    a relational backend substitutes a **reconnect-after-crash durability** test for replay-from-log. This
    **retracts** ADR-007's "fused vs split disappears" premise (ADR-007:71).
@@ -124,9 +124,9 @@ sharding, create more queues."**
   transactional control plane. Rejected: consumer simplicity + no stalls + a no-Postgres option outweigh
   single-queue horizontal scale, which the floor math makes narrow.
 - **Async-behind projection (log leads, projection trails).** Deferred and benchmark-gated; it only pays off
-  when the log substrate is far cheaper than the projection AND read-after-write lag is tolerable (the
-  object-log→relational case), and it is a footgun on a same-substrate store (it breaks push→claim immediacy).
-  v1 modes are log-less (default) and log + sync-projection.
+  when the log substrate is far cheaper than the projection AND any lag is hidden behind API-001's success
+  barrier. Exposing read-after-success lag, delayed claim visibility, or backend-specific caller repair is not
+  acceptable; it would break transaction integrity. v1 modes are log-less (default) and log + sync-projection.
 - **Routing via a separately-distributed owner map.** Unnecessary: owner placement is deterministic (HRW over
   the live owner set), so the map is *computable*, and a stale route is safe (the fenced append rejects a
   deposed owner) — so a lazy `MOVED`-style redirect-on-miss suffices.

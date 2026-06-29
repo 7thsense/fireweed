@@ -93,8 +93,8 @@ begins redirecting. Within that window:
 | Command class | On a deposed/stale owner, within the renew window |
 |---|---|
 | **Durable writes** (`XADD`; the `append_batch` of any mutating command) | **Cannot corrupt state.** The TD-003 Single Authoritative Fencing Rule rejects an append whose `expected_epoch` is not the current control-plane epoch, the instant the epoch advances — so a misrouted write is rejected and the client retries against the current owner. `client_item_key` makes the `XADD` retry converge. |
-| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On the eventual-apply backend (`objectlog`) the claim selects from a lagging local projection and MAY hand a worker items before its `BatchClaim` `append_batch` is fenced; that append is then rejected, so **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced → `-ERR pqueue stale_lease` (§3): the redundant delivery **cannot complete**. The new owner redelivers — ordinary at-least-once (FR-28). Stock `XREADGROUP` carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection, not on request-id replay (library-only, §4). |
-| **Pure reads** (`XLEN`, `XINFO`, `XPENDING`, `XRANGE`) | **Bounded-stale, never authoritative.** A read has no `append_batch` and is not epoch-fenced; a deposed owner that has not yet failed a renew MAY serve a read from its frozen local projection. Such reads are best-effort and bounded-stale by the lease/renew interval (and, on the eventual-apply backend, additionally by the projection apply window). A client needing an authoritative read MUST reach the current owner (follow the redirect). The read guarantee is "bounded staleness," not "fresh-or-fenced"; a node MUST still redirect once it has learned it is not the owner. |
+| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver before commit, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On a log-then-apply backend (`objectlog`) any tentative delivery before the claim command commits is non-authoritative: if the `BatchClaim` append is fenced, **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced -> `-ERR pqueue stale_lease` (§3). A successful claim response is still subject to API-001's durable+visible response barrier. Stock `XREADGROUP` carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection; library/native paths use `request_id` replay (§4). |
+| **Pure reads** (`XLEN`, `XINFO`, `XPENDING`, `XRANGE`) | **Bounded-stale, never authoritative.** A read has no `append_batch` and is not epoch-fenced; a deposed owner that has not yet failed a renew MAY serve a read from its frozen local projection. Such reads are best-effort and bounded-stale by the lease/renew interval and any documented unrelated-operation apply budget. A client needing an authoritative read MUST reach the current owner (follow the redirect). The read guarantee is "bounded staleness," not "fresh-or-fenced"; a node MUST still redirect once it has learned it is not the owner. |
 
 ### Reassignment (drain) on the wire
 
@@ -162,7 +162,9 @@ Rules:
 - If the key collides with **claimed (leased, non-terminal)** work, the call returns
   `-ERR pqueue invalid` (no lifecycle transition on in-flight work). If it collides with **terminal**
   work, the call returns `-ERR pqueue terminal`. (Mapping pinned in TD-007 §2.3.)
-- On eventual-apply backends, replacement is unavailable and returns `-ERR pqueue unavailable`.
+- On log-then-apply backends, replacement is unavailable until the backend can close the
+  replacement/claim race under the same external transaction contract; unavailable replacement returns
+  `-ERR pqueue unavailable`.
 - Non-reserved field/value pairs are stored as structured item fields. `payload` is stored separately as
   the existing opaque payload slot. Claims and `PQ.*` reads return both.
 
@@ -295,8 +297,9 @@ Launch custom RESP commands are read-only and scoped to live item access.
 4. **Fenced `XACK`.** A stale lease returns `-ERR pqueue stale_lease`; it does not silently return `0`.
 5. **Superseded ids are explicit failures.** `XACK`/`XCLAIM` of a superseded id returns
    `-ERR pqueue superseded`.
-6. **Eventual-apply backends have weaker ordering guarantees.** Priority order is over applied state,
-   and pending-item replacement returns `-ERR pqueue unavailable`.
+6. **Log-then-apply backends preserve the same durable queue contract through a response barrier.**
+   Pending-item replacement may return `-ERR pqueue unavailable` until that backend can close the
+   replacement/claim race without weakening transaction integrity.
 7. **`PQ.H*` commands are pqueue live-item reads, not Redis hashes.** They emulate Redis hash read
    response shapes over pqueue's structured item fields. They do not create independent hash keys, and
    data disappears from the live view when the queue item completes, fails, is purged, or is superseded.

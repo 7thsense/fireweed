@@ -63,7 +63,7 @@ The two v1 scale envelopes both deliver and both substantiate:
 | Envelope | Deployment shape | Delivered by | Evidence record |
 |----------|------------------|--------------|-----------------|
 | **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | `postgres_native` (TD-002) | **E1** vs the per-queue throughput floor **E0** |
-| **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + cross-queue distribution (ADR-008) + `object_log_sqlite_projection` (TD-004) | **E2** (cross-queue scale-out) and **E3** (object-log cost/ack + recovery) |
+| **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + cross-queue distribution (ADR-008) + object-log local-projection profiles (TD-004) | **E2** (cross-queue scale-out) and **E3** (object-log latency/cost + recovery) |
 
 ## Scale Evidence Records
 
@@ -89,7 +89,7 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > multi-shard mechanism; the reframed cross-queue E2 must be re-measured in the
 > later build phase before a horizontal-scale claim cites it. E0, E1, and E3 (the
 > per-queue floor, the single-deployment envelope, and the object-log
-> cost/ack/recovery profile) are unaffected by the reframe.
+> latency/cost/recovery profile) are unaffected by the reframe.
 
 `scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3` validates
 these source beads directly when invoked with the corresponding
@@ -146,10 +146,13 @@ Backend: `postgres_native` (TD-002). Deployment: one Postgres, one queue owned b
 Mechanism: per-queue ownership (TD-003) + cross-queue distribution (ADR-008) —
 many queues spread across many owner nodes; each queue is a single-owner,
 single-hop claim (no intra-queue sharding, no scatter-gather).
-**Backend: `object_log_sqlite_projection` (TD-004) is REQUIRED** for the headline
-horizontal evidence; **`postgres_native` MAY additionally be run as a comparator**
-but does not on its own satisfy E2 (per ADR-001 "Scale Claim Scoping",
-`postgres_native` alone is not evidence for the horizontal envelope).
+**Backend: object-log local projection (TD-004) is REQUIRED** for the headline
+horizontal evidence. The release matrix MUST include both
+`object_log_inmemory_projection` and `object_log_sqlite_projection` unless one is
+explicitly marked unsupported by the implementation phase; **`postgres_native`
+MAY additionally be run as a comparator** but does not on its own satisfy E2 (per
+ADR-001 "Scale Claim Scoping", `postgres_native` alone is not evidence for the
+horizontal envelope).
 
 | Parameter | Value |
 |-----------|-------|
@@ -162,18 +165,20 @@ but does not on its own satisfy E2 (per ADR-001 "Scale Claim Scoping",
 | Pass: single lease | no item double-leased across an owner reassignment/drain (TD-003). |
 | Pass: routing redirect | a client addressing a queue on the wrong node is redirected (`-MOVED`-style) to the current owner and converges in a single hop; a stale/misrouted write is fenced, never corrupting state (TD-006 §1A). |
 
-### E3 — Object-log cost/ack + recovery (pass/fail)
+### E3 — Object-log latency/cost + recovery (pass/fail)
 
-Backend: `object_log_sqlite_projection` (TD-004). Reported against the per-queue
-throughput floor E0.
+Backend: `object_log_inmemory_projection` and `object_log_sqlite_projection`
+(TD-004). Reported against the per-queue throughput floor E0.
 
 | Parameter | Value |
 |-----------|-------|
-| Pass: ack latency | p95/p99 group-commit ack across ≥ 2 segment sizes within stated budget (relative to the configured `segment_max_latency_ms` window) |
+| Commit-latency-bound sweep | run at ≥ 4 configured bounds, including low-latency, balanced, and cost-optimized values (for example 1 ms, 5 ms, 20 ms, 100 ms or implementation-equivalent documented values) |
+| Pass: ack latency | p95/p99 group-commit ack reported for each bound and projection variant, within stated budget relative to the configured `segment_max_latency_ms` / `max_commit_latency_ms` window |
 | Pass: throughput | sustained items/hr at or above the E0 per-queue floor (≥10M items/hr per queue) reported alongside the ack-latency distribution |
-| Pass: cost | $/billion-commands beats `postgres_native` at high sustained volume (ADR-001 cost table) |
+| Pass: cost | $/billion-commands and object/log requests per billion commands reported for each latency bound; the cost-optimized point beats `postgres_native` at high sustained volume (ADR-001 cost table) |
 | Pass: recovery | rebuild 10M-item SQLite projection from snapshot + log tail within stated recovery-window budget |
 | Pass: manifest fencing | a stale-epoch writer's manifest CAS commit is rejected; on a no-CAS object store the Postgres-held manifest pointer enforces the same fence (TD-004) |
+| Pass: transaction contract | success-visible, rejection-no-effect, and unknown-outcome replay invariants hold under the same bound sweep; no latency setting may weaken TP-003 transaction invariants |
 
 ### Recurrence under scale (both backend profiles)
 
@@ -198,11 +203,11 @@ P0 items are referenced by name (not number) to stay robust to PRD renumbering.
 | PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 (single queue ≥ E0 floor of 10M items/hr, sub-second p95/p99) and E2 (aggregate scales beyond one deployment's ceiling by distributing queues across owners AND the E0 floor is preserved for every queue at any scale, while preserving each queue's local progress bound). |
 | PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density: ≥1000 concurrently active queues on a single node, each meeting its progress bound, no cross-queue degradation, any one able to reach the per-queue floor, and per-queue background work multiplexed onto bounded shared per-node pools (`queue_density_single_node_tests`). |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment, epoch fencing of a stale owner, graceful drain without loss/duplication, recovery, and stalled-queue visibility. |
-| TD-004 object-log backend | TD-004 / ADR-001 | E3 cost/ack/recovery; manifest-CAS (or Postgres-pointer fallback) current-epoch fencing; passes the shared TD-001 backend conformance suite. |
+| TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery; commit-latency-bound sweep; manifest-CAS (or Postgres-pointer fallback) current-epoch fencing; passes the shared TD-001 backend conformance suite. |
 | Per-queue local progress (D1) | TD-001 / TD-003 | Each queue's oldest-eligible age is computed locally on its owner (gate-aware); the oldest item is claimed before the bound; no cross-shard aggregation. |
 | TD-006 client routing | TD-006 / TD-003 | A wrong-node command is `-MOVED`-redirected to the queue's owner and converges in one hop; a stale/misrouted write is fenced, never corrupting state. |
 | Recurrence under scale (D4) | TD-001 / TD-002 / TD-004 | Recurrence scale row passes under both backend profiles: high-frequency rearm, idle inventory bound, queue-local purge under load. |
-| Shared backend conformance | TD-001 | Both `postgres_native` and `object_log_sqlite_projection` pass the same TD-001 shared backend conformance suite (core + log / relational-reconnect-durability classes, including group/cohort, `same_group_key`, ownership/fence, and recovery rows) before either is selectable by backend profile. |
+| Shared backend conformance | TD-001 | `postgres_native`, `object_log_inmemory_projection`, and `object_log_sqlite_projection` pass the same TD-001 shared backend conformance suite (core + transaction contract + log / relational-reconnect-durability classes, including group/cohort, `same_group_key`, ownership/fence, and recovery rows) before any is selectable by backend profile. |
 
 ## Named Test Suites
 
@@ -213,6 +218,8 @@ Implementation beads should create or extend these suites:
 - `per_queue_progress_tests`
 - `routing_redirect_tests`
 - `object_log_commit_recovery_tests`
+- `object_log_latency_cost_matrix_tests`
+- `external_transaction_contract_matrix_tests`
 - `performance_cross_queue_scale_out_tests` (replaces the retired `performance_multi_shard_scale_out_tests`)
 - `performance_single_deployment_baseline_tests`
 - `queue_density_single_node_tests`
@@ -240,10 +247,14 @@ Scale benchmarking must include:
   (E2 / TD-003);
 - client routing redirect convergence in a single hop and fence-safety of a
   misrouted write (E2 / TD-006);
-- object-log group-commit ack latency across ≥ 2 segment sizes, $/command at high
-  volume, and 10M-item projection rebuild time (E3);
+- object-log group-commit ack latency across the commit-latency-bound sweep,
+  $/command and object/log requests per billion commands at high volume, and
+  10M-item projection rebuild time for each committed object-log projection
+  variant (E3);
 - manifest-CAS fencing, including the Postgres-held manifest-pointer fallback on
   no-CAS object stores (E3);
+- external transaction-contract invariants under the E3 latency-bound sweep, so
+  lower latency or lower cost configurations cannot publish weaker semantics;
 - recurrence under scale on both backend profiles.
 
 ## Manual or Deferred Evidence
@@ -281,7 +292,7 @@ Before scale claims are published, the referencing evidence records must pass
 against the E0 per-queue floor (≥10M items/hr per queue, preserved for every
 queue at any scale): E1 for the single-deployment envelope, E2 for the horizontal
 envelope (including the every-queue-at-any-scale floor under K-queue concurrency),
-and E3 for the object-log cost/ack/recovery profile. A scale claim in any
+and E3 for the object-log latency/cost/recovery profile. A scale claim in any
 document must cite at least one evidence record (E0–E3) and, where it asserts a
 benchmark outcome, the named scale test suite that produces it. A horizontal-scale
 claim MUST NOT be substantiated by `postgres_native` alone.

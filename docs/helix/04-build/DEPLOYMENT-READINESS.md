@@ -62,6 +62,12 @@ Unsupported runtime combinations must fail loudly at process startup with the
 requested log/projection pair. They must not be silently mapped onto a synthetic
 combined backend name.
 
+Runtime status is not a production transaction claim. A storage combination may
+be executable for smoke tests after it starts and preserves restart readback, but
+it may be production-claimed only after the TP-003 external transaction-contract
+matrix and the applicable TP-002 scale/latency evidence are green for that exact
+log/projection pair.
+
 ## Production Target
 
 The production deployment target is a Kubernetes installation delivered by Helm.
@@ -78,6 +84,10 @@ Release readiness requires:
   `sqlite`;
 - a live `kind` install smoke for every combination that the service runtime
   claims as executable in Kubernetes.
+- release evidence that every production-claimed storage combination satisfies
+  API-001's external transaction contract under fault injection: success is
+  durable and visible, rejection has no committed effect, and unknown outcomes
+  resolve exactly once by `request_id`.
 
 The `kind` proof is the minimum release-readiness gate. It is not a substitute
 for environment-specific capacity planning, credentials, monitoring, backups, or
@@ -111,6 +121,12 @@ The release CI surface must include:
   output;
 - a live `kind` Helm smoke for `objectlog` + `inmemory`, including RESP `PING`,
   `XADD`, `XREADGROUP`, rollout restart, and post-restart readback;
+- the TP-003 `AC-TXN-*` transaction-contract matrix for every production-claimed
+  storage combination, including object-log crash points around segment write,
+  manifest commit, projection apply, response delivery, snapshot, and owner
+  reassignment;
+- the TP-002 E3 latency/cost matrix for object-log production claims, including
+  the configured commit-latency-bound sweep and object/log request-cost curve;
 - release artifact verification before publishing.
 
 As more runtime adapters are wired, the live `kind` matrix must grow by storage
@@ -130,6 +146,10 @@ Release evidence must record:
 - command, exit status, environment variables, storage combination, scale, seed,
   and ledger paths for source and deployment validation;
 - TP-002 E0-E3 source-backed evidence references;
+- TP-003 external transaction-contract evidence for the exact storage
+  combinations claimed by the release;
+- configured object-log commit-latency bound values and measured latency/cost
+  curves when an object-log production claim is made;
 - any declared exclusions, including storage combinations that are chart-rendered
   but not yet live runtime claims.
 
@@ -170,10 +190,15 @@ The object-log release path must prove:
 - object-log root/configuration is present for the container runtime;
 - the deployed service writes through the configured object-log runtime path;
 - after a rollout restart, acknowledged state can be read back through RESP.
+- the configured `PQUEUE_SEGMENT_MAX_LATENCY_MS` / commit-latency-bound value is
+  included in release evidence;
+- TP-003 `AC-TXN-*` passes for the claimed projection backend; and
+- TP-002 E3 reports the latency/cost/recovery curve for that projection backend.
 
 Provider-specific S3 readiness requires a later acceptance run with a named
 provider or provider-compatible endpoint, credentials, conditional-write
-semantics, and release evidence separate from the local object-log fixture.
+semantics, the same transaction-contract matrix, and release evidence separate
+from the local object-log fixture.
 
 ## Verification Commands
 

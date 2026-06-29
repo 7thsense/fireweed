@@ -19,6 +19,15 @@ Clients push and update items idempotently, workers claim eligible items under a
 lease, and claimed items are finalized as complete, failed, retryable, or
 released.
 
+pqueue is also the transaction mapping layer for this centralized state-machine
+workflow. The native interface is batch-centric, and every storage profile MUST
+present the same external mutation contract: a successful response means the
+mutation is durable and visible through subsequent reads/claims, a rejected
+mutation has no durable effect, and an interrupted or timed-out mutation can be
+resolved through `request_id` replay without duplicating state transitions.
+Storage choices may change latency, cost, scale envelope, and recovery time; they
+MUST NOT change transaction integrity.
+
 The product is general-purpose and may become open source. Seventh Sense is the
 first validation workload: several delivery, action, job, and connector queues
 need timestamp-ordered execution, mutable schedules, batch processing,
@@ -38,6 +47,13 @@ as the target host) with no cross-queue degradation, while still claiming every
 eligible item before its queue-global progress bound.
 Each measure references a recorded evidence artifact (see "Scale
 Substantiation").
+
+The primary high-scale value profile is local memory or SQLite serving
+projections backed by a durable object log, giving Redis-level hot-path behavior
+with object-store durability and queue count bounded by cluster capacity rather
+than by one database. A Postgres log backend remains a lower-latency option with
+different scaling and operational parameters, but it is not allowed to define a
+different client contract.
 
 ## Problem and Goals
 
@@ -70,6 +86,12 @@ queue with timestamp ordering as a first-class validation case.
 5. Seventh Sense can replace or consolidate its scheduled delivery/action queues
    without losing timestamp scheduling, lifecycle safety, or operational
    visibility.
+6. Operators can configure a commit-latency bound for durable-log profiles and
+   understand the resulting tradeoff between latency, batch density, and backing
+   store request cost.
+7. Callers can depend on one transaction contract across all supported
+   implementation combinations without knowing whether pqueue uses memory,
+   SQLite, Postgres, or an object log internally.
 
 ### Success Metrics
 
@@ -80,6 +102,8 @@ queue with timestamp ordering as a first-class validation case.
 | Queue density | At least 1000 concurrently active queues are supported, with a single node as the target host: every active queue meets its progress bound, there is no cross-queue degradation as the active-queue count grows to 1000, and any single queue can still reach the per-queue throughput floor when it is the hot queue. Aggregate single-node throughput is bounded by the node (not 1000× the floor); multi-node provides aggregate headroom | Multi-queue density benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Hot queue scale | At least 10M items resident in a single active queue (including terminal retained rows per retention policy) remain claimable and observable with sub-second p95/p99 on its single owning deployment | Benchmark per TP-002 E1 (single deployment) |
 | Core operation latency | Sub-second p95 and p99 for batch push, batch update, batch claim, and batch finalize | Benchmark harness under representative Seventh Sense and synthetic workloads |
+| External transaction integrity | 100% of supported implementation combinations satisfy the same success/error/unknown-outcome contract under retries, process crashes, projection rebuilds, and log replay | Backend conformance and fault-injection matrix per TP-003 |
+| Commit latency and cost dial | Durable-log profiles publish latency, throughput, and object-store request-cost curves for the configured commit-latency bound | Object-log latency/cost matrix per TP-002 E3 |
 | Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
 | Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
 
@@ -211,6 +235,17 @@ priority, retry, claim, and state logic with different table shapes.
     connection per queue.
     Aggregate single-node throughput is bounded by the node (not 1000x the
     per-queue floor); multi-node deployment provides aggregate headroom.
+15. Backend-independent transaction contract: every supported implementation
+    combination MUST preserve the same external semantics for batch mutation
+    success, structured rejection, unknown retry resolution, idempotency replay,
+    read-your-write visibility, claim exclusivity, and recovery from durable
+    state. No caller may need backend-specific write, flush, replay, or repair
+    choreography to preserve state-machine integrity.
+16. Durable-log profiles MUST expose an operator-configurable commit-latency
+    bound that controls group-commit cadence. Lower bounds reduce mutation
+    latency and increase object-store/log request cost; higher bounds increase
+    batch density and latency. The bound is a performance/cost dial only and
+    MUST NOT weaken transaction integrity.
 
 ### Should Have (P1)
 

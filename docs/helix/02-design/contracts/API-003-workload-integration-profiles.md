@@ -79,6 +79,20 @@ levers (PRD non-goal; API-001 "Caller-driven downstream pacing"):
 A profile MUST restate this boundary and MUST NOT describe pqueue as throttling,
 shaping, or admitting traffic by downstream capacity.
 
+## Batching and Durability Profile Guidance
+
+Adapters MUST treat API-001 as the complete transaction contract. They MAY tune
+batch size, flush cadence, and retry policy around the deployment's documented
+commit-latency bound, but they MUST NOT depend on backend-specific behaviors
+such as SQLite transaction timing, Postgres commit visibility, object-log segment
+layout, manifest publication, projection catch-up, or local cache state.
+
+For durable-log profiles, larger batches and a higher commit-latency bound can
+reduce backing-store request cost; lower bounds reduce mutation latency. That is
+an operator-visible deployment tradeoff. Adapter logic remains unchanged: submit
+batches with stable `request_id` values, retry unknown outcomes through the
+native idempotency contract, and consume only successful, visible results.
+
 ---
 
 ## Profile: Scheduled Batch Delivery

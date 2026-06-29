@@ -57,9 +57,9 @@ This is a pre-implementation test plan. Exact Rust function names may change
 when the workspace is created, but implementation beads must preserve the suite
 intent and cite the relevant requirement IDs.
 
-Scale, queue-density, and horizontal-envelope evidence (the per-queue throughput
-floor, ≥1000-active-queue density, cross-queue scale-out, and object-log
-cost/ack/recovery) are owned by the **scale-substantiation test plan**
+Scale, queue-density, horizontal-envelope evidence, and object-log latency/cost
+evidence (the per-queue throughput floor, ≥1000-active-queue density,
+cross-queue scale-out, and object-log commit-latency-bound matrix) are owned by the **scale-substantiation test plan**
 (`tp-scale-substantiation`, TP-002, evidence records E0–E3). This governing plan
 references TP-002 for those records rather than restating them; the two plans are
 complementary and non-overlapping.
@@ -69,7 +69,7 @@ complementary and non-overlapping.
 | Layer | Location | Purpose |
 |-------|----------|---------|
 | Core unit | `crates/pqueue-core/src/**`, `crates/pqueue-engine/**` | Pure validation, priority encoding, lifecycle, retry, idempotency, version rules, and the engine's decision helpers + dependency-direction guard. |
-| Backend conformance | `crates/pqueue-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executed against every backend: memory/sqlite (atomic) + objectlog (eventual-apply) + postgres (live). Backend-independent durability, replay, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. |
+| Backend conformance | `crates/pqueue-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executed against every backend combination: memory/sqlite, postgres, object-log/in-memory projection, and object-log/SQLite projection where implemented. It includes backend-independent transaction-contract scenarios (success-visible, rejection-no-effect, unknown-outcome replay), durability, replay, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. |
 | Postgres integration | `crates/pqueue-postgres/tests/**` | The durable-log postgres adapter (TD-004 template) against a real DB, env-gated on `PQUEUE_PG_TEST_URL`: the full conformance suite + a reconnect/durability replay test. |
 | Wire (RESP) integration | `crates/pqueue-resp/tests/**` | End-to-end over real TCP with an off-the-shelf `redis` client: XADD/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM/XLEN/XDEL/XINFO, error tokens, and Invariant-1/2 reconcile (ADR-007 RESP face). |
 | Library (facade) integration | `crates/pqueue/tests/**` | The ergonomic Rust library face: every verb (push/claim/ack/nack/fail/renew/reassign/rearm/purge/peek/claimed/metrics) over real backends. |
@@ -195,7 +195,8 @@ Implementation beads should create or extend these suites:
 
 Scale, density, and object-log performance suites (`performance_single_deployment_baseline_tests`,
 `performance_cross_queue_scale_out_tests`, `queue_density_single_node_tests`,
-`object_log_commit_recovery_tests` cost/ack rows, `recurrence_scale_both_profiles_tests`)
+`object_log_latency_cost_matrix_tests`, `object_log_commit_recovery_tests`,
+`external_transaction_contract_matrix_tests`, `recurrence_scale_both_profiles_tests`)
 are owned by TP-002 (`tp-scale-substantiation`); see that plan for their pass bars.
 
 ## Performance Evidence

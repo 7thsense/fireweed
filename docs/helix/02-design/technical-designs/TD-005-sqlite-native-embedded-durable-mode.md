@@ -96,8 +96,8 @@ SQLite database file:
 **Key decisions**
 
 - **One database, one transaction for append+apply.** Unlike TD-004 (where the
-  object-log commit and the SQLite projection apply are separate steps with an
-  eventual-apply window), `sqlite` writes the log row and the projection rows in
+  object-log commit and the local projection apply are separate steps guarded by
+  a response barrier), `sqlite` writes the log row and the projection rows in
   the **same** SQLite transaction. On commit, both are durable together. This
   removes the apply-lag/reservation machinery TD-004 needs and gives strict
   read-after-write: a returned ack means the projection already reflects it.
