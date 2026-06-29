@@ -17,11 +17,17 @@ pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 pqueue-projection = { path = "../pqueue-projection" }
 postgres = "0.19"
+native-tls = { version = "0.2", optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
 serde = "1"
 serde_json = "1"
 bytes = "1"
 # Lease-token hashing for the relational projection (hash-only at rest; parity with pqueue-sqlite).
 sha2 = "0.11"
+
+[features]
+default = []
+tls = ["dep:native-tls", "dep:postgres-native-tls"]
 
 [dev-dependencies]
 # A NON-tokio executor drives these tests: the sync `postgres` client runs its own internal tokio runtime
