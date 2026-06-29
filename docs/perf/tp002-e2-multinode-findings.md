@@ -3,8 +3,10 @@
 **Beads:** `pqueue-b5af53fb` (containerized live multi-node E2 harness) and `pqueue-a983b5e2` (run the
 provisioned multi-node E2 evidence). **Status: BOTH OPEN** — the harness is delivered and correct and the
 single-node backend is now fast, but the release bars are only **marginally and not reproducibly** met at 8
-co-located owners on this 12-core box (a hardware/co-location ceiling, characterized below). **Date:**
-2026-06-29.
+co-located owners on this 12-core box (a hardware/co-location ceiling, characterized below). The hypothesized
+backend follow-up (decoupling the SQLite apply from the coord mutex) was implemented and measured to
+**regress** ingest — see **Finding 4**; it was not adopted, and the ceiling is confirmed to be the shared box
+(CPU), not the backend's locking. **Date:** 2026-06-29.
 
 ## Delivered in this pass (Part B)
 
@@ -92,13 +94,61 @@ claim path collapses to ~1,900/queue. The architecture scales (ingest is near-li
 one-owner-per-queue holds), and single-node throughput is well over floor — the wall is **8 servers + driver
 on one 12-core host**, not the backend.
 
+## Finding 4 — the "decouple the apply from the coord mutex" follow-up was tried and REGRESSES ingest (2026-06-29)
+
+The Completion-path hypothesis below ("move the SQLite batch apply out from under the coord mutex so ingest
+no longer degrades with worker-thread count") was **implemented and measured at 8 owners across multiple
+runs**. It does **not** help — it **regresses** the binding metric (8-owner per-queue ingest). The decouple
+acked pushes at the durable SEAL boundary (eventual-apply: the apply is a derived view) and ran
+`apply_committed_batch` on a per-queue ordered applier (FIFO mpsc, applies in strict commit order, claim
+drains it via a barrier before selecting so it still observes prior pushes / no double-claim) on the blocking
+pool, off the enqueue critical section. Correctness held (single-node still drained 12,000/12,000 with
+claim+finalize ~23k–32k/q). But the throughput went the wrong way:
+
+| variant @ 8 owners | ingest agg /s | worst ingest/q | 8/2 ratio |
+|---|---|---|---|
+| **HEAD (apply under coord mutex)**, W=2 | 16,251–22,616 | 2,028–2,827 | 2.71–3.57 |
+| **HEAD**, W=4 | 20,937 | 2,608 | 3.26 |
+| **decoupled apply**, W=1 (small batch) | 14,782 | 1,848 | 2.30 |
+| **decoupled apply**, W=2 (spawn_blocking) | 15,759 | 1,968 | 2.64 |
+| **decoupled apply**, W=1/W=2 (1 MB batch) | 15,605 / 12,469 | 1,907 / 1,559 | 3.98 / 3.17 |
+
+**Why the model was wrong.** The doc's earlier model ("ingest bottleneck is the per-queue coord async mutex;
+fastest with few threads") implied removing the apply from that mutex would lift ingest. It does the
+opposite, because the binding resource at 8 co-located owners is **CPU, not lock-hold time**: 8 server
+containers + a ~64-thread load driver already saturate the 12 cores. Apply-under-the-mutex provides natural
+**backpressure** (a push acks only after its apply, rate-limiting the driver to the box's true capacity); the
+decouple removes that backpressure and adds applier/blocking-pool threads, so more work is in flight on an
+already-saturated box → context-switch thrash → **lower** aggregate ingest. This is the SAME conclusion the
+earlier single-queue decouple attempt reached (it too was reverted because the box, not the lock, was the
+ceiling). **The decouple was therefore not adopted.** It has now been measured-and-rejected twice; it is not
+the path forward.
+
+A secondary correction from the re-measurement: on current HEAD at **W=2** the force-sealed
+**claim+finalize** path is comfortably over floor (worst ~10,900–12,500/q, not the ~1,900/q in the Finding 3
+table — that row predates a claim-path fix). So at W=2 the ingest-vs-claim "tension" is gone; the **only**
+binding constraint is 8-owner ingest, which coin-flips around the 2,778/q floor (median ~2,300–2,400/q, no
+reproducible margin). This narrows — but does not move — the ceiling: it is a raw per-queue ingest CPU wall.
+
+### Bug found + fixed during the re-measurement: concurrent cold-start epoch double-acquire
+
+`lease_decide_acquire` is intentionally non-idempotent (it bumps `assignment_epoch` on **every** call). The
+server's `ensure_epoch` had no per-queue serialization on the cold-start (`Unassigned`) path, so two
+concurrent first-writes to an unowned queue could **each** acquire — double-bumping the epoch and fencing the
+laggard with `-ERR pqueue epoch_stale`. Rare under the slow apply-under-mutex path (the first push finishes
+its acquire before the second resolves), it surfaces reliably under any faster ingest path. **Fix
+(`crates/pqueue-server/src/lib.rs`):** a per-queue acquire gate serializes the cold-start acquisition (taken
+ONLY on the unowned path — the hot already-owned path stays lock-free); a concurrent first-writer that loses
+the gate re-resolves and reuses the winner's session. Whole workspace test suite green.
+
 ## Completion path
 - Re-run on a host with more cores, or with the 8 owner nodes on **separate machines** and the driver on its
   own host (the real ADR-008 topology) — removes the co-location contention; the per-queue floors then hold
   with the single-node margins from Finding 2. On a pass the harness emits the `evidence_tier=release` E2
-  rows automatically.
-- OR a backend follow-up (separate bead): shrink the ingest per-queue coordinator critical section (move the
-  SQLite batch apply out from under the coord mutex) so ingest no longer degrades with worker-thread count,
-  letting one W setting satisfy both paths on a 12-core box.
+  rows automatically. **This is the real path** (the wall is the shared box, not the backend).
+- A backend CPU-EFFICIENCY follow-up (separate bead), if more headroom is wanted on a co-located box: cut the
+  **per-item CPU of a seal** (the segment is serialized with `serde_json`; a faster codec would lower the
+  seal cost that caps per-queue ingest). NOTE: a concurrency RESTRUCTURE (decoupling the apply) is explicitly
+  NOT this path — see Finding 4; it has been measured-and-rejected.
 
 No release row was emitted and no evidence was faked. The smoke row records the honest measured ceiling.

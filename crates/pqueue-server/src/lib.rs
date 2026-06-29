@@ -86,6 +86,11 @@ pub struct OwnershipRuntime<B, CP> {
     owner_endpoints: Mutex<std::collections::HashMap<OwnerId, String>>,
     managed_queues: Mutex<std::collections::HashSet<QueueKey>>,
     sessions: Mutex<std::collections::HashMap<QueueKey, OwnedSession>>,
+    /// Per-queue gate serializing COLD-START acquisition. `acquire_queue_lease` is non-idempotent (it bumps
+    /// the epoch on every call), so two concurrent first-writes to an unowned queue would each acquire,
+    /// double-bumping the epoch and fencing the laggard. This gate (taken only on the unowned path, never on
+    /// the hot already-owned path) lets the first acquirer win and the rest reuse its session.
+    acquire_gates: Mutex<std::collections::HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl<B, CP> OwnershipRuntime<B, CP>
@@ -104,6 +109,7 @@ where
             owner_endpoints: Mutex::new(endpoints),
             managed_queues: Mutex::new(std::collections::HashSet::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
+            acquire_gates: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -274,42 +280,87 @@ where
                 let epoch = resolution
                     .assignment_epoch
                     .ok_or(EngineError::Unavailable)?;
-                let existing = {
-                    let sessions = self.sessions.lock().expect("poisoned");
-                    sessions.get(queue).and_then(|session| {
-                        (session.lease_epoch == epoch).then_some(session.fence_epoch)
-                    })
-                };
-                if existing.is_some() {
-                    return Ok(existing);
-                }
-                let fence_epoch = self.backend.current_epoch(queue).await?;
-                if fence_epoch != epoch {
-                    return Err(EngineError::EpochFenced);
-                }
-                let session = OwnedSession {
-                    owner: self.owner.clone(),
-                    queue: queue.clone(),
-                    lease_epoch: epoch,
-                    fence_epoch,
-                };
-                let fence_epoch = session.fence_epoch;
-                self.sessions
-                    .lock()
-                    .expect("poisoned")
-                    .insert(queue.clone(), session);
-                Ok(Some(fence_epoch))
+                // Hot path: already own this queue → no gate, just (re)validate the cached session.
+                self.establish_owned_session(queue, epoch).await
             }
             (_, Some(_)) => Err(EngineError::Unavailable),
             (LeaseState::Unassigned, None)
                 if resolution.target_owner.as_ref() == Some(&self.owner) =>
             {
-                self.acquire_queue(queue, now).await?;
-                let sessions = self.sessions.lock().expect("poisoned");
-                Ok(sessions.get(queue).map(|session| session.fence_epoch))
+                // Cold start: serialize acquisition per queue (the non-idempotent epoch bump must happen at
+                // most once across concurrent first-writes).
+                let gate = self.acquire_gate_for(queue);
+                let _g = gate.lock().await;
+                // Re-resolve under the gate: a peer first-write may have acquired while we waited.
+                let resolution = self.cp_resolve(queue.clone(), now).await?;
+                match (resolution.state, resolution.active_owner.as_ref()) {
+                    (LeaseState::Assigned, Some(owner)) | (LeaseState::Draining, Some(owner))
+                        if owner == &self.owner =>
+                    {
+                        if resolution.state == LeaseState::Draining && is_new_claim {
+                            return Err(EngineError::Unavailable);
+                        }
+                        let epoch = resolution
+                            .assignment_epoch
+                            .ok_or(EngineError::Unavailable)?;
+                        self.establish_owned_session(queue, epoch).await
+                    }
+                    (_, Some(_)) => Err(EngineError::Unavailable),
+                    (LeaseState::Unassigned, None)
+                        if resolution.target_owner.as_ref() == Some(&self.owner) =>
+                    {
+                        self.acquire_queue(queue, now).await?;
+                        let sessions = self.sessions.lock().expect("poisoned");
+                        Ok(sessions.get(queue).map(|session| session.fence_epoch))
+                    }
+                    _ => Err(EngineError::Unavailable),
+                }
             }
             _ => Err(EngineError::Unavailable),
         }
+    }
+
+    /// (Re)establish the cached fence session for a queue this owner holds at `epoch`, returning the fence
+    /// epoch passed to write commands. Reuses a still-valid cached session; otherwise reads the backend's
+    /// authoritative epoch and caches it (fencing if the backend epoch no longer matches the lease).
+    async fn establish_owned_session(
+        &self,
+        queue: &QueueKey,
+        epoch: u64,
+    ) -> EngineResult<Option<u64>> {
+        let existing = {
+            let sessions = self.sessions.lock().expect("poisoned");
+            sessions
+                .get(queue)
+                .and_then(|session| (session.lease_epoch == epoch).then_some(session.fence_epoch))
+        };
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        let fence_epoch = self.backend.current_epoch(queue).await?;
+        if fence_epoch != epoch {
+            return Err(EngineError::EpochFenced);
+        }
+        let session = OwnedSession {
+            owner: self.owner.clone(),
+            queue: queue.clone(),
+            lease_epoch: epoch,
+            fence_epoch,
+        };
+        self.sessions
+            .lock()
+            .expect("poisoned")
+            .insert(queue.clone(), session);
+        Ok(Some(fence_epoch))
+    }
+
+    fn acquire_gate_for(&self, queue: &QueueKey) -> Arc<tokio::sync::Mutex<()>> {
+        self.acquire_gates
+            .lock()
+            .expect("poisoned")
+            .entry(queue.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     async fn cp_register(&self, owner: OwnerId, now: UtcTimestamp) -> EngineResult<()> {
