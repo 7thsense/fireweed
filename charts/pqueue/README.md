@@ -70,8 +70,9 @@ store the password inside the DSN Secret. For service-principal OAuth, set
 is also modeled with `pat-oauth` for the existing Databricks credential-provider
 environment contract.
 
-The Lakebase image must be built from the pqueue source with TLS-capable
-postgres support before using this profile in a live environment. The current
-chart profile is render and Secret-wiring support only; `pqueue-13924b0e` owns
-the TLS/runtime work and `pqueue-ea625701` owns live Lakebase provider
-certification with real credentials.
+The server now parses the postgres_native and Lakebase env names rendered by
+this chart, but live startup remains gated until `pqueue-558bf933` adds the
+blocking-safe postgres runtime wrapper. Build source images that need optional
+cargo features with `--build-arg CARGO_FEATURES=<features>`; omitting that build
+arg keeps the default image build unchanged. `pqueue-ea625701` owns live
+Lakebase provider certification with real credentials.
