@@ -16,6 +16,8 @@
 //! pre-validate — see the INVARIANT). Object names are zero-padded sequence numbers so lexical order is
 //! replay order; the next sequence is `max(existing)+1`, compaction-safe.
 
+pub mod segmented;
+
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;

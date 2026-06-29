@@ -19,6 +19,10 @@ pqueue-projection = { path = "../pqueue-projection" }
 serde = "1"
 serde_json = "1"
 bytes = "1"
+# SigV4 signing for the minimal hand-rolled S3 client (`segmented::S3BlobStore`). Already in-tree for the
+# relational projection crates; HMAC-SHA256 / canonical-request / HTTP/1.1 framing are hand-rolled on top so
+# no async HTTP/S3 SDK (reqwest/hyper/object_store) is pulled — keeping the adapter's dependency surface lean.
+sha2 = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
@@ -36,3 +40,7 @@ path = "tests/durability.rs"
 [[test]]
 name = "object_log_commit_recovery_tests"
 path = "tests/object_log_commit_recovery_tests.rs"
+
+[[test]]
+name = "segmented_s3_substrate_tests"
+path = "tests/segmented_s3_substrate_tests.rs"
