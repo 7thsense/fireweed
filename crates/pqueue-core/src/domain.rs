@@ -1296,3 +1296,481 @@ fn cmp_timestamp(a: &UtcTimestamp, b: &UtcTimestamp) -> std::cmp::Ordering {
         .cmp(&b.seconds)
         .then(a.nanoseconds.cmp(&b.nanoseconds))
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    //! Targeted unit tests that exercise the mechanical impls (serde, conversions,
+    //! Display, validation/error branches, decimal encoding) the release coverage
+    //! gate flagged as unhit. Tests only — no production logic lives here.
+    use super::*;
+
+    fn valid_create_queue() -> CreateQueue {
+        CreateQueue {
+            tenant_id: TenantId::new("tenant_acme").unwrap(),
+            queue_id: QueueId::new("scheduled_actions").unwrap(),
+            priority_model: PriorityModel::timestamp_ascending(),
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 10_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: CohortPolicy::disabled(),
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 3_600_000,
+            client_item_key_retention_ms: 86_400_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 5 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 50,
+            max_eligible_group_size: Some(25),
+            secondary_indexes: vec![],
+        }
+    }
+
+    fn policy() -> QueueCreationPolicy {
+        QueueCreationPolicy {
+            default_max_gate_keys_per_item: 12,
+            default_max_gates_per_request: 6,
+        }
+    }
+
+    #[test]
+    fn identifier_newtype_conversions_and_serde_round_trip() {
+        let id = TenantId::new("tenant_acme").unwrap();
+
+        // AsRef<str>
+        let as_ref: &str = id.as_ref();
+        assert_eq!(as_ref, "tenant_acme");
+
+        // From<$name> for String
+        let owned: String = String::from(id.clone());
+        assert_eq!(owned, "tenant_acme");
+
+        // Display
+        assert_eq!(format!("{id}"), "tenant_acme");
+
+        // Serialize -> Deserialize round trip
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"tenant_acme\"");
+        let back: TenantId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, id);
+
+        // Deserialize error branch: empty string fails the validating constructor.
+        let empty = serde_json::from_str::<TenantId>("\"\"");
+        assert!(empty.is_err());
+
+        // Deserialize error branch: wrong wire type (number, not string).
+        let wrong_type = serde_json::from_str::<TenantId>("123");
+        assert!(wrong_type.is_err());
+
+        // Other id newtypes exercise the same generated impls.
+        let queue = QueueId::new("q1").unwrap();
+        assert_eq!(queue.as_ref(), "q1");
+        let q_back: QueueId =
+            serde_json::from_str(&serde_json::to_string(&queue).unwrap()).unwrap();
+        assert_eq!(q_back, queue);
+    }
+
+    #[test]
+    fn item_id_serde_round_trip_and_error_branch() {
+        let id = ItemId::mint(7, 3, 42);
+
+        // Serialize is the decimal string of the packed value.
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, format!("\"{}\"", id.as_u64()));
+
+        // Deserialize valid string -> equal value.
+        let back: ItemId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, id);
+
+        // Deserialize error branch: not a u64 decimal string.
+        let bad = serde_json::from_str::<ItemId>("\"not-a-number\"");
+        assert!(bad.is_err());
+
+        // Accessors.
+        assert_eq!(id.epoch(), 7);
+        assert_eq!(id.node(), 3);
+        assert_eq!(id.counter(), 42);
+        assert_eq!(ItemId::from_u64(id.as_u64()), id);
+    }
+
+    #[test]
+    fn small_helpers_and_constructors() {
+        assert_eq!(default_max_rank_error(), 0);
+        assert_eq!(default_terminal_retention_ms(), 60_000);
+
+        let mut entries = BTreeMap::new();
+        entries.insert("k".to_string(), MetadataValue::Bool(true));
+        let md = Metadata::from_entries(entries);
+        assert_eq!(md.len(), 1);
+        assert_eq!(md.get("k"), Some(&MetadataValue::Bool(true)));
+
+        let creation = QueueCreationPolicy::default();
+        assert_eq!(creation.default_max_gate_keys_per_item, 1);
+        assert_eq!(creation.default_max_gates_per_request, 1);
+    }
+
+    #[test]
+    fn create_queue_error_display() {
+        let mut request = valid_create_queue();
+        request.progress_bound_ms = 0;
+        let err = request.validate(&policy()).unwrap_err();
+        let rendered = format!("{err}");
+        assert!(rendered.contains("InvalidRequest"));
+        assert!(rendered.contains("progress_bound_ms"));
+    }
+
+    #[test]
+    fn max_rank_error_requires_bounded_relaxed() {
+        let mut request = valid_create_queue();
+        request.max_rank_error = 5;
+        request.ordering_mode = OrderingMode::Strict;
+        let err = request.validate(&policy()).unwrap_err();
+        assert_eq!(err.kind, CreateQueueErrorKind::InvalidRequest);
+        assert!(err.message.contains("max_rank_error"));
+
+        // Ok side: bounded-relaxed with a non-zero bound validates.
+        let mut ok = valid_create_queue();
+        ok.max_rank_error = 5;
+        ok.ordering_mode = OrderingMode::BoundedRelaxed;
+        assert!(ok.validate(&policy()).is_ok());
+    }
+
+    #[test]
+    fn max_eligible_group_size_must_not_exceed_claim_batch() {
+        let mut request = valid_create_queue();
+        request.max_eligible_group_size = Some(1_000);
+        request.max_claim_batch_size = 50;
+        let err = request.validate(&policy()).unwrap_err();
+        assert_eq!(err.kind, CreateQueueErrorKind::QueueDefinitionConflict);
+        assert!(err.message.contains("max_eligible_group_size"));
+    }
+
+    #[test]
+    fn cohort_max_size_must_not_exceed_claim_batch() {
+        let mut request = valid_create_queue();
+        request.max_claim_batch_size = 5;
+        request.max_eligible_group_size = None;
+        request.cohort_policy = CohortPolicy {
+            enabled: true,
+            completion_bound_ms: Some(9_000),
+            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+            max_cohort_size: Some(10),
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert_eq!(err.kind, CreateQueueErrorKind::QueueDefinitionConflict);
+        assert!(err.message.contains("max_cohort_size"));
+    }
+
+    #[test]
+    fn cohort_enabled_valid_definition_carries_policy() {
+        let mut request = valid_create_queue();
+        request.cohort_policy = CohortPolicy {
+            enabled: true,
+            completion_bound_ms: Some(9_000),
+            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+            max_cohort_size: Some(10),
+        };
+        let definition = request.validate(&policy()).unwrap();
+        let cohort = definition.cohort_policy.expect("cohort policy retained");
+        assert!(cohort.enabled);
+        assert_eq!(cohort.max_cohort_size, Some(10));
+    }
+
+    fn index_request(specs: Vec<IndexSpec>) -> CreateQueue {
+        let mut request = valid_create_queue();
+        request.secondary_indexes = specs;
+        request
+    }
+
+    #[test]
+    fn secondary_index_validation_branches() {
+        // Empty index name.
+        let err = index_request(vec![IndexSpec {
+            name: "  ".to_string(),
+            fields: vec!["region".to_string()],
+            unique: false,
+        }])
+        .validate(&policy())
+        .unwrap_err();
+        assert!(err.message.contains("index name must not be empty"));
+
+        // Duplicate index names.
+        let err = index_request(vec![
+            IndexSpec {
+                name: "by_region".to_string(),
+                fields: vec!["region".to_string()],
+                unique: false,
+            },
+            IndexSpec {
+                name: "by_region".to_string(),
+                fields: vec!["zone".to_string()],
+                unique: false,
+            },
+        ])
+        .validate(&policy())
+        .unwrap_err();
+        assert!(err.message.contains("unique within the queue"));
+
+        // No fields declared.
+        let err = index_request(vec![IndexSpec {
+            name: "by_region".to_string(),
+            fields: vec![],
+            unique: false,
+        }])
+        .validate(&policy())
+        .unwrap_err();
+        assert!(err.message.contains("at least one field"));
+
+        // Empty field name.
+        let err = index_request(vec![IndexSpec {
+            name: "by_region".to_string(),
+            fields: vec!["region".to_string(), "  ".to_string()],
+            unique: true,
+        }])
+        .validate(&policy())
+        .unwrap_err();
+        assert!(err.message.contains("field name must not be empty"));
+
+        // Ok side: a well-formed unique index validates.
+        let definition = index_request(vec![IndexSpec {
+            name: "by_region".to_string(),
+            fields: vec!["region".to_string(), "zone".to_string()],
+            unique: true,
+        }])
+        .validate(&policy())
+        .unwrap();
+        assert_eq!(definition.secondary_indexes.len(), 1);
+    }
+
+    #[test]
+    fn queue_definition_serde_defaults_terminal_retention() {
+        // A persisted definition missing terminal_retention_ms must rehydrate via the
+        // serde default (exercising default_terminal_retention_ms through serde).
+        let mut request = valid_create_queue();
+        request.terminal_retention_ms = 60_000;
+        let definition = request.validate(&policy()).unwrap();
+        let mut json: serde_json::Value = serde_json::to_value(&definition).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("terminal_retention_ms");
+        let restored: QueueDefinition = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.terminal_retention_ms, 60_000);
+    }
+
+    #[test]
+    fn decimal_digit_count_handles_zero_and_multi_digit() {
+        assert_eq!(decimal_digit_count(0), 1);
+        assert_eq!(decimal_digit_count(7), 1);
+        assert_eq!(decimal_digit_count(12_345), 5);
+    }
+
+    #[test]
+    fn decimal_encoding_zero_small_and_large_mantissa() {
+        // Zero encodes with the 0x80 sign byte and an all-zero remainder.
+        let zero = encode_decimal_ascending(0, 0);
+        assert_eq!(zero.len(), 21);
+        assert_eq!(zero[0], 0x80);
+        assert!(zero[1..].iter().all(|&b| b == 0));
+
+        // Positive value: 0xc0 sign byte.
+        let pos = encode_decimal_ascending(12_345, 2);
+        assert_eq!(pos[0], 0xc0);
+
+        // Negative value: 0x40 sign byte.
+        let neg = encode_decimal_ascending(-12_345, 2);
+        assert_eq!(neg[0], 0x40);
+
+        // Larger absolute negative sorts before (less than) a smaller one.
+        let neg_big = encode_decimal_ascending(-99_999, 0);
+        assert!(neg_big < neg);
+
+        // >= 38 significant digits exercises the divide-down normalization branch.
+        let huge = 12_345_678_901_234_567_890_123_456_789_012_345_678_i128; // 38 digits
+        let enc = encode_decimal_ascending(huge, 0);
+        assert_eq!(enc[0], 0xc0);
+        assert_eq!(enc.len(), 21);
+
+        // Reached through the public priority_sort entry point (descending inverts bytes).
+        let model = PriorityModel {
+            kind: PriorityModelKind::Decimal,
+            direction: PriorityDirection::Descending,
+            tie_breaker: PriorityTieBreaker::ItemId,
+        };
+        let sorted = priority_sort(
+            &PriorityValue::Decimal(DecimalValue {
+                mantissa: 42,
+                scale: 0,
+            }),
+            &model,
+        );
+        assert_eq!(sorted.len(), 21);
+    }
+
+    #[test]
+    fn validate_remaining_error_branches() {
+        // terminal_retention_ms == 0
+        let mut request = valid_create_queue();
+        request.terminal_retention_ms = 0;
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("terminal_retention_ms"));
+
+        // timestamp priority queues must use created_sequence tie breaking
+        let mut request = valid_create_queue();
+        request.priority_model = PriorityModel {
+            kind: PriorityModelKind::Timestamp,
+            direction: PriorityDirection::Ascending,
+            tie_breaker: PriorityTieBreaker::ItemId,
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("created_sequence"));
+
+        // cohort fields present while cohort disabled
+        let mut request = valid_create_queue();
+        request.cohort_policy = CohortPolicy {
+            enabled: false,
+            completion_bound_ms: Some(1_000),
+            on_incomplete: None,
+            max_cohort_size: None,
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("must be omitted"));
+
+        // recurrence.until present on a oneshot queue
+        let mut request = valid_create_queue();
+        request.recurrence = RecurrencePolicy {
+            mode: RecurrenceMode::Oneshot,
+            until: Some(UtcTimestamp::new(1_700_000_000, 0).unwrap()),
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("recurrence.until"));
+
+        // recurrence.until required when recurring
+        let mut request = valid_create_queue();
+        request.recurrence = RecurrencePolicy {
+            mode: RecurrenceMode::Recurring,
+            until: None,
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(
+            err.message
+                .contains("required when recurrence.mode=recurring")
+        );
+
+        // max_eligible_group_size == 0
+        let mut request = valid_create_queue();
+        request.max_eligible_group_size = Some(0);
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(
+            err.message
+                .contains("max_eligible_group_size must be greater")
+        );
+
+        // None branch of the max_eligible_group_size guard validates.
+        let mut request = valid_create_queue();
+        request.max_eligible_group_size = None;
+        assert!(request.validate(&policy()).is_ok());
+
+        // gate-key caps present while gate_keys=none
+        let mut request = valid_create_queue();
+        request.eligibility_policy = EligibilityPolicy {
+            metadata_blockers: BTreeMap::new(),
+            gate_keys: GateKeyPolicy::None,
+            max_gate_keys_per_item: Some(3),
+            max_gates_per_request: None,
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("gate-key caps must be omitted"));
+    }
+
+    #[test]
+    fn validate_short_circuit_branch_arms() {
+        // Non-timestamp priority kind short-circuits the timestamp tie-breaker check.
+        let mut request = valid_create_queue();
+        request.priority_model = PriorityModel {
+            kind: PriorityModelKind::Int64,
+            direction: PriorityDirection::Ascending,
+            tie_breaker: PriorityTieBreaker::ItemId,
+        };
+        assert!(request.validate(&policy()).is_ok());
+
+        // Cohort disabled with only max_cohort_size set walks the full `||` chain.
+        let mut request = valid_create_queue();
+        request.cohort_policy = CohortPolicy {
+            enabled: false,
+            completion_bound_ms: None,
+            on_incomplete: None,
+            max_cohort_size: Some(3),
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("must be omitted"));
+
+        // A valid recurring queue exercises the `until.is_none()` false arm.
+        let mut request = valid_create_queue();
+        request.recurrence = RecurrencePolicy {
+            mode: RecurrenceMode::Recurring,
+            until: Some(UtcTimestamp::new(1_700_000_000, 0).unwrap()),
+        };
+        assert!(request.validate(&policy()).is_ok());
+
+        // gate_keys=none with only max_gates_per_request set exercises the `||` second arm.
+        let mut request = valid_create_queue();
+        request.eligibility_policy = EligibilityPolicy {
+            metadata_blockers: BTreeMap::new(),
+            gate_keys: GateKeyPolicy::None,
+            max_gate_keys_per_item: None,
+            max_gates_per_request: Some(2),
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("gate-key caps must be omitted"));
+    }
+
+    #[test]
+    fn validate_dynamic_gate_key_policy_branches() {
+        // Happy path: defaults pulled from the creation policy.
+        let mut request = valid_create_queue();
+        request.eligibility_policy = EligibilityPolicy {
+            metadata_blockers: BTreeMap::new(),
+            gate_keys: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: None,
+            max_gates_per_request: None,
+        };
+        let definition = request.validate(&policy()).unwrap();
+        assert_eq!(
+            definition.eligibility_policy.max_gate_keys_per_item,
+            Some(12)
+        );
+        assert_eq!(definition.eligibility_policy.max_gates_per_request, Some(6));
+
+        // max_gate_keys_per_item == 0 rejected.
+        let mut request = valid_create_queue();
+        request.eligibility_policy = EligibilityPolicy {
+            metadata_blockers: BTreeMap::new(),
+            gate_keys: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: Some(0),
+            max_gates_per_request: Some(2),
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("max_gate_keys_per_item"));
+
+        // max_gates_per_request == 0 rejected.
+        let mut request = valid_create_queue();
+        request.eligibility_policy = EligibilityPolicy {
+            metadata_blockers: BTreeMap::new(),
+            gate_keys: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: Some(4),
+            max_gates_per_request: Some(0),
+        };
+        let err = request.validate(&policy()).unwrap_err();
+        assert!(err.message.contains("max_gates_per_request"));
+    }
+
+    #[test]
+    fn transition_error_display() {
+        let err = apply_transition(ItemState::Complete, ItemEvent::Claim).unwrap_err();
+        let rendered = format!("{err}");
+        assert!(rendered.contains("illegal transition"));
+        assert!(rendered.contains("Complete"));
+        assert!(rendered.contains("Claim"));
+    }
+}
