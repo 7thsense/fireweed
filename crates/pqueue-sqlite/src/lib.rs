@@ -622,6 +622,14 @@ impl PushPort for SqliteBackend {
 /// [`pqueue_engine::EngineError::Unavailable`] so a caller rejects it before activation.
 impl pqueue_engine::CommitTransitionPort for SqliteBackend {}
 
+// Gates are a relational-mode feature; the log-replay sqlite family rejects SetGates with the default
+// `Unavailable` (consistent with `validate_gate_command`). The gate-capable backend is SqliteRelationalBackend.
+impl pqueue_engine::SetGatesPort for SqliteBackend {}
+
+// Reschedule is wired in the in-memory log-replay reference (MemoryBackend); the durable log-replay
+// sqlite backend has not wired it yet, so it refuses with the default `Unavailable`.
+impl pqueue_engine::ReschedulePort for SqliteBackend {}
+
 /// Recovery/explain reads inherit the `Unavailable` default; the authoritative commit boundary lives on
 /// `SqliteRelationalBackend`, not this log-replay backend.
 impl pqueue_engine::RecoveryReadPort for SqliteBackend {}
@@ -772,6 +780,8 @@ impl UpdateFieldsPort for SqliteBackend {
                 item_id,
                 field_ops,
                 payload,
+                set_priority: Default::default(),
+                set_not_before: Default::default(),
             });
             let env = g.make_envelope(cmd, vec![item_id], now);
             g.commit_locked(shard, env, expected_epoch)?;

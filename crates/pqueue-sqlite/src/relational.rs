@@ -3601,6 +3601,8 @@ impl PushPort for SqliteRelationalBackend {
     }
 }
 
+impl pqueue_engine::ReschedulePort for SqliteRelationalBackend {}
+
 impl SetGatesPort for SqliteRelationalBackend {
     fn set_gates(
         &self,
@@ -4366,6 +4368,8 @@ impl UpdateFieldsPort for SqliteRelationalBackend {
                     item_id,
                     field_ops,
                     payload,
+                    set_priority: Default::default(),
+                    set_not_before: Default::default(),
                 }),
                 now,
                 expected_epoch,

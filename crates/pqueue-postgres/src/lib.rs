@@ -652,6 +652,13 @@ impl PushPort for PostgresBackend {
 /// [`pqueue_engine::EngineError::Unavailable`] so a caller rejects it before activation.
 impl pqueue_engine::CommitTransitionPort for PostgresBackend {}
 
+// Gates are a relational-mode feature; the log-replay postgres family rejects SetGates with the default
+// `Unavailable`. The gate-capable backend is PostgresRelationalBackend.
+impl pqueue_engine::SetGatesPort for PostgresBackend {}
+
+// Reschedule is not wired on the durable log-replay postgres backend yet; it refuses with the default `Unavailable`.
+impl pqueue_engine::ReschedulePort for PostgresBackend {}
+
 /// Recovery/explain reads inherit the `Unavailable` default (no authoritative commit boundary on this path).
 impl pqueue_engine::RecoveryReadPort for PostgresBackend {}
 
@@ -833,6 +840,8 @@ impl UpdateFieldsPort for PostgresBackend {
                 item_id,
                 field_ops,
                 payload,
+                set_priority: Default::default(),
+                set_not_before: Default::default(),
             });
             let env = g.make_envelope(cmd, vec![item_id], now);
             g.commit_locked(shard, env, expected_epoch)?;

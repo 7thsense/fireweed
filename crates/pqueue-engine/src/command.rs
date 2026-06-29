@@ -339,6 +339,25 @@ pub struct UpdateFieldsCommand {
     pub item_id: ItemId,
     pub field_ops: BTreeMap<String, Option<Bytes>>,
     pub payload: PayloadUpdate,
+    /// Reschedule the item's priority (BQ pqueue-7a96f929). `Keep` leaves it; `Set(Some(p))` re-prices the
+    /// item (which re-keys it in the eligibility order) and `Set(None)` clears the priority. Legal while the
+    /// item is Pending or Leased. Defaults to `Keep` (a bare field/payload update is unchanged).
+    #[serde(default)]
+    pub set_priority: ScheduleUpdate<PriorityValue>,
+    /// Reschedule the item's `not_before` (BQ pqueue-7a96f929). `Keep` leaves it; `Set(Some(t))` defers the
+    /// item until `t` (re-eligible at that time); `Set(None)` clears it (immediately eligible). Defaults to
+    /// `Keep`.
+    #[serde(default)]
+    pub set_not_before: ScheduleUpdate<UtcTimestamp>,
+}
+
+/// A field-reschedule disposition under [`UpdateFieldsCommand`] (BQ pqueue-7a96f929): leave the value as-is,
+/// or set it (`Set(None)` clears an optional value). Distinct from a bare field/payload merge.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub enum ScheduleUpdate<T> {
+    #[default]
+    Keep,
+    Set(Option<T>),
 }
 
 /// Disposition of an item's payload under [`UpdateFieldsCommand`]: leave it as-is, or replace it
@@ -500,6 +519,8 @@ mod serde_tests {
                     ("stale".to_string(), None),
                 ]),
                 payload: PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
+                set_priority: ScheduleUpdate::Keep,
+                set_not_before: ScheduleUpdate::Keep,
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
                 item_ids: vec![iid("a")],

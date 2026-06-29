@@ -747,6 +747,32 @@ pub trait UpdateFieldsPort: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
 }
 
+/// Reschedule a **live** item's `priority`/`not_before` after push (BQ pqueue-7a96f929) — the operator/
+/// owner-runtime "change when/where this item is delivered" seam, distinct from the [`UpdateFieldsPort`]
+/// field/payload merge. Pre-validated exactly like [`UpdateFieldsPort::update_fields`]: an absent / terminal
+/// / superseded id rejects and nothing is appended, and an `expected_item_version` mismatch rejects with
+/// `EngineError::Conflict`. Legal while the item is Pending OR Leased; a priority change re-keys the item in
+/// the eligibility order and a `not_before` change re-gates its eligibility. Bumps and returns the new
+/// `item_version`. The default impl returns [`EngineError::Unavailable`] so a backend that has not wired
+/// reschedule (the eventual-apply object-log family, the relational family) refuses rather than silently
+/// dropping the change.
+#[doc(hidden)]
+pub trait ReschedulePort: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
+    fn reschedule(
+        &self,
+        _shard: &QueueKey,
+        _item_id: ItemId,
+        _set_priority: crate::ScheduleUpdate<PriorityValue>,
+        _set_not_before: crate::ScheduleUpdate<UtcTimestamp>,
+        _expected_item_version: Option<u64>,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
 /// Reclaims **this queue's** leases that expired strictly before `now` (Leased → Pending), appending one
 /// `LeaseExpired` command fenced by `expected_epoch`, and returns the reclaimed ids (FAC-2). Unlike the
 /// global background [`ReclaimDriver::tick`], this is per-queue and fenced, so an owner-runtime sweeps

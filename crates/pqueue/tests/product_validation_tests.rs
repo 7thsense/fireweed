@@ -24,17 +24,18 @@ use std::time::Instant;
 use bytes::Bytes;
 use pqueue::{
     ClaimCompatibility, ClientItemKey, EngineError, GroupBatching, LibBackend, Nack, NewItem,
-    Pqueue, UpsertOutcome,
+    Pqueue, ScheduleUpdate, UpsertOutcome,
 };
 use pqueue_core::{
-    CohortPolicy, EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
-    RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GateKeyPolicy, GroupKey, ItemId,
+    OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    PriorityValue, QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy,
+    TenantId, UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, MemoryBackend};
 use pqueue_objectlog::ObjectLogBackend;
-use pqueue_sqlite::SqliteBackend;
+use pqueue_sqlite::{SqliteBackend, SqliteRelationalBackend};
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -476,10 +477,11 @@ fn ts(seconds: i64) -> UtcTimestamp {
 /// max_items/cadence pacing; complete/fail/retry/release/rearm finalize mappings; progress to terminal
 /// (INV-4); tenant NAMESPACING (same queue_id under two tenants are independent queues with no cross-tenant
 /// leakage); metrics match the terminal state.
-/// DEFERRED (tracked on pqueue-7a96f929 — facade lacks the seam): BatchUpdate reschedule (change
-/// priority/not_before after push), SetGates close+reopen gating (no gated item claimed while blocked),
-/// and claim-by-group_key. Cross-tenant AUTHZ denial lives in the auth layer (ADR-002), not this trusted
-/// library facade. NOT claimed in the row.
+/// ASSERTED (BQ pqueue-7a96f929): BatchUpdate reschedule via `pq.update` — re-pricing re-keys the
+/// eligibility order and rescheduling `not_before` re-gates eligibility; and SetGates close+reopen via
+/// `pq.set_gates` on the gate-capable relational backend — no gated item is claimed while its gate is
+/// blocked, eligibility restored on reopen.
+/// DEFERRED: cross-tenant AUTHZ denial lives in the auth layer (ADR-002), not this trusted library facade.
 #[tokio::test]
 async fn scheduled_action_delivery_e2e() {
     let (pq, clock) = deployment();
@@ -575,12 +577,168 @@ async fn scheduled_action_delivery_e2e() {
         "no cross-tenant leakage into B"
     );
 
+    // --- BatchUpdate reschedule (BQ pqueue-7a96f929): change not_before/priority AFTER push ---
+    // (1) reschedule not_before: a deferred item is ineligible until its time; pulling its not_before to
+    // now makes it claimable. (2) reschedule priority: re-pricing re-keys the eligibility order.
+    let resched_q = qk("sched", "reschedule");
+    pq.create_queue(qdef(
+        "sched",
+        "reschedule",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    clock.set(0);
+    let deferred = pq
+        .push(
+            &resched_q,
+            NewItem {
+                priority: Some(PriorityValue::Int64(50)),
+                not_before: Some(ts(100)),
+                payload: Some(Bytes::from_static(b"deferred")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        pq.claim(&resched_q, 10, 60_000).await.unwrap().is_empty(),
+        "a deferred item is ineligible before its not_before"
+    );
+    // reschedule its not_before to now (Keep priority) → immediately eligible.
+    pq.update(
+        &resched_q,
+        deferred,
+        ScheduleUpdate::Keep,
+        ScheduleUpdate::Set(Some(ts(0))),
+        None,
+    )
+    .await
+    .unwrap();
+    let pulled = pq.claim(&resched_q, 10, 60_000).await.unwrap();
+    assert_eq!(
+        pulled.len(),
+        1,
+        "rescheduling not_before to now makes the deferred item eligible"
+    );
+    assert_eq!(pulled[0].item_id, deferred);
+    let reschedule_not_before = pulled.len() == 1 && pulled[0].item_id == deferred;
+    pq.ack(&resched_q, [deferred]).await.unwrap();
+
+    // priority reschedule re-keys claim order: A(10) leads B(20) ascending; re-price A above B and B leads.
+    let reprice_q = qk("sched", "reprice");
+    pq.create_queue(qdef(
+        "sched",
+        "reprice",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    let a = pq
+        .push(
+            &reprice_q,
+            NewItem {
+                priority: Some(PriorityValue::Int64(10)),
+                payload: Some(Bytes::from_static(b"A")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let b = pq
+        .push(
+            &reprice_q,
+            NewItem {
+                priority: Some(PriorityValue::Int64(20)),
+                payload: Some(Bytes::from_static(b"B")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    pq.update(
+        &reprice_q,
+        a,
+        ScheduleUpdate::Set(Some(PriorityValue::Int64(30))),
+        ScheduleUpdate::Keep,
+        None,
+    )
+    .await
+    .unwrap();
+    let order = pq.claim(&reprice_q, 2, 60_000).await.unwrap();
+    assert_eq!(
+        (order[0].item_id, order[1].item_id),
+        (b, a),
+        "re-pricing A above B re-keys the eligibility order: B is now claimed first"
+    );
+    let reschedule_priority_rekeys = order[0].item_id == b;
+
+    // --- SetGates close+reopen (BQ-14d): no gated item is claimed while its gate is blocked ---
+    // Gates are a RELATIONAL-mode feature, so this sub-part is driven on the gate-capable relational backend
+    // (the memory/log-replay family stores no gate state). Same lib facade — Pqueue over a relational backend.
+    let gate_clock = Arc::new(ManualClock::at(0));
+    let gpq = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::in_memory().expect("relational backend")),
+        gate_clock,
+    );
+    let gq = qk("sched", "gated");
+    let mut gdef = qdef(
+        "sched",
+        "gated",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    gdef.eligibility_policy = EligibilityPolicy {
+        gate_keys: GateKeyPolicy::Dynamic,
+        max_gate_keys_per_item: Some(8),
+        max_gates_per_request: Some(8),
+        ..EligibilityPolicy::default()
+    };
+    gpq.create_queue(gdef).await.unwrap();
+    let gated = gpq
+        .push(
+            &gq,
+            NewItem {
+                gate_keys: vec!["hold".to_string()],
+                payload: Some(Bytes::from_static(b"gated")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // un-gated, the item is immediately claimable — establish the baseline, then release it back.
+    let pre = gpq.claim(&gq, 10, 60_000).await.unwrap();
+    assert_eq!(pre.len(), 1, "an un-blocked gated item is claimable");
+    gpq.nack(&gq, [gated], Nack::Release).await.unwrap();
+    // BLOCK the gate key: the gated item is now INELIGIBLE — never claimed while blocked.
+    gpq.set_gates(&gq, vec!["hold".to_string()], true)
+        .await
+        .unwrap();
+    assert!(
+        gpq.claim(&gq, 10, 60_000).await.unwrap().is_empty(),
+        "no gated item is claimed while its gate is closed"
+    );
+    // REOPEN the gate: eligibility is restored.
+    gpq.set_gates(&gq, vec!["hold".to_string()], false)
+        .await
+        .unwrap();
+    let reopened = gpq.claim(&gq, 10, 60_000).await.unwrap();
+    assert_eq!(
+        reopened.len(),
+        1,
+        "reopening the gate restores the gated item's eligibility"
+    );
+    assert_eq!(reopened[0].item_id, gated);
+    let gate_close_reopen = reopened.len() == 1 && reopened[0].item_id == gated;
+
     emit_ac_with_context(
         "AC-E2E-1",
         &["INV-4"],
-        "scheduled actions use stable client_item_key, become eligible at not_before, obey caller max_items/cadence pacing, map application results onto complete/fail/retry/release/rearm, preserve the no-rate-admission boundary, remain tenant-namespaced, and reach terminal metrics on memory/sqlite/object-log smoke profiles [DEFERRED -> pqueue-7a96f929: BatchUpdate-reschedule, SetGates-gating, claim-by-group_key; cross-tenant AUTHZ denial is the auth layer]",
-        "memory+sqlite+object_log_sqlite_projection",
-        "in-process lib facade over MemoryBackend, SqliteBackend, and ObjectLogBackend; release shape is the provisioned run",
+        "scheduled actions use stable client_item_key, become eligible at not_before, obey caller max_items/cadence pacing, map application results onto complete/fail/retry/release/rearm, preserve the no-rate-admission boundary, remain tenant-namespaced, and reach terminal metrics on memory/sqlite/object-log smoke profiles; BatchUpdate reschedule (pq.update) re-keys priority order and re-gates not_before eligibility; SetGates close+reopen (pq.set_gates) keeps a gated item unclaimable while blocked then restores it on the gate-capable relational backend [cross-tenant AUTHZ denial is the auth layer]",
+        "memory+sqlite+object_log_sqlite_projection+relational_gates",
+        "in-process lib facade over MemoryBackend, SqliteBackend, ObjectLogBackend, and SqliteRelationalBackend (gates); release shape is the provisioned run",
         BTreeMap::from([
             (
                 "scheduled_actions".into(),
@@ -628,13 +786,24 @@ async fn scheduled_action_delivery_e2e() {
             ),
             (
                 "backend_profiles".into(),
-                serde_json::json!(["memory", "sqlite", "object_log_sqlite_projection"]),
+                serde_json::json!([
+                    "memory",
+                    "sqlite",
+                    "object_log_sqlite_projection",
+                    "relational_gates"
+                ]),
             ),
             (
-                "deferred_subparts".into(),
-                serde_json::json!(
-                    "BatchUpdate-reschedule, SetGates-gating, claim-by-group_key -> pqueue-7a96f929"
-                ),
+                "reschedule_not_before_makes_eligible".into(),
+                serde_json::json!(reschedule_not_before),
+            ),
+            (
+                "reschedule_priority_rekeys_order".into(),
+                serde_json::json!(reschedule_priority_rekeys),
+            ),
+            (
+                "gate_close_blocks_then_reopen_restores".into(),
+                serde_json::json!(gate_close_reopen),
             ),
         ]),
     );
@@ -1186,11 +1355,13 @@ fn group_qdef(tenant: &str, queue: &str, max_eligible_group_size: u64) -> QueueD
 ///       * `group_batching` on a queue WITHOUT max_eligible_group_size -> Invalid;
 ///       * `group_batching.max_groups == 0` -> Invalid;
 ///       * `max_eligible_group_size > max_items` -> BatchTooLarge (the "next whole group cannot fit" guard);
-///       * a well-formed WHOLE-GROUP claim unit is RECOGNIZED and refused with the structured `Unavailable`
-///         (the group selection is not yet implemented — NOT silently item-claimed or mis-rejected).
-/// DEFERRED (whole-group SELECTION not implemented -> BQ-14b / pqueue-7a96f929): atomic whole-group claim,
-/// INV-7 (0 partial groups), <=max_groups groups per claim, group-representative ordering, concurrent
-/// claimers do not duplicate groups, and active-group discovery. NOT asserted, NOT claimed in the row.
+///       * a well-formed WHOLE-GROUP claim unit on the LOG-REPLAY family is refused with `Unavailable`
+///         (that family has no group selection — NOT silently item-claimed or mis-rejected).
+/// ASSERTED (BQ-14b): atomic whole-group SELECTION on the gate/group-capable relational backend, via the
+/// same lib facade — a whole-group claim leases exactly one COMPLETE group (no partial group, INV-7),
+/// bounded by max_groups, and successive claims drain distinct groups with zero duplicates.
+/// DEFERRED (heavier provisioned run): group-representative ordering under contention, concurrent
+/// multi-claimer no-duplicate-group, and active-group discovery.
 #[tokio::test]
 async fn marketo_group_batching_e2e() {
     let (pq, _clock) = deployment();
@@ -1277,13 +1448,85 @@ async fn marketo_group_batching_e2e() {
     let well_formed = pq.claim_with(&q, 100, 60_000, whole_group(300)).await;
     assert!(
         matches!(well_formed, Err(EngineError::Unavailable)),
-        "a well-formed whole-group claim is refused with Unavailable (selection unimplemented -> BQ-14b): {well_formed:?}"
+        "a well-formed whole-group claim is refused with Unavailable on the log-replay family (no group selection there): {well_formed:?}"
     );
+
+    // --- ASSERTED whole-group SELECTION on the gate/group-capable relational backend (BQ-14b) ---
+    // The relational family implements atomic whole-group claim. Same lib facade (Pqueue), relational backend.
+    let rel = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::in_memory().expect("relational backend")),
+        Arc::new(ManualClock::at(0)),
+    );
+    let rq = qk("marketo", "leads-rel");
+    let mut rdef = qdef(
+        "marketo",
+        "leads-rel",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    rdef.max_eligible_group_size = Some(5);
+    rel.create_queue(rdef).await.unwrap();
+    // Two whole groups: gA (2 tasks), gB (3 tasks).
+    let group_item = |p: i64, g: &str| NewItem {
+        priority: Some(PriorityValue::Int64(p)),
+        group_key: Some(GroupKey::new(g).unwrap()),
+        ..Default::default()
+    };
+    rel.push_batch(
+        &rq,
+        vec![
+            group_item(10, "gA"),
+            group_item(11, "gA"),
+            group_item(20, "gB"),
+            group_item(21, "gB"),
+            group_item(22, "gB"),
+        ],
+    )
+    .await
+    .unwrap();
+    // whole-group claim, max_groups=1: leases ALL items of exactly ONE group atomically (no partial group).
+    let wg1 = rel
+        .claim_with(&rq, 100, 60_000, whole_group(1))
+        .await
+        .unwrap();
+    assert!(!wg1.is_empty(), "whole-group claim leases a complete group");
+    let g1 = wg1[0].group_key.clone();
+    assert!(
+        wg1.iter().all(|i| i.group_key == g1),
+        "a whole-group claim returns exactly ONE group's items (<= max_groups=1)"
+    );
+    let g1_size = if g1 == Some(GroupKey::new("gA").unwrap()) {
+        2
+    } else {
+        3
+    };
+    assert_eq!(
+        wg1.len(),
+        g1_size,
+        "the whole group is leased atomically — the complete group, no partial (INV-7)"
+    );
+    rel.ack(&rq, wg1.iter().map(|i| i.item_id)).await.unwrap();
+    // A second whole-group claim returns the OTHER complete group (no duplicate group; both fully drain).
+    let wg2 = rel
+        .claim_with(&rq, 100, 60_000, whole_group(1))
+        .await
+        .unwrap();
+    let g2 = wg2[0].group_key.clone();
+    assert_ne!(
+        g1, g2,
+        "the second whole-group claim returns a DIFFERENT group (no group duplicated across claims)"
+    );
+    assert_eq!(
+        wg1.len() + wg2.len(),
+        5,
+        "both whole groups delivered, zero partial/duplicate items"
+    );
+    let whole_group_selection = wg1.len() + wg2.len() == 5 && g1 != g2;
 
     emit_ac(
         "AC-E2E-2",
         &[],
-        "group-batching queue loaded with >=1000 groups; item-level claim parity holds; the group-batching claim-compatibility contract is enforced (max_groups=0 -> Invalid; group-size>max_items -> BatchTooLarge; missing max_eligible_group_size -> Invalid; well-formed whole-group -> Unavailable, selection unimplemented). [DEFERRED -> BQ-14b/pqueue-7a96f929: atomic whole-group claim, INV-7 0-partial-groups, <=max_groups/claim, group-rep ordering, concurrent no-dup, discovery]",
+        "group-batching queue loaded with >=1000 groups; item-level claim parity holds; the group-batching claim-compatibility contract is enforced (max_groups=0 -> Invalid; group-size>max_items -> BatchTooLarge; missing max_eligible_group_size -> Invalid); and ASSERTED atomic whole-group SELECTION on the relational backend (BQ-14b): a whole-group claim leases exactly one COMPLETE group (no partial, INV-7), bounded by max_groups, and successive claims drain distinct groups with zero duplicates. [DEFERRED: group-rep ordering under contention, concurrent multi-claimer no-dup, discovery are the heavier provisioned run]",
         BTreeMap::from([
             ("groups_loaded".into(), serde_json::json!(groups)),
             ("items_loaded".into(), serde_json::json!(loaded)),
@@ -1304,8 +1547,12 @@ async fn marketo_group_batching_e2e() {
                 serde_json::json!(format!("{unconfigured:?}")),
             ),
             (
-                "well_formed_whole_group".into(),
+                "well_formed_whole_group_logreplay".into(),
                 serde_json::json!(format!("{well_formed:?}")),
+            ),
+            (
+                "relational_whole_group_selection".into(),
+                serde_json::json!(whole_group_selection),
             ),
         ]),
     );
@@ -1352,9 +1599,11 @@ fn cohort_qdef(
 ///   - whole_cohort with completion_bound_ms (90s) > progress_bound_ms (60s) -> Invalid("...<= progress_bound_ms");
 ///   - whole_cohort COMBINED with group_key -> Invalid("cannot be combined...");
 ///   - a well-formed whole_cohort claim is RECOGNIZED (ClaimUnit::WholeCohort) and refused with Unavailable
-///     by this backend family, NOT silently item-claimed.
-/// NOT asserted here: relational whole-cohort atomic claim, incomplete-cohort hiding, INV-7 (0 cohort
-/// leaks), and expired-incomplete -> terminal failed with reason; those live in the relational suites.
+///     by the LOG-REPLAY family, NOT silently item-claimed.
+/// ASSERTED (BQ-14c): atomic whole-cohort SELECTION on the relational backend via the same lib facade — a
+/// COMPLETE cohort leases all-or-nothing under a shared cohort lease token while an incomplete cohort is
+/// skipped (no partial-cohort leak, INV-7).
+/// DEFERRED (relational suites): incomplete-cohort expiry -> terminal failed with reason.
 #[tokio::test]
 async fn callback_cohort_e2e() {
     let (pq, _clock) = deployment();
@@ -1452,13 +1701,78 @@ async fn callback_cohort_e2e() {
     let well_formed = pq.claim_with(&cohort_q, 10, 60_000, whole_cohort()).await;
     assert!(
         matches!(well_formed, Err(EngineError::Unavailable)),
-        "a well-formed whole_cohort claim is refused with Unavailable by this backend family: {well_formed:?}"
+        "a well-formed whole_cohort claim is refused with Unavailable by the log-replay family: {well_formed:?}"
     );
+
+    // --- ASSERTED atomic whole-cohort SELECTION on the relational backend (BQ-14c, all-or-nothing) ---
+    let rel = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::in_memory().expect("relational backend")),
+        Arc::new(ManualClock::at(0)),
+    );
+    let crq = qk("cohort", "callbacks-rel");
+    let mut cdef = qdef(
+        "cohort",
+        "callbacks-rel",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    cdef.cohort_policy = Some(CohortPolicy {
+        enabled: true,
+        completion_bound_ms: Some(30_000),
+        on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+        max_cohort_size: Some(10),
+    });
+    rel.create_queue(cdef).await.unwrap();
+    let cohort_member = |p: i64, g: &str, size: u64| NewItem {
+        priority: Some(PriorityValue::Int64(p)),
+        group_key: Some(GroupKey::new(g).unwrap()),
+        cohort_size: Some(size),
+        ..Default::default()
+    };
+    // A COMPLETE cohort "c1" (3 of 3 members, all eligible) and an INCOMPLETE cohort "c2" (1 of 3).
+    let mut c1 = rel
+        .push_batch(
+            &crq,
+            vec![
+                cohort_member(10, "c1", 3),
+                cohort_member(11, "c1", 3),
+                cohort_member(12, "c1", 3),
+            ],
+        )
+        .await
+        .unwrap();
+    rel.push(&crq, cohort_member(20, "c2", 3)).await.unwrap();
+    // whole-cohort claim leases the COMPLETE cohort atomically under a SHARED cohort lease token; the
+    // incomplete cohort is skipped (all-or-nothing — no partial cohort leaks, INV-7).
+    let resp = rel
+        .claim_response_with(
+            &crq,
+            100,
+            60_000,
+            ClaimCompatibility {
+                whole_cohort: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.cohort_lease_token.is_some(),
+        "a whole-cohort claim carries the shared cohort lease token at the response top level"
+    );
+    let mut leased: Vec<ItemId> = resp.items.iter().map(|i| i.item_id).collect();
+    leased.sort();
+    c1.sort();
+    assert_eq!(
+        leased, c1,
+        "the whole COMPLETE cohort leases together (all-or-nothing); the incomplete cohort is NOT leased"
+    );
+    let whole_cohort_selection = leased == c1 && resp.cohort_lease_token.is_some();
 
     emit_ac(
         "AC-E2E-3",
         &[],
-        "item-level claim parity on a cohort-enabled queue; the generic-family whole_cohort claim-compatibility contract is enforced with distinct errors (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined); well-formed -> Unavailable rather than item-level downgrade). Relational suites cover atomic whole-cohort claim, incomplete-cohort hiding, INV-7 0-cohort-leaks, and expiry->failed.",
+        "item-level claim parity on a cohort-enabled queue; the generic-family whole_cohort claim-compatibility contract is enforced with distinct errors (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined); well-formed -> Unavailable on the log-replay family); and ASSERTED atomic whole-cohort SELECTION on the relational backend (BQ-14c): a COMPLETE cohort leases all-or-nothing under a shared cohort lease token while an incomplete cohort is skipped (no partial-cohort leak, INV-7). [DEFERRED: incomplete-cohort expiry->failed-with-reason is in the relational suites]",
         BTreeMap::from([
             (
                 "item_level_claim_len".into(),
@@ -1481,8 +1795,12 @@ async fn callback_cohort_e2e() {
                 serde_json::json!(format!("{combined:?}")),
             ),
             (
-                "well_formed_whole_cohort".into(),
+                "well_formed_whole_cohort_logreplay".into(),
                 serde_json::json!(format!("{well_formed:?}")),
+            ),
+            (
+                "relational_whole_cohort_selection".into(),
+                serde_json::json!(whole_cohort_selection),
             ),
         ]),
     );

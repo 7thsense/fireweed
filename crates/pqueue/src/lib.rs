@@ -23,7 +23,7 @@ use pqueue_engine::{
     CommitTransitionPort, ControlPlaneStore, FinalizeOutcome, FinalizePort, IndexQueryPort,
     LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
     QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    UpdateFieldsPort, UpsertPort, acquire_and_fence,
+    ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort, acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ pub use pqueue_engine::{
     ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommitCapabilities,
     CommitEntryStatus, CommitRecovery, ControlPlaneConfig, CreateQueueOutcome, EngineError,
     EngineResult, EntryRecovery, FinalizeKind, GroupBatching, IndexHit, InstanceFence, ItemView,
-    LiveItemView, PayloadUpdate, QueueKey, QueueMetrics, SideRecord, UpsertOutcome,
+    LiveItemView, PayloadUpdate, QueueKey, QueueMetrics, ScheduleUpdate, SideRecord, UpsertOutcome,
 };
 
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
@@ -77,7 +77,9 @@ pub trait LibBackend:
     + RenewLeasePort
     + ReassignLeasePort
     + ReclaimPort
+    + ReschedulePort
     + PurgePort
+    + SetGatesPort
     + ProjectionRead
     + IndexQueryPort
     + ControlPlaneStore
@@ -98,7 +100,9 @@ impl<T> LibBackend for T where
         + RenewLeasePort
         + ReassignLeasePort
         + ReclaimPort
+        + ReschedulePort
         + PurgePort
+        + SetGatesPort
         + ProjectionRead
         + IndexQueryPort
         + ControlPlaneStore
@@ -907,6 +911,69 @@ impl<B: LibBackend> Pqueue<B> {
                 payload,
                 expected_item_version,
                 now,
+                epoch,
+            )
+            .await;
+        self.note(queue, r)
+    }
+
+    /// Reschedule a **live** item's `priority` and/or `not_before` after push (BQ pqueue-7a96f929) — the
+    /// "change when/where this item is delivered" verb, distinct from [`Pqueue::update_fields`] (which merges
+    /// hot-storage fields/payload). [`ScheduleUpdate::Keep`] leaves a dimension unchanged; `Set(Some(v))`
+    /// sets it; `Set(None)` clears it (clearing `not_before` makes the item immediately eligible; clearing
+    /// `priority` drops it to the unpriced FIFO tail). A priority change re-keys the item in the eligibility
+    /// order; a `not_before` change re-gates its eligibility (so a deferred item leaves the claimable set
+    /// until its new time). Legal while the item is Pending OR Leased; pre-validated like `update_fields`
+    /// (absent/terminal/superseded id → reject; `expected_item_version` mismatch → [`EngineError::Conflict`]),
+    /// fenced by the owner's epoch. Bumps and returns the new `item_version`. Atomic class only — the
+    /// eventual-apply object-log family and the relational family return [`EngineError::Unavailable`].
+    pub async fn update(
+        &self,
+        queue: &QueueKey,
+        item_id: ItemId,
+        priority: ScheduleUpdate<PriorityValue>,
+        not_before: ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<u64> {
+        let epoch = self.session_epoch(queue).await?;
+        let now = self.clock.now();
+        let r = self
+            .backend
+            .reschedule(
+                queue,
+                item_id,
+                priority,
+                not_before,
+                expected_item_version,
+                now,
+                epoch,
+            )
+            .await;
+        self.note(queue, r)
+    }
+
+    /// Block or unblock the given gate keys for `queue` (BQ-14d, API-001 g2 `SetGates`). Blocking a gate
+    /// key makes every item carrying it INELIGIBLE — a blocked-gated item is never claimed until the key is
+    /// unblocked (the relational eligibility predicate anti-joins item gate keys against the queue's gate
+    /// state); `blocked = false` restores eligibility. Operator-driven (drains/holds a class of work).
+    ///
+    /// SCOPE (TD-002 §gate): gates are a RELATIONAL-mode feature. A gate-capable backend (the relational
+    /// family) enforces this; the log-replay / in-memory family stores no gate state and rejects it with
+    /// [`EngineError::Unavailable`] (carrying a gate key on a log-replay queue is already rejected at push).
+    /// Fenced by the owner's epoch.
+    pub async fn set_gates(
+        &self,
+        queue: &QueueKey,
+        gate_keys: Vec<String>,
+        blocked: bool,
+    ) -> EngineResult<()> {
+        let epoch = self.session_epoch(queue).await?;
+        let r = self
+            .backend
+            .set_gates(
+                queue,
+                SetGatesCommand { gate_keys, blocked },
+                self.clock.now(),
                 epoch,
             )
             .await;

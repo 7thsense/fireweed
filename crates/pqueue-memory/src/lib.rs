@@ -835,6 +835,49 @@ impl PurgePort for MemoryBackend {
     }
 }
 
+// Gates are a relational-mode feature; the in-memory log-replay family rejects SetGates with the
+// default `Unavailable` (it stores no gate state). Surfaced so MemoryBackend satisfies the lib facade bound.
+impl pqueue_engine::SetGatesPort for MemoryBackend {}
+
+impl pqueue_engine::ReschedulePort for MemoryBackend {
+    fn reschedule(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        set_priority: pqueue_engine::ScheduleUpdate<pqueue_core::PriorityValue>,
+        set_not_before: pqueue_engine::ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                // Same pre-commit gate as a field update: an absent / terminal / superseded / fenced id or a
+                // version mismatch rejects and nothing is appended (no eligibility re-key on a rejected op).
+                proj.update_fields_validate(&item_id, expected_item_version)?;
+            }
+            // Reschedule rides the UpdateFields command with an empty field/payload delta — only the
+            // priority/not_before reschedule is carried. The projection re-keys eligibility on a reprice.
+            let cmd = QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id,
+                field_ops: BTreeMap::new(),
+                payload: PayloadUpdate::Keep,
+                set_priority,
+                set_not_before,
+            });
+            let env = self.make_envelope(cmd, vec![item_id], now);
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            g.projections
+                .get(shard)
+                .and_then(|p| p.item_version(&item_id))
+                .ok_or(EngineError::NotFound)
+        })();
+        std::future::ready(result)
+    }
+}
+
 impl UpdateFieldsPort for MemoryBackend {
     fn update_fields(
         &self,
@@ -858,6 +901,8 @@ impl UpdateFieldsPort for MemoryBackend {
                 item_id,
                 field_ops,
                 payload,
+                set_priority: Default::default(),
+                set_not_before: Default::default(),
             });
             let env = self.make_envelope(cmd, vec![item_id], now);
             Self::commit_locked(&mut g, shard, env, expected_epoch)?;

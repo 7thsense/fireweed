@@ -2548,6 +2548,8 @@ impl PushPort for PostgresRelationalBackend {
     }
 }
 
+impl pqueue_engine::ReschedulePort for PostgresRelationalBackend {}
+
 impl SetGatesPort for PostgresRelationalBackend {
     fn set_gates(
         &self,
@@ -3020,6 +3022,8 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
                     item_id,
                     field_ops,
                     payload,
+                    set_priority: Default::default(),
+                    set_not_before: Default::default(),
                 }),
                 now,
                 expected_epoch,

@@ -30,7 +30,8 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeKind, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PayloadUpdate,
-    ProjectionSnapshot, PushItem, QueueCommand, QueueKey, QueueMetrics, SnapshotRef,
+    ProjectionSnapshot, PushItem, QueueCommand, QueueKey, QueueMetrics, ScheduleUpdate,
+    SnapshotRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -546,13 +547,14 @@ impl ProjectionData {
                 Ok(())
             }
             QueueCommand::UpdateFields(c) => {
+                let model = self.priority_model;
                 let rec = self
                     .items
                     .get_mut(&c.item_id)
                     .ok_or(EngineError::NotFound)?;
-                // Bare field/payload merge (no lifecycle change), so it relies on `update_fields_validate`
-                // having run pre-commit. Assert the pre-condition so a divergent replay is LOUD in
-                // debug/test (apply stays infallible in release).
+                // A field/payload merge and/or a priority/not_before reschedule (no lifecycle change), so it
+                // relies on `update_fields_validate` having run pre-commit. Assert the pre-condition so a
+                // divergent replay is LOUD in debug/test (apply stays infallible in release).
                 debug_assert!(
                     !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
                     "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
@@ -575,6 +577,21 @@ impl ProjectionData {
                     PayloadUpdate::Keep => {}
                     PayloadUpdate::Set(p) => rec.payload = p.clone(),
                 }
+                // Reschedule (BQ pqueue-7a96f929): a priority change re-keys the item in the eligibility
+                // order (the `EligKey` is priced on `priority`); `not_before` is not_before-independent in
+                // `EligKey`, so it only re-gates `eligible_candidates` (which filters `not_before <= now`).
+                // Capture the OLD eligibility key (while still Pending and pre-reprice), then re-insert the
+                // NEW key after — outside the `rec` borrow, since `self.eligible` is a disjoint field.
+                let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_));
+                let was_pending = rec.state == ItemState::Pending;
+                let old_elig = (repricing && was_pending).then(|| elig_key(rec, &model));
+                if let ScheduleUpdate::Set(p) = &c.set_priority {
+                    rec.priority = p.clone();
+                }
+                if let ScheduleUpdate::Set(nb) = &c.set_not_before {
+                    rec.not_before = *nb;
+                }
+                let new_elig = (repricing && was_pending).then(|| elig_key(rec, &model));
                 rec.item_version += 1;
                 let new_keys = index_keys(&self.index_specs, &rec.fields);
                 let item_id = c.item_id;
@@ -590,7 +607,14 @@ impl ProjectionData {
                     .collect();
                 self.index_remove_keys(item_id, &removed);
                 self.index_insert_keys(item_id, &added);
-                // Eligibility (state) is unchanged, so the eligibility index needs no update.
+                // Re-key the eligibility index for a repriced Pending item (no-op otherwise — a non-reprice
+                // or a Leased item leaves the eligibility set unchanged).
+                if let Some(old) = old_elig {
+                    self.eligible.remove(&old);
+                }
+                if let Some(new) = new_elig {
+                    self.eligible.insert(new);
+                }
                 Ok(())
             }
             QueueCommand::Finalize(c) => {

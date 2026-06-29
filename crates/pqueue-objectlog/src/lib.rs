@@ -765,6 +765,14 @@ impl PushPort for ObjectLogBackend {
 /// [`pqueue_engine::EngineError::Unavailable`] — a consumer must reject it before activation.
 impl pqueue_engine::CommitTransitionPort for ObjectLogBackend {}
 
+// Gates are a relational-mode feature; the eventual-apply object-log family rejects SetGates with the
+// default `Unavailable` (consistent with `validate_gate_command`).
+impl pqueue_engine::SetGatesPort for ObjectLogBackend {}
+
+// Priority/not_before reschedule is an atomic-class capability; the eventual-apply object-log family
+// refuses it with the default `Unavailable`.
+impl pqueue_engine::ReschedulePort for ObjectLogBackend {}
+
 /// Recovery/explain reads are unavailable: this eventual-apply backend has no authoritative commit boundary
 /// (it inherits the `Unavailable` default).
 impl pqueue_engine::RecoveryReadPort for ObjectLogBackend {}
