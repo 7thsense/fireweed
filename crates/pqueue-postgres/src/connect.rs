@@ -16,6 +16,13 @@ pub fn default_max_connection_lifetime() -> Duration {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectorKind {
+    NoTls,
+    #[cfg(feature = "tls")]
+    NativeTls,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostgresSslMode {
     Disable,
     Prefer,
@@ -37,6 +44,25 @@ impl PostgresSslMode {
             Self::Disable => PgSslMode::Disable,
             Self::Prefer => PgSslMode::Prefer,
             Self::Require => PgSslMode::Require,
+        }
+    }
+}
+
+fn connector_kind(mode: PostgresSslMode) -> EngineResult<ConnectorKind> {
+    match mode {
+        PostgresSslMode::Disable | PostgresSslMode::Prefer => Ok(ConnectorKind::NoTls),
+        PostgresSslMode::Require => {
+            #[cfg(feature = "tls")]
+            {
+                Ok(ConnectorKind::NativeTls)
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                Err(EngineError::Storage(
+                    "postgres sslmode=require requires building pqueue-postgres with the tls feature"
+                        .to_string(),
+                ))
+            }
         }
     }
 }
@@ -128,19 +154,29 @@ impl PostgresConnectConfig {
 
 /// Build one sync postgres client through the centralized pqueue-postgres connection helper.
 ///
-/// TLS-capable connectors are intentionally not created here yet: the current crate depends only on
-/// `postgres` and drives `NoTls`, while the server-runtime/pool boundary is tracked separately. Requiring
-/// TLS fails explicitly instead of falling back to plaintext.
+/// `sslmode=require` never falls back to plaintext: it uses the optional native TLS connector when the
+/// `tls` feature is enabled and fails explicitly otherwise.
 pub fn connect(config: PostgresConnectConfig) -> EngineResult<Client> {
-    let ssl_mode = config.parsed_ssl_mode()?;
-    if matches!(ssl_mode, PostgresSslMode::Require) {
-        return Err(EngineError::Unavailable);
+    let now = now();
+    let pg_config = config.postgres_config(now)?;
+    match connector_kind(PostgresSslMode::from_pg(pg_config.get_ssl_mode()))? {
+        ConnectorKind::NoTls => st(pg_config.connect(NoTls)),
+        #[cfg(feature = "tls")]
+        ConnectorKind::NativeTls => connect_native_tls(pg_config),
     }
-    st(config.postgres_config(now())?.connect(NoTls))
 }
 
 fn parse_config(url: &str) -> EngineResult<Config> {
     Config::from_str(url).map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+#[cfg(feature = "tls")]
+fn connect_native_tls(config: Config) -> EngineResult<Client> {
+    let connector = native_tls::TlsConnector::builder()
+        .build()
+        .map_err(|e| EngineError::Storage(e.to_string()))?;
+    let connector = postgres_native_tls::MakeTlsConnector::new(connector);
+    st(config.connect(connector))
 }
 
 fn now() -> UtcTimestamp {
@@ -225,11 +261,31 @@ mod tests {
     }
 
     #[test]
-    fn required_ssl_fails_before_no_tls_connection_attempt() {
-        let result = connect(PostgresConnectConfig::new(
-            "postgres://postgres:pq@localhost/postgres?sslmode=require",
-        ));
+    fn connector_selection_uses_no_tls_for_disable_and_prefer() {
+        assert_eq!(
+            connector_kind(PostgresSslMode::Disable).unwrap(),
+            ConnectorKind::NoTls
+        );
+        assert_eq!(
+            connector_kind(PostgresSslMode::Prefer).unwrap(),
+            ConnectorKind::NoTls
+        );
+    }
 
-        assert!(matches!(result, Err(EngineError::Unavailable)));
+    #[cfg(feature = "tls")]
+    #[test]
+    fn required_ssl_selects_native_tls_when_feature_enabled() {
+        assert_eq!(
+            connector_kind(PostgresSslMode::Require).unwrap(),
+            ConnectorKind::NativeTls
+        );
+    }
+
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn required_ssl_requires_tls_feature_without_plaintext_fallback() {
+        let err = connector_kind(PostgresSslMode::Require).unwrap_err();
+
+        assert!(matches!(err, EngineError::Storage(msg) if msg.contains("tls feature")));
     }
 }
