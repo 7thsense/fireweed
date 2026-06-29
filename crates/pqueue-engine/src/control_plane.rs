@@ -107,9 +107,23 @@ pub fn owner_heartbeat_live(heartbeat_at: UtcTimestamp, now: UtcTimestamp, ttl_m
 }
 
 /// Acquire decision over the `current` record (the caller has already confirmed the owner is LIVE). Rejects
-/// (carrying `current`) if a DIFFERENT owner holds a live lease; otherwise returns the new record at a
-/// strictly-greater epoch (atomic acquire→fence). See [`QueueControlPlane::acquire_queue_lease`] for the
-/// non-idempotency contract.
+/// (carrying `current`) if a DIFFERENT owner holds a live lease; otherwise returns the acquired record. See
+/// [`QueueControlPlane::acquire_queue_lease`] for the epoch contract.
+///
+/// EPOCH POLICY (TD-003 fence authority / BQ-20 — the fix for the self-fencing collapse, bead
+/// pqueue-79178303): the `assignment_epoch` fence exists ONLY to supersede a DIFFERENT owner's writes. It is
+/// advanced (`+1`) on a genuine ownership CHANGE — a different `active_owner`, or `None` (cold-start first
+/// acquire / a post-`release` re-grant) — and PRESERVED on a same-owner re-affirmation where the authority
+/// record still names US as `active_owner`, EVEN when our lease has lapsed (`now > lease_expires_at`).
+///
+/// Safety: if `current.active_owner_id` still names US at re-acquire time, then no OTHER owner acquired in
+/// the lapse gap — a takeover would have set `active_owner` to them AND bumped the epoch. So our in-flight
+/// writes at this epoch are legitimately ours and MUST NOT be fenced. Bumping here would fence the node's
+/// OWN in-flight pushes/claims (`EpochFenced`), which under CPU starvation (late lease renewal → self-driven
+/// `Unassigned`→re-acquire) collapses throughput instead of degrading gracefully. Preserving the epoch lets
+/// a slow-but-alive sole owner keep serving at its existing fence — just slower. Takeover by a different
+/// owner still bumps (that owner's `acquire` records itself as `active_owner` first), so real fencing is
+/// untouched.
 pub fn lease_decide_acquire(
     current: &QueueLease,
     owner: &OwnerId,
@@ -119,11 +133,18 @@ pub fn lease_decide_acquire(
     if current.is_live(now) && current.active_owner_id.as_ref() != Some(owner) {
         return AcquireOutcome::Rejected(current.clone());
     }
+    // Re-affirming OUR OWN (still-recorded) lease preserves the epoch; a takeover/cold-start advances it.
+    let same_owner = current.active_owner_id.as_ref() == Some(owner);
+    let assignment_epoch = if same_owner {
+        current.assignment_epoch
+    } else {
+        current.assignment_epoch + 1
+    };
     AcquireOutcome::Acquired(QueueLease {
         state: LeaseState::Assigned,
         active_owner_id: Some(owner.clone()),
         target_owner_id: Some(owner.clone()),
-        assignment_epoch: current.assignment_epoch + 1,
+        assignment_epoch,
         lease_expires_at: Some(add_millis(now, lease_ttl_ms)),
     })
 }
@@ -293,14 +314,16 @@ pub trait QueueControlPlane: Send + Sync {
     /// DIFFERENT owner holds a live (`assigned`/`draining`, non-expired) lease. The caller MUST be a live
     /// registered owner (fail-closed) — else `EngineError::Forbidden`.
     ///
-    /// CONTRACT — acquire is NOT idempotent: EVERY successful acquire allocates a NEW strictly-greater
-    /// epoch, INCLUDING a same-owner re-acquire of a still-live lease. This is intentional — a restarted
-    /// owner re-acquiring its own queue MUST fence its pre-crash in-flight appends (TD-003 Recovery: a new
-    /// epoch fences who may extend the log). The consequence a caller MUST respect: do NOT blindly retry
-    /// `acquire` after a timeout (a retry whose first attempt actually succeeded would double-bump and fence
-    /// the caller's own epoch-N writes); instead re-`resolve_queue_owner` and use the returned epoch as
-    /// authoritative. To merely extend an existing lease, call [`renew_queue_lease`](Self::renew_queue_lease)
-    /// (same epoch), not acquire.
+    /// CONTRACT — the epoch advances ONLY on a genuine ownership CHANGE (a DIFFERENT owner takes over an
+    /// expired/free lease, or the first acquire of an unowned/released queue). A same-owner re-acquire — the
+    /// authority record still names the acquirer as `active_owner`, even with a LAPSED lease — PRESERVES the
+    /// epoch and only refreshes `lease_expires_at` (bead pqueue-79178303). Rationale: the epoch fence exists
+    /// to supersede a DIFFERENT owner; if the record still names us, no other owner acquired in the gap, so
+    /// our in-flight epoch-N writes are legitimately ours and must NOT be self-fenced. A consequence: a
+    /// same-owner retry after a timeout is now epoch-idempotent (it will not double-bump and fence the
+    /// caller's own writes). To merely extend a still-live lease without re-resolving, prefer
+    /// [`renew_queue_lease`](Self::renew_queue_lease) (same epoch); a takeover by a different owner still
+    /// allocates a strictly-greater epoch (fencing the superseded owner).
     fn acquire_queue_lease(
         &self,
         queue: &QueueKey,
@@ -689,18 +712,58 @@ mod tests {
     }
 
     #[test]
-    fn the_same_owner_reacquiring_its_live_lease_bumps_epoch() {
-        // A re-acquire by the SAME owner is allowed (e.g. a restart that re-resolves to itself) and still
-        // allocates a strictly-greater epoch — fencing any of its own in-flight stragglers from the old epoch.
+    fn the_same_owner_reaffirming_its_live_lease_preserves_the_epoch() {
+        // A re-acquire by the SAME owner (still the recorded active_owner) re-affirms an uncontested lease:
+        // it PRESERVES the epoch and only refreshes the deadline — it must NOT self-fence the owner's own
+        // in-flight epoch-N writes (bead pqueue-79178303). Epoch advances only on a takeover by a DIFFERENT
+        // owner.
         let cp = cp();
         let a = owner("a");
         let q = qk("q1");
         cp.register_owner(&a, ts(0)).unwrap();
-        cp.acquire_queue_lease(&q, &a, ts(0)).unwrap();
+        let AcquireOutcome::Acquired(l1) = cp.acquire_queue_lease(&q, &a, ts(0)).unwrap() else {
+            panic!("expected Acquired");
+        };
+        assert_eq!(l1.assignment_epoch, 1);
+        // Re-acquire while still live: same epoch, deadline pushed out from ts(1).
         let AcquireOutcome::Acquired(l2) = cp.acquire_queue_lease(&q, &a, ts(1)).unwrap() else {
             panic!("expected Acquired");
         };
-        assert_eq!(l2.assignment_epoch, 2);
+        assert_eq!(
+            l2.assignment_epoch, 1,
+            "same-owner re-affirm preserves epoch"
+        );
+        assert_eq!(l2.lease_expires_at, Some(ts(16)), "deadline refreshed");
+    }
+
+    #[test]
+    fn the_same_owner_reacquiring_its_lapsed_lease_preserves_the_epoch() {
+        // THE self-fencing-collapse fix (bead pqueue-79178303): a sole owner whose lease TTL lapsed (the
+        // renew task ran late under CPU starvation) re-acquires its OWN queue. The authority record still
+        // names it active_owner, so no other owner took over in the gap → preserve the epoch (no self-fence),
+        // just refresh liveness. This is graceful degradation, not collapse.
+        let cp = cp();
+        let a = owner("a");
+        let q = qk("q1");
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.acquire_queue_lease(&q, &a, ts(0)).unwrap(); // epoch 1, expires ts(15)
+        // Keep the owner heartbeat-live, but re-acquire only AFTER the lease has lapsed (ts(100) > ts(15)).
+        cp.heartbeat(&a, ts(100)).unwrap();
+        let lease_before = cp.lease(&q).unwrap();
+        assert!(
+            !lease_before.is_live(ts(100)),
+            "precondition: the lease has actually lapsed"
+        );
+        assert_eq!(lease_before.active_owner_id.as_ref(), Some(&a));
+        let AcquireOutcome::Acquired(l2) = cp.acquire_queue_lease(&q, &a, ts(100)).unwrap() else {
+            panic!("expected Acquired (same owner re-affirms its lapsed lease)");
+        };
+        assert_eq!(
+            l2.assignment_epoch, 1,
+            "re-affirming a LAPSED own lease must NOT bump the epoch (no self-fence)"
+        );
+        assert_eq!(l2.lease_expires_at, Some(ts(115)), "deadline refreshed");
+        assert_eq!(l2.active_owner_id.as_ref(), Some(&a));
     }
 
     // ----- seam invariant: monotonic epoch + expired-lease reclaim -----

@@ -111,21 +111,26 @@ async fn a_live_lease_rejects_a_second_acquire_without_touching_the_fence() {
     append_at(&b, fence_before).await.unwrap();
 }
 
-/// A re-acquire by the SAME owner (the cold-restart-re-resolves-to-itself case) allocates a strictly-greater
-/// fence epoch that fences its OWN pre-restart stragglers at the append seam. This is NOT a full TD-003
-/// §Recovery test — there is no crash, snapshot load, or log-tail replay here (those are the
-/// relational-reconnect + log-replay suites, run WITHOUT an ownership handoff); the recovery-with-replay-
-/// under-handoff scenario is deferred (pqueue-c33c367e). It asserts only the re-acquire→fence-stragglers
-/// property on a still-live in-process backend.
+/// A re-acquire by the SAME owner (the sole owner whose lease lapsed under load and re-resolves to ITSELF)
+/// PRESERVES the fence epoch — it does NOT advance the storage fence and does NOT self-fence the owner's own
+/// in-flight writes (bead pqueue-79178303). The authority record still names this node `active_owner`, so no
+/// DIFFERENT owner took over in the gap; the fence exists only to supersede a different owner, so there is
+/// nothing legitimate to fence here. Bumping would fence the node's own epoch-N writes and collapse
+/// throughput instead of degrading gracefully. (Contrast: a DIFFERENT owner taking over DOES bump and fence
+/// — `a_superseded_owner_is_fenced_at_the_append_seam` above.)
+///
+/// NOTE: a real process restart on the in-memory control plane resets the record to genesis (epoch 0,
+/// unowned), so a restarted node takes the COLD-START path (epoch advances 0→1) — it does not reach this
+/// same-owner-preserve branch. This branch is the in-process lease-lapse case (the self-fencing-collapse bug).
 #[tokio::test]
-async fn a_re_acquire_fences_the_owners_own_stragglers_at_the_seam() {
+async fn a_same_owner_reaffirm_preserves_its_fence_and_does_not_self_fence() {
     let b = MemoryBackend::new();
     b.create_queue(qdef()).await.unwrap();
     let cp = InMemoryControlPlane::default();
     let a = owner("a");
     cp.register_owner(&a, ts(0)).unwrap();
 
-    // First owner does some work (a pause), then its lease expires.
+    // First owner does some work (a pause), then its lease lapses.
     let OwnershipOutcome::Owned(s1) = acquire_and_fence(&cp, &b, &shard(), &a, ts(0))
         .await
         .unwrap()
@@ -134,8 +139,8 @@ async fn a_re_acquire_fences_the_owners_own_stragglers_at_the_seam() {
     };
     append_at(&b, s1.fence_epoch).await.unwrap();
 
-    // The SAME node re-resolves to itself and re-acquires (recovery): a strictly-greater fence epoch that
-    // fences its own pre-recovery stragglers, on the same durable queue (no rewind).
+    // The SAME node re-resolves to itself and re-acquires its OWN (lapsed) lease: the fence epoch is
+    // PRESERVED (no storage advance), on the same durable queue (no rewind).
     cp.register_owner(&a, ts(100_000)).unwrap();
     let OwnershipOutcome::Owned(s2) = acquire_and_fence(&cp, &b, &shard(), &a, ts(100_000))
         .await
@@ -143,14 +148,16 @@ async fn a_re_acquire_fences_the_owners_own_stragglers_at_the_seam() {
     else {
         panic!("re-acquire");
     };
-    assert!(
-        s2.fence_epoch > s1.fence_epoch,
-        "recovery fences the prior epoch"
-    );
-    // A straggler write at the pre-recovery epoch is fenced; the recovered owner resumes at the new epoch.
     assert_eq!(
-        append_at(&b, s1.fence_epoch).await,
-        Err(EngineError::EpochFenced)
+        s2.fence_epoch, s1.fence_epoch,
+        "same-owner re-affirm keeps the fence epoch (no self-advance)"
     );
+    assert_eq!(
+        b.current_epoch(&shard()).await.unwrap(),
+        s1.fence_epoch,
+        "the durable storage fence does not advance on a same-owner re-affirm"
+    );
+    // The in-flight write at the (still-current) fence epoch is NOT fenced — graceful degradation, no storm.
+    append_at(&b, s1.fence_epoch).await.unwrap();
     append_at(&b, s2.fence_epoch).await.unwrap();
 }

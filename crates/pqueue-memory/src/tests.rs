@@ -192,6 +192,90 @@ async fn push_fences_superseded_owner_epoch() {
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
 }
 
+/// Graceful-degradation guard (bead pqueue-79178303): a sole owner whose lease LAPSES under CPU starvation
+/// re-acquires its OWN queue WITHOUT self-fencing. This drives the real ownership primitive
+/// (`acquire_and_fence`) over the reference control plane + the memory storage fence, then proves an
+/// in-flight push stamped with the PRIOR fence epoch is STILL accepted (no `EpochFenced`). Before the fix
+/// the re-acquire bumped the epoch, advanced the storage fence, and fenced the node's own in-flight writes
+/// — a self-inflicted retry storm that collapsed throughput instead of degrading gracefully.
+#[tokio::test]
+async fn lapsed_same_owner_reacquire_does_not_self_fence_inflight_writes() {
+    use pqueue_conformance::{qdef, qkey, shard};
+    use pqueue_core::OwnerId;
+    use pqueue_engine::{
+        ControlPlaneConfig, ControlPlaneStore, InMemoryControlPlane, OwnershipOutcome,
+        ProjectionRead, PushPort, PushSpec, QueueControlPlane, acquire_and_fence,
+    };
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+
+    // Reference control plane: heartbeat TTL 5s, lease TTL 15s (the defaults that expose the bug).
+    let cp = InMemoryControlPlane::new(ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 15_000,
+    });
+    let a = OwnerId::new("node-a").unwrap();
+    cp.register_owner(&a, ts(0)).unwrap();
+
+    // First acquire binds the lease to the storage fence (genesis 0 -> 1).
+    let OwnershipOutcome::Owned(session1) = acquire_and_fence(&cp, &b, &shard(), &a, ts(0))
+        .await
+        .unwrap()
+    else {
+        panic!("expected Owned");
+    };
+    assert_eq!(session1.fence_epoch, 1);
+
+    // The owner serves: an in-flight push at its fence epoch lands.
+    b.push(
+        &shard(),
+        vec![PushSpec::default()],
+        ts(1),
+        Some(session1.fence_epoch),
+    )
+    .await
+    .unwrap();
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+
+    // Under CPU starvation the renew task ran late: the lease TTL (15s) lapsed by ts(100). The owner is
+    // still heartbeat-live (it re-registers) and re-resolves to itself, so it re-acquires its OWN queue.
+    cp.register_owner(&a, ts(100)).unwrap();
+    let OwnershipOutcome::Owned(session2) = acquire_and_fence(&cp, &b, &shard(), &a, ts(100))
+        .await
+        .unwrap()
+    else {
+        panic!("expected Owned on same-owner re-affirm");
+    };
+
+    // The fix: the epoch is PRESERVED across the lapse, so the storage fence does NOT advance.
+    assert_eq!(
+        session2.fence_epoch, session1.fence_epoch,
+        "re-acquiring a lapsed OWN lease must keep the fence epoch (no self-advance)"
+    );
+    assert_eq!(
+        b.current_epoch(&shard()).await.unwrap(),
+        session1.fence_epoch,
+        "the durable storage fence must not advance on a same-owner re-affirm"
+    );
+
+    // The proof of graceful degradation: an in-flight write stamped with the PRIOR fence epoch is NOT
+    // fenced — the slow-but-alive owner keeps serving; it did not collapse itself.
+    b.push(
+        &shard(),
+        vec![PushSpec::default()],
+        ts(101),
+        Some(session1.fence_epoch),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        2,
+        "the prior-epoch in-flight write must still commit (no self-fence storm)"
+    );
+}
+
 /// B1b (ADR-009 / TD-003): the cached-epoch fence also covers `FinalizePort::finalize` — completing the
 /// TD-003 explicit Push/Claim/Finalize fence MUST. A superseded owner's finalize is `EpochFenced` and
 /// makes no lifecycle transition; the current-epoch owner finalizes normally.
