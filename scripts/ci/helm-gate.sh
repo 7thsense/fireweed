@@ -42,7 +42,7 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/pqueue/ci/.
-COMBINATIONS=(objectlog-inmemory objectlog-sqlite postgres-inmemory postgres-sqlite postgres-postgres)
+COMBINATIONS=(objectlog-inmemory objectlog-sqlite postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -133,6 +133,7 @@ values_file_for() {
         postgres-inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         postgres-sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres-postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
+        lakebase-postgres) echo "${CHART_DIR}/ci/lakebase-postgres-values.yaml" ;;
         *) err "no CI values file for storage combination: ${combination}"; exit 1 ;;
     esac
 }
@@ -214,6 +215,30 @@ assert_postgres_contract() {
     assert_no_fixture_credentials "$rendered" "postgres rendered manifest"
 }
 
+assert_lakebase_postgres_contract() {
+    local rendered="$1"
+
+    assert_postgres_contract "$rendered" "postgres"
+    assert_contains "$rendered" 'PQUEUE_LAKEBASE_ENDPOINT_MODE' "Lakebase endpoint mode env"
+    assert_contains "$rendered" 'value: "pooler"' "Lakebase pooler endpoint selection"
+    assert_contains "$rendered" 'PQUEUE_LAKEBASE_DATABASE_NAME' "Lakebase database name env"
+    assert_contains "$rendered" 'value: "databricks_postgres"' "Lakebase default database"
+    assert_contains "$rendered" 'PQUEUE_LAKEBASE_PORT' "Lakebase port env"
+    assert_contains "$rendered" 'value: "5432"' "Lakebase port value"
+    assert_contains "$rendered" 'PQUEUE_LAKEBASE_SSLMODE' "Lakebase sslmode env"
+    assert_contains "$rendered" 'value: "require"' "Lakebase sslmode value"
+    assert_contains "$rendered" 'PQUEUE_LAKEBASE_AUTH_MODE' "Lakebase auth mode env"
+    assert_contains "$rendered" 'value: "service-principal-oauth"' "Lakebase OAuth auth mode"
+    assert_contains "$rendered" 'name: DATABRICKS_HOST' "Databricks host Secret env"
+    assert_contains "$rendered" 'name: PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME' "Databricks instance Secret env"
+    assert_contains "$rendered" 'name: DATABRICKS_CLIENT_ID' "Databricks service principal client id"
+    assert_contains "$rendered" 'name: DATABRICKS_CLIENT_SECRET' "Databricks service principal client secret"
+    assert_contains "$rendered" 'name: "pqueue-lakebase-dsn"' "Lakebase DSN Secret"
+    assert_contains "$rendered" 'name: "pqueue-lakebase-oauth"' "Lakebase OAuth Secret"
+    assert_not_contains "$rendered" 'password=' "inline Lakebase password"
+    assert_no_fixture_credentials "$rendered" "Lakebase rendered manifest"
+}
+
 assert_combination_contract() {
     local combination="$1"
     local rendered="$2"
@@ -225,6 +250,7 @@ assert_combination_contract() {
         postgres-inmemory) assert_postgres_contract "$rendered" "inmemory" ;;
         postgres-sqlite) assert_postgres_contract "$rendered" "sqlite" ;;
         postgres-postgres) assert_postgres_contract "$rendered" "postgres" ;;
+        lakebase-postgres) assert_lakebase_postgres_contract "$rendered" ;;
         *) err "no rendered contract assertions for storage combination: ${combination}"; exit 1 ;;
     esac
 }

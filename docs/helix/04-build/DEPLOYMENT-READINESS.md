@@ -145,16 +145,17 @@ Databricks Lakebase when the runtime adapter is wired. Lakebase is
 Postgres-wire compatible. Connection setup belongs to
 `pqueue-postgres::connect`:
 
-- TLS is required for Lakebase. The connector reads `sslmode` from the
-  connection string and selects rustls vs `NoTls` automatically.
+- TLS is required for Lakebase. The current connector parses `sslmode` but
+  rejects `sslmode=require` before attempting a `NoTls` connection; the
+  TLS-capable connector/runtime work is tracked by `pqueue-13924b0e`.
 - Native password through a pooler and OAuth-generated database credentials are
   connection-layer concerns, not new storage combinations.
 - A credentialed live acceptance run against a real managed endpoint is required
   before any release claims provider-specific managed-Postgres certification.
 
-Until that live run exists, releases may claim only chart/render support for the
-Postgres storage axes unless the service runtime and `kind` gate prove the
-combination.
+Until the TLS/runtime work and live run exist, releases may claim only
+chart/render support for the Lakebase Postgres storage axes unless the service
+runtime and `kind` gate prove the combination.
 
 ## Object-Log Boundary
 
