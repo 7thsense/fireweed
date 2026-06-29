@@ -88,10 +88,105 @@ identifier_type!(TenantId);
 identifier_type!(QueueId);
 identifier_type!(RequestId);
 identifier_type!(ClientItemKey);
-identifier_type!(ItemId);
 identifier_type!(LeaseToken);
 identifier_type!(GroupKey);
+identifier_type!(CohortId);
 identifier_type!(WorkerId);
+identifier_type!(OwnerId);
+
+/// Server-assigned item identity (ADR-009): a packed `u64` laid out **high → low** as
+/// `[ epoch : 24 ][ node : 8 ][ counter : 32 ]`.
+///
+/// The layout is chosen for the `(tenant, queue, item_id)` pkey: `epoch` (strictly-increasing per queue on
+/// every ownership change) is the high order and `counter` (per-tenure, +1 per push) the low order, so
+/// item_ids increase monotonically with insertion order — **append-only** B-tree inserts, and numeric order
+/// equals stream/insertion order. `node` (the writer's node id) sits in the middle as split-brain
+/// disambiguation; single-writer-per-epoch already makes `(epoch, counter)` unique, so `node` is
+/// defense-in-depth, not the primary guarantee. Generated **locally** by the owning node (no central
+/// sequence — works on the log); the counter resets each acquire (a new, strictly-greater epoch).
+///
+/// Serialized as its **decimal string** on the log/wire (no JSON-number precision footgun, stable token);
+/// stored as a native `BIGINT`/`INTEGER` ([`as_u64`](Self::as_u64)) in a relational projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemId(u64);
+
+impl ItemId {
+    const NODE_SHIFT: u32 = 32;
+    const EPOCH_SHIFT: u32 = 40;
+    const EPOCH_MASK: u64 = (1 << 24) - 1;
+
+    /// Pack `(epoch, node, counter)` into the id. Only the low 24 bits of `epoch` are used (it wraps after
+    /// 2^24 ownership changes — a centuries-away event, see the epoch-exhaustion guard at the owner).
+    pub fn mint(epoch: u64, node: u8, counter: u32) -> Self {
+        Self(
+            ((epoch & Self::EPOCH_MASK) << Self::EPOCH_SHIFT)
+                | ((node as u64) << Self::NODE_SHIFT)
+                | counter as u64,
+        )
+    }
+
+    /// Wrap a raw packed value (read from durable storage / the wire).
+    pub fn from_u64(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Parse a persisted/wire rendering — the inverse of [`Display`](std::fmt::Display). Accepts the
+    /// canonical decimal of the packed value; used when reading an id back from a TEXT column or a RESP
+    /// frame. (Kept named `new` so the many read-from-storage call sites are unchanged.)
+    pub fn new(rendered: impl AsRef<str>) -> Result<Self, IdentifierError> {
+        rendered.as_ref().parse()
+    }
+
+    /// The packed value — store this as the native `BIGINT`/`INTEGER` pkey in a relational projection.
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// The 24-bit epoch field (low bits of the queue's `assignment_epoch`).
+    pub fn epoch(&self) -> u64 {
+        self.0 >> Self::EPOCH_SHIFT
+    }
+
+    /// The writer's node id.
+    pub fn node(&self) -> u8 {
+        (self.0 >> Self::NODE_SHIFT) as u8
+    }
+
+    /// The per-tenure counter.
+    pub fn counter(&self) -> u32 {
+        self.0 as u32
+    }
+}
+
+impl fmt::Display for ItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Decimal of the packed value: stable, opaque token; numeric order == stream/insertion order.
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for ItemId {
+    type Err = IdentifierError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u64>()
+            .map(Self)
+            .map_err(|_| IdentifierError::new("ItemId must be a u64 decimal string"))
+    }
+}
+
+impl serde::Serialize for ItemId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // String on the wire/log — avoids the JSON >2^53 number-precision footgun.
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ItemId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -143,7 +238,7 @@ pub struct DecimalValue {
     pub scale: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PriorityValue {
     Timestamp(UtcTimestamp),
     Int64(i64),
@@ -214,6 +309,10 @@ pub struct Metadata {
 impl Metadata {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn from_entries(entries: BTreeMap<String, MetadataValue>) -> Self {
+        Self { entries }
     }
 
     pub fn insert(
@@ -318,7 +417,6 @@ pub struct RetryPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QueueCreationPolicy {
-    pub deployment_max_shard_count: u32,
     pub default_max_gate_keys_per_item: u64,
     pub default_max_gates_per_request: u64,
 }
@@ -326,7 +424,6 @@ pub struct QueueCreationPolicy {
 impl Default for QueueCreationPolicy {
     fn default() -> Self {
         Self {
-            deployment_max_shard_count: 1,
             default_max_gate_keys_per_item: 1,
             default_max_gates_per_request: 1,
         }
@@ -441,25 +538,42 @@ pub struct ItemResult {
     pub status: ItemResultStatus,
 }
 
+/// Declaration of one per-queue secondary index over configured item fields (ADR-010).
+///
+/// An index belongs to one queue (no cross-queue lookup) and is generic over field *names* and opaque
+/// *bytes* values (pqueue stays domain-agnostic). The composite key is built from `fields` in order; a
+/// `unique` index rejects a push/upsert/update that would create a duplicate key with
+/// [`ApiErrorCode::Conflict`] semantics, atomically committing nothing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IndexSpec {
+    /// Unique index name within the queue (the lookup handle).
+    pub name: String,
+    /// Ordered list of field names whose values compose the key. Order is significant.
+    pub fields: Vec<String>,
+    /// `true` => at most one live item may carry a given composite key (atomic Conflict on violation).
+    pub unique: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateQueue {
     pub tenant_id: TenantId,
     pub queue_id: QueueId,
     pub priority_model: PriorityModel,
     pub ordering_mode: OrderingMode,
-    pub group_co_residency: bool,
     pub progress_bound_ms: u64,
     pub eligibility_policy: EligibilityPolicy,
     pub cohort_policy: CohortPolicy,
     pub recurrence: RecurrencePolicy,
     pub request_id_retention_ms: u64,
     pub client_item_key_retention_ms: u64,
+    pub terminal_retention_ms: u64,
     pub max_lease_duration_ms: u64,
     pub retry_policy: RetryPolicy,
     pub max_push_batch_size: u64,
     pub max_claim_batch_size: u64,
     pub max_eligible_group_size: Option<u64>,
-    pub shard_count: Option<u32>,
+    /// Per-queue secondary indexes over configured item fields (ADR-010). Empty (default) = no indexes.
+    pub secondary_indexes: Vec<IndexSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -468,19 +582,27 @@ pub struct QueueDefinition {
     pub queue_id: QueueId,
     pub priority_model: PriorityModel,
     pub ordering_mode: OrderingMode,
-    pub group_co_residency: bool,
     pub progress_bound_ms: u64,
     pub eligibility_policy: EligibilityPolicy,
     pub cohort_policy: Option<CohortPolicy>,
     pub recurrence: RecurrencePolicy,
     pub request_id_retention_ms: u64,
     pub client_item_key_retention_ms: u64,
+    #[serde(default = "default_terminal_retention_ms")]
+    pub terminal_retention_ms: u64,
     pub max_lease_duration_ms: u64,
     pub retry_policy: RetryPolicy,
     pub max_push_batch_size: u64,
     pub max_claim_batch_size: u64,
     pub max_eligible_group_size: Option<u64>,
-    pub shard_count: u32,
+    /// Per-queue secondary indexes over configured item fields (ADR-010). Empty (default) = no indexes;
+    /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
+    #[serde(default)]
+    pub secondary_indexes: Vec<IndexSpec>,
+}
+
+fn default_terminal_retention_ms() -> u64 {
+    60_000
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -509,6 +631,12 @@ impl CreateQueue {
         if self.client_item_key_retention_ms == 0 {
             return Err(CreateQueueError::invalid_request(
                 "client_item_key_retention_ms must be greater than 0",
+            ));
+        }
+
+        if self.terminal_retention_ms == 0 {
+            return Err(CreateQueueError::invalid_request(
+                "terminal_retention_ms must be greater than 0",
             ));
         }
 
@@ -545,12 +673,6 @@ impl CreateQueue {
         }
 
         if self.cohort_policy.enabled {
-            if !self.group_co_residency {
-                return Err(CreateQueueError::conflict(
-                    "cohort-enabled queues require group_co_residency=true",
-                ));
-            }
-
             if self.recurrence.mode == RecurrenceMode::Recurring {
                 return Err(CreateQueueError::invalid_request(
                     "recurrence.mode=recurring is mutually exclusive with cohort_policy.enabled=true",
@@ -628,11 +750,6 @@ impl CreateQueue {
                     "max_eligible_group_size must be greater than 0",
                 ));
             }
-            if !self.group_co_residency {
-                return Err(CreateQueueError::invalid_request(
-                    "max_eligible_group_size requires group_co_residency=true",
-                ));
-            }
             if max_eligible_group_size > self.max_claim_batch_size {
                 return Err(CreateQueueError::conflict(
                     "max_eligible_group_size must be less than or equal to max_claim_batch_size",
@@ -640,17 +757,32 @@ impl CreateQueue {
             }
         }
 
-        if self.shard_count == Some(0) {
-            return Err(CreateQueueError::invalid_request(
-                "shard_count must be greater than or equal to 1",
-            ));
-        }
-
-        let shard_count = self.shard_count.unwrap_or(1);
-        if shard_count > policy.deployment_max_shard_count {
-            return Err(CreateQueueError::invalid_request(
-                "shard_count exceeds deployment_max_shard_count",
-            ));
+        // Secondary-index declarations (ADR-010 §3): each index needs a non-empty name unique within the
+        // queue, and a non-empty list of non-empty field names. Field names are NOT checked against pushed
+        // items — fields are dynamic per item, and a missing field simply leaves the item out of the index
+        // (sparse rule).
+        let mut seen_index_names = std::collections::BTreeSet::new();
+        for spec in &self.secondary_indexes {
+            if spec.name.trim().is_empty() {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index name must not be empty",
+                ));
+            }
+            if !seen_index_names.insert(spec.name.as_str()) {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index names must be unique within the queue",
+                ));
+            }
+            if spec.fields.is_empty() {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index must declare at least one field",
+                ));
+            }
+            if spec.fields.iter().any(|f| f.trim().is_empty()) {
+                return Err(CreateQueueError::invalid_request(
+                    "secondary index field name must not be empty",
+                ));
+            }
         }
 
         let mut eligibility_policy = self.eligibility_policy;
@@ -698,7 +830,6 @@ impl CreateQueue {
             queue_id: self.queue_id,
             priority_model: self.priority_model,
             ordering_mode: self.ordering_mode,
-            group_co_residency: self.group_co_residency,
             progress_bound_ms: self.progress_bound_ms,
             eligibility_policy,
             cohort_policy: if self.cohort_policy.enabled {
@@ -709,12 +840,13 @@ impl CreateQueue {
             recurrence: self.recurrence,
             request_id_retention_ms: self.request_id_retention_ms,
             client_item_key_retention_ms: self.client_item_key_retention_ms,
+            terminal_retention_ms: self.terminal_retention_ms,
             max_lease_duration_ms: self.max_lease_duration_ms,
             retry_policy: self.retry_policy,
             max_push_batch_size: self.max_push_batch_size,
             max_claim_batch_size: self.max_claim_batch_size,
             max_eligible_group_size: self.max_eligible_group_size,
-            shard_count,
+            secondary_indexes: self.secondary_indexes,
         })
     }
 }
@@ -1066,7 +1198,7 @@ pub struct EligibilitySnapshot {
 pub struct QueueEligibilityRules {
     /// Keys in `metadata_blockers` map to sets of values that block eligibility.
     pub metadata_blockers: std::collections::BTreeMap<String, Vec<MetadataValue>>,
-    /// Gate keys that are currently in a `blocked` state for this shard.
+    /// Gate keys that are currently in a `blocked` state for this queue.
     pub blocked_gate_keys: std::collections::HashSet<String>,
 }
 
@@ -1084,6 +1216,12 @@ pub enum IneligibilityReason {
 ///
 /// Returns `Ok(())` if eligible, or the first `IneligibilityReason` found
 /// following the Eligibility Precedence order.
+///
+/// NOTE (BQ-14d): this is the *reference* eligibility specification, not the live claim path of any
+/// backend. The relational family re-expresses this predicate in SQL (incl. the gate anti-join); the
+/// in-memory family re-expresses it inline in `ProjectionData::eligible_candidates` and does NOT consult
+/// gates (gates are relational-mode only). A passing `GateBlocked` test here does NOT imply the in-memory
+/// claim path enforces gates — see `PushItem.gate_keys` scope.
 pub fn evaluate_eligibility(
     snapshot: &EligibilitySnapshot,
     rules: &QueueEligibilityRules,

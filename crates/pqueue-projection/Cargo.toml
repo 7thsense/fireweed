@@ -1,0 +1,17 @@
+[package]
+name = "pqueue-projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# The priority-ordered projection state machine + per-shard log, as a pure in-memory `Shard` with no
+# I/O. Driven adapters (memory/sqlite/postgres) provide PERSISTENCE of this shared core rather than each
+# re-implementing the apply/eligibility/lease domain logic. Depends only on the domain (engine + core).
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+bytes = "1"

@@ -7,7 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CHART_DIR="${REPO_ROOT}/charts/pqueue"
 KIND_DIR="${SCRIPT_DIR}/kind"
 
-BACKEND=""
+LOG_BACKEND=""
+PROJECTION_BACKEND=""
 CLUSTER_NAME=""
 RELEASE_NAME="pqueue"
 NAMESPACE="pqueue"
@@ -28,7 +29,7 @@ usage() {
 kind-helm-test.sh - run a disposable kind Helm install smoke test for pqueue
 
 USAGE:
-  bash scripts/ci/kind-helm-test.sh --backend <profile> [OPTIONS]
+  bash scripts/ci/kind-helm-test.sh --log-backend <backend> --projection-backend <backend> [OPTIONS]
 
 REQUIRED TOOLS FOR REAL RUNS:
   docker    build the pqueue image
@@ -36,16 +37,18 @@ REQUIRED TOOLS FOR REAL RUNS:
   kubectl   apply helper manifests, wait for rollout, and run the smoke check
   helm      install/upgrade the charts/pqueue release
 
-BACKEND PROFILES:
-  postgres_native
-  object_log_sqlite_projection
+STORAGE BACKENDS:
+  log:        objectlog
+  projection: inmemory
 
 OPTIONS:
-  --backend <profile>      Required backend profile.
+  --log-backend <backend>  Required log backend for this runtime smoke.
+  --projection-backend <backend>
+                           Required projection backend for this runtime smoke.
   --dry-run                Print the planned commands and values without
                            checking tools or creating a cluster.
   --cluster-name <name>    kind cluster name. Defaults to a disposable
-                           pqueue-<backend>-<pid> name.
+                           pqueue-<log>-<projection>-<pid> name.
   --release-name <name>    Helm release name. Default: pqueue.
   --namespace <name>       Kubernetes namespace. Default: pqueue.
   --image <repo:tag>       Image to build, load, and install. Default: pqueue:ci.
@@ -57,10 +60,9 @@ OPTIONS:
   -h, --help               Show this help text and exit.
 
 The harness builds the pqueue container image, creates a kind cluster, loads the
-image into that cluster, applies local runtime-secret fixtures, installs the
-postgres_native PostgreSQL dependency when required, installs the Helm chart
-with the selected CI backend values file, waits for readiness, checks GET
-/readyz through kubectl port-forward, and deletes the cluster by default.
+image into that cluster, installs the Helm chart with the selected CI storage
+values file, waits for readiness, checks RESP PING through kubectl
+port-forward, and deletes the cluster by default.
 EOF
 }
 
@@ -91,10 +93,9 @@ kubectl_cmd() {
 }
 
 values_file_for() {
-    case "$1" in
-        postgres_native) echo "${CHART_DIR}/ci/postgres-native-values.yaml" ;;
-        object_log_sqlite_projection) echo "${CHART_DIR}/ci/object-log-sqlite-projection-values.yaml" ;;
-        *) die "unsupported backend profile: $1" ;;
+    case "$1:$2" in
+        objectlog:inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
+        *) die "no runtime CI values file for log=$1 projection=$2" ;;
     esac
 }
 
@@ -111,9 +112,14 @@ cleanup() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --backend)
-                [[ $# -ge 2 ]] || die "--backend requires a value"
-                BACKEND="$2"
+            --log-backend)
+                [[ $# -ge 2 ]] || die "--log-backend requires a value"
+                LOG_BACKEND="$2"
+                shift 2
+                ;;
+            --projection-backend)
+                [[ $# -ge 2 ]] || die "--projection-backend requires a value"
+                PROJECTION_BACKEND="$2"
                 shift 2
                 ;;
             --dry-run)
@@ -171,40 +177,35 @@ parse_args() {
 }
 
 validate_config() {
-    [[ -n "${BACKEND}" ]] || die "--backend is required"
-    case "${BACKEND}" in
-        postgres_native | object_log_sqlite_projection) ;;
-        *) die "unsupported backend profile: ${BACKEND}" ;;
+    [[ -n "${LOG_BACKEND}" ]] || die "--log-backend is required"
+    [[ -n "${PROJECTION_BACKEND}" ]] || die "--projection-backend is required"
+    case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
+        objectlog:inmemory) ;;
+        *) die "runtime smoke currently supports only log=objectlog projection=inmemory; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example pqueue:ci"
     [[ "${SMOKE_PORT}" =~ ^[0-9]+$ ]] || die "--smoke-port must be a TCP port number"
-    [[ -f "$(values_file_for "${BACKEND}")" ]] || die "missing values file for backend: ${BACKEND}"
-    [[ -f "${KIND_DIR}/runtime-secrets.yaml" ]] || die "missing helper manifest: ${KIND_DIR}/runtime-secrets.yaml"
-    if [[ "${BACKEND}" == "postgres_native" ]]; then
-        [[ -f "${KIND_DIR}/postgres.yaml" ]] || die "missing postgres helper manifest: ${KIND_DIR}/postgres.yaml"
-    else
-        [[ -f "${KIND_DIR}/object-log.yaml" ]] || die "missing object-log helper manifest: ${KIND_DIR}/object-log.yaml"
-    fi
+    [[ -f "$(values_file_for "${LOG_BACKEND}" "${PROJECTION_BACKEND}")" ]] || die "missing values file for log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}"
 
     if [[ -z "${CLUSTER_NAME}" ]]; then
-        CLUSTER_NAME="pqueue-${BACKEND//_/-}-$$"
+        CLUSTER_NAME="pqueue-${LOG_BACKEND}-${PROJECTION_BACKEND}-$$"
     fi
 }
 
 dry_run_plan() {
     local values image_repository image_tag
-    values="$(values_file_for "${BACKEND}")"
+    values="$(values_file_for "${LOG_BACKEND}" "${PROJECTION_BACKEND}")"
     image_repository="${IMAGE%:*}"
     image_tag="${IMAGE##*:}"
 
     echo "=== kind Helm integration dry run ==="
-    echo "backend:       ${BACKEND}"
+    echo "log backend:   ${LOG_BACKEND}"
+    echo "projection:    ${PROJECTION_BACKEND}"
     echo "cluster:       ${CLUSTER_NAME}"
     echo "namespace:     ${NAMESPACE}"
     echo "release:       ${RELEASE_NAME}"
     echo "image:         ${IMAGE}"
     echo "values:        ${values}"
-    echo "helper:        ${KIND_DIR}/runtime-secrets.yaml"
     echo "required tools for real runs: docker kind kubectl helm"
     echo
     echo "--- planned commands ---"
@@ -217,25 +218,16 @@ dry_run_plan() {
     print_cmd kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" cluster-info
     echo "+ kubectl --context kind-${CLUSTER_NAME} create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl --context kind-${CLUSTER_NAME} apply -f -"
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
-    if [[ "${BACKEND}" == "postgres_native" ]]; then
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
-    else
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/object-log.yaml"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/minio --timeout "${TIMEOUT}"
-    fi
     print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
-    echo "+ GET http://127.0.0.1:${SMOKE_PORT}/readyz"
-    if [[ "${BACKEND}" == "object_log_sqlite_projection" ]]; then
-        echo "+ POST http://127.0.0.1:${SMOKE_PORT}/__pqueue/deployment/object-log-smoke/<proof-id>"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec deployment/minio -- test -s "/data/pqueue-object-log/pqueue/deployment-smoke/<proof-id>.json"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec "deployment/${RELEASE_NAME}" -- test -s "/var/lib/pqueue/projection/deployment-smoke/<proof-id>.json"
+    echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} port-forward pod/<ready-pqueue-pod> ${SMOKE_PORT}:8080"
+    echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
+    echo "+ RESP XADD/XREADGROUP 127.0.0.1:${SMOKE_PORT}"
+    if [[ "${LOG_BACKEND}" == "objectlog" ]]; then
+        echo "+ RESP XADD before restart"
         print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
         print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
-        echo "+ GET http://127.0.0.1:${SMOKE_PORT}/__pqueue/deployment/object-log-smoke/<proof-id>"
+        echo "+ RESP XREADGROUP after restart"
     fi
     if [[ "${KEEP_CLUSTER}" == false ]]; then
         print_cmd kind delete cluster --name "${CLUSTER_NAME}"
@@ -271,6 +263,56 @@ stop_port_forward() {
     fi
 }
 
+pod_selector() {
+    printf 'app.kubernetes.io/instance=%s,app.kubernetes.io/name=pqueue' "${RELEASE_NAME}"
+}
+
+current_ready_pod() {
+    local selector pod_name
+    selector="$(pod_selector)"
+    pod_name="$(
+        kubectl_cmd -n "${NAMESPACE}" get pods \
+            -l "${selector}" \
+            --field-selector status.phase=Running \
+            -o jsonpath='{range .items[*]}{.metadata.creationTimestamp}{" "}{.metadata.name}{"\n"}{end}' |
+            sort |
+            tail -n 1 |
+            awk '{print $2}'
+    )"
+    [[ -n "${pod_name}" ]] || die "no running pqueue pod found for selector ${selector}"
+    {
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" wait --for=condition=Ready "pod/${pod_name}" --timeout "${TIMEOUT}"
+    } >&2
+    kubectl_cmd -n "${NAMESPACE}" wait --for=condition=Ready "pod/${pod_name}" --timeout "${TIMEOUT}" >&2
+    printf '%s\n' "${pod_name}"
+}
+
+start_resp_port_forward() {
+    local run_dir log_path pod_name
+    run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
+    mkdir -p "${run_dir}"
+    log_path="${run_dir}/port-forward.log"
+    pod_name="$(current_ready_pod)"
+
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "pod/${pod_name}" "${SMOKE_PORT}:8080"
+    kubectl_cmd -n "${NAMESPACE}" port-forward "pod/${pod_name}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
+    PF_PID=$!
+
+    wait_for_port_forward "${log_path}"
+}
+
+smoke_resp_ping() {
+    local response_path="$1"
+
+    echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
+    resp_request "${response_path}" '*1\r\n$4\r\nPING\r\n'
+    if ! grep -Fq '+PONG' "${response_path}"; then
+        err "RESP PING did not return PONG"
+        sed -n '1,80p' "${response_path}" >&2 || true
+        return 1
+    fi
+}
+
 wait_for_kubernetes_api() {
     echo "waiting for Kubernetes API for kind cluster ${CLUSTER_NAME}"
     for _ in {1..60}; do
@@ -282,76 +324,98 @@ wait_for_kubernetes_api() {
     die "timed out waiting for Kubernetes API for kind cluster ${CLUSTER_NAME}"
 }
 
-smoke_readyz() {
-    local run_dir log_path response_path
+resp_request() {
+    local response_path="$1"
+    local payload="$2"
+    RESP_SMOKE_PORT="${SMOKE_PORT}" \
+    RESP_SMOKE_RESPONSE="${response_path}" \
+    RESP_SMOKE_PAYLOAD="${payload}" \
+    python3 - <<'PY'
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+port = int(os.environ["RESP_SMOKE_PORT"])
+response = Path(os.environ["RESP_SMOKE_RESPONSE"])
+payload = os.environ["RESP_SMOKE_PAYLOAD"].encode("utf-8").decode("unicode_escape").encode("latin1")
+deadline = time.monotonic() + 5.0
+chunks = []
+
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=2.0) as sock:
+        sock.settimeout(0.25)
+        sock.sendall(payload)
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                if chunks:
+                    break
+                continue
+            if not chunk:
+                break
+            chunks.append(chunk)
+except OSError as exc:
+    print(f"RESP request failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if not chunks:
+    print("RESP request timed out waiting for a response", file=sys.stderr)
+    sys.exit(1)
+
+response.write_bytes(b"".join(chunks))
+PY
+}
+
+smoke_resp() {
+    local run_dir response_path
     run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
     mkdir -p "${run_dir}"
-    log_path="${run_dir}/port-forward.log"
-    response_path="${run_dir}/readyz.response"
+    response_path="${run_dir}/resp.response"
 
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080"
-    kubectl_cmd -n "${NAMESPACE}" port-forward "service/${RELEASE_NAME}" "${SMOKE_PORT}:8080" >"${log_path}" 2>&1 &
-    PF_PID=$!
+    start_resp_port_forward
+    smoke_resp_ping "${response_path}"
 
-    wait_for_port_forward "${log_path}"
-
-    (
-        exec 3<>"/dev/tcp/127.0.0.1/${SMOKE_PORT}"
-        printf 'GET /readyz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3
-        cat <&3
-    ) >"${response_path}"
-
-    if ! sed -n '1p' "${response_path}" | grep -Eq '^HTTP/[0-9.]+ 200 '; then
-        err "GET /readyz did not return HTTP 200"
+    echo "+ RESP XADD 127.0.0.1:${SMOKE_PORT}"
+    resp_request "${response_path}" '*5\r\n$4\r\nXADD\r\n$5\r\nt1:q1\r\n$1\r\n*\r\n$8\r\npriority\r\n$1\r\n1\r\n'
+    if ! grep -Eq '^\$[0-9]+' "${response_path}"; then
+        err "RESP XADD did not return a bulk item id"
         sed -n '1,80p' "${response_path}" >&2 || true
         return 1
     fi
 
-    echo "GET /readyz returned HTTP 200"
-}
-
-service_http_request() {
-    local method="$1"
-    local path="$2"
-    local response_path="$3"
-
-    (
-        exec 3<>"/dev/tcp/127.0.0.1/${SMOKE_PORT}"
-        printf '%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' "${method}" "${path}" >&3
-        cat <&3
-    ) >"${response_path}"
-
-    if ! sed -n '1p' "${response_path}" | grep -Eq '^HTTP/[0-9.]+ 200 '; then
-        err "${method} ${path} did not return HTTP 200"
+    echo "+ RESP XREADGROUP 127.0.0.1:${SMOKE_PORT}"
+    resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$1\r\nc\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
+    if ! grep -Fq 't1:q1' "${response_path}"; then
+        err "RESP XREADGROUP did not return the bootstrap queue"
         sed -n '1,120p' "${response_path}" >&2 || true
         return 1
     fi
+
+    echo "RESP smoke passed"
 }
 
 smoke_object_log_runtime() {
-    [[ "${BACKEND}" == "object_log_sqlite_projection" ]] || return 0
+    [[ "${LOG_BACKEND}" == "objectlog" ]] || return 0
 
-    local run_dir proof_id smoke_path post_response get_response object_path marker_path
+    local run_dir response_path
     run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
-    proof_id="$(printf '%s' "${CLUSTER_NAME}-$(date +%s)" | tr -c 'A-Za-z0-9_-' '_')"
-    smoke_path="/__pqueue/deployment/object-log-smoke/${proof_id}"
-    post_response="${run_dir}/object-log-smoke-post.response"
-    get_response="${run_dir}/object-log-smoke-get.response"
-    object_path="/data/pqueue-object-log/pqueue/deployment-smoke/${proof_id}.json"
-    marker_path="/var/lib/pqueue/projection/deployment-smoke/${proof_id}.json"
+    response_path="${run_dir}/object-log-recovery.response"
 
-    echo "+ POST http://127.0.0.1:${SMOKE_PORT}${smoke_path}"
-    service_http_request POST "${smoke_path}" "${post_response}"
-    grep -F '"recovered":false' "${post_response}" >/dev/null || {
-        err "object-log deployment smoke POST did not report recovered=false"
-        sed -n '1,120p' "${post_response}" >&2 || true
+    echo "+ RESP XADD before restart"
+    resp_request "${response_path}" '*5\r\n$4\r\nXADD\r\n$5\r\nt1:q1\r\n$1\r\n*\r\n$8\r\npriority\r\n$1\r\n2\r\n'
+    if ! grep -Eq '^\$[0-9]+' "${response_path}"; then
+        err "object-log pre-restart XADD did not return a bulk item id"
+        sed -n '1,80p' "${response_path}" >&2 || true
         return 1
-    }
-
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec deployment/minio -- test -s "${object_path}"
-    kubectl_cmd -n "${NAMESPACE}" exec deployment/minio -- test -s "${object_path}"
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" exec "deployment/${RELEASE_NAME}" -- test -s "${marker_path}"
-    kubectl_cmd -n "${NAMESPACE}" exec "deployment/${RELEASE_NAME}" -- test -s "${marker_path}"
+    fi
 
     stop_port_forward
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
@@ -359,15 +423,16 @@ smoke_object_log_runtime() {
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
 
-    smoke_readyz
-    echo "+ GET http://127.0.0.1:${SMOKE_PORT}${smoke_path}"
-    service_http_request GET "${smoke_path}" "${get_response}"
-    grep -F '"recovered":true' "${get_response}" >/dev/null || {
-        err "object-log deployment smoke GET did not report recovered=true"
-        sed -n '1,120p' "${get_response}" >&2 || true
+    start_resp_port_forward
+    smoke_resp_ping "${response_path}"
+    echo "+ RESP XREADGROUP after restart"
+    resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$9\r\nrestarted\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
+    if ! grep -Fq 't1:q1' "${response_path}"; then
+        err "object-log post-restart XREADGROUP did not recover queue data"
+        sed -n '1,120p' "${response_path}" >&2 || true
         return 1
-    }
-    echo "object-log write and restart recovery smoke passed"
+    fi
+    echo "object-log restart recovery smoke passed"
 }
 
 create_namespace() {
@@ -388,12 +453,13 @@ main() {
     trap cleanup EXIT
 
     local values image_repository image_tag
-    values="$(values_file_for "${BACKEND}")"
+    values="$(values_file_for "${LOG_BACKEND}" "${PROJECTION_BACKEND}")"
     image_repository="${IMAGE%:*}"
     image_tag="${IMAGE##*:}"
 
     echo "=== kind Helm integration smoke ==="
-    echo "backend:   ${BACKEND}"
+    echo "log:       ${LOG_BACKEND}"
+    echo "projection:${PROJECTION_BACKEND}"
     echo "cluster:   ${CLUSTER_NAME}"
     echo "namespace: ${NAMESPACE}"
     echo "release:   ${RELEASE_NAME}"
@@ -409,19 +475,6 @@ main() {
     run kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"
     wait_for_kubernetes_api
     create_namespace
-    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
-    kubectl_cmd -n "${NAMESPACE}" apply -f "${KIND_DIR}/runtime-secrets.yaml"
-    if [[ "${BACKEND}" == "postgres_native" ]]; then
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
-        kubectl_cmd -n "${NAMESPACE}" apply -f "${KIND_DIR}/postgres.yaml"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
-        kubectl_cmd -n "${NAMESPACE}" rollout status deployment/postgres --timeout "${TIMEOUT}"
-    else
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" apply -f "${KIND_DIR}/object-log.yaml"
-        kubectl_cmd -n "${NAMESPACE}" apply -f "${KIND_DIR}/object-log.yaml"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status deployment/minio --timeout "${TIMEOUT}"
-        kubectl_cmd -n "${NAMESPACE}" rollout status deployment/minio --timeout "${TIMEOUT}"
-    fi
     run helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
         --kube-context "kind-${CLUSTER_NAME}" \
         --namespace "${NAMESPACE}" \
@@ -434,7 +487,7 @@ main() {
         --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
-    smoke_readyz
+    smoke_resp
     smoke_object_log_runtime
 
     echo "=== kind Helm integration smoke PASSED ==="

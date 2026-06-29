@@ -11,9 +11,9 @@ metadata:
 spec:
   type: {{ .Values.service.type }}
   ports:
-    - name: http
+    - name: resp
       port: {{ .Values.service.port }}
-      targetPort: http
+      targetPort: resp
       protocol: TCP
   selector:
     {{- include "pqueue.selectorLabels" . | nindent 4 }}

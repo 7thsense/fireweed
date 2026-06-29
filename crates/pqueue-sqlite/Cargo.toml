@@ -5,40 +5,54 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+# Driven adapter: sqlite. Durable command LOG in sqlite (rusqlite); the priority-ordered projection is
+# the shared `pqueue-projection` materialization, rebuilt from the log. Depends on the domain
+# (engine/core) + the shared projection — the correct hexagonal direction.
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
-pqueue-storage = { path = "../pqueue-storage" }
+pqueue-engine = { path = "../pqueue-engine" }
+pqueue-projection = { path = "../pqueue-projection" }
 rusqlite = { version = "0.32", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
+serde = "1"
 serde_json = "1"
+bytes = "1"
+# Lease-token hashing for the relational projection (hash-only at rest; TD-004 §security / TD-002 parity).
+sha2 = "0.11"
 
 [dev-dependencies]
-tokio = { version = "1.44", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+# Runs the shared backend-conformance suite against the sqlite backend.
+pqueue-conformance = { path = "../pqueue-conformance" }
+# BQ-13: the in-memory log-replay family representative, for the head-to-head two-family parity test.
+pqueue-memory = { path = "../pqueue-memory" }
 
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+
+[[test]]
+name = "durability"
+path = "tests/durability.rs"
+
+# BQ-11a/b/c: the relational projection family's core conformance + lifecycle round-trip + group/retention.
+[[test]]
+name = "relational_conformance"
+path = "tests/relational_conformance.rs"
+
+# BQ-11d: the relational-reconnect conformance class against the DB-authoritative relational backend.
+[[test]]
+name = "relational_reconnect"
+path = "tests/relational_reconnect.rs"
+
+# Projection-only replay/apply seam used by the object-log + SQLite composite runtime.
 [[test]]
 name = "sqlite_projection_tests"
 path = "tests/sqlite_projection_tests.rs"
 
+# BQ-13: head-to-head CORE parity — the in-memory log-replay family vs the relational family.
 [[test]]
-name = "sqlite_log_tests"
-path = "tests/sqlite_log_tests.rs"
-
-[[test]]
-name = "sqlite_projection_store_tests"
-path = "tests/sqlite_projection_store_tests.rs"
-
-[[test]]
-name = "sqlite_control_plane_tests"
-path = "tests/sqlite_control_plane_tests.rs"
-
-[[test]]
-name = "sqlite_backend_tests"
-path = "tests/sqlite_backend_tests.rs"
-
-[[test]]
-name = "shared_conformance"
-path = "tests/shared_conformance.rs"
-
-[[test]]
-name = "embedder_delivery_conformance"
-path = "tests/embedder_delivery_conformance.rs"
+name = "cross_family_parity"
+path = "tests/cross_family_parity.rs"

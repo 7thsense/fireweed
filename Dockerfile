@@ -15,16 +15,7 @@ WORKDIR /build
 # target/, VCS, and execution evidence stay out.
 COPY . .
 
-# `pqueue-objectlog` (object-log backend) and `pqueue-kafka` (designed P1 backend)
-# link external sibling workspaces (`fjord`, `heimq`) via relative paths outside
-# this build context. The runtime service binary uses neither: `pqueue-objectlog`
-# is only a dev-dependency exercised by tests, and `pqueue-kafka` is not a service
-# dependency at all. They are detached from the workspace so the image builds
-# self-contained, without local source mounts. `pqueue-sqlite` has no external
-# dependency and stays in place.
-RUN sed -i '\#"crates/pqueue-objectlog",#d;\#"crates/pqueue-kafka",#d' Cargo.toml \
-    && sed -i '/^pqueue-objectlog = /d' crates/pqueue-service/Cargo.toml \
-    && cargo build --release --bin pqueue-service --bin pqueue-verify-ledger
+RUN cargo build --release --bin pqueue-service --bin pqueue-verify-ledger
 
 # ---- runtime ----
 FROM debian:bookworm-slim AS runtime
@@ -39,9 +30,10 @@ USER pqueue
 
 # Default runtime configuration; override per deployment via Helm values.
 ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
-    PQUEUE_BACKEND_PROFILE=postgres_native
+    PQUEUE_LOG_BACKEND=objectlog \
+    PQUEUE_PROJECTION_BACKEND=inmemory
 
-# HTTP service + health probes (/healthz, /readyz) listen here.
+# RESP service listens here.
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/pqueue-service"]

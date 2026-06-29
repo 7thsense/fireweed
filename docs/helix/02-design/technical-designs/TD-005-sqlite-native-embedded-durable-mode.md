@@ -8,16 +8,18 @@ ddx:
     - adr-embedded-engine-integration-and-public-surface
     - td-storage-architecture-backend-contracts
     - td-s3-object-log-sqlite-projection-mode
+    - adr-queue-as-shard-unit-and-projection-families
   review:
-    self_hash: 92f84037765c772d48e72afaea301ad013e51258a81c96af5ecee6c9ce281ebf
+    self_hash: e058be2e8505016b7cbb1bf117d7454848d2578cbb7bfa0b8f742fdf6a39f872
     deps:
-      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
-      adr-embedded-engine-integration-and-public-surface: bb88006608f011c35bc42d5686e17467b0e3c81e56d7931e04442b01e71d672a
-      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-      td-s3-object-log-sqlite-projection-mode: d346e72f23f5859de62807f41e81b34409b43814faf95db8de237ff1ede895b7
-      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-    reviewed_at: "2026-06-23T01:44:34Z"
+      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
+      adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
+      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+      td-s3-object-log-sqlite-projection-mode: fde8c520a39579fd2c2e771a3f251d09714bb370db6e2eaf040c2d84e9e7dc0d
+      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # Technical Design: TD-005 SQLite-Native Embedded Durable Mode
@@ -45,8 +47,8 @@ In scope:
   (`pqueue-sqlite`, `projection.rs`) as the `ProjectionStore`, unchanged from
   object-log mode. (This is the full `ProjectionStore` — not the group/cohort
   `SqliteProjection` in `lib.rs` used by object-log group-summary materialization.)
-- A SQLite `ControlPlaneStore` (queue definitions, shard assignment + epoch) in
-  the same database.
+- A SQLite `ControlPlaneStore` (queue definitions, queue-owner assignment +
+  epoch) in the same database.
 - **Single-transaction append+apply**: a command is written to the log table and
   applied to the projection tables in one SQLite transaction, so the projection
   is never inconsistent with the log and the durable ack boundary is one WAL
@@ -73,8 +75,8 @@ Out of scope:
 SQLite database file:
 
 - `LogStore` — appends serialized `CommandEnvelope`s to `pqueue_command_log`
-  `(tenant_id, queue_id, shard_id, sequence, backend_epoch, checksum, payload,
-  created_at)`, `PRIMARY KEY (tenant_id, queue_id, shard_id, sequence)`. The
+  `(tenant_id, queue_id, sequence, backend_epoch, checksum, payload,
+  created_at)`, `PRIMARY KEY (tenant_id, queue_id, sequence)`. The
   durable ack boundary is the committed SQLite transaction under WAL with
   `synchronous=FULL`, which fsyncs the WAL on every commit so a returned append
   survives process crash AND power loss. (`NORMAL` only fsyncs at checkpoint,
@@ -85,7 +87,7 @@ SQLite database file:
   the full item-lifecycle projection), applied only from committed log rows
   (unchanged semantics from TD-004).
 - `ControlPlaneStore` — `pqueue_queue` (validated `QueueDefinition`) and
-  `pqueue_shard_assignment` (shard → epoch) tables in the same database.
+  `pqueue_queue_owner` (queue → epoch) tables in the same database.
 - `SnapshotStore` — optional/no-op for v1: the projection is persisted in the
   same file and is always current with the log (atomic append+apply), so there is
   no replay to accelerate. A compaction/checkpoint may be added later but is not
@@ -100,7 +102,7 @@ SQLite database file:
   removes the apply-lag/reservation machinery TD-004 needs and gives strict
   read-after-write: a returned ack means the projection already reflects it.
 - **Single-writer ownership = simpler fencing.** The embedded host process is the
-  sole writer of the file. `backend_epoch` is recorded per shard and bumped on
+  sole writer of the file. `backend_epoch` is recorded per queue and bumped on
   open for restart-fencing/observability; there is no concurrent-writer CAS. A
   second process opening the same file is a misconfiguration the backend rejects.
   v1 enforces this with `PRAGMA locking_mode=EXCLUSIVE` plus an exclusive write

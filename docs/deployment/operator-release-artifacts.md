@@ -1,7 +1,7 @@
 # Operator Release Artifacts
 
 This is the operator-facing location for obtaining and verifying pqueue release
-artifacts. Replace `OWNER`, `REPO`, and `v0.2.4` with the release repository and
+artifacts. Replace `OWNER`, `REPO`, and `v0.2.5` with the release repository and
 tag you are installing from.
 
 The current release workflow publishes:
@@ -15,9 +15,9 @@ The current release workflow publishes:
 | Binary archives | GitHub Release assets `pqueue-<version>-<target-triple>.tar.gz` |
 | Checksums | GitHub Release asset `SHA256SUMS` |
 
-For example, release tag `v0.2.4` uses version `0.2.4`, so the chart package is
-`pqueue-0.2.4.tgz` and binary archives are named like
-`pqueue-0.2.4-x86_64-linux.tar.gz`. The `v0.2.4` workflow publishes the Helm
+For example, release tag `v0.2.5` uses version `0.2.5`, so the chart package is
+`pqueue-0.2.5.tgz` and binary archives are named like
+`pqueue-0.2.5-x86_64-linux.tar.gz`. The `v0.2.5` workflow publishes the Helm
 chart as a GitHub Release package asset; it does not publish an OCI chart.
 
 ## Download
@@ -27,7 +27,7 @@ With the GitHub CLI:
 ```sh
 OWNER=<github-owner>
 REPO=pqueue
-TAG=v0.2.4
+TAG=v0.2.5
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 
@@ -45,7 +45,7 @@ gh release download "$TAG" \
 Without `gh`, download the same assets from:
 
 ```text
-https://github.com/OWNER/REPO/releases/tag/v0.2.4
+https://github.com/OWNER/REPO/releases/tag/v0.2.5
 ```
 
 ## Verify Checksums
@@ -116,25 +116,22 @@ The gate writes:
 The JSON proof records the commit SHA, Helm chart version and package path,
 container image tag/digest when supplied by `PQUEUE_IMAGE_TAG`,
 `PQUEUE_IMAGE_DIGEST`, `PQUEUE_IMAGE_COORDINATE`, or
-`PQUEUE_IMAGE_EVIDENCE_FILE`, every command and exit status, the backend profile
-matrix, local Docker/kind skips, and supporting artifact paths. If image
+`PQUEUE_IMAGE_EVIDENCE_FILE`, every command and exit status, the storage
+combination matrix, local Docker/kind skips, and supporting artifact paths. If image
 coordinates are unavailable in a local non-release run, the image fields are
 recorded as `unavailable` and the gate can still pass non-cluster checks.
 
 Release notes should cite the JSON `release_notes` block or the Markdown summary
-for the exact command list, chart package/version, backend profile matrix, and
+for the exact command list, chart package/version, storage matrix, and
 supporting artifact paths. A local Docker/kind skip is scoped to the disposable
-kind backend matrix only and is not CI matrix proof.
+kind storage matrix only and is not CI matrix proof.
 
-## Backend Support Boundary
+## Storage Boundary
 
-The release artifact set is valid for the BUILD-001 supported backend profiles:
+The chart exposes separate storage axes:
 
-- `postgres_native`
-- `object_log_sqlite_projection`
+- log backend: `objectlog` or `postgres`
+- projection backend: `inmemory`, `sqlite`, or `postgres`
 
-`object_log_sqlite_projection` release readiness is bounded to the documented
-MinIO S3-compatible proof unless a later release publishes provider-specific
-cloud S3 evidence. These artifacts do not certify AWS S3, GCS S3 interop, IAM
-policy, provider TLS/certificate hardening, or provider-specific
-conditional-write behavior.
+The v0.2.5 server smoke path wires `objectlog` plus `inmemory`; other rendered
+axis combinations fail explicitly until their composition roots are implemented.

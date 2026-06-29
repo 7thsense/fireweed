@@ -1,0 +1,11 @@
+# Static render values: postgres log with in-memory projection axis selected.
+storage:
+  log:
+    backend: postgres
+    postgres:
+      existingSecret: pqueue-postgres-log
+      databaseUrlKey: database-url
+  projection:
+    backend: inmemory
+image:
+  tag: ci

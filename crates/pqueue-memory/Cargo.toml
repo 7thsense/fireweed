@@ -13,7 +13,13 @@ path = "src/lib.rs"
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
+pqueue-projection = { path = "../pqueue-projection" }
 bytes = "1"
+# Canonical serialization for the request-id body fingerprint (mirrors the relational backend, which
+# hashes the same serialized push specs). Used only by the request-id idempotency path.
+serde_json = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+# The shared backend-conformance harness runs its port-level suite against MemoryBackend.
+pqueue-conformance = { path = "../pqueue-conformance" }

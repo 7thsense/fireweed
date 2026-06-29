@@ -103,6 +103,14 @@ impl<O: Clone> QueueIdempotencyCache<O> {
         );
     }
 
+    /// Read the retained outcome for `request_id` IGNORING the body fingerprint (a recovery/explain read has
+    /// only the id, not the original body). Returns the retained outcome while the record exists; the caller
+    /// treats `None` (never recorded, or compacted away) as "no retained record". Unlike [`check`], this does
+    /// not classify expiry — recovery surfaces the record for as long as it is retained.
+    pub fn peek(&self, request_id: &RequestId) -> Option<O> {
+        self.entries.get(request_id).map(|e| e.outcome.clone())
+    }
+
     /// Drop entries whose retention has elapsed at `now` (bounded growth, TD-007 section 4).
     /// Called from the apply path / ReclaimDriver.
     pub fn compact(&mut self, now: UtcTimestamp) {

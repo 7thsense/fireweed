@@ -1,224 +1,16 @@
-//! Behavioral conformance for the memory backend. Each test fails if the method under test returns
-//! a default/no-op — the behavioral no-stub proof (plan §6) for this backend.
+//! Conformance for the memory backend.
+//!
+//! The full **port-level** behavioral no-stub suite is shared (`pqueue-conformance`) and run against
+//! `MemoryBackend` by the `conformance_suite!` invocation below. The projection-internals white-box
+//! tests (item_version monotonicity, high-water survives compaction) now live in `pqueue-projection`,
+//! where that state lives. What remains here is the test-only `ManualClock`/`SeqIdGen` helpers, which
+//! are memory-specific and not expressible through the ports.
 
 use super::*;
-use bytes::Bytes;
-use pqueue_core::{
-    EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModelKind, PriorityTieBreaker,
-    RecurrencePolicy, RetryPolicy, WorkerId,
-};
-use pqueue_engine::{
-    Backend, ClaimCommand, ClaimPort, ClaimRequest, CommandChecksum, ControlPlaneStore,
-    FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
-    ProjectionRead, PushCommand, PushItem, QueueCommand, ReclaimDriver, ReplacePendingCommand,
-    SnapshotStore, UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
-};
+use pqueue_conformance::ts;
 
-fn tenant() -> TenantId {
-    TenantId::new("t1").unwrap()
-}
-fn queue() -> QueueId {
-    QueueId::new("q1").unwrap()
-}
-fn qkey() -> QueueKey {
-    QueueKey::new(tenant(), queue())
-}
-fn shard() -> ShardKey {
-    ShardKey::new(tenant(), queue(), ShardId::ZERO)
-}
-fn ts(s: i64) -> UtcTimestamp {
-    UtcTimestamp::new(s, 0).unwrap()
-}
-
-fn qdef() -> QueueDefinition {
-    QueueDefinition {
-        tenant_id: tenant(),
-        queue_id: queue(),
-        priority_model: PriorityModel {
-            kind: PriorityModelKind::Int64,
-            direction: PriorityDirection::Ascending,
-            tie_breaker: PriorityTieBreaker::CreatedSequence,
-        },
-        ordering_mode: OrderingMode::Strict,
-        group_co_residency: false,
-        progress_bound_ms: 60_000,
-        eligibility_policy: EligibilityPolicy::default(),
-        cohort_policy: None,
-        recurrence: RecurrencePolicy::default(),
-        request_id_retention_ms: 60_000,
-        client_item_key_retention_ms: 60_000,
-        max_lease_duration_ms: 60_000,
-        retry_policy: RetryPolicy { max_attempts: 3 },
-        max_push_batch_size: 100,
-        max_claim_batch_size: 100,
-        max_eligible_group_size: None,
-        shard_count: 1,
-    }
-}
-
-fn item(id: &str, key: &str, priority: i64) -> PushItem {
-    PushItem {
-        client_item_key: ClientItemKey::new(key).unwrap(),
-        item_id: ItemId::new(id).unwrap(),
-        priority: Some(PriorityValue::Int64(priority)),
-        not_before: None,
-        group_key: None,
-        max_attempts: 3,
-        payload: None,
-    }
-}
-
-fn envelope(command: QueueCommand, item_ids: Vec<ItemId>) -> CommandEnvelope {
-    CommandEnvelope {
-        command_id: CommandId::new("c"),
-        request_id: None,
-        shard_id: ShardId::ZERO,
-        item_ids,
-        command,
-        checksum: CommandChecksum(0),
-        created_at: ts(0),
-    }
-}
-
-/// Apply a command through the atomic unit of work (append + apply together).
-async fn commit(backend: &MemoryBackend, env: CommandEnvelope) {
-    backend
-        .write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
-        .await
-        .expect("commit");
-}
-
-#[tokio::test]
-async fn push_then_select_eligible_in_priority_order() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-
-    // Push out of priority order: 30, 10, 20.
-    let push = QueueCommand::Push(PushCommand {
-        items: vec![
-            item("a", "ka", 30),
-            item("b", "kb", 10),
-            item("c", "kc", 20),
-        ],
-    });
-    commit(&b, envelope(push, vec![])).await;
-
-    let eligible = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
-    let ids: Vec<&str> = eligible.iter().map(|i| i.as_str()).collect();
-    // Ascending Int64 priority => 10(b), 20(c), 30(a). Fails if select_eligible is a no-op.
-    assert_eq!(
-        ids,
-        vec!["b", "c", "a"],
-        "must be priority-ordered, not insertion order"
-    );
-}
-
-#[tokio::test]
-async fn claim_then_complete_lifecycle() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-
-    // Claim it.
-    let claim = QueueCommand::Claim(ClaimCommand {
-        item_ids: vec![ItemId::new("a").unwrap()],
-        lease_token: LeaseToken::new("lease-1").unwrap(),
-        lease_expires_at: ts(200),
-    });
-    commit(&b, envelope(claim, vec![ItemId::new("a").unwrap()])).await;
-
-    let m = b.metrics(&qkey()).await.unwrap();
-    assert_eq!(m.leased, 1, "claim must move item to leased");
-    assert_eq!(m.pending, 0);
-    // Claimed item is no longer eligible.
-    assert!(
-        b.select_eligible(&shard(), ts(300), 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    // Complete it.
-    let fin = QueueCommand::Finalize(FinalizeCommand {
-        outcomes: vec![FinalizeOutcome {
-            item_id: ItemId::new("a").unwrap(),
-            kind: FinalizeKind::Complete,
-        }],
-    });
-    commit(&b, envelope(fin, vec![ItemId::new("a").unwrap()])).await;
-
-    let m = b.metrics(&qkey()).await.unwrap();
-    assert_eq!(
-        m.complete, 1,
-        "finalize-complete must move item to complete"
-    );
-    assert_eq!(m.leased, 0);
-}
-
-#[tokio::test]
-async fn replace_pending_supersedes_old() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("old", "dup", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-
-    // Upsert: same client_item_key replaces the pending item with a new id.
-    let replace = QueueCommand::ReplacePending(ReplacePendingCommand {
-        client_item_key: ClientItemKey::new("dup").unwrap(),
-        superseded_item_id: ItemId::new("old").unwrap(),
-        replacement: item("new", "dup", 5),
-    });
-    commit(&b, envelope(replace, vec![])).await;
-
-    let eligible = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
-    let ids: Vec<&str> = eligible.iter().map(|i| i.as_str()).collect();
-    assert_eq!(
-        ids,
-        vec!["new"],
-        "superseded old id must not be eligible; new id is"
-    );
-
-    let m = b.metrics(&qkey()).await.unwrap();
-    assert_eq!(m.pending, 1, "superseded item excluded from counts");
-}
-
-#[tokio::test]
-async fn high_water_is_monotonic() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    let p1 = CommandPosition::new(shard(), 0, 1);
-    let p2 = CommandPosition::new(shard(), 0, 2);
-
-    b.set_high_water(&shard(), p2.clone()).await.unwrap();
-    assert_eq!(b.high_water(&shard()).await.unwrap(), Some(p2.clone()));
-    // Regression must be rejected (TD-007 §4).
-    assert_eq!(
-        b.set_high_water(&shard(), p1).await,
-        Err(EngineError::Invalid("high-water regression"))
-    );
-    assert_eq!(b.high_water(&shard()).await.unwrap(), Some(p2));
-}
+// The full shared backend-conformance suite (16 port-level scenarios) against MemoryBackend.
+pqueue_conformance::conformance_suite!(MemoryBackend::new);
 
 #[tokio::test]
 async fn manual_clock_and_idgen_are_real() {
@@ -230,620 +22,350 @@ async fn manual_clock_and_idgen_are_real() {
     let ids = SeqIdGen::default();
     let a = ids.next_item_id();
     let b = ids.next_item_id();
-    assert_ne!(
-        a.as_str(),
-        b.as_str(),
-        "ids must be unique, not a no-op constant"
-    );
+    assert_ne!(a, b, "ids must be unique, not a no-op constant");
 }
 
-// ---------------------------------------------------------------------------
-// Phase 1c: ClaimPort / UpsertPort / ReclaimDriver
-// ---------------------------------------------------------------------------
-
-fn claim_req(max_items: usize, lease_expires_at: i64, now: i64) -> ClaimRequest {
-    ClaimRequest {
-        shard: shard(),
-        worker_id: WorkerId::new("w1").unwrap(),
-        max_items,
-        lease_token: LeaseToken::new("lease-1").unwrap(),
-        lease_expires_at: ts(lease_expires_at),
-        now: ts(now),
-    }
-}
-
+/// ADR-009 collision fix: two instances with distinct `node_id`s minting into the same queue at the same
+/// epoch+counter produce DISTINCT ids (the node byte disambiguates). The pre-fix per-connection counter
+/// gave both writers identical ids — this is the regression guard.
 #[tokio::test]
-async fn claim_returns_priority_ordered_rich_items() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![
-                    item("a", "ka", 30),
-                    item("b", "kb", 10),
-                    item("c", "kc", 20),
-                ],
-            }),
-            vec![],
-        ),
-    )
-    .await;
+async fn distinct_node_ids_never_collide_on_concurrent_push() {
+    use pqueue_conformance::{qdef, shard};
+    use pqueue_engine::{PushPort, PushSpec};
 
-    let claimed = b.claim(claim_req(2, 500, 100)).await.unwrap();
-    let ids: Vec<&str> = claimed.items.iter().map(|i| i.item_id.as_str()).collect();
-    assert_eq!(
-        ids,
-        vec!["b", "c"],
-        "claim must deliver highest priority first"
-    );
-    // Rich shape populated (would fail if claim returned a stub).
-    let first = &claimed.items[0];
-    assert_eq!(first.lease_token.as_str(), "lease-1");
-    assert_eq!(first.item_version, 2, "claim bumps item_version");
-    assert_eq!(first.attempt_count, 1, "first delivery");
-    assert_eq!(first.lease_expires_at, ts(500));
-
-    // The unclaimed lowest-priority item remains eligible.
-    let remaining = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
-    assert_eq!(
-        remaining.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
-        vec!["a"]
-    );
-}
-
-#[tokio::test]
-async fn claim_empty_when_nothing_eligible() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
-    assert!(claimed.items.is_empty());
-}
-
-#[tokio::test]
-async fn upsert_inserts_then_replaces_pending() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    let key = ClientItemKey::new("dup").unwrap();
-
-    let out = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i1").unwrap(),
-            Some(PriorityValue::Int64(5)),
-            None,
-            None,
-            None,
-            ts(1),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        out,
-        UpsertOutcome::Inserted {
-            item_id: ItemId::new("i1").unwrap()
-        }
-    );
-
-    let out = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i2").unwrap(),
-            Some(PriorityValue::Int64(5)),
-            None,
-            None,
-            None,
-            ts(2),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        out,
-        UpsertOutcome::Replaced {
-            new_item_id: ItemId::new("i2").unwrap(),
-            superseded_item_id: ItemId::new("i1").unwrap(),
-        }
-    );
-    // Only the replacement is eligible; the superseded id is gone.
-    let elig = b.select_eligible(&shard(), ts(100), 10).await.unwrap();
-    assert_eq!(
-        elig.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
-        vec!["i2"]
-    );
-}
-
-#[tokio::test]
-async fn upsert_rejects_claimed_and_terminal() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    let key = ClientItemKey::new("dup").unwrap();
-    b.replace_if_pending(
-        &shard(),
-        &key,
-        ItemId::new("i1").unwrap(),
-        Some(PriorityValue::Int64(5)),
-        None,
-        None,
-        None,
-        ts(1),
-    )
-    .await
-    .unwrap();
-
-    // Claim it → leased. Upsert must be rejected with Invalid (no transition on in-flight work).
-    b.claim(claim_req(10, 500, 10)).await.unwrap();
-    let err = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i2").unwrap(),
-            None,
-            None,
-            None,
-            None,
-            ts(20),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(err, EngineError::Invalid("collision with claimed item"));
-
-    // Finalize-complete → terminal. Upsert must be rejected with Terminal.
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Finalize(FinalizeCommand {
-                outcomes: vec![FinalizeOutcome {
-                    item_id: ItemId::new("i1").unwrap(),
-                    kind: FinalizeKind::Complete,
-                }],
-            }),
-            vec![ItemId::new("i1").unwrap()],
-        ),
-    )
-    .await;
-    let err = b
-        .replace_if_pending(
-            &shard(),
-            &key,
-            ItemId::new("i3").unwrap(),
-            None,
-            None,
-            None,
-            None,
-            ts(30),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(err, EngineError::Terminal);
-}
-
-#[tokio::test]
-async fn upsert_preserves_group_delay_and_payload_in_claim_shape() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    let key = ClientItemKey::new("grouped").unwrap();
-    let group = GroupKey::new("group-a").unwrap();
-
-    b.replace_if_pending(
-        &shard(),
-        &key,
-        ItemId::new("i1").unwrap(),
-        Some(PriorityValue::Int64(5)),
-        Some(group.clone()),
-        Some(ts(250)),
-        Some(Bytes::from_static(b"payload")),
-        ts(1),
-    )
-    .await
-    .unwrap();
-
-    assert!(
-        b.claim(claim_req(10, 500, 100))
-            .await
-            .unwrap()
-            .items
-            .is_empty(),
-        "not_before must keep the upserted item out of early claims"
-    );
-
-    let claimed = b.claim(claim_req(10, 500, 300)).await.unwrap();
-    assert_eq!(claimed.items.len(), 1);
-    let item = &claimed.items[0];
-    assert_eq!(item.item_id.as_str(), "i1");
-    assert_eq!(item.group_key.as_ref(), Some(&group));
-    assert_eq!(item.not_before, Some(ts(250)));
-    assert_eq!(item.payload.as_deref(), Some(&b"payload"[..]));
-}
-
-#[tokio::test]
-async fn tick_reclaims_expired_lease_with_no_client_traffic() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    // Claim with a lease expiring at t=100.
-    b.claim(claim_req(10, 100, 10)).await.unwrap();
-    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
-
-    // Before expiry: tick is a no-op.
-    let r = b.tick(ts(50)).await.unwrap();
-    assert_eq!(r.leases_reclaimed, 0);
-    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
-
-    // After expiry: tick reclaims — WITH ZERO intervening client commands (DoD, TD-007 §3).
-    let r = b.tick(ts(200)).await.unwrap();
-    assert_eq!(r.leases_reclaimed, 1);
-    let m = b.metrics(&qkey()).await.unwrap();
-    assert_eq!(m.pending, 1);
-    assert_eq!(m.leased, 0);
-
-    // Idempotent: re-ticking at the same time reclaims nothing (item already pending).
-    let r = b.tick(ts(200)).await.unwrap();
-    assert_eq!(r.leases_reclaimed, 0);
-
-    // Reclaim charged a second attempt (claim=1, reclaim=2).
-    let pending = b.select_eligible(&shard(), ts(300), 10).await.unwrap();
-    assert_eq!(
-        pending.iter().map(|i| i.as_str()).collect::<Vec<_>>(),
-        vec!["a"]
-    );
-}
-
-#[tokio::test]
-async fn tick_lease_boundary_is_half_open() {
-    // Convention: a lease is valid THROUGH `lease_expires_at`; reclaim fires only at now > exp (B1).
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    b.claim(claim_req(10, 100, 10)).await.unwrap(); // lease_expires_at = ts(100)
-
-    // At exactly the expiry instant: lease still held, nothing reclaimed.
-    assert_eq!(b.tick(ts(100)).await.unwrap().leases_reclaimed, 0);
-    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
-
-    // One unit past expiry: reclaimed.
-    assert_eq!(b.tick(ts(101)).await.unwrap().leases_reclaimed, 1);
-    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 0);
-}
-
-#[tokio::test]
-async fn paused_queue_yields_no_claims() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    // Pause: nothing eligible/claimable.
-    commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
-    assert!(
-        b.claim(claim_req(10, 500, 10))
-            .await
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        b.select_eligible(&shard(), ts(10), 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    // Resume: claimable again.
-    commit(&b, envelope(QueueCommand::ResumeQueue, vec![])).await;
-    assert_eq!(
-        b.claim(claim_req(10, 500, 10)).await.unwrap().items.len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn fenced_lease_finalize_is_stale() {
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    b.claim(claim_req(10, 500, 10)).await.unwrap();
-    let id = ItemId::new("a").unwrap();
-
-    // Operator fences the lease.
-    commit(
-        &b,
-        envelope(
-            QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![id.clone()],
-            }),
-            vec![id.clone()],
-        ),
-    )
-    .await;
-    // The holder's finalize is rejected StaleLease, and nothing is committed (still leased).
-    let outcomes = vec![FinalizeOutcome {
-        item_id: id.clone(),
-        kind: FinalizeKind::Complete,
-    }];
-    assert_eq!(
-        b.finalize(&shard(), outcomes.clone(), ts(20)).await,
-        Err(EngineError::StaleLease)
-    );
-    assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
-
-    // Operator unfences: finalize now succeeds.
-    commit(
-        &b,
-        envelope(
-            QueueCommand::UnfenceLease(UnfenceLeaseCommand {
-                item_ids: vec![id.clone()],
-            }),
-            vec![id.clone()],
-        ),
-    )
-    .await;
-    b.finalize(&shard(), outcomes, ts(30)).await.unwrap();
-    assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
-}
-
-#[tokio::test]
-async fn finalize_of_nonleased_item_is_rejected_without_appending() {
-    use pqueue_engine::LogRead;
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    let id = ItemId::new("a").unwrap();
-    let before = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
-    // Item is Pending (never claimed) -> finalize rejected, and NOTHING is appended (no divergence, B1).
-    let outcomes = vec![FinalizeOutcome {
-        item_id: id,
-        kind: FinalizeKind::Complete,
-    }];
-    assert_eq!(
-        b.finalize(&shard(), outcomes, ts(10)).await,
-        Err(EngineError::Invalid("item is not leased"))
-    );
-    let after = b
-        .read_from(&shard(), None, 1000)
-        .await
-        .unwrap()
-        .entries
-        .len();
-    assert_eq!(before, after, "rejected finalize must NOT append a command");
-}
-
-#[tokio::test]
-async fn pause_and_fence_reconstruct_from_log() {
-    use pqueue_engine::LogRead;
-    // Backend A: push two items, claim+fence one, leave one pending, pause the queue.
-    let a = MemoryBackend::new();
+    let a = MemoryBackend::new().with_node_id(1);
+    let b = MemoryBackend::new().with_node_id(7);
     a.create_queue(qdef()).await.unwrap();
+    b.create_queue(qdef()).await.unwrap();
+
+    // Both writers push the FIRST item into the same queue at the genesis epoch (counter base 0 on each).
+    let ida = a
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap()[0];
+    let idb = b
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap()[0];
+
+    assert_ne!(ida, idb, "same epoch+counter on two nodes must not collide");
+    assert_eq!((ida.node(), ida.counter()), (1, 0));
+    assert_eq!((idb.node(), idb.counter()), (7, 0));
+    // The dedup client_item_key (defaulting to the id) is likewise distinct.
+    assert_ne!(ida.to_string(), idb.to_string());
+}
+
+#[tokio::test]
+async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
+    use pqueue_conformance::{envelope, qdef, qkey, shard, ts};
+    use pqueue_engine::{EngineError, LogWriter, ProjectionWriter, QueueCommand, SetGatesCommand};
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+
+    let err = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                gate_keys: vec!["hold".to_string()],
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0);
+
+    let env = envelope(
+        QueueCommand::SetGates(SetGatesCommand {
+            gate_keys: vec!["hold".to_string()],
+            blocked: true,
+        }),
+        vec![],
+    );
+    let epoch = b.current_epoch(&shard()).await.unwrap();
+    let err = b
+        .write(
+            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
+                let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
+                pw.apply(&pos, std::slice::from_ref(&env))?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+}
+
+/// B1a (ADR-009 / TD-003 In-Process Library Owner-Runtime): a claim stamped with the owner's *cached*
+/// acquire-time epoch is fenced at commit once a newer epoch is acquired (the owner was superseded), and
+/// leases nothing; the current-epoch owner claims normally; `None` (sole-owner) is unaffected.
+#[tokio::test]
+async fn claim_fences_superseded_owner_epoch() {
+    use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
+    use pqueue_engine::{
+        ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, ProjectionRead, PushCommand,
+        QueueCommand,
+    };
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    // Push one item at the current (genesis) epoch via the shared commit helper (degenerate owner).
     commit(
-        &a,
+        &b,
         envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5), item("p", "kp", 9)],
+                items: vec![item("1", "ka", 5)],
             }),
             vec![],
         ),
     )
     .await;
-    a.claim(claim_req(1, 500, 10)).await.unwrap(); // claims "a" (priority 5 < 9)
-    let aid = ItemId::new("a").unwrap();
+
+    // Ownership handoff: acquire a strictly-greater epoch (0 -> 1), durably superseding the epoch-0 owner.
+    let e1 = b.acquire_epoch(&shard()).await.unwrap();
+    assert!(e1 >= 1, "acquire advances the durable epoch");
+
+    // A claim carrying the STALE cached epoch (0) is fenced at commit and leases nothing.
+    let stale = ClaimRequest {
+        expected_epoch: Some(0),
+        ..claim_req(10, 500, 100)
+    };
+    assert!(
+        matches!(b.claim(stale).await, Err(EngineError::EpochFenced)),
+        "a superseded owner's claim must be EpochFenced"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().leased,
+        0,
+        "a fenced claim must lease nothing (atomic reject before apply)"
+    );
+
+    // The current-epoch owner claims normally.
+    let ok = ClaimRequest {
+        expected_epoch: Some(e1),
+        ..claim_req(10, 500, 100)
+    };
+    let claimed = b.claim(ok).await.unwrap();
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "current-epoch owner claims the item"
+    );
+}
+
+/// B1b (ADR-009 / TD-003): the same cached-epoch fence applies to `PushPort::push` — a superseded owner's
+/// push is `EpochFenced` and appends nothing; the current-epoch owner appends normally.
+#[tokio::test]
+async fn push_fences_superseded_owner_epoch() {
+    use pqueue_conformance::{qdef, qkey, shard};
+    use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec};
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
+    let e1 = b.acquire_epoch(&shard()).await.unwrap(); // advance genesis 0 -> 1
+    assert!(e1 >= 1);
+
+    // Stale-epoch push is fenced and appends nothing.
+    assert!(
+        matches!(
+            b.push(&shard(), vec![PushSpec::default()], ts(0), Some(0))
+                .await,
+            Err(EngineError::EpochFenced)
+        ),
+        "a superseded owner's push must be EpochFenced"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        0,
+        "a fenced push must append nothing"
+    );
+
+    // Current-epoch push succeeds.
+    let ids = b
+        .push(&shard(), vec![PushSpec::default()], ts(1), Some(e1))
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+}
+
+/// B1b (ADR-009 / TD-003): the cached-epoch fence also covers `FinalizePort::finalize` — completing the
+/// TD-003 explicit Push/Claim/Finalize fence MUST. A superseded owner's finalize is `EpochFenced` and
+/// makes no lifecycle transition; the current-epoch owner finalizes normally.
+#[tokio::test]
+async fn finalize_fences_superseded_owner_epoch() {
+    use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
+    use pqueue_engine::{
+        ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
+        FinalizePort, ProjectionRead, PushCommand, QueueCommand,
+    };
+
+    let b = MemoryBackend::new();
+    b.create_queue(qdef()).await.unwrap();
     commit(
-        &a,
+        &b,
         envelope(
-            QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![aid.clone()],
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "ka", 5)],
             }),
-            vec![aid.clone()],
+            vec![],
         ),
     )
     .await;
-    commit(&a, envelope(QueueCommand::PauseQueue, vec![])).await;
-
-    // Replay A's full log into a fresh backend B (TD-007 §4 replay reconstruction).
-    let page = a.read_from(&shard(), None, 1000).await.unwrap();
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    for (_pos, env) in &page.entries {
-        let env = env.clone();
-        b.write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env))?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
+    // Lease the item under the degenerate (sole-owner) path.
+    let claimed = b
+        .claim(ClaimRequest {
+            expected_epoch: None,
+            ..claim_req(10, 500, 10)
         })
         .await
         .unwrap();
-    }
+    let id = claimed.items[0].item_id;
 
-    // B reconstructed the durable state: pause withholds the pending item, and the fence holds.
+    let e1 = b.acquire_epoch(&shard()).await.unwrap(); // ownership handoff 0 -> 1
+    let outcomes = vec![FinalizeOutcome::new(id, FinalizeKind::Complete)];
+
     assert!(
-        b.claim(claim_req(10, 500, 50))
-            .await
-            .unwrap()
-            .items
-            .is_empty(),
-        "pause reconstructed"
+        matches!(
+            b.finalize(&shard(), outcomes.clone(), ts(20), Some(0))
+                .await,
+            Err(EngineError::EpochFenced)
+        ),
+        "a superseded owner's finalize must be EpochFenced"
     );
-    let outcomes = vec![FinalizeOutcome {
-        item_id: aid,
-        kind: FinalizeKind::Complete,
-    }];
     assert_eq!(
-        b.finalize(&shard(), outcomes, ts(60)).await,
-        Err(EngineError::StaleLease),
-        "fence reconstructed"
+        b.metrics(&qkey()).await.unwrap().complete,
+        0,
+        "a fenced finalize must make no transition"
     );
+
+    b.finalize(&shard(), outcomes, ts(20), Some(e1))
+        .await
+        .unwrap();
+    assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
 }
 
-// White-box helper: read an item's durable item_version straight from the projection.
-fn item_version_of(b: &MemoryBackend, sk: &ShardKey, id: &str) -> u64 {
-    let g = b.state.lock().expect("poisoned");
-    g.projections
-        .get(sk)
-        .unwrap()
-        .items
-        .get(&ItemId::new(id).unwrap())
-        .unwrap()
-        .item_version
-}
-
+/// Acceptance #4 (epic pqueue-2201fd37): the vectorized claimed-work commit path PROPAGATES the caller's
+/// request id into EVERY backend command envelope it appends — `WriteSideRecords`, `AdvanceInstanceFence`,
+/// the lifecycle `Push`, and `Finalize` — and does NOT construct any of them with `request_id: None`.
+///
+/// This is a RUNTIME assertion, not a source grep: it commits one entry that forces all four commit-path
+/// command kinds, then reads the durable log back through [`LogRead`] and asserts each commit-path envelope
+/// carries `request_id == Some(rid)`. The request-id-less input `Push` and the `Claim` are kept in the same
+/// log as negative controls, proving the assertion actually discriminates `Some` from `None`.
 #[tokio::test]
-async fn item_version_is_monotonic_per_item() {
+async fn commit_path_propagates_request_id_into_every_command_envelope() {
+    use pqueue_conformance::{claim_req, qdef, shard, ts};
+    use pqueue_engine::{
+        ClaimPort, ClaimRef, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
+        ControlPlaneStore, FinalizeKind, InstanceFence, LogRead, PushPort, PushSpec, QueueCommand,
+        SideRecord,
+    };
+
     let b = MemoryBackend::new();
     b.create_queue(qdef()).await.unwrap();
-    let sk = shard();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    let v0 = item_version_of(&b, &sk, "a"); // push -> 1
-    b.claim(claim_req(1, 500, 10)).await.unwrap();
-    let v1 = item_version_of(&b, &sk, "a"); // claim bumps -> 2
-    let aid = ItemId::new("a").unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::RenewLease(pqueue_engine::RenewLeaseCommand {
-                item_ids: vec![aid.clone()],
-                lease_expires_at: ts(600),
-            }),
-            vec![aid.clone()],
-        ),
-    )
-    .await; // renew bumps -> 3
-    let v2 = item_version_of(&b, &sk, "a");
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Finalize(FinalizeCommand {
-                outcomes: vec![FinalizeOutcome {
-                    item_id: aid.clone(),
-                    kind: FinalizeKind::Complete,
+
+    // Push one input item WITHOUT a request id: this envelope MUST carry `request_id: None`. It is the
+    // negative control that proves the commit-path assertion below isn't trivially true.
+    b.push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    // Claim it to obtain the lease-token + version-bearing claim_ref the commit validates inside its boundary.
+    let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+    let c = &claimed.items[0];
+    let claim_ref = ClaimRef {
+        item_id: c.item_id,
+        lease_token: c
+            .lease_token
+            .clone()
+            .expect("claimed item carries a lease token"),
+        lease_expires_at: c.lease_expires_at,
+        item_version: c.item_version,
+    };
+
+    // One entry that forces ALL FOUR commit-path envelope kinds in a single transition: a side record
+    // (WriteSideRecords), an instance fence (AdvanceInstanceFence), a lifecycle item (Push), and a finalize
+    // (Finalize). The caller request id must thread into every one of them.
+    let rid = RequestId::new("txn-c10").unwrap();
+    let outcomes = b
+        .commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: Some(rid.clone()),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![SideRecord {
+                        key: b"state/run".to_vec(),
+                        payload: Bytes::from_static(b"opaque"),
+                    }],
+                    lifecycle_items: vec![PushSpec::default()],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: b"wf-1".to_vec(),
+                        expected: 0,
+                        next: 1,
+                    }),
                 }],
-            }),
-            vec![aid],
-        ),
-    )
-    .await; // finalize bumps -> 4
-    let v3 = item_version_of(&b, &sk, "a");
-    assert_eq!(
-        (v0, v1, v2, v3),
-        (1, 2, 3, 4),
-        "item_version bumps exactly once per committed mutation (API-001)"
-    );
-}
-
-#[tokio::test]
-async fn high_water_advances_on_each_commit() {
-    use pqueue_engine::SnapshotStore;
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    let sk = shard();
-    assert!(b.high_water(&sk).await.unwrap().is_none(), "no commits yet");
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("a", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    let h1 = b.high_water(&sk).await.unwrap().expect("after push");
-    b.claim(claim_req(1, 500, 10)).await.unwrap();
-    let h2 = b.high_water(&sk).await.unwrap().expect("after claim");
-    assert!(
-        h1.precedes(&h2),
-        "command_position high-water must advance on each commit (push -> claim)"
-    );
-}
-
-#[tokio::test]
-async fn high_water_survives_log_compaction() {
-    use pqueue_engine::SnapshotStore;
-    let b = MemoryBackend::new();
-    b.create_queue(qdef()).await.unwrap();
-    let sk = shard();
-    for p in [10_i64, 20, 30] {
-        commit(
-            &b,
-            envelope(
-                QueueCommand::Push(PushCommand {
-                    items: vec![item(&format!("i{p}"), &format!("k{p}"), p)],
-                }),
-                vec![],
-            ),
+            },
+            ts(1),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1, "one entry committed");
+
+    // Read the durable log back and inspect every appended envelope's `request_id`.
+    let page = b.read_from(&shard(), None, 1000).await.unwrap();
+    let mut commit_path_envs = 0;
+    let mut saw_input_push_without_rid = false;
+    let mut saw_claim_without_rid = false;
+    for (_pos, env) in &page.entries {
+        match &env.command {
+            // The three commit-path command kinds that are unambiguous (no non-commit producer in this test).
+            QueueCommand::WriteSideRecords(_)
+            | QueueCommand::AdvanceInstanceFence(_)
+            | QueueCommand::Finalize(_) => {
+                assert_eq!(
+                    env.request_id.as_ref(),
+                    Some(&rid),
+                    "commit-path envelope must carry the caller request id, not None"
+                );
+                commit_path_envs += 1;
+            }
+            // Two pushes reach the log: the request-id-less input push (None) and the commit's lifecycle push
+            // (Some(rid)). Discriminate by request_id — the commit one MUST be Some(rid).
+            QueueCommand::Push(_) => {
+                if env.request_id.is_some() {
+                    assert_eq!(env.request_id.as_ref(), Some(&rid));
+                    commit_path_envs += 1;
+                } else {
+                    saw_input_push_without_rid = true;
+                }
+            }
+            // The claim is NOT on the commit path: it must carry no request id (negative control).
+            QueueCommand::Claim(_) => {
+                assert!(
+                    env.request_id.is_none(),
+                    "non-commit claim envelope carries no request id"
+                );
+                saw_claim_without_rid = true;
+            }
+            _ => {}
+        }
     }
-    let before = b.high_water(&sk).await.unwrap().unwrap();
-    // Simulate log compaction: drop the stored entries (retention). The persisted high-water is a
-    // separate field, NOT recomputed from entries.len() — so it MUST be unchanged (TD-007 §4).
-    {
-        let mut g = b.state.lock().unwrap();
-        g.logs.get_mut(&sk).unwrap().entries.clear();
-    }
-    let after = b.high_water(&sk).await.unwrap().unwrap();
     assert_eq!(
-        before, after,
-        "high-water is persisted, not recomputed from a compacted log"
+        commit_path_envs, 4,
+        "WriteSideRecords + AdvanceInstanceFence + lifecycle Push + Finalize all propagated Some(rid)"
     );
-    assert_eq!(
-        after.sequence, 2,
-        "3 commits -> seq 2 (would be 0 if recomputed from empty entries)"
+    assert!(
+        saw_input_push_without_rid,
+        "the request-id-less input push is the negative control proving None is observable"
+    );
+    assert!(
+        saw_claim_without_rid,
+        "the non-commit claim envelope is a second negative control"
     );
 }

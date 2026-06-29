@@ -7,14 +7,23 @@ ddx:
     - api-native-client-interface
     - api-operator-repair-contract
   status: draft
+  review:
+    self_hash: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
+    deps:
+      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
+      adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # Architecture Decision Record
 
 **ADR ID**: ADR-007
 **Title**: Hexagonal architecture and two interfaces (RESP + Rust library)
-**Status**: draft
-**Related**: ADR-001 (CQRS log/projection), ADR-006 (embedded surface), API-001, API-002,
+**Status**: draft (the "one shared projection" consequence superseded by ADR-008)
+**Related**: ADR-001 (CQRS log/projection), ADR-006 (embedded surface), ADR-008 (queue-as-shard-unit &
+two projection families — supersedes the one-shared-projection consequence below), API-001, API-002,
 TD-006 (RESP surface), TD-007 (durability), `docs/helix/04-build/hexagonal-migration-plan.md`
 
 ## Context
@@ -67,8 +76,11 @@ deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the mig
   domain, not in a transport crate.
 - Off-the-shelf Redis clients (and `redis-cli`) drive the worker hot path; no SDK to maintain for the
   common case.
-- Storage backends are uniform driven adapters; the "fused vs split" special case disappears (a
-  backend is just a durability class).
+- Storage backends are driven adapters classified by durability class. (**Superseded in part by
+  ADR-008:** the "fused vs split disappears / one shared projection" framing is retracted — there are
+  **two projection families**, an in-memory log-replay projection and a relational / DB-resident
+  projection, held identical by the conformance suite, not a single shared projection. A backend is a
+  durability class *and* a projection family.)
 - Modularity is mechanically enforced (dependency-direction test, behavioral no-stub conformance).
 
 **Negative / accepted costs:**
@@ -77,7 +89,7 @@ deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the mig
 - "pqueue-flavored Redis" diverges from literal Redis in named, documented ways (priority delivery
   order, upsert `XADD`, lease-generation-fenced `XACK`); semantic contracts hold but bit-identical
   behavior does not (TD-006 §3).
-- Multi-shard coordination is descoped to post-launch (single-shard launch; ports admit multi-shard).
+- The queue is the unit of sharding (ADR-008): a queue is owned by one node and horizontal scale is cross-queue (per-queue ownership + routing, TD-003/TD-006). There is no intra-queue/multi-shard coordination to build; the ports admit per-queue ownership and cross-queue distribution.
 - A net-new RESP server, `ReclaimDriver`, and `UpsertPort` must be built, and durable state migrated
   off in-memory `Mutex` storage (TD-007).
 

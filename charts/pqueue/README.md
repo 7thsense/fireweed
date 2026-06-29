@@ -1,80 +1,42 @@
 # pqueue Helm Chart
 
-This chart deploys the `pqueue-service` HTTP runtime. Backend selection is
-controlled by `backend.profile`.
+This chart deploys the `pqueue-service` RESP runtime. Storage is configured with
+separate log and projection axes.
 
-## postgres_native
+## Storage Axes
 
-Production operators using `backend.profile=postgres_native` must provide a
-reachable PostgreSQL database and a Kubernetes Secret containing the connection
-URL.
+Log backend:
 
-Required values:
+- `objectlog`
+- `postgres`
 
-```yaml
-backend:
-  profile: postgres_native
-  shardCount:
-    min: 1
-    max: 1
-  postgres:
-    existingSecret: pqueue-postgres
-    databaseUrlKey: database-url
-```
+Projection backend:
 
-The referenced Secret key must contain a URL accepted by `tokio-postgres`, for
-example:
+- `inmemory`
+- `sqlite`
+- `postgres`
+
+The current `pqueue-server` binary only wires a subset of those combinations.
+Unsupported combinations fail loudly at startup instead of being hidden behind a
+synthetic combined backend name.
+
+## Default Values
 
 ```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: pqueue-postgres
-type: Opaque
-stringData:
-  database-url: postgres://pqueue:pqueue@postgres.example:5432/pqueue
+storage:
+  log:
+    backend: objectlog
+  projection:
+    backend: inmemory
 ```
 
-The chart exposes that key as `PQUEUE_POSTGRES_DATABASE_URL`. For the
-`postgres_native` profile, `/readyz` opens a PostgreSQL connection and runs
-`SELECT 1`; Kubernetes will not mark the pqueue Deployment ready until the
-database accepts that query.
+The chart renders:
 
-## object_log_sqlite_projection
+- `PQUEUE_LOG_BACKEND`
+- `PQUEUE_PROJECTION_BACKEND`
+- `PQUEUE_OBJECT_LOG_ROOT` when `storage.log.backend=objectlog`
+- `PQUEUE_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite`
+- Postgres log/projection database URL Secret refs when the corresponding axis
+  uses `postgres`
 
-Production operators using `backend.profile=object_log_sqlite_projection` must
-provide the same PostgreSQL Secret for the control plane, plus S3-compatible
-object storage settings and a Kubernetes Secret containing only object-store
-credentials.
-
-Required values:
-
-```yaml
-backend:
-  profile: object_log_sqlite_projection
-  postgres:
-    existingSecret: pqueue-postgres
-    databaseUrlKey: database-url
-  objectLog:
-    endpoint: http://minio:9000
-    bucket: pqueue-object-log
-    region: us-east-1
-    segmentMaxCommands: 1024
-    existingSecret: pqueue-object-log
-    accessKeyIdKey: access-key-id
-    secretAccessKeyKey: secret-access-key
-  sqliteProjection:
-    mountPath: /var/lib/pqueue/projection
-persistence:
-  enabled: true
-```
-
-The chart renders endpoint, bucket, region, segment count, and SQLite projection
-path into the ConfigMap. `PQUEUE_OBJECT_LOG_ACCESS_KEY_ID`,
-`PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY`, and `PQUEUE_POSTGRES_DATABASE_URL` are
-always sourced from Kubernetes Secret keys, so access keys, secret keys, and
-local CI fixture credentials are not chart defaults.
-
-When persistence is enabled, the chart creates or references a PVC and mounts it
-at `backend.sqliteProjection.mountPath`. When persistence is disabled, the same
-mount path is backed by `emptyDir`.
+The service exposes the RESP port and uses TCP liveness/readiness probes.

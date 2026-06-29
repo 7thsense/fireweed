@@ -14,25 +14,24 @@ fn valid_create_queue() -> CreateQueue {
         queue_id: QueueId::new("scheduled_actions").unwrap(),
         priority_model: PriorityModel::timestamp_ascending(),
         ordering_mode: OrderingMode::Strict,
-        group_co_residency: true,
         progress_bound_ms: 10_000,
         eligibility_policy: pqueue_core::EligibilityPolicy::default(),
         cohort_policy: CohortPolicy::disabled(),
         recurrence: RecurrencePolicy::default(),
         request_id_retention_ms: 3_600_000,
         client_item_key_retention_ms: 86_400_000,
+        terminal_retention_ms: 60_000,
         max_lease_duration_ms: 60_000,
         retry_policy: RetryPolicy { max_attempts: 5 },
         max_push_batch_size: 100,
         max_claim_batch_size: 50,
         max_eligible_group_size: Some(25),
-        shard_count: Some(4),
+        secondary_indexes: vec![],
     }
 }
 
 fn policy() -> QueueCreationPolicy {
     QueueCreationPolicy {
-        deployment_max_shard_count: 8,
         default_max_gate_keys_per_item: 12,
         default_max_gates_per_request: 6,
     }
@@ -89,32 +88,8 @@ fn core_domain_tests_rejects_completion_bound_above_progress_bound() {
 }
 
 #[test]
-fn core_domain_tests_rejects_cohort_without_group_co_residency() {
+fn core_domain_tests_applies_policy_defaults() {
     let mut request = valid_create_queue();
-    request.group_co_residency = false;
-    request.cohort_policy = CohortPolicy {
-        enabled: true,
-        completion_bound_ms: Some(9_000),
-        on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
-        max_cohort_size: Some(10),
-    };
-
-    let error = request.validate(&policy()).unwrap_err();
-    assert_eq!(
-        error.kind,
-        pqueue_core::CreateQueueErrorKind::QueueDefinitionConflict
-    );
-    assert!(
-        error.message.contains("group_co_residency=true"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
-#[test]
-fn core_domain_tests_applies_shard_count_policy_fields_and_defaults() {
-    let mut request = valid_create_queue();
-    request.shard_count = None;
     request.eligibility_policy = pqueue_core::EligibilityPolicy {
         metadata_blockers: Default::default(),
         gate_keys: GateKeyPolicy::Dynamic,
@@ -123,43 +98,8 @@ fn core_domain_tests_applies_shard_count_policy_fields_and_defaults() {
     };
 
     let queue = request.validate(&policy()).unwrap();
-    assert_eq!(queue.shard_count, 1);
     assert_eq!(queue.eligibility_policy.max_gate_keys_per_item, Some(12));
     assert_eq!(queue.eligibility_policy.max_gates_per_request, Some(6));
-}
-
-#[test]
-fn core_domain_tests_rejects_shard_count_above_deployment_cap() {
-    let mut request = valid_create_queue();
-    request.shard_count = Some(9);
-
-    let error = request.validate(&policy()).unwrap_err();
-    assert_eq!(
-        error.kind,
-        pqueue_core::CreateQueueErrorKind::InvalidRequest
-    );
-    assert!(
-        error.message.contains("deployment_max_shard_count"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
-#[test]
-fn core_domain_tests_rejects_zero_shard_count() {
-    let mut request = valid_create_queue();
-    request.shard_count = Some(0);
-
-    let error = request.validate(&policy()).unwrap_err();
-    assert_eq!(
-        error.kind,
-        pqueue_core::CreateQueueErrorKind::InvalidRequest
-    );
-    assert!(
-        error.message.contains("greater than or equal to 1"),
-        "unexpected error message: {}",
-        error.message
-    );
 }
 
 #[test]
@@ -225,7 +165,6 @@ fn core_domain_tests_create_queue_success_response_preserves_fields() {
     let queue = valid_create_queue().validate(&policy()).unwrap();
     assert_eq!(queue.tenant_id.as_str(), "tenant_acme");
     assert_eq!(queue.queue_id.as_str(), "scheduled_actions");
-    assert_eq!(queue.shard_count, 4);
     assert_eq!(queue.cohort_policy, None);
 
     let response = queue.create_response(true);
@@ -403,14 +342,6 @@ fn core_domain_tests_rejects_invalid_recurrence_group_and_gate_shapes() {
             },
         ),
         (
-            "max_eligible_group_size requires group_co_residency=true",
-            CreateQueueErrorKind::InvalidRequest,
-            |request| {
-                request.group_co_residency = false;
-                request.max_eligible_group_size = Some(1);
-            },
-        ),
-        (
             "max_eligible_group_size must be less than or equal to max_claim_batch_size",
             CreateQueueErrorKind::QueueDefinitionConflict,
             |request| {
@@ -458,7 +389,18 @@ fn core_domain_tests_rejects_invalid_recurrence_group_and_gate_shapes() {
 #[test]
 fn core_domain_tests_exercises_result_identifier_variants() {
     let client_key = ClientItemKey::new("client-key").unwrap();
-    let item_id = ItemId::new("item-1").unwrap();
     assert_eq!(client_key.to_string(), "client-key");
-    assert_eq!(item_id.to_string(), "item-1");
+
+    // ItemId is a packed u64 `[epoch:24][node:8][counter:32]` (ADR-009): mint decodes back to its parts,
+    // renders as the decimal of the packed value, and parses (the `Display` inverse) for read-from-storage.
+    let item_id = ItemId::mint(7, 3, 42);
+    assert_eq!(
+        (item_id.epoch(), item_id.node(), item_id.counter()),
+        (7, 3, 42)
+    );
+    assert_eq!(item_id.as_u64(), (7u64 << 40) | (3u64 << 32) | 42);
+    assert_eq!(ItemId::new(item_id.to_string()).unwrap(), item_id);
+    assert_eq!(ItemId::from_u64(item_id.as_u64()), item_id);
+    // The epoch field is masked to its low 24 bits (it wraps, per the design).
+    assert_eq!(ItemId::mint((1 << 24) + 5, 0, 0).epoch(), 5);
 }

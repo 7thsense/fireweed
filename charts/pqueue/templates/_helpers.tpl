@@ -64,8 +64,8 @@ Select the image tag.
 {{- end -}}
 
 {{/*
-Name of the SQLite projection persistent volume claim.
+Name of the storage persistent volume claim.
 */}}
-{{- define "pqueue.sqlitePvcName" -}}
-{{- default (printf "%s-sqlite-projection" (include "pqueue.fullname" .)) .Values.persistence.existingClaim -}}
+{{- define "pqueue.storagePvcName" -}}
+{{- default (printf "%s-storage" (include "pqueue.fullname" .)) .Values.persistence.existingClaim -}}
 {{- end -}}

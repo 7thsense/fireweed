@@ -1,0 +1,132 @@
+---
+ddx:
+  id: adr-queue-as-shard-unit-and-projection-families
+  depends_on:
+    - prd
+  status: accepted
+  review:
+    self_hash: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+    deps:
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+    reviewed_at: "2026-06-25T04:21:18Z"
+---
+
+# Architecture Decision Record
+
+**ADR ID**: ADR-008
+**Title**: The queue is the unit of sharding; two projection families; a pluggable control plane
+**Status**: accepted
+**Related**: PRD (FR-13), ADR-001 (CQRS log/projection), ADR-004 (granularity & claim domain),
+ADR-007 (hexagonal & two interfaces), TD-001 (backend contracts), TD-002 (relational `postgres_native`),
+TD-003 (sharding & ownership), TD-006 (RESP), TD-007 (durability),
+`docs/helix/04-build/coordinated-log-relational-projection-plan.md`
+
+## Context
+
+The original storage model (ADR-001) and its technical designs specify **intra-queue sharding**: a queue is
+split into `shard_count` shards, items are placed by `hash(group_key | client_item_key) mod shard_count`
+(ADR-004 / TD-003), and a queue-global claim **fans out across all of a queue's shards and k-way-merges**
+their candidates, with a queue-global progress bound aggregated across shards (TD-001/TD-003). That buys
+*single-queue* horizontal scale (PRD FR-13; TP-002 E2: one queue over 8 shards ≥ 4× one deployment).
+
+Two costs surfaced in review:
+
+1. **Scatter-gather per claim.** A queue-global claim must probe the top of every shard — across owner nodes
+   — and merge. That is expensive, stall-prone, and taxes priority specifically (cheap claims would require
+   relaxing ordering). For a priority work queue this undercuts the core value at exactly the scale where it
+   should hold up.
+2. **ADR-007's projection premise contradicts the standing designs.** ADR-007 consolidated storage to "one
+   shared in-memory projection + swappable log stores" and recorded that *"the 'fused vs split' special case
+   disappears (a backend is just a durability class)."* But TD-002 still specifies the relational
+   `pqueue_items` projection with an SQL `FOR UPDATE SKIP LOCKED` claim — a genuinely different projection.
+   The code shipped the one-projection version (PHASE-7: `ShardId::ZERO`, an in-memory projection,
+   `postgres_native` rebuilt as a log-store rather than the relational projection), leaving large queues
+   RAM-bound to a single process and the multi-shard horizontal envelope unbuildable.
+
+The product floor (E0: ≥10M items/hr ≈ 2,778 items/s **per queue**) is met by a single owner with batching,
+so "a single queue must exceed one node" is a narrow need; "many queues across many owners" covers the floor,
+the ≥1000-active-queue density, and aggregate headroom. The product owner has decided to trade single-queue
+horizontal scale for single-hop, no-stall claims: **"Queue is the unit of sharding. If you want more
+sharding, create more queues."**
+
+## Decision
+
+1. **The queue is the unit of sharding.** There is no intra-queue sharding. A whole queue is owned by exactly
+   one node at a time, placed by a deterministic function of `(tenant_id, queue_id)` over the live owner set
+   (HRW/rendezvous hashing, TD-003) — **per queue**, not per a fixed bucket count. Placement is
+   **client-invisible** (ADR-004's "`shard_id` is never a client-visible ordering/progress key" holds).
+   **`shard_count` is removed from the contract** (API-001 `CreateQueue`, the config-identity hash,
+   idempotent-create). Horizontal scale is **cross-queue** — distributing queues across nodes; a producer
+   needing more than one owner's throughput for a logical stream partitions it across multiple queues at the
+   application layer.
+
+   (A relational store MAY *physically* hash-partition its item table — e.g. Postgres declarative partitioning
+   by `hash(tenant_id, queue_id) % N`, `N` default 16, power-of-2 — purely for vacuum/index-size isolation.
+   That is an internal TD-002 **storage** optimization, **not** an ownership, routing, or client-visible
+   unit, and it does not bound how many nodes the queue population spreads across.)
+
+2. **Two projection families, one behavior contract.** The system supports (a) the **in-memory log-replay**
+   projection (embedded / object-log) and (b) the **relational / DB-resident** projection (`pqueue_items` +
+   SQL claim, sqlite/postgres). They share **behavior, not code**: the **conformance suite is the contract**
+   that holds them identical. Partition principle: the **core** suite is all observable queue behavior
+   *independent of durability substrate* — ordering, eligibility, claim atomicity, idempotency, lease/epoch
+   fencing, and the per-queue progress bound — which **every** projection passes; the **log** suite is
+   replay-from-log, snapshot+tail recovery, and segment/manifest commit, which only log-bearing backends run;
+   a relational backend substitutes a **reconnect-after-crash durability** test for replay-from-log. This
+   **retracts** ADR-007's "fused vs split disappears" premise (ADR-007:71).
+
+3. **Ownership is per-queue single-writer with an epoch fence.** Retain TD-003's mechanism — a control-plane
+   lease, deterministic HRW/rendezvous owner placement over the live owner set, and the **Single Authoritative
+   Fencing Rule** (epoch allocated in the control plane, durably fenced into the log before the owner serves,
+   append rejects any non-current epoch) — **re-scoped from per-`(queue,shard)` to per-`(tenant,queue)`**: the
+   owned unit is the whole queue, and the lease / epoch / HRW key is `(tenant_id, queue_id)`. There is **no
+   cross-shard machinery**: no fan-out/k-way-merge claim, no cross-shard progress aggregation, no resharding/
+   cohort-split. The progress bound — both `oldest_eligible_age_ms` and `progress_bound_risk_count` — is a
+   **local per-queue property**, not a cross-shard aggregate or sum.
+
+4. **The control plane is pluggable.** `ControlPlaneStore` (membership + leases + epoch) is a capability with
+   a Postgres implementation (default). A no-Postgres / object-store implementation (S3 conditional-PUT lease
+   + heartbeat membership + epoch CAS), enabling a pure object-log + local-projection deployment, is recorded
+   as a **deferred capability** that must clear an S3-CAS multi-object-acquire→fence-atomicity spike before it
+   is specified as settled (it has a real correctness cost the transactional Postgres path gets for free).
+   This loop specs only the pluggable **seam**.
+
+## Consequences
+
+- **Removed across the cascade:** intra-queue item-to-shard placement (`hash(group_key) mod shard_count`),
+  cross-shard claim fan-out/k-way-merge, cross-shard queue-global progress aggregation, resharding/cohort-
+  split. `group_key` becomes an **ordering/compatibility** concern only (never placement).
+  `group_co_residency` is **removed from the contract and the config-identity hash** (co-residency now holds
+  by construction); the per-item `group_key`-required rule and `whole_group`/`whole_cohort` atomicity become
+  **unconditional queue properties**, gated only by `cohort_policy.enabled` / `compatibility.group_batching`
+  config, never by a `group_co_residency` flag. `metrics.oldest_eligible_age_ms` and
+  `progress_bound_risk_count` are per-queue on its one owner (not cross-shard).
+- **TP-002 E2 is reframed** from single-queue-N-shard (≥4× one deployment) to **cross-queue scale-out** —
+  N queues across N owners, monotonic with owner count, the per-queue floor preserved under density.
+- **Gains:** claims are single-hop (no scatter-gather, no stalls); the relational projection removes the
+  in-RAM ceiling; ownership/coordination collapses to one lease per queue — replacing the per-`(queue,shard)`
+  lease — which is what makes the no-Postgres option tractable.
+- **Trade-off accepted:** a single queue cannot exceed one owner's throughput — mitigated by app-level
+  multi-queue fan-out, and acceptable because the per-queue E0 floor is met by one owner.
+- **Supersedes / amends:** ADR-004 (item-to-shard placement; `group_co_residency`), TD-003 (the cross-shard
+  model), ADR-007 (retract the "fused vs split disappears" claim, ADR-007:71). It **amends ADR-001** — which
+  already states "Postgres is preferred; a backend-specific control plane may be supported later but must
+  justify" — by **adding a concrete pluggable `ControlPlaneStore` seam** (the object-store impl is the
+  deferred candidate that must clear ADR-001's justification bar, not a removal of the bar) and by
+  establishing the projection as a **family** with a behavior contract; ADR-001's `ControlPlaneStore`
+  capability row (shard assignment / shard-owner leases) is re-scoped per-queue. The PRD was amended first
+  (FR-13, FR-11/12, FR-48, Success Metrics) so the source of truth leads the cascade.
+
+## Alternatives considered
+
+- **Keep intra-queue sharding (the existing TD-003 model).** More capable — a single queue scales across
+  shards — but pays the scatter-gather/stall cost on every queue-global claim, taxes priority, and mandates a
+  transactional control plane. Rejected: consumer simplicity + no stalls + a no-Postgres option outweigh
+  single-queue horizontal scale, which the floor math makes narrow.
+- **Async-behind projection (log leads, projection trails).** Deferred and benchmark-gated; it only pays off
+  when the log substrate is far cheaper than the projection AND read-after-write lag is tolerable (the
+  object-log→relational case), and it is a footgun on a same-substrate store (it breaks push→claim immediacy).
+  v1 modes are log-less (default) and log + sync-projection.
+- **Routing via a separately-distributed owner map.** Unnecessary: owner placement is deterministic (HRW over
+  the live owner set), so the map is *computable*, and a stale route is safe (the fenced append rejects a
+  deposed owner) — so a lazy `MOVED`-style redirect-on-miss suffices.

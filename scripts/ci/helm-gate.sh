@@ -5,8 +5,8 @@
 # chart schema / template / Kubernetes API errors BEFORE the (expensive) kind
 # install smoke tests run. It performs NO cluster operations:
 #
-#   1. helm lint            -- chart + values.schema.json validation per profile
-#   2. helm template        -- render manifests for every supported profile
+#   1. helm lint            -- chart + values.schema.json validation per storage combination
+#   2. helm template        -- render manifests for supported storage combinations
 #   3. kubeconform          -- validate rendered manifests against the pinned
 #                              Kubernetes API schema set
 #
@@ -41,8 +41,8 @@ declare -A KUBECONFORM_SHA256=(
     [darwin-arm64]="cbb47d938a8d18eb5f79cb33663b2cecdee0c8ac0bf562ebcfca903df5f0802f"
 )
 
-# Profiles to validate. Each maps to a CI values file under charts/pqueue/ci/.
-PROFILES=(postgres_native object_log_sqlite_projection)
+# Storage combinations to validate. Each maps to a CI values file under charts/pqueue/ci/.
+COMBINATIONS=(objectlog-inmemory objectlog-sqlite postgres-inmemory postgres-sqlite postgres-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -126,11 +126,14 @@ ensure_kubeconform() {
 }
 
 values_file_for() {
-    local profile="$1"
-    case "$profile" in
-        postgres_native) echo "${CHART_DIR}/ci/postgres-native-values.yaml" ;;
-        object_log_sqlite_projection) echo "${CHART_DIR}/ci/object-log-sqlite-projection-values.yaml" ;;
-        *) err "no CI values file for profile: ${profile}"; exit 1 ;;
+    local combination="$1"
+    case "$combination" in
+        objectlog-inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
+        objectlog-sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
+        postgres-inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
+        postgres-sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
+        postgres-postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
+        *) err "no CI values file for storage combination: ${combination}"; exit 1 ;;
     esac
 }
 
@@ -167,52 +170,62 @@ assert_no_fixture_credentials() {
     done
 }
 
-assert_object_log_contract() {
+assert_objectlog_inmemory_contract() {
     local rendered="$1"
 
-    assert_contains "$rendered" 'PQUEUE_BACKEND_PROFILE: "object_log_sqlite_projection"' "object-log backend profile"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ENDPOINT: "http://minio:9000"' "object-log endpoint"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_BUCKET: "pqueue-object-log"' "object-log bucket"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_REGION: "us-east-1"' "object-log region"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_SEGMENT_MAX_COMMANDS: "1024"' "object-log segment max commands"
-    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_DIR: "/var/lib/pqueue/projection"' "SQLite projection path"
-    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_DATABASE_URL' "Postgres control-plane env"
-    assert_contains "$rendered" 'name: "pqueue-postgres"' "Postgres control-plane Secret reference"
-    assert_contains "$rendered" 'key: "database-url"' "Postgres control-plane Secret key"
-    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_ACCESS_KEY_ID' "object-log access key env"
-    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_SECRET_ACCESS_KEY' "object-log secret key env"
-    assert_contains "$rendered" 'name: "pqueue-object-log"' "object-log credential Secret reference"
-    assert_contains "$rendered" 'key: "access-key-id"' "object-log access key Secret key"
-    assert_contains "$rendered" 'key: "secret-access-key"' "object-log secret key Secret key"
-    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "SQLite projection PVC"
-    assert_contains "$rendered" 'name: sqlite-projection' "SQLite projection volume"
+    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "inmemory"' "in-memory projection axis"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT: "/var/lib/pqueue/projection/object-log"' "object-log root"
+    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
+    assert_contains "$rendered" 'name: storage' "storage volume"
     assert_contains "$rendered" 'mountPath: "/var/lib/pqueue/projection"' "SQLite projection volume mount"
-    assert_contains "$rendered" 'claimName: pqueue-object-log-sqlite-projection-sqlite-projection' "SQLite projection PVC claim"
+    assert_not_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH' "sqlite projection path"
+    assert_not_contains "$rendered" 'name: PQUEUE_POSTGRES_DATABASE_URL' "Postgres env"
     assert_no_fixture_credentials "$rendered" "object-log rendered manifest"
 }
 
-assert_postgres_native_contract() {
+assert_objectlog_sqlite_contract() {
     local rendered="$1"
 
-    assert_contains "$rendered" 'PQUEUE_BACKEND_PROFILE: "postgres_native"' "postgres-native backend profile"
-    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_DATABASE_URL' "Postgres database env"
-    assert_contains "$rendered" 'secretKeyRef:' "Postgres database Secret reference"
-    assert_not_contains "$rendered" 'PQUEUE_OBJECT_LOG_' "postgres-native object-log env"
-    assert_not_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_DIR' "postgres-native SQLite projection env"
-    assert_not_contains "$rendered" 'sqlite-projection' "postgres-native SQLite projection volume or PVC"
-    assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "postgres-native PVC"
-    assert_no_fixture_credentials "$rendered" "postgres-native rendered manifest"
+    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT: "/var/lib/pqueue/projection/object-log"' "object-log root"
+    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "sqlite projection path"
+    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
+    assert_contains "$rendered" 'name: storage' "storage volume"
+    assert_no_fixture_credentials "$rendered" "objectlog/sqlite rendered manifest"
 }
 
-assert_profile_contract() {
-    local profile="$1"
+assert_postgres_contract() {
+    local rendered="$1"
+    local projection="$2"
+
+    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "postgres"' "postgres log axis"
+    assert_contains "$rendered" "PQUEUE_PROJECTION_BACKEND: \"${projection}\"" "${projection} projection axis"
+    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_LOG_DATABASE_URL' "postgres log env"
+    assert_contains "$rendered" 'secretKeyRef:' "postgres Secret reference"
+    if [[ "$projection" == "postgres" ]]; then
+        assert_contains "$rendered" 'name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL' "postgres projection env"
+    fi
+    if [[ "$projection" == "sqlite" ]]; then
+        assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "sqlite projection path"
+    fi
+    assert_not_contains "$rendered" 'PQUEUE_BACKEND_PROFILE' "legacy profile env"
+    assert_no_fixture_credentials "$rendered" "postgres rendered manifest"
+}
+
+assert_combination_contract() {
+    local combination="$1"
     local rendered="$2"
 
-    echo "--- rendered contract assertions [${profile}] ---"
-    case "$profile" in
-        postgres_native) assert_postgres_native_contract "$rendered" ;;
-        object_log_sqlite_projection) assert_object_log_contract "$rendered" ;;
-        *) err "no rendered contract assertions for profile: ${profile}"; exit 1 ;;
+    echo "--- rendered contract assertions [${combination}] ---"
+    case "$combination" in
+        objectlog-inmemory) assert_objectlog_inmemory_contract "$rendered" ;;
+        objectlog-sqlite) assert_objectlog_sqlite_contract "$rendered" ;;
+        postgres-inmemory) assert_postgres_contract "$rendered" "inmemory" ;;
+        postgres-sqlite) assert_postgres_contract "$rendered" "sqlite" ;;
+        postgres-postgres) assert_postgres_contract "$rendered" "postgres" ;;
+        *) err "no rendered contract assertions for storage combination: ${combination}"; exit 1 ;;
     esac
 }
 
@@ -223,7 +236,7 @@ main() {
     echo "chart:               ${CHART_DIR}"
     echo "kubeconform version: ${KUBECONFORM_VERSION}"
     echo "kubernetes schema:   v${KUBERNETES_VERSION}"
-    echo "profiles:            ${PROFILES[*]}"
+    echo "storage combinations: ${COMBINATIONS[*]}"
 
     ensure_kubeconform
     assert_no_fixture_credentials "${CHART_DIR}/values.yaml" "chart default values"
@@ -233,21 +246,21 @@ main() {
     mkdir -p "$PACKAGE_DIR"
     helm package "$CHART_DIR" --destination "$PACKAGE_DIR"
 
-    for profile in "${PROFILES[@]}"; do
+    for combination in "${COMBINATIONS[@]}"; do
         local values
-        values="$(values_file_for "$profile")"
+        values="$(values_file_for "$combination")"
         [[ -f "$values" ]] || { err "missing values file: ${values}"; exit 1; }
 
-        echo "--- helm lint [${profile}] ---"
+        echo "--- helm lint [${combination}] ---"
         helm lint "$CHART_DIR" --strict --values "$values"
 
-        echo "--- helm template + kubeconform [${profile}] ---"
+        echo "--- helm template + kubeconform [${combination}] ---"
         # -strict rejects unknown fields; -kubernetes-version pins the API
         # schema set; reading from stdin keeps the render deterministic.
         local rendered
         rendered="$(mktemp)"
-        helm template "pqueue-${profile//_/-}" "$CHART_DIR" --values "$values" >"$rendered"
-        assert_profile_contract "$profile" "$rendered"
+        helm template "pqueue-${combination}" "$CHART_DIR" --values "$values" >"$rendered"
+        assert_combination_contract "$combination" "$rendered"
         "$KUBECONFORM_BIN" \
                 -strict \
                 -summary \

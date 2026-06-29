@@ -6,12 +6,12 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
+    self_hash: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
     deps:
-      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-      product-vision: db0233e246975862c254e082d416a90599b8a401d31baa590a03ebf7171d5d86
-    reviewed_at: "2026-06-16T17:42:59Z"
+      concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+      product-vision: d5543b685e3f48406e03429eda380418943be1c1b152483fe349ef466d5dfaa1
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # ADR-001: CQRS Log Projection Storage Model
@@ -25,9 +25,10 @@ claim, lease renewal, finalize, retry, failure, progress bounds, and recovery at
 10M-item queue scale, meeting the per-queue throughput floor (TP-002 E0:
 >=10M items/hr per queue, preserved for every queue at any scale). These targets are delivered
 in two committed v1 envelopes: a single-deployment envelope (delivered by
-`postgres_native`), and a horizontal envelope (delivered by multi-shard claim
-with control-plane-lease shard ownership and a log-backed second backend,
-`object_log_sqlite_projection`). Both are substantiated by recorded benchmark
+`postgres_native`), and a horizontal envelope (delivered by **cross-queue
+scale-out** — distributing whole queues across nodes via control-plane-lease
+per-queue ownership over a log-backed second backend, `object_log_sqlite_projection`,
+and/or independent deployments). Both are substantiated by recorded benchmark
 evidence (TP-002).
 
 The preferred deployment shape separates a low-rate control plane from a
@@ -165,15 +166,18 @@ The storage API must be capability-based rather than one flat generic store:
 
 | Capability | Responsibility |
 |------------|----------------|
-| `LogStore` | Append and read durable command records by tenant/queue/shard. |
-| `ProjectionStore` | Maintain local query state optimized for priority claim and lease operations. |
+| `LogStore` | Append and read durable command records by tenant/queue. |
+| `ProjectionStore` | Maintain local query state optimized for priority claim and lease operations. A **family** of implementations — an in-memory log-replay projection and a relational / DB-resident projection — held identical by the conformance suite (ADR-008), not a single shared implementation. |
 | `SnapshotStore` | Persist projection snapshots at durable log positions and support bounded replay. |
-| `ControlPlaneStore` | Store queue metadata, shard assignment, backend configuration, epochs, placement, and shard-owner leases (TD-003). |
+| `ControlPlaneStore` | Store queue metadata, queue assignment, backend configuration, epochs, placement, and queue-owner leases (TD-003). |
 
 Postgres is the preferred implementation for `ControlPlaneStore` across all
-operating modes. A backend-specific control plane may be supported later, but it
-must justify why Postgres is not sufficient for low-rate metadata, assignment,
-epoch, and configuration state.
+operating modes. The control plane is a **pluggable seam**: a backend-specific
+control plane (e.g. an object-store implementation enabling a no-Postgres
+object-log deployment) may be supported later, but it must justify why Postgres
+is not sufficient for low-rate metadata, assignment, epoch, and configuration
+state — the object-store candidate is deferred pending a CAS-atomicity spike
+(ADR-008).
 
 The core implementation must not assume that all backends provide the same
 latency, concurrency, retention, or transaction semantics. Backend adapters must
@@ -194,9 +198,9 @@ In this mode:
 - `ControlPlaneStore` uses Postgres and may share the same Postgres deployment
   at small scale.
 - SQLite projection is optional rather than required.
-- Queue/shard partitioning still exists in the schema so the deployment can
-  migrate later to sharded Postgres, object-log, Kafka/Redpanda, or local
-  SQLite projection modes.
+- Queue placement (one owner per queue, ADR-008) and optional internal item-table
+  partitioning exist in the schema so the deployment can migrate later to
+  object-log, Kafka/Redpanda, or local SQLite projection modes.
 
 This mode trades maximum horizontal scale for simplicity, low operational
 overhead, low-latency small commits, and provider-managed durability. It remains
@@ -233,17 +237,18 @@ This ADR's backend menu maps to two **delivered v1** envelopes:
   ceiling is that of a well-tuned single-Postgres `SKIP LOCKED` priority queue;
   v1's advantage here is durable queue semantics. Evidence: TP-002 E1 vs the
   per-queue throughput floor E0 (>=10M items/hr per queue).
-- **Horizontal envelope** — delivered by **multi-shard claim + cross-shard
-  progress aggregation** (TD-001), **sharding & shard ownership** (TD-003), and
-  the **`object_log_sqlite_projection`** second backend (TD-004).
-  `postgres_native` alone MUST NOT be cited as evidence for this envelope.
-  Evidence: TP-002 E2 (scale-out) and E3 (object-log cost/ack + recovery).
+- **Horizontal envelope** — delivered by **cross-queue scale-out**: distributing
+  whole queues across nodes via per-queue ownership (TD-003) over the
+  **`object_log_sqlite_projection`** second backend (TD-004) and/or independent
+  `postgres_native` deployments. A single deployment alone MUST NOT be cited as
+  evidence for this envelope. Evidence: TP-002 E2 (cross-queue scale-out) and E3
+  (object-log cost/ack + recovery).
 
 | Claim | Substantiated by (committed v1) | Evidence record |
 |-------|--------------------------------|-----------------|
 | Single-deployment per-queue throughput >= floor (>=10M items/hr/queue) | `postgres_native` (TD-002) | E1 vs E0 |
-| Write/claim load scales beyond one deployment with shard count; per-queue floor preserved for every queue at any scale | multi-shard claim (TD-001) + sharding & shard ownership (TD-003) + object-log backend (TD-004) | E2 |
-| Queue-global progress bound holds across shards | cross-shard oldest-eligible aggregation (TD-001 / TD-003) | E2 |
+| Write/claim load scales beyond one deployment by distributing queues across nodes; per-queue floor preserved for every queue at any scale | cross-queue placement + per-queue ownership (TD-003) + object-log backend (TD-004) | E2 |
+| Per-queue progress bound holds on the queue's single owner | per-queue oldest-eligible tracking (TD-003); queue-local, no cross-shard aggregation | E1 |
 | Lower $/command + bounded recovery at high volume | `object_log_sqlite_projection` group commit + SQLite projection rebuild (TD-004) | E3 |
 
 ### Napkin Cost Comparison
@@ -324,9 +329,9 @@ Positive:
 - Users can choose latency/cost tradeoffs by selecting a backend and batch
   profile.
 - Postgres-native mode gives a simple, credible small-scale deployment path.
-- A Postgres control plane gives every data-plane mode one consistent place for
-  queue metadata, shard assignment, backend configuration, and epoch/fencing
-  state.
+- A Postgres control plane (the preferred, pluggable `ControlPlaneStore`) gives
+  every data-plane mode one consistent place for queue metadata, queue assignment,
+  backend configuration, and epoch/fencing state.
 - SQLite remains useful for fast local claims without becoming an unrecoverable
   authority.
 - Snapshots let object-log deployments expire old command segments and keep
@@ -336,8 +341,9 @@ Negative:
 
 - The storage API is more complex than a single database adapter.
 - Postgres-native mode can hide scaling limits if used past one deployment's
-  ceiling; v1 mitigates this by committing the multi-shard mechanism (TD-003) and
-  the `object_log_sqlite_projection` second backend (TD-004), each with a
+  ceiling; v1 mitigates this by committing the cross-queue placement mechanism
+  (per-queue ownership, TD-003) and the `object_log_sqlite_projection` second
+  backend (TD-004), each with a
   benchmark gate, so the horizontal envelope is delivered and tested rather than
   assumed.
 - Every backend needs conformance tests for durability, replay, idempotency,
@@ -363,12 +369,13 @@ Follow-up design work:
 Committed v1 design artifacts (no longer open spikes):
 
 - **TD-002** — `postgres_native` reference backend (single-deployment envelope).
-- **TD-003** — sharding & shard ownership: deterministic shard assignment from
-  the Postgres control plane (target vs active owner), storage-backed shard
-  leases, monotonic epoch fencing durably bound to the log before a new lease is
-  usable, shard rebalance, graceful drain, recovery, and cross-shard queue-global
-  progress aggregation. No ZooKeeper/etcd/embedded consensus. This substantiates
-  the horizontal-scale direction without an external coordinator.
+- **TD-003** — queue ownership (the queue is the unit of sharding, ADR-008):
+  deterministic per-queue assignment from the control plane (target vs active
+  owner), storage-backed per-queue leases, monotonic epoch fencing durably bound
+  to the log before a new lease is usable, queue rebalance, graceful drain, and
+  recovery. Progress is per-queue/local (no cross-shard aggregation). No
+  ZooKeeper/etcd/embedded consensus. This substantiates the cross-queue
+  horizontal-scale direction without an external coordinator.
 - **TD-004** — `object_log_sqlite_projection` backend: group-commit sealed
   segments, manifest commit (conditional/CAS) with fencing against the current
   control-plane epoch, in-flight claim reservation, SQLite projection, periodic

@@ -4,180 +4,183 @@ ddx:
   depends_on:
     - td-storage-architecture-backend-contracts
     - adr-cqrs-log-projection-storage-model
+    - adr-queue-as-shard-unit-and-projection-families
     - prd
     - concerns
   review:
-    self_hash: f962d0f302d06d256b30abad82b1da033df39b89630763b8be3a3954bc502aa7
+    self_hash: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
     deps:
-      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
-      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-      td-storage-architecture-backend-contracts: 5980a5612e178fc0828f567f21efaafd9d49cf7e62b2d8655bf7b9ef32e97d8d
-    reviewed_at: "2026-06-20T19:01:18Z"
+      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
+      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+      concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
+    reviewed_at: "2026-06-27T19:08:46Z"
 ---
 
-# Technical Design: TD-003 Sharding and Shard Ownership
+# Technical Design: TD-003 Queue Ownership and Fencing
 
-**Contract**: API-001 | **ADR**: ADR-001, ADR-002, ADR-004 | **Scope**: shard assignment, ownership, fencing, rebalance, drain, recovery, cross-shard progress
+**Contract**: API-001 | **ADR**: ADR-001, ADR-002, ADR-004, ADR-008, ADR-009 | **Scope**: queue-to-owner assignment, single-writer ownership, epoch fencing, reassignment, drain, recovery, the in-process library owner-runtime and its cached-epoch data-plane fence
 
 ## Scope
 
-This technical design defines how a horizontally scaled pqueue queue is split
-into shards, how a single writer owns each shard without an external
-coordinator, and how the single queue-global progress bound is computed across
-shards. It is backend-neutral: it constrains every backend profile in TD-001,
-and TD-002 (`postgres_native`) and TD-004 (`object_log_sqlite_projection`)
-inherit it.
+This technical design defines how a horizontally scaled pqueue deployment
+assigns ownership of whole queues to single-writer owners without an external
+coordinator, and how a queue's local progress bound is preserved on its one
+owner. Per ADR-008, **the queue is the unit of sharding**: a whole queue is
+owned by exactly one node at a time, and horizontal scale is achieved by
+distributing *queues* across nodes — there is no intra-queue sharding, no
+cross-shard claim fan-out, and no cross-shard progress aggregation. This design
+is backend-neutral: it constrains every backend profile in TD-001, and TD-002
+(`postgres_native`) and TD-004 (`object_log_sqlite_projection`) inherit it.
 
 In scope:
 
-- Deterministic item-to-shard assignment and the relationship to group
-  co-residency (ADR-004).
-- Deterministic shard-to-owner assignment computed from `ControlPlaneStore`
+- Deterministic queue-to-owner assignment computed from `ControlPlaneStore`
   state, with no node-to-node discovery or consensus, including the
   `target_owner` vs `active_owner` distinction during reassignment.
-- Storage-backed shard leases owned by the Postgres `ControlPlaneStore`,
-  including renewal, expiry, and monotonic `assignment_epoch` allocation.
+- Storage-backed queue leases owned by the `ControlPlaneStore`, including
+  renewal, expiry, and monotonic `assignment_epoch` allocation.
 - The single authoritative fencing rule: `assignment_epoch` is allocated in the
   control plane and is durably fenced into the durable log before the new lease
   is usable; `LogStore.append_batch` rejects any epoch that is not the current
-  control-plane epoch for the shard.
-- Rebalance: changing `shard_count` (resharding) and changing shard ownership
-  (reassignment), and the difference between them.
-- Graceful drain of an owned shard before reassignment.
-- Recovery of an owned shard from the latest snapshot plus log tail.
-- Cross-shard queue-global progress: a single `oldest_eligible_age_ms` and
-  `progress_bound_risk_count` per queue, computed across shards, the global
-  owner-liveness guard that makes FR-12 enforceable, and how claimers/monitors
-  find the worst oldest-eligible across shards (tie-in with
-  `DiscoverActiveScopes`, G4).
+  control-plane epoch for the queue.
+- Reassignment: changing *which owner* holds a queue (owner failure, scale
+  up/down, operator action).
+- Graceful drain of an owned queue before reassignment.
+- Recovery of an owned queue from the latest snapshot plus log tail.
+- The per-queue progress bound: `oldest_eligible_age_ms` and
+  `progress_bound_risk_count` are **local** properties of the queue on its one
+  owner, plus the owner-liveness guard that makes FR-12 enforceable.
 - Conformance scenarios: stale-epoch reject (including the
-  post-epoch-advance/pre-new-segment window), reassignment, drain, cross-shard
-  progress, stalled-shard visibility.
+  post-epoch-advance/pre-new-segment window), reassignment, drain, owner
+  liveness, stalled-queue visibility.
 
 Out of scope:
 
 - The claim algorithm and eligibility predicate (API-001 Eligibility
-  Precedence; TD-001 `ClaimPlan`).
-- The cross-shard claim-capacity scheduling decision (which shard receives claim
-  throughput to satisfy the queue-global bound). TD-003 defines the *state and
-  liveness requirements* the planner must honor; the *enforcement/redirection
-  algorithm* is owned by TD-001 (see "Cross-Shard Queue-Global Progress").
-- Group co-residency placement rules and the four client-visible granularity
-  axes (ADR-004).
+  Precedence; TD-001 `ClaimPlan`). Claims are single-owner-local; there is no
+  cross-owner claim scheduling.
+- Group co-residency placement rules and the client-visible granularity axes
+  (ADR-004). Under the queue-as-shard-unit model a group is co-resident on the
+  queue's single owner **by construction**; `group_key` is an
+  ordering/compatibility concern only, never a placement key.
 - The per-group summary projection's row-maintenance and gate-flip lag model
-  (TD-002 / TD-004); TD-003 only consumes its cross-shard aggregation guarantee.
-- Exact Postgres DDL for shard tables (TD-002) and object-log manifest/segment
-  shapes (TD-004).
-- Operator APIs to trigger reshard/reassign/drain (P1 operator contract).
+  (TD-002 / TD-004).
+- Exact Postgres DDL for control-plane tables (TD-002) and object-log
+  manifest/segment shapes (TD-004).
+- Operator APIs to trigger reassign/drain (P1 operator contract).
 - Cross-tenant or cross-queue placement policy and capacity-based bin-packing
   (P1).
+- The no-Postgres / object-store `ControlPlaneStore` implementation — recorded
+  as a deferred, spike-gated capability (ADR-008; this design specs only the
+  pluggable seam, see "Control-Plane Pluggability").
 
 ## Technical Approach
 
-**Strategy**: pqueue achieves horizontal scale by partitioning each queue into a
-fixed number of shards (`shard_count`, ADR-004) and giving exactly one worker
-authority over each shard at a time. Authority is not negotiated between nodes;
-it is *read* from the Postgres control plane and *enforced* at the durable log
-via a monotonic epoch fence. This keeps the data plane horizontally scalable
+**Strategy**: pqueue achieves horizontal scale by distributing whole queues
+across owner nodes and giving exactly one worker authority over each queue at a
+time (ADR-008). Authority is not negotiated between nodes; it is *read* from the
+control plane and *enforced* at the durable log via a monotonic epoch fence.
+This keeps the data plane horizontally scalable across the queue population
 (ADR-001 decision drivers) while keeping the only coordination point a low-rate,
-transactional control plane (concerns.md `deployment-topology` override).
+transactional control plane (concerns.md `deployment-topology` override). A
+producer that needs more than one owner's throughput for a logical stream
+partitions it across multiple queues at the application layer (ADR-008).
 
 **Key decisions**:
 
-- **Two distinct assignments, one mechanism.** Item-to-shard assignment is
-  deterministic from item identity (ADR-004): non-group-aware items hash on
-  `client_item_key`; group-aware items hash on `group_key` so a group is
-  co-resident on one shard (D2). Shard-to-owner assignment is deterministic from
-  `ControlPlaneStore` shard rows plus the live owner set. Both are pure functions
-  of control-plane state; neither requires nodes to discover each other.
-- **Storage-backed lease, not a lock service.** Each
-  `(tenant_id, queue_id, shard_id)` has at most one *active owner lease* recorded
-  in the Postgres `ControlPlaneStore`. The lease carries a monotonically
-  increasing `assignment_epoch`. A worker may append to a shard's `LogStore`
-  only while it holds a non-expired lease for the current epoch.
+- **One assignment, one mechanism.** Queue-to-owner assignment is deterministic
+  from `ControlPlaneStore` state plus the live owner set. It is a pure function
+  of control-plane state and requires no node-to-node discovery. There is no
+  separate item-to-shard assignment: an item belongs to its queue, and the queue
+  has exactly one owner.
+- **Storage-backed lease, not a lock service.** Each `(tenant_id, queue_id)` has
+  at most one *active owner lease* recorded in the `ControlPlaneStore`. The lease
+  carries a monotonically increasing `assignment_epoch`. A worker may append to a
+  queue's `LogStore` only while it holds a non-expired lease for the current
+  epoch.
 - **Epoch fences the log, and the epoch is durably advanced before the new lease
   is usable.** Correctness does not depend on lease-clock accuracy. The
-  `assignment_epoch` is allocated in Postgres on `acquire_shard_lease`; before
-  the acquiring owner may serve claims, the new epoch is durably fenced into the
-  shard's durable log (see "Single Authoritative Fencing Rule"). Thereafter only
-  the holder of the current `assignment_epoch` can append; the backend rejects
-  any epoch that is not current. The lease is a *liveness/assignment* mechanism;
-  the epoch is the *safety* mechanism.
-- **Queue-global progress is an aggregation plus a global liveness guard, not a
-  per-shard contract.** The progress bound (FR-9/FR-12) is queue-wide (D1). Each
-  shard maintains its own oldest-eligible age in the per-group summary
-  projection; the queue-global value is the max over shards. There is no
-  per-shard or per-group progress invariant in the engine. Queue-global
-  *enforcement* is the conjunction of (i) each shard's planner honoring the
-  queue-global bound for its own items and (ii) every shard having a live owner;
-  the cross-shard claim-capacity decision is owned by TD-001's planner (see
-  "Cross-Shard Queue-Global Progress").
-- **No external coordinator.** Assignment, leases, and epochs live in Postgres.
-  pqueue runs no membership, election, or consensus protocol.
+  `assignment_epoch` is allocated in the control plane on `acquire_queue_lease`;
+  before the acquiring owner may serve claims, the new epoch is durably fenced
+  into the queue's durable log (see "Single Authoritative Fencing Rule").
+  Thereafter only the holder of the current `assignment_epoch` can append; the
+  backend rejects any epoch that is not current. The lease is a
+  *liveness/assignment* mechanism; the epoch is the *safety* mechanism.
+- **The progress bound is a local per-queue property.** The progress bound
+  (FR-9/FR-12) is queue-wide and is computed entirely on the queue's one owner
+  from its own projection (D1). `oldest_eligible_age_ms` and
+  `progress_bound_risk_count` are local values; there is no cross-shard
+  aggregation, k-way merge, or per-group progress invariant in the engine.
+  Queue-global *enforcement* is the conjunction of (i) the owner's claim planner
+  honoring the bound for the queue's items (TD-001) and (ii) the queue having a
+  live owner (the owner-liveness guard below).
+- **No external coordinator.** Assignment, leases, and epochs live in the
+  control plane. pqueue runs no membership, election, or consensus protocol.
 
 **Trade-offs**:
 
-- We gain single-writer-per-shard safety with a familiar transactional store, but
+- We gain single-writer-per-queue safety with a familiar transactional store, but
   the control plane must stay available for ownership changes (assignment is read
-  from Postgres; the existing fallback in TD-001 — reject mutations with
+  from the control plane; the existing fallback in TD-001 — reject mutations with
   retryable commit errors — applies).
-- We gain deterministic placement (cheap routing, no rebalance chatter), but
-  changing `shard_count` is a heavier operation (resharding, see Rebalance).
-- We gain queue-global progress correctness across shards, but cross-shard
-  `oldest_eligible_age_ms` requires one rank-index read per shard plus a merge
-  (bounded by `shard_count`, served from the maintained per-group summary
-  projection, not a scan).
+- We gain deterministic placement (cheap routing, no rebalance chatter), and
+  because the owned unit is the whole queue, a claim never fans out across owners
+  — it is single-hop and stall-free (ADR-008).
+- We accept that a single queue cannot exceed one owner's throughput; this is
+  mitigated by app-level multi-queue fan-out and is acceptable because the
+  per-queue E0 floor (≥10M items/hr) is met by a single owner with batching
+  (ADR-008).
 
-## Shard Identity and Placement
+## Queue Ownership and Placement
 
-### Item-to-shard (deterministic, ADR-004)
+### Item-to-queue (trivial)
 
-| Rule | Normative text |
-|------|----------------|
-| Shard count | A queue's `shard_count` is fixed at `CreateQueue` (API-001 `CreateQueue.shard_count`, surfaced into TD-001 `QueueDefinition.shard_count`). It MUST be >= 1. `shard_count=1` is the single-shard reference profile and MUST behave identically to a degenerate multi-shard queue. See "Shard count in the contract" below for who sets it. |
-| Group-aware placement | When `group_co_residency=true` (API-001, D2), an item's shard MUST be `hash(group_key) mod shard_count`. All items sharing a `group_key` MUST be co-resident on exactly one shard (ADR-004). This is what makes `whole_group` (reachable via `compatibility.group_batching`) and `whole_cohort` (reachable via `cohort_policy`) claims shard-local and atomic. |
-| Non-group placement | When `group_co_residency=false`, an item's shard MUST be `hash(client_item_key) mod shard_count`. |
-| Hash function | `hash` MUST be a stable, documented, non-cryptographic hash with uniform distribution; it MUST NOT change for a queue after creation (changing it is equivalent to resharding, see Rebalance). |
-| Visibility | `shard_id` MUST NOT be a client-visible ordering or progress key (ADR-004). It is a physical routing/capacity unit only. |
+An item belongs to the queue named in its push. There is no intra-queue
+placement function: the queue has exactly one owner, so every item of a queue —
+and every member of a `group_key` within it — is co-resident on that owner **by
+construction** (ADR-008). `group_key` is an ordering/compatibility key only and
+MUST NOT be a client-visible or physical placement key (ADR-004). This is what
+makes `whole_group` (reachable via `compatibility.group_batching`) and
+`whole_cohort` (reachable via `cohort_policy`) claims owner-local and atomic
+without any co-residency flag.
 
-### Shard count in the contract (who sets `shard_count`)
+> **Internal storage partitioning (non-normative for ownership).** A relational
+> backend MAY *physically* hash-partition its item table — e.g. Postgres
+> declarative partitioning by `hash(tenant_id, queue_id) % N`, `N` default 16 —
+> purely for vacuum/index-size isolation (TD-002). That partition is an internal
+> **storage** detail: it is **not** an ownership, routing, or client-visible unit,
+> and it does not bound how many nodes the queue population spreads across.
 
-| Rule | Normative text |
-|------|----------------|
-| Client-supplied, policy-bounded | `shard_count` is an **optional client field on `CreateQueue`** (API-001). When omitted it defaults to `1`. When supplied it MUST be `>= 1` and MUST be `<= deployment_max_shard_count` (a service/deployment policy bound); a request above the bound MUST be rejected with `invalid-request`. |
-| Operator/service override | A deployment MAY pin or override `shard_count` by policy (e.g. force `1` on a single-node deployment, or derive a default from queue class). When policy overrides a client value, the stored `QueueDefinition.shard_count` is authoritative and `CreateQueue.response` MUST echo the effective value. |
-| D4 v1 path | The D4(a) multi-shard path is requested by a client passing `shard_count = N > 1` on `CreateQueue` (subject to the policy bound). No separate "enable sharding" flag exists; `shard_count > 1` *is* the request. |
-| Immutability | `shard_count` is immutable after `CreateQueue` in v1 (see Rebalance). An idempotent `CreateQueue` with a different `shard_count` is an incompatible definition and MUST fail per API-001 idempotent-create rules. |
-
-### Shard-to-owner (deterministic, control-plane-driven)
+### Queue-to-owner (deterministic, control-plane-driven)
 
 | Rule | Normative text |
 |------|----------------|
 | Owner set source | The set of candidate owner workers is registered in the `ControlPlaneStore` (`pqueue_workers` or equivalent, see Data Model) with a heartbeat. pqueue MUST NOT discover workers peer-to-peer. The **live owner set** is the set of registered owners whose `heartbeat_at + heartbeat_ttl_ms > now()`. |
-| Assignment function | The control plane MUST compute a deterministic **target owner** for each shard from `(shard_id, live_owner_set)` (e.g. rendezvous/highest-random-weight hashing) so that adding or removing one owner moves only an `O(shard_count / owners)` fraction of shards. The function MUST be a pure function of `(shard_id, live_owner_set)`. |
-| Target vs active owner | The function's output is the **target owner**. The **active owner** is whoever currently holds the non-expired lease in the authority record. These MAY differ transiently (a new target is selected but the previous owner's lease has not yet expired or drained). Safety never depends on them agreeing; see Shard Lease Lifecycle and the "Single Authoritative Fencing Rule". |
-| Authority record | For each shard the control plane MUST record at most one active owner lease: `(active_owner_id, assignment_epoch, lease_expires_at, state, target_owner_id)`. |
-| Epoch monotonicity | `assignment_epoch` MUST increase strictly each time ownership of a shard changes (new owner, reclaim after expiry, or forced reassignment). It MUST NOT decrease or repeat for a shard. |
+| Assignment function | The control plane MUST compute a deterministic **target owner** for each queue from `((tenant_id, queue_id), live_owner_set)` (e.g. rendezvous / highest-random-weight hashing) so that adding or removing one owner moves only an `O(queues / owners)` fraction of queues. The function MUST be a pure function of `((tenant_id, queue_id), live_owner_set)`. |
+| Target vs active owner | The function's output is the **target owner**. The **active owner** is whoever currently holds the non-expired lease in the authority record. These MAY differ transiently (a new target is selected but the previous owner's lease has not yet expired or drained). Safety never depends on them agreeing; see Queue Lease Lifecycle and the "Single Authoritative Fencing Rule". |
+| Authority record | For each queue the control plane MUST record at most one active owner lease: `(active_owner_id, assignment_epoch, lease_expires_at, state, target_owner_id)`. |
+| Epoch monotonicity | `assignment_epoch` MUST increase strictly each time ownership of a queue changes (new owner, reclaim after expiry, or forced reassignment). It MUST NOT decrease or repeat for a queue. |
 
-## Shard Lease Lifecycle
+## Queue Lease Lifecycle
 
-The `ControlPlaneStore` owns shard leases. The following operations are added to
+The `ControlPlaneStore` owns queue leases. The following operations are part of
 the `ControlPlaneStore` capability (see API / Interface Design) and are
 transactional. Throughout, `active_owner` is the lease holder recorded in the
 authority record; `target_owner` is the deterministic assignment-function output.
 
 | State | Meaning | Allowed transitions |
 |-------|---------|---------------------|
-| `unassigned` | No live active owner. | -> `assigned` via `acquire_shard_lease`. |
-| `assigned` | An active owner holds a non-expired lease for the current epoch. | -> `assigned` (renew, same epoch); -> `draining` (graceful handoff when `target_owner != active_owner`); -> `unassigned` (lease expiry reclaim, new epoch on next acquire). |
+| `unassigned` | No live active owner. | -> `assigned` via `acquire_queue_lease`. |
+| `assigned` | An active owner holds a non-expired lease for the current epoch. | -> `assigned` (renew, same epoch); -> `draining` (graceful handoff via `begin_drain` when `target_owner != active_owner`); -> `unassigned` (lease expiry reclaim, new epoch on next acquire). |
 | `draining` | Active owner is finishing in-flight work; not accepting new claims; a `target_owner` is recorded. | -> `unassigned` when drain completes or deadline passes. |
 
-**What `resolve_shard_owner` returns by state.** `resolve_shard_owner(shard)`
+**What `resolve_queue_owner` returns by state.** `resolve_queue_owner(queue)`
 returns the deterministic `target_owner` plus the current `active_owner`,
 `assignment_epoch`, and `state`. Callers interpret it as:
 
-- `unassigned`: the `target_owner` SHOULD call `acquire_shard_lease`.
+- `unassigned`: the `target_owner` SHOULD call `acquire_queue_lease`.
 - `assigned` and `target_owner == active_owner`: the active owner renews; others
   do nothing.
 - `assigned` and `target_owner != active_owner`: a reassignment is desired; the
@@ -194,7 +197,7 @@ reclaimed only via `lease_expires_at` (so safety is governed by the lease+epoch,
 not the heartbeat). `lease_ttl_ms` SHOULD be `>= heartbeat_ttl_ms`.
 
 **Acquisition.** A worker that the deterministic assignment function selects as
-`target_owner` for a shard MUST call `acquire_shard_lease(shard, owner_id)`. The
+`target_owner` for a queue MUST call `acquire_queue_lease(queue, owner_id)`. The
 control plane MUST, in one transaction:
 
 1. Reject the acquire if an active (`assigned`/`draining`) non-expired lease is
@@ -205,17 +208,17 @@ control plane MUST, in one transaction:
    `lease_expires_at = now() + lease_ttl_ms`.
 
 After a successful acquire, the new owner MUST durably fence the new epoch into
-the shard's log before serving claims (see "Single Authoritative Fencing Rule").
+the queue's log before serving claims (see "Single Authoritative Fencing Rule").
 
 **Renewal.** The owner MUST call
-`renew_shard_lease(shard, owner_id, expected_epoch)` before `lease_expires_at`.
+`renew_queue_lease(queue, owner_id, expected_epoch)` before `lease_expires_at`.
 Renewal MUST NOT change `assignment_epoch`. A renewal whose `expected_epoch` does
 not match the stored epoch, or whose `owner_id` is not the `active_owner`, MUST
-fail with `shard-epoch-stale`; the worker MUST stop appending and re-resolve
+fail with `queue-epoch-stale`; the worker MUST stop appending and re-resolve
 assignment.
 
 **Expiry / reclaim.** If a lease is not renewed before `lease_expires_at`, the
-shard is reclaimable. The next `acquire_shard_lease` (by the deterministically
+queue is reclaimable. The next `acquire_queue_lease` (by the deterministically
 selected `target_owner`) allocates a **new, strictly greater**
 `assignment_epoch`, which fences the previous owner's appends.
 
@@ -224,18 +227,18 @@ There is exactly one fencing authority: the control-plane `assignment_epoch`. To
 prevent a stale epoch-`E` writer from appending after epoch `E+1` is acquired but
 before any `E+1` segment exists, both of the following MUST hold:
 
-1. **Durable fence before use.** On `acquire_shard_lease`, before the new owner
+1. **Durable fence before use.** On `acquire_queue_lease`, before the new owner
    serves any claim or appends any data segment, it MUST durably record the new
-   epoch in the shard's durable log such that the log's recorded current epoch
+   epoch in the queue's durable log such that the log's recorded current epoch
    becomes `E+1`. For `postgres_native` this is the `assignment_epoch` column on
-   the shard row updated in the same acquire transaction (the append transaction
-   validates against it). For `object_log_sqlite_projection` (TD-004) the new
-   owner MUST commit an **epoch-fence manifest entry** (a zero-or-control segment
-   carrying `assignment_epoch = E+1`) via the manifest CAS *before* committing any
-   data segment, so the manifest's recorded current epoch advances to `E+1` at
-   handoff time, not lazily on first data write.
+   the queue-owner row updated in the same acquire transaction (the append
+   transaction validates against it). For `object_log_sqlite_projection` (TD-004)
+   the new owner MUST commit an **epoch-fence manifest entry** (a zero-or-control
+   segment carrying `assignment_epoch = E+1`) via the manifest CAS *before*
+   committing any data segment, so the manifest's recorded current epoch advances
+   to `E+1` at handoff time, not lazily on first data write.
 2. **Reject non-current epoch.**
-   `LogStore.append_batch(shard, expected_epoch, ...)` MUST reject any append
+   `LogStore.append_batch(queue, expected_epoch, ...)` MUST reject any append
    whose `expected_epoch` is not equal to the log's current recorded epoch (not
    merely `<=`). The TD-004 manifest CAS MUST therefore compare against the
    manifest's recorded current epoch (which step 1 has already advanced), and
@@ -243,7 +246,7 @@ before any `E+1` segment exists, both of the following MUST hold:
    epoch-`E` writer is rejected the instant `E+1` is fenced, regardless of
    whether an `E+1` *data* segment exists yet.
 
-Therefore at most one writer can ever append to a shard at a given epoch, and a
+Therefore at most one writer can ever append to a queue at a given epoch, and a
 superseded writer is fenced at handoff, not at first conflicting data write.
 Lease TTL governs *liveness* (how fast a dead owner is replaced), never *safety*.
 
@@ -259,151 +262,186 @@ incarnation token alongside the epoch to defend against owner spoofing in
 less-trusted deployments. This is recorded as a future option, not a v1
 requirement.
 
+## In-Process Library Owner-Runtime (ADR-009)
+
+This design is written in terms of an abstract "owner worker." Per ADR-007 there
+are **two** driving adapters that realize an owner-runtime over the *same* engine
+coordination: the RESP server (`pqueue-resp`) and the **in-process Rust library**
+(`pqueue`, `Pqueue`). ADR-009 makes both first-class owners — **neither is exempt
+from resolve + fence**, and coordination is enforced in the engine *below the
+ports*, not in either adapter. The rules below constrain the library realization
+specifically (closing the gap where the library delegated straight to the
+data-plane ports without acquiring a lease); the RESP server realization is
+unchanged from the rest of this design.
+
+| Rule | Normative text |
+|------|----------------|
+| Library is an owner | A `Pqueue` handle MUST carry an `OwnerId` and a `ControlPlaneStore`, resolve ownership, and operate under an acquired, fenced lease for every queue-addressed op — identically to the RESP server. It MUST NOT append to a queue it has not acquired-and-fenced. A single embedded sole-owner deployment is the degenerate case: constant ownership and a constant (always-current) epoch, so single-instance behavior is unchanged. |
+| Cached acquire-time epoch (MUST) | The `expected_epoch` carried on every data-plane append (`PushPort`/`ClaimPort`/`FinalizePort` -> `append_batch`) MUST be the epoch the owner **cached at `acquire_queue_lease`** (`OwnedSession.fence_epoch`), NOT a value re-read from the control plane / current log epoch at append time. Re-reading the current epoch defeats the fence (a superseded owner would read the new epoch and pass) and is therefore forbidden. The fence MUST be evaluated **at commit time inside the append's atomic unit of work**, so an owner superseded after it resolved but before it commits is rejected `queue-epoch-stale` mid-operation (no resolve->commit TOCTOU). |
+| Single durable epoch (MUST) | For the cached-epoch fence to bind, the control-plane `assignment_epoch` and the storage append-fence epoch MUST be **one durable value advanced atomically at acquire** — already specified as the same token (Data Model) and bound in the `postgres_native` acquire transaction (Backend Profile Bindings). An implementation that keeps two separately-advanced counters does NOT satisfy this rule. |
+| Data-path fail-closed (MUST) | Lease liveness MUST fail closed on the **data path**, not only the control path. If a library owner stalls (host GC pause) past `lease_expires_at` and a peer reclaims the queue at a greater epoch, the stalled owner's next append MUST be rejected by the cached-epoch fence regardless of whether its renew loop has run. The cached session is advisory for liveness; the append fence is the safety authority. |
+| Target-affinity (MUST) | The library policy layer MUST restrict `acquire_queue_lease` to the queue's deterministic `target_owner` (Queue-to-owner) and MUST NOT acquire a queue a live peer is the target for. A queue held by a different live owner yields an owned-elsewhere resolution (rendered `-MOVED` by RESP, an `OwnedElsewhere` value by the library); the library MUST NOT contend by acquiring a *live* lease (online handoff is `begin_drain`). The reference in-memory control plane's *cooperative* acquire (admits any live owner) is a reference-impl simplification; target-affinity is the normative requirement **both** adapters MUST apply so they cannot thrash a queue against each other. After a renew/acquire timeout the owner MUST **re-resolve**, never blindly retry the non-idempotent acquire. |
+| Bounded per-node coordination (MUST) | A library process owning many queues MUST keep renew/heartbeat and ownership state bounded per node — a single bounded renew/heartbeat driver, never one task/connection per queue (Queue density). |
+
+**Multi-instance shared-store competition (library).** Multiple `Pqueue` instances
+sharing one durable backend, competing for per-queue leases, is the library
+realization of this design. It is correct **only** on a backend that presents the
+single atomic acquire->fence epoch above — `postgres_native` once that binding
+holds. The reference in-memory control plane (per-process, resets on restart) and a
+backend with no shared durable control plane (sqlite-local) are **single-process
+only**. `object_log_sqlite_projection` is **single-owner only** until the deferred
+manifest-CAS epoch fence (Control-Plane Pluggability) lands and per-entry epochs
+are recorded. A `Pqueue` constructed for multi-owner operation MUST runtime-refuse
+a backend that does not present the atomic acquire->fence capability.
+
 ## Graceful Drain
 
-Drain is the cooperative path used by rebalance and rolling deploys so claimed
+Drain is the cooperative path used by reassignment and rolling deploys so claimed
 work is not orphaned and progress is not interrupted. Drain is initiated when
 `target_owner != active_owner` (a reassignment is desired) and the active owner
 is still live.
 
 | Step | Normative text |
 |------|----------------|
-| 1. Enter drain | The control plane (or operator action) sets the shard lease `state=draining` for the current epoch and records `target_owner_id`. The active owner observes this on its next renew. |
-| 2. Stop new claims | While `draining`, the active owner MUST stop serving `BatchClaim` for that shard. Pushes, updates, renewals, and finalizations MAY continue so in-flight leases can be completed. |
+| 1. Enter drain | The control plane (or operator action) sets the queue lease `state=draining` for the current epoch and records `target_owner_id`. The active owner observes this on its next renew. |
+| 2. Stop new claims | While `draining`, the active owner MUST stop serving `BatchClaim` for that queue. Pushes, updates, renewals, and finalizations MAY continue so in-flight leases can be completed. |
 | 3. Quiesce | The active owner SHOULD allow active leases to be finalized or to approach expiry up to a bounded `drain_deadline_ms`. It MUST NOT forcibly cancel in-flight worker leases. |
-| 4. Hand off | When in-flight work is quiesced or the deadline passes, the active owner stops appending and releases the lease (`release_shard_lease(shard, owner_id, expected_epoch)`), setting `state=unassigned`. |
-| 5. Reacquire | The recorded `target_owner` calls `acquire_shard_lease`, gets a strictly greater epoch, durably fences it (see Single Authoritative Fencing Rule), recovers from snapshot + log tail (see Recovery), and resumes claims. |
+| 4. Hand off | When in-flight work is quiesced or the deadline passes, the active owner stops appending and releases the lease (`release_queue_lease(queue, owner_id, expected_epoch)`), setting `state=unassigned`. |
+| 5. Reacquire | The recorded `target_owner` calls `acquire_queue_lease`, gets a strictly greater epoch, durably fences it (see Single Authoritative Fencing Rule), recovers from snapshot + log tail (see Recovery), and resumes claims. |
 
 Drain MUST be safe even if it is interrupted: if the draining owner dies
-mid-drain, lease expiry + epoch fencing (see Shard Lease Lifecycle) still
+mid-drain, lease expiry + epoch fencing (see Queue Lease Lifecycle) still
 guarantees single-writer safety; the new owner simply recovers and may redeliver
 leases that were not finalized (at-least-once, FR-28).
 
-**Progress during drain (MUST).** A draining shard's items still accrue
-progress-bound age (they are eligible work that is temporarily not being claimed
-on that shard). The cross-shard progress aggregation (see Cross-Shard
-Queue-Global Progress) MUST continue to count a draining shard's oldest-eligible
-age so the queue-global bound is not silently violated by a slow handoff.
+**Progress during drain (MUST).** A draining queue's items still accrue
+progress-bound age (they are eligible work that is temporarily not being claimed).
+A slow handoff is itself a progress-bound risk: the owner-liveness guard (see
+Per-Queue Progress Bound) MUST treat a queue with eligible work that is draining
+or unowned past its oldest-eligible item's remaining budget as a violation.
 `drain_deadline_ms` SHOULD be set below `progress_bound_ms` for the queue.
 
-## Rebalance
+## Reassignment
 
-pqueue distinguishes two operations. Both are control-plane events; neither
-requires consensus.
+Reassignment changes *which owner* holds a queue; the item set and the queue's
+identity are unchanged. Triggered by owner failure (heartbeat/lease expiry),
+owner set change (scale up/down changing `target_owner`), or operator action. The
+deterministic queue-to-owner function recomputes the `target_owner`; when it
+differs from the live `active_owner`, handoff uses graceful drain (online) or
+lease expiry + epoch fence (on failure). No item data moves; the new owner
+recovers the same queue from snapshot + log tail.
 
-### Reassignment (cheap, online)
-
-Reassignment changes *which owner* holds a shard; `shard_count` and
-item-to-shard mapping are unchanged. Triggered by owner failure (heartbeat/lease
-expiry), owner set change (scale up/down changing `target_owner`), or operator
-action. The deterministic shard-to-owner function recomputes the `target_owner`;
-when it differs from the live `active_owner`, handoff uses graceful drain
-(online) or lease expiry + epoch fence (on failure). No item data moves; the new
-owner recovers the same shard from snapshot + log tail.
-
-**Rebalance must not split a live cohort or group (MUST, G6).** Because cohorts
-and groups inherit group co-residency (`shard = hash(group_key) mod
-shard_count`, D2), all members of a `group_key` are co-resident on one shard. A
-reassignment MUST move the whole shard — and therefore the whole cohort/group —
-to the new owner as a unit; it MUST NOT split a live cohort's (or group's)
-`group_key` across shards. Reassignment does not change item-to-shard mapping,
-so this holds by construction; resharding (below), which does change the mapping,
-is what could split a cohort and is therefore gated.
-
-### Resharding (heavier, gated)
-
-Resharding changes `shard_count`, which changes `hash(...) mod shard_count` and
-therefore moves items between shards.
-
-| Rule | Normative text |
-|------|----------------|
-| v1 default | `shard_count` is fixed at `CreateQueue` and is **immutable in v1** unless a later migration design (operator contract) defines a safe split/merge. |
-| Why gated | Changing `shard_count` re-partitions group co-residency; a group must atomically move to its new shard or `whole_group`/`whole_cohort` atomicity breaks. This requires a migration command sequence (drain affected shards, copy group state under a fence, advance epoch) that is a P1 operator contract, not a hot-path operation. |
-| Evidence tie-in | Online resharding under load is the only mechanism that proves *unbounded* horizontal scale-out; it is gated on the scale-substantiation evidence (TP-002, E0-E3). v1 commits to *pre-created multi-shard placement* (fixed `shard_count > 1` spread across owners), which is sufficient to defend D4(a) horizontal claim distribution without live resharding. |
-
-**v1 commitment (MUST):** A queue created with `shard_count = N > 1` MUST
-distribute its N shards across the available owners via the deterministic
-shard-to-owner function, run independent single-writer claim/append per shard,
-and aggregate progress queue-globally. This is the substantiated multi-shard
-claim path (D4a). Live resharding (changing N) is deferred to a migration
-contract.
+Because the whole queue moves as a unit, reassignment can never split a live
+cohort or group across owners — co-residency holds by construction (ADR-008), so
+`whole_group`/`whole_cohort` atomicity (G1/G6) is preserved with no special
+rebalance rule. There is **no resharding**: the queue is the unit of sharding, so
+there is no `shard_count` to change and no item-redistribution migration. A
+producer that outgrows one owner's throughput creates additional queues at the
+application layer (ADR-008).
 
 ## Recovery
 
-When an owner acquires a shard (cold start, reassignment, or restart), it MUST
-rebuild authoritative shard state before serving claims, using the CQRS recovery
+When an owner acquires a queue (cold start, reassignment, or restart), it MUST
+rebuild authoritative queue state before serving claims, using the CQRS recovery
 contract (ADR-001):
 
 | Step | Normative text |
 |------|----------------|
-| 1. Resolve + fence epoch | Acquire the shard lease, read the current `assignment_epoch`, and durably fence it into the log (see Single Authoritative Fencing Rule) before any data append. |
-| 2. Load snapshot | Read the latest `SnapshotStore` snapshot for the shard (TD-001 `latest_snapshot`); it carries a committed `CommandPosition`. For `postgres_native`, the projection is authoritative in-place and snapshot load is a no-op (TD-002 / see Backend Profile Bindings). |
+| 1. Resolve + fence epoch | Acquire the queue lease, read the current `assignment_epoch`, and durably fence it into the log (see Single Authoritative Fencing Rule) before any data append. |
+| 2. Load snapshot | Read the latest `SnapshotStore` snapshot for the queue (TD-001 `latest_snapshot`); it carries a committed `CommandPosition`. For `postgres_native`, the projection is authoritative in-place and snapshot load is a no-op (TD-002 / see Backend Profile Bindings). |
 | 3. Replay tail | Read `LogStore` commands from the snapshot position forward (TD-001 `read_from`) and apply them to the projection (`apply_committed`), bounded by the retention/snapshot window (ADR-001 bounded replay). |
 | 4. Materialize leases | Reconstruct active leases and lease-expiry state; expired leases become eligible again (FR-26) and MUST preserve progress-bound age (FR-11). |
 | 5. Resume | Begin serving claims under the current epoch. All appends carry `expected_epoch`. |
 
 Recovery MUST be idempotent: replaying already-applied commands MUST NOT
-double-mutate (commands carry monotonic per-shard positions, TD-001). A new
+double-mutate (commands carry monotonic per-queue positions, TD-001). A new
 epoch never rewinds the log; it only fences who may extend it.
 
-## Cross-Shard Queue-Global Progress
+## Per-Queue Progress Bound
 
-The progress bound is **queue-global** (D1; FR-9/FR-12 unchanged). There is
-exactly one `oldest_eligible_age_ms` and one `progress_bound_risk_count` per
-queue, regardless of `shard_count`. There is **no** per-group or per-shard
-progress invariant in the engine; per-group fairness is a routing concern served
-by `DiscoverActiveScopes` (G4), not an engine guarantee.
-
-### Aggregation contract
+The progress bound is **queue-global and computed locally** on the queue's one
+owner (D1; FR-9/FR-12 unchanged). There is exactly one `oldest_eligible_age_ms`
+and one `progress_bound_risk_count` per queue. Because the whole queue lives on one
+owner, both are **local** values read from the owner's own projection in a single
+read — there is no cross-owner aggregation, k-way merge, or sum. The per-group
+summary rows below are a **storage layout** of one queue's state on its owner, not a
+per-group progress invariant: there is **no** per-group or per-shard progress
+invariant in the engine, and per-group fairness is a routing concern served by
+`DiscoverActiveScopes` (G4), not an engine guarantee.
 
 | Rule | Normative text |
 |------|----------------|
-| Per-shard input | Each shard maintains its oldest-eligible age in the per-group summary projection (`pqueue_group_summary`, keyed `(tenant_id, queue_id, shard_id, group_key)`, maintained transactionally with item mutations). `oldest_eligible_at` per row is authoritative and exact; eligible *counts* MAY be lagged/approximate (per the projection consistency model). |
-| Queue-global oldest-eligible | `metrics.oldest_eligible_age_ms` (API-001) for a multi-shard queue MUST equal `now() - min(oldest_eligible_at)` across all of the queue's shards' summary rows. With group co-residency each group lives on one shard, so each group's row is already the cross-shard minimum for that group; the queue-global value is `max` of per-group ages = `now() - min` of per-group `oldest_eligible_at`. |
-| Queue-global risk count | `metrics.progress_bound_risk_count` MUST be the sum across shards of eligible items whose eligible age is near `progress_bound_ms`. This MAY be approximate when documented (API-001 already allows approximate counts); the oldest-eligible age MUST be authoritative. |
-| Read cost | The aggregation MUST be served from the maintained summary projection: **one rank-index read per shard (top-of-rank by oldest-eligible) plus a merge**, never a full-table scan of `pqueue_items`. Cost is `O(shard_count)` index probes, not one summary row per shard (a shard has one summary row per active group). |
-| Read semantics across shards | Each per-shard read carries the shard's summary `as_of` watermark. The queue-global aggregate's `as_of` MUST be the **minimum** (oldest) `as_of` over the shards read, so callers can reason about staleness. The queue-global `oldest_eligible_age_ms` is "exact as of `min(as_of)`": exactness of the *age* per shard is guaranteed by the transactional summary maintenance, and the aggregate is exact with respect to the state each shard had committed as of its own watermark. A read MUST NOT silently drop a shard; an unreadable/unowned shard MUST be surfaced (see Stalled-shard detection). |
-| Progress enforcement (state vs owner) | TD-003 supplies per-shard oldest-eligible state and the global owner-liveness guard. The decision of which shard receives claim capacity to keep the queue-global bound is the TD-001 claim planner's responsibility. TD-003 requires only: (i) each shard's planner, when serving that shard, MUST honor the queue-global `progress_bound_ms` for that shard's items (claim a near-violation item before the bound via the shard's progress-protection window — TD-002 claim shape); and (ii) every shard MUST have a live owner. Because each item lives on exactly one shard, queue-global compliance is the conjunction of per-shard compliance plus the global owner-liveness guard below. |
-| Global owner-liveness guard (MUST) | The control plane MUST treat "a shard with eligible work has no live owner for longer than its oldest-eligible item's remaining budget against `progress_bound_ms`" as a queue-global progress-bound risk. The reassignment path (target-owner recompute + acquire) is the mechanism that restores a live owner; TD-003 requires this guard to exist and to be observable (FR-41). It does not specify the claim planner's intra-shard ordering, which is TD-001's. |
-| Stalled-shard detection | If a shard has no live owner (lease expired, not yet reacquired) or is unreadable, its eligible items still accrue age. The cross-shard aggregation MUST include unowned/draining shards' oldest-eligible age (from the last committed summary, with its `as_of`) so monitoring (FR-41) and `DiscoverActiveScopes` surface the violation. A shard whose owner is dead for longer than `progress_bound_ms` is a progress-bound violation and MUST be observable. |
-| Recurring participation (G5) | A recurring item participates in the single cross-shard queue-global oldest-eligible aggregation exactly like any other item; re-arm only changes when it next becomes eligible, never which shard owns it (co-residency, D2). There is no recurring-specific aggregation. |
+| Source | The owner maintains oldest-eligible age in the per-group summary projection (`pqueue_group_summary`, keyed `(tenant_id, queue_id, group_key)`, maintained transactionally with item mutations). `oldest_eligible_at` per row is authoritative and exact; eligible *counts* MAY be lagged/approximate (per the projection consistency model). |
+| Queue oldest-eligible | `metrics.oldest_eligible_age_ms` (API-001) MUST equal `now() - min(oldest_eligible_at)` over the queue's own summary rows on its owner — a single local read. The per-group rows store one queue's state; this min imposes no per-group invariant. |
+| Queue risk count | `metrics.progress_bound_risk_count` MUST be the count of eligible items whose eligible age is near `progress_bound_ms`. This MAY be approximate when documented (API-001 already allows approximate counts); the oldest-eligible age MUST be authoritative. |
+| Read cost | The value MUST be served from the maintained summary projection: a bounded rank-index read on the owner, never a full-table scan of `pqueue_items`. |
+| Read semantics | The read carries the summary `as_of` watermark so callers can reason about staleness; the `oldest_eligible_age_ms` is "exact as of `as_of`". |
+| Progress enforcement (state vs owner) | TD-003 supplies the per-queue oldest-eligible state and the owner-liveness guard. The decision of how the owner orders claim capacity to keep the bound is the TD-001 claim planner's responsibility: the planner MUST honor the queue-global `progress_bound_ms` (claim a near-violation item before the bound via the queue's progress-protection window — TD-002 claim shape). |
+| Owner-liveness guard (MUST) | The control plane MUST treat "a queue with eligible work has no live owner for longer than its oldest-eligible item's remaining budget against `progress_bound_ms`" as a progress-bound risk. The reassignment path (target-owner recompute + acquire) is the mechanism that restores a live owner; TD-003 requires this guard to exist and to be observable (FR-41). |
+| Stalled-queue detection | If a queue has no live owner (lease expired, not yet reacquired) or is unreadable, its eligible items still accrue age. Monitoring (FR-41) and `DiscoverActiveScopes` MUST surface the last committed oldest-eligible age (with its `as_of`) so the violation is observable. A queue whose owner is dead for longer than `progress_bound_ms` is a progress-bound violation and MUST be observable. |
+| Recurring participation (G5) | A recurring item participates in the queue's oldest-eligible computation exactly like any other item; re-arm only changes when it next becomes eligible. There is no recurring-specific aggregation. |
 
-### Finding the worst oldest-eligible across shards (claimer / monitor tie-in, G4)
+`DiscoverActiveScopes` (API-001, G4) returns scopes ranked by
+`oldest_eligible_age_ms` descending by reading the owner's per-group summary rank
+index. Because each queue has one owner, the ranking is a local top-N over the
+owner's summary rows; there is no cross-owner merge. Results expose the summary
+`as_of` so a caller can reason about lag.
 
-A claimer or monitor that needs the worst oldest-eligible scope across shards
-MUST use `DiscoverActiveScopes` (API-001, G4), which returns scopes ranked by
-`oldest_eligible_age_ms` descending and aggregates across shards by reading each
-shard's per-group summary rank index and merging queue-global by
-`(queue_id, group_key)` (min oldest-eligible, summed counts) before top-N (G4
-"Discovery Shard Aggregation"). TD-003 adds no new client operation for this; it
-constrains the projection so that:
+## Control-Plane Pluggability
 
-- A group spanning multiple shards is impossible under group co-residency (D2),
-  so each `(shard_id, group_key)` row maps to exactly one shard and the
-  queue-global merge by `group_key` is a no-op collision-wise.
-- For non-group-aware queues, the queue-level descriptor's
-  `oldest_eligible_age_ms` MUST be the cross-shard minimum `oldest_eligible_at`
-  over the queue's shards (G4 shard-aggregation merge before top-N).
-- `DiscoverActiveScopes` results MUST expose `as_of` = `min(as_of)` over the
-  shards read (G4), so a caller can reason about summary lag and partial
-  convergence.
+`ControlPlaneStore` (membership + leases + epoch allocation) is a **pluggable
+capability** (ADR-008). The default and only v1-settled implementation is
+Postgres (transactional acquire/renew/epoch allocation); ADR-001's bar — "Postgres
+is preferred; a backend-specific control plane may be supported later but must
+justify" — holds. A no-Postgres / object-store implementation (S3 conditional-PUT
+lease + heartbeat membership + epoch CAS), enabling a pure object-log +
+local-projection deployment, is the deferred candidate that must clear that bar:
+it is gated on an S3-CAS multi-object acquire→fence-atomicity spike before it is
+specified as settled (ADR-008 §4). This design specs only the pluggable **seam**;
+the object-store implementation gets its own fresh-eyes review when it lands.
+
+**Seam contract (what any `ControlPlaneStore` implementation MUST provide).** The
+seam is substrate-neutral; an implementation is admissible only if it upholds these
+invariants — which the Postgres implementation obtains for free from a single
+serializable transaction, and which the deferred object-store implementation MUST
+prove out in the spike before it is specified:
+
+| Invariant | Requirement |
+|-----------|-------------|
+| Single active lease | At most one `active_owner` lease per `(tenant_id, queue_id)` at any instant. Concurrent `acquire_queue_lease` calls MUST linearize: at most one succeeds against a given prior epoch. |
+| Monotonic epoch allocation | `assignment_epoch` is allocated strictly increasing per queue and never repeats or decreases, even across acquire races and reclaims (Epoch monotonicity, above). |
+| Atomic acquire→fence ordering | The acquired epoch MUST become durable and binding on the log **before** the new owner serves any claim or appends any data segment (Single Authoritative Fencing Rule step 1). On a non-transactional substrate this multi-object ordering (lease record + log/manifest epoch) is the hard part the spike must establish. |
+| Bounded staleness on resolve | `resolve_queue_owner` MAY return a stale `active_owner`/`state`, but a stale result MUST be *safe*: acting on it can only fail closed (the fenced append rejects a deposed owner), never produce two live writers. |
+| Fail-closed unavailability | When the control plane is unreachable, existing owners keep serving under live leases and new acquisitions/renewals fail with a retryable error (TD-001 control-plane fallback); no append proceeds on an unconfirmed epoch. |
+
+The trait below is the seam; backend DDL/CAS mechanics live in TD-002 (Postgres)
+and the deferred object-store design (TD-004 territory).
 
 ## API / Interface Design
 
-TD-003 extends the `ControlPlaneStore` capability (TD-001) with shard-ownership
+TD-003 extends the `ControlPlaneStore` capability (TD-001) with queue-ownership
 operations. The hot-path `LogStore.append_batch(expected_epoch)` fencing token is
 unchanged from TD-001; its acceptance rule is tightened to "equals current
 epoch" per the Single Authoritative Fencing Rule. Shapes are normative for
-intent, not final syntax.
+intent, not final syntax. `QueueKey` is `(tenant_id, queue_id)` — the owned unit.
 
 ```rust
-pub struct ShardLease {
-    pub shard: ShardKey,
+pub struct QueueLease {
+    pub queue: QueueKey,          // (tenant_id, queue_id)
     pub active_owner_id: OwnerId,
     pub target_owner_id: OwnerId,
     pub assignment_epoch: u64,
-    pub state: ShardLeaseState, // Unassigned | Assigned | Draining
+    pub state: QueueLeaseState,   // Unassigned | Assigned | Draining
     pub lease_expires_at: Timestamp,
+}
+
+pub struct QueueOwnerResolution {
+    pub queue: QueueKey,
+    pub target_owner_id: OwnerId,             // deterministic assignment output; always present
+    pub active_owner_id: Option<OwnerId>,     // None when state == Unassigned
+    pub assignment_epoch: Option<u64>,        // None when no lease has ever been granted
+    pub state: QueueLeaseState,               // Unassigned | Assigned | Draining
+    pub lease_expires_at: Option<Timestamp>,  // None when Unassigned
 }
 
 #[async_trait]
@@ -414,43 +452,43 @@ pub trait ControlPlaneStore { // additions to the TD-001 trait
         heartbeat_ttl_ms: u64,
     ) -> Result<(), ControlPlaneError>;
 
-    /// Deterministic target owner for a shard given the live owner set,
+    /// Deterministic target owner for a queue given the live owner set,
     /// plus the current active owner / epoch / state (target vs active may differ).
-    async fn resolve_shard_owner(
+    async fn resolve_queue_owner(
         &self,
-        shard: &ShardKey,
-    ) -> Result<ShardOwnerResolution, ControlPlaneError>;
+        queue: &QueueKey,
+    ) -> Result<QueueOwnerResolution, ControlPlaneError>;
 
     /// Acquire/reclaim; allocates a strictly greater epoch on ownership change.
     /// Caller MUST durably fence the new epoch into the log before serving claims.
-    async fn acquire_shard_lease(
+    async fn acquire_queue_lease(
         &self,
-        shard: &ShardKey,
+        queue: &QueueKey,
         owner_id: &OwnerId,
         lease_ttl_ms: u64,
-    ) -> Result<ShardLease, ControlPlaneError>;
+    ) -> Result<QueueLease, ControlPlaneError>;
 
-    /// Renew without changing the epoch; fails `ShardEpochStale` on mismatch
+    /// Renew without changing the epoch; fails `QueueEpochStale` on mismatch
     /// or when owner_id is not the active owner.
-    async fn renew_shard_lease(
+    async fn renew_queue_lease(
         &self,
-        shard: &ShardKey,
+        queue: &QueueKey,
         owner_id: &OwnerId,
         expected_epoch: u64,
         lease_ttl_ms: u64,
-    ) -> Result<ShardLease, ControlPlaneError>;
+    ) -> Result<QueueLease, ControlPlaneError>;
 
     /// Set state=draining and record target_owner_id for the current epoch.
     async fn begin_drain(
         &self,
-        shard: &ShardKey,
+        queue: &QueueKey,
         expected_epoch: u64,
         target_owner_id: &OwnerId,
-    ) -> Result<ShardLease, ControlPlaneError>;
+    ) -> Result<QueueLease, ControlPlaneError>;
 
-    async fn release_shard_lease(
+    async fn release_queue_lease(
         &self,
-        shard: &ShardKey,
+        queue: &QueueKey,
         owner_id: &OwnerId,
         expected_epoch: u64,
     ) -> Result<(), ControlPlaneError>;
@@ -459,30 +497,29 @@ pub trait ControlPlaneStore { // additions to the TD-001 trait
 
 | Operation | Maps to |
 |-----------|---------|
-| `register_owner` / heartbeat | Live owner set for deterministic shard-to-owner assignment. No peer discovery. |
-| `resolve_shard_owner` | Deterministic target-owner function (rendezvous hashing) over live owners; returns target + active + epoch + state. |
-| `acquire_shard_lease` | Lease acquisition; allocates new epoch; caller then durably fences it. |
-| `renew_shard_lease` | Lease renewal; epoch-fenced. |
+| `register_owner` / heartbeat | Live owner set for deterministic queue-to-owner assignment. No peer discovery. |
+| `resolve_queue_owner` | Deterministic target-owner function (rendezvous hashing) over live owners; returns target + active + epoch + state. |
+| `acquire_queue_lease` | Lease acquisition; allocates new epoch; caller then durably fences it. |
+| `renew_queue_lease` | Lease renewal; epoch-fenced. |
 | `begin_drain` | Graceful Drain step 1; records `target_owner`. |
-| `release_shard_lease` | Graceful Drain step 4. |
+| `release_queue_lease` | Graceful Drain step 4. |
 | (unchanged shape, tightened rule) `LogStore.append_batch(expected_epoch)` | Safety fence; rejects any epoch that is not the current epoch (TD-001/TD-002/TD-004). |
 
 ## Data Model Changes
 
 TD-003 defines logical records; backend DDL belongs in TD-002 (Postgres) /
-TD-004 (object-log control plane is still Postgres per ADR-001). The
-`ShardAssignment` record in TD-001 is extended; a worker registry is added.
+TD-004 (object-log control plane is still Postgres per ADR-001 in v1). The
+`QueueAssignment` record extends TD-001; a worker registry is added.
 
 ```text
-ShardAssignment {            // extends TD-001 ShardAssignment
-  tenant_id, queue_id, shard_id,
+QueueAssignment {            // one row per owned queue
+  tenant_id, queue_id,
   backend_profile,
-  assignment_epoch,          // monotonic per shard (TD-001); durably fenced into the log on acquire
+  assignment_epoch,          // monotonic per queue (TD-001); durably fenced into the log on acquire
   active_owner_id,           // current lease holder; null when unassigned
   target_owner_id,           // deterministic assignment-function target; may differ during reassignment
   state,                     // unassigned | assigned | draining
   lease_expires_at,          // owner lease deadline
-  placement                  // control-plane routing metadata (TD-002)
 }
 
 OwnerRegistration {
@@ -496,7 +533,7 @@ OwnerRegistration {
 The `assignment_epoch` here is the SAME token already threaded through
 `CommandPosition.backend_epoch` and `pqueue_commands.assignment_epoch`
 (TD-001/TD-002). TD-003 only specifies *how it advances* (ownership change),
-*who allocates it* (the control plane on `acquire_shard_lease`), and *when it
+*who allocates it* (the control plane on `acquire_queue_lease`), and *when it
 becomes binding on the log* (durably fenced before the new lease is usable, see
 Single Authoritative Fencing Rule).
 
@@ -506,21 +543,21 @@ Single Authoritative Fencing Rule).
   operations; the service principal MUST be authorized for the deployment's
   control plane. Per-queue tenant authorization (ADR-002) still gates every
   data-plane append.
-- **Tenant isolation**: shard leases are keyed by
-  `(tenant_id, queue_id, shard_id)`; a worker holding a lease for one tenant's
-  shard MUST NOT thereby gain access to another tenant's shards (ADR-002).
+- **Tenant isolation**: queue leases are keyed by `(tenant_id, queue_id)`; a
+  worker holding a lease for one tenant's queue MUST NOT thereby gain access to
+  another tenant's queues (ADR-002).
 - **Threats**:
   - *Zombie writer*: an owner that paused past its lease and resumed — mitigated
     by epoch fencing on `append_batch` (the core safety property), and
     specifically by the Single Authoritative Fencing Rule which fences the old
     epoch at handoff, not at first conflicting data write.
-  - *Owner spoofing*: a worker claiming a shard it was not assigned —
-    `acquire_shard_lease` rejects when an active lease is held by another owner;
+  - *Owner spoofing*: a worker claiming a queue it was not assigned —
+    `acquire_queue_lease` rejects when an active lease is held by another owner;
     deterministic assignment plus single-active-lease bound the blast radius.
     Epoch-only credentials are sufficient for trusted internals; an unguessable
-    lease incarnation token is a deferred hardening option (see Shard Lease
+    lease incarnation token is a deferred hardening option (see Queue Lease
     Lifecycle note).
-  - *Split brain*: two workers both believing they own a shard — permitted
+  - *Split brain*: two workers both believing they own a queue — permitted
     transiently for liveness, made safe by single-epoch append.
 
 ## Performance
@@ -529,38 +566,36 @@ Single Authoritative Fencing Rule).
   per-append control-plane round trip. Ownership is cached and refreshed on
   renew interval. The durable epoch fence happens once per acquire, not per
   append.
-- **Control-plane rate**: lease renew is O(owned shards / renew interval), a
-  low-rate background load on Postgres (ADR-001 "low-rate control plane").
-- **Cross-shard progress read**: one rank-index probe per shard plus a merge
-  (O(`shard_count`) probes) per metrics/discovery call, served from the
-  maintained per-group summary index, not item scans.
-- **Reassignment cost**: recovery time per shard is bounded by snapshot +
+- **Control-plane rate**: lease renew is O(owned queues / renew interval), a
+  low-rate background load on the control plane (ADR-001 "low-rate control plane").
+- **Progress read**: a bounded rank-index probe on the owner per metrics/discovery
+  call, served from the maintained per-group summary index, not item scans. No
+  cross-owner merge.
+- **Reassignment cost**: recovery time per queue is bounded by snapshot +
   log-tail replay (ADR-001 bounded replay; TD-002 in-place projection makes this
   near-zero for `postgres_native`).
 
-### Queue density: many shards/queues owned per node (>=1000 active queues)
+### Queue density: many queues owned per node (>=1000 active queues)
 
 The PRD queue-density target (>=1000 concurrently active queues per node, ideally
-a single node) means one node owns the shard leases for many queues at once
-(>=1000 queues x `shard_count`). Ownership and its background work MUST therefore
-be bounded per node, not per shard:
+a single node) means one node owns the leases for many queues at once. Ownership
+and its background work MUST therefore be bounded per node, not per queue:
 
-- **Lease renewal is batched per node.** A node renews all of its owned shard
+- **Lease renewal is batched per node.** A node renews all of its owned queue
   leases in bounded batched control-plane writes on the renew interval (one
   multi-row update / small number of statements), NOT one renew task or
-  connection per shard. Control-plane rate stays O(owned shards / renew interval)
+  connection per queue. Control-plane rate stays O(owned queues / renew interval)
   with a small constant, and the durable-epoch fence is still once per acquire.
 - **One assignment poll per node.** A node learns its assignment set from the
   control plane in a single bounded query, not per-queue subscriptions.
-- **Cross-shard progress aggregation is shared and bounded.** The aggregation /
-  oldest-eligible monitor (and the G4 discovery read path) runs as a bounded
-  shared per-node job over the maintained per-group summary index, with work
-  proportional to active shards scanned per pass and a bounded cadence — never
-  one monitor loop per queue or per shard.
-- **Owned-shard state is bounded.** Per-shard in-memory ownership state is small
-  and capped; per-shard projection handles (e.g. SQLite databases under TD-004)
+- **Progress aggregation is shared and bounded.** The oldest-eligible monitor
+  (and the G4 discovery read path) runs as a bounded shared per-node job over the
+  maintained per-group summary index, with work proportional to active queues
+  scanned per pass and a bounded cadence — never one monitor loop per queue.
+- **Owned-queue state is bounded.** Per-queue in-memory ownership state is small
+  and capped; per-queue projection handles (e.g. SQLite databases under TD-004)
   are opened lazily and bounded by an LRU cap rather than held open per owned
-  shard indefinitely.
+  queue indefinitely.
 
 Aggregate single-node throughput remains bounded by the node; density requires
 that the 1000th owned active queue costs only bounded incremental
@@ -569,35 +604,35 @@ ownership/background resource and still meets its progress bound. Validated by
 
 ## Backend Profile Bindings
 
-| Profile | Shard lease store | Append fence | Recovery |
+| Profile | Queue lease store | Append fence | Recovery |
 |---------|-------------------|--------------|----------|
-| `postgres_native` (TD-002) | Postgres `pqueue_shards` row, transactional acquire/renew | `assignment_epoch` updated on the shard row in the acquire transaction; the data-plane append transaction validates `expected_epoch == current assignment_epoch` (TD-002 stale-epoch reject). The acquire transaction IS the durable fence. | Projection is in-place authoritative; recovery = read current epoch (no replay needed beyond crash recovery of the DB). |
-| `object_log_sqlite_projection` (TD-004, D4b) | Postgres `ControlPlaneStore` (ADR-001 keeps control plane in Postgres for all profiles) | On acquire, the new owner MUST commit an epoch-fence manifest entry advancing the manifest's recorded current epoch to `E+1` via CAS BEFORE any data segment; thereafter manifest commit MUST reject any `expected_epoch` not equal to the manifest's recorded current epoch. | Recovery = latest SQLite snapshot from object storage + replay sealed segments after the snapshot position (ADR-001 S3/Object-Log section). |
+| `postgres_native` (TD-002) | Postgres queue-owner row, transactional acquire/renew | `assignment_epoch` updated on the queue-owner row in the acquire transaction; the data-plane append transaction validates `expected_epoch == current assignment_epoch` (TD-002 stale-epoch reject). The acquire transaction IS the durable fence. | Projection is in-place authoritative; recovery = read current epoch (no replay needed beyond crash recovery of the DB). |
+| `object_log_sqlite_projection` (TD-004, D4b) | Postgres `ControlPlaneStore` (ADR-001 keeps control plane in Postgres in v1; object-store control plane deferred, ADR-008) | On acquire, the new owner MUST commit an epoch-fence manifest entry advancing the manifest's recorded current epoch to `E+1` via CAS BEFORE any data segment; thereafter manifest commit MUST reject any `expected_epoch` not equal to the manifest's recorded current epoch. | Recovery = latest SQLite snapshot from object storage + replay sealed segments after the snapshot position (ADR-001 S3/Object-Log section). |
 
 Both committed v1 profiles MUST pass the TD-003 conformance scenarios (see
 Testing).
 
 ## Testing
 
-TD-003 is not satisfied until these scenarios pass for every backend profile
-that claims multi-shard support.
+TD-003 is not satisfied until these scenarios pass for every backend profile.
 
 | Scenario | Required evidence |
 |----------|-------------------|
-| Stale-epoch reject | A writer holding epoch E appends after the shard is reassigned to epoch E+1; the append MUST fail (`shard-epoch-stale`) and MUST NOT mutate state. |
+| Stale-epoch reject | A writer holding epoch E appends after the queue is reassigned to epoch E+1; the append MUST fail (`queue-epoch-stale`) and MUST NOT mutate state. |
 | Stale writer after epoch advance, before new data segment | Epoch E+1 is acquired and the epoch fence is committed, but NO E+1 data segment exists yet. An epoch-E writer's `append_batch`/manifest commit MUST be rejected immediately (it is not the current epoch), proving the fence binds at handoff, not at first conflicting data write. |
-| Single writer under contention | Two owners transiently believe they own a shard; only the current-epoch holder's appends commit; no duplicate/lost commands. |
-| Reassignment recovery | Kill the owner; after lease expiry a new owner acquires a greater epoch, durably fences it, recovers from snapshot + log tail, and reproduces shard state exactly. |
-| Target vs active owner during rolling deploy | A new `target_owner` is selected while the previous `active_owner` lease is still live; `resolve_shard_owner` reports both; the target does not acquire until drain/expiry; no double-writer window. |
+| Single writer under contention | Two owners transiently believe they own a queue; only the current-epoch holder's appends commit; no duplicate/lost commands. |
+| Reassignment recovery | Kill the owner; after lease expiry a new owner acquires a greater epoch, durably fences it, recovers from snapshot + log tail, and reproduces queue state exactly. |
+| Target vs active owner during rolling deploy | A new `target_owner` is selected while the previous `active_owner` lease is still live; `resolve_queue_owner` reports both; the target does not acquire until drain/expiry; no double-writer window. |
 | Graceful drain | `begin_drain` stops new claims, lets in-flight leases finalize within `drain_deadline_ms`, releases the lease; the new owner resumes with no orphaned leases and no progress-bound violation. |
 | Interrupted drain | Draining owner dies mid-drain; lease expiry + epoch fence still yield single-writer safety; unfinalized leases redeliver (at-least-once, FR-28). |
-| Cross-shard progress | A multi-shard queue with skewed load reports queue-global `oldest_eligible_age_ms` = max over shards (= `now() - min(oldest_eligible_at)`); an item near violation on any shard is claimed before `progress_bound_ms`. |
-| Cross-shard as-of | A read while one shard's summary lags reports the aggregate `as_of` = min over shards and does not drop the lagging shard. |
-| Stalled-shard visibility | A shard left unowned past `progress_bound_ms` is surfaced as a progress-bound violation in metrics and `DiscoverActiveScopes`. |
-| Group co-residency invariance | All items of one `group_key` resolve to one shard; `whole_group`/`whole_cohort` claims (G1/G6) are shard-local and atomic. |
-| Rebalance does not split a live cohort | Reassign a shard holding a live cohort's `group_key`; the whole cohort moves to the new owner as a unit; no member is split across shards (G6). |
-| Reshard immutability (v1) | Attempting to change `shard_count` on an existing queue is rejected pending the migration contract. |
-| Queue density (>=1000 active queues/node) | A single node owns the shards for >=1000 concurrently active queues; lease renewal stays O(owned shards / interval) via batched per-node writes (not per-shard tasks/connections), background sweeps/aggregation run as bounded shared per-node jobs, every active queue meets its progress bound, any one queue can reach the per-queue floor, and there is no cross-queue degradation as the active-queue count grows to 1000 (`queue_density_single_node_tests`, TP-002 E2). |
+| Per-queue progress | A queue with skewed group load reports `oldest_eligible_age_ms` = `now() - min(oldest_eligible_at)` over its summary rows; an item near violation is claimed before `progress_bound_ms`. |
+| Owner-local discovery | `DiscoverActiveScopes` ranks the queue's scopes by oldest-eligible from the owner's summary index; the result exposes the summary `as_of`. |
+| Group co-residency by construction | All items of one `group_key` are owned by the queue's single owner; `whole_group`/`whole_cohort` claims (G1/G6) are owner-local and atomic with no co-residency flag. |
+| Stalled-queue visibility | A queue left unowned past `progress_bound_ms` is surfaced as a progress-bound violation in metrics and `DiscoverActiveScopes`. |
+| Queue density (>=1000 active queues/node) | A single node owns the leases for >=1000 concurrently active queues; lease renewal stays O(owned queues / interval) via batched per-node writes (not per-queue tasks/connections), background sweeps/aggregation run as bounded shared per-node jobs, every active queue meets its progress bound, any one queue can reach the per-queue floor, and there is no cross-queue degradation as the active-queue count grows to 1000 (`queue_density_single_node_tests`, TP-002 E2). |
+| In-process library owner fenced at commit (ADR-009) | A `Pqueue` owner holding cached epoch E continues to append (push/claim/finalize) after a peer acquired E+1; the append MUST fail `queue-epoch-stale` **at commit**, MUST NOT mutate state, and MUST use the cached epoch (NOT a re-read of current). A sole-owner `Pqueue` is never spuriously fenced. |
+| Library data-path fail-closed on stall (ADR-009) | A `Pqueue` owner whose lease expired during a simulated stall, after a peer reclaimed the queue, has its next append fenced **regardless** of whether its renew loop has run (the cached-epoch fence, not the renew loop, is the authority). |
+| Multi-instance target-affinity, no thrash (ADR-009) | Two `Pqueue` instances over a shared `postgres_native` store: only the deterministic `target_owner` acquires; requests at a non-target return `OwnedElsewhere` (no contended acquire of a live lease); the `assignment_epoch` does not ping-pong; a superseded instance is fenced; ownership migrates to a new target only on expiry/drain. A multi-owner `Pqueue` on a non-atomic-acquire backend is runtime-refused. |
 
 ## Risks
 
@@ -606,32 +641,35 @@ that claims multi-shard support.
 | Stale writer after epoch advance but before new data segment | M | H | Single Authoritative Fencing Rule: epoch durably fenced into the log at acquire; append rejects any non-current epoch; dedicated conformance row. |
 | Control-plane unavailability blocks ownership changes | M | M | Existing owners keep serving under live leases; new acquisitions fail closed (TD-001 control-plane fallback); appends never proceed on a stale epoch. |
 | Lease TTL too low causes ownership churn | M | M | TTL >> renew interval and GC pause; safety is epoch-based so churn only costs recovery, not correctness. |
-| Slow/indefinite drain hides a progress-bound violation | M | H | Aggregation counts draining shards; `drain_deadline_ms < progress_bound_ms`; stalled-shard conformance test; global owner-liveness guard. |
-| Resharding misperceived as online in v1 | M | M | `shard_count` immutable in v1; resharding explicitly deferred to a migration contract and the scale-substantiation evidence (TP-002). |
-| Multi-shard misread as the unbounded scale claim | M | H | Magnitude beyond one DB stays evidence-gated (TP-002, E0-E3); TD-003 commits the *mechanism* (fixed-N placement) that preserves the per-queue floor (E0) for every queue at any scale, not unbounded items/hr. |
+| Slow/indefinite drain hides a progress-bound violation | M | H | Owner-liveness guard counts draining/unowned queues; `drain_deadline_ms < progress_bound_ms`; stalled-queue conformance test. |
+| Single queue mistaken for unbounded scale | M | M | A queue cannot exceed one owner's throughput (ADR-008); horizontal scale is cross-queue, evidence-gated (TP-002 E2 cross-queue scale-out); the per-queue E0 floor is met by one owner. |
 
 ## Review Checklist
 
+- [x] In-process library is a first-class owner-runtime (ADR-009): resolves +
+      fences like the RESP server; data-plane append uses the cached acquire-time
+      epoch checked at commit; data-path fail-closed; target-affinity; multi-owner
+      is postgres-only and runtime-refused elsewhere (object-log single-owner).
 - [x] No external coordinator / consensus (ADR-001, concerns.md override).
-- [x] Storage-backed leases owned by Postgres `ControlPlaneStore`.
+- [x] Storage-backed queue leases owned by the pluggable `ControlPlaneStore`
+      (Postgres default; object-store deferred, ADR-008).
 - [x] Single authoritative fencing rule: epoch durably fenced before new lease
       usable; append rejects any non-current epoch (no stale-writer window).
-- [x] Deterministic item-to-shard (ADR-004 co-residency) and shard-to-owner
-      assignment; target vs active owner defined.
-- [x] `shard_count` is a client `CreateQueue` field (policy-bounded), `> 1`
-      requests the D4 v1 multi-shard path.
-- [x] Rebalance distinguishes online reassignment from gated resharding;
-      reassignment must not split a live cohort/group.
+- [x] Deterministic queue-to-owner assignment (HRW over `((tenant,queue),
+      live_owner_set)`); target vs active owner defined.
+- [x] Queue is the unit of sharding (ADR-008): no `shard_count`, no item-to-shard
+      placement, no resharding; group co-residency holds by construction.
+- [x] Reassignment changes owner only; whole queue moves as a unit so no
+      cohort/group split is possible.
 - [x] Graceful drain bounded below `progress_bound_ms`.
 - [x] Recovery from snapshot + log tail, idempotent replay.
-- [x] Cross-shard progress is queue-global (D1); no per-group/per-shard
-      invariant; enforcement owner (TD-001 planner) + global liveness guard
+- [x] Progress bound is a local per-queue property (D1); no cross-shard
+      aggregation/merge; enforcement owner (TD-001 planner) + owner-liveness guard
       (TD-003) named.
-- [x] Oldest-eligible aggregation served from the unified per-group summary
-      keyed `(tenant, queue, shard, group_key)`, one rank-index probe per shard +
-      merge, `as_of` = min over shards, surfaced via `DiscoverActiveScopes` (G4).
-- [x] Recurring items participate in cross-shard aggregation with no special
-      handling (G5).
+- [x] Oldest-eligible served from the per-group summary keyed
+      `(tenant, queue, group_key)`, a local rank-index probe on the owner,
+      surfaced via `DiscoverActiveScopes` (G4); no cross-owner merge.
+- [x] Recurring items participate with no special handling (G5).
 - [x] Conformance scenarios cover stale-epoch reject, post-advance/pre-segment
-      fence, reassignment, drain, target-vs-active, cross-shard progress, as-of,
-      stalled shard, cohort-not-split.
+      fence, reassignment, drain, target-vs-active, per-queue progress, stalled
+      queue, co-residency-by-construction.

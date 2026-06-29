@@ -1,37 +1,28 @@
 [workspace]
+# The hexagonal architecture in full (plan v4): the domain (core + engine + projection), the shared
+# conformance harness, the four driven adapters (memory/sqlite/postgres/objectlog), and the two driving
+# faces (RESP front + library facade) plus the composition root. The legacy HTTP-service/Kafka/storage-
+# trait crates were deleted in Phase 6; the postgres adapter was rebuilt fresh to the engine ports
+# (OWED-resolution Chunk 4) via the durable-adapter template. No crate is excluded, so `cargo test`
+# covers everything; postgres conformance is env-gated on PQUEUE_PG_TEST_URL (LOUD skip without a DB).
 members = [
     "crates/pqueue-core",
     "crates/pqueue-engine",
+    "crates/pqueue-projection",
+    "crates/pqueue-conformance",
     "crates/pqueue-memory",
-    "crates/pqueue-resp",
-    "crates/pqueue-storage",
-    "crates/pqueue-postgres",
-    "crates/pqueue-service",
-    "crates/pqueue-client",
-    "crates/pqueue-kafka",
-    "crates/pqueue-objectlog",
     "crates/pqueue-sqlite",
-]
-# Phase 2 (move-and-delete): pqueue-service is being demolished — its domain logic migrates into
-# pqueue-engine and its REST handlers are deleted. It is excluded from the default build/test set so
-# the workspace stays green while it shrinks to nothing (deleted entirely in Phase 6). Build it
-# explicitly with `-p pqueue-service` if needed.
-default-members = [
-    "crates/pqueue-core",
-    "crates/pqueue-engine",
-    "crates/pqueue-memory",
-    "crates/pqueue-resp",
-    "crates/pqueue-storage",
     "crates/pqueue-postgres",
-    "crates/pqueue-client",
-    "crates/pqueue-kafka",
     "crates/pqueue-objectlog",
-    "crates/pqueue-sqlite",
+    "crates/pqueue-resp",
+    "crates/pqueue",
+    "crates/pqueue-server",
+    "crates/pqueue-release",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.4"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"

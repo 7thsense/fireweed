@@ -1,338 +1,69 @@
 #![forbid(unsafe_code)]
 //! # pqueue-memory
 //!
-//! In-memory reference backend (atomic durability class). Implements the engine's storage/projection
-//! ports; the claim/upsert/reclaim orchestration ports build on this in the next chunk. This is the
-//! conformance reference for every other backend.
+//! In-memory reference backend (atomic durability class). It is a thin **persistence wrapper** over the
+//! shared projection state machine in [`pqueue_projection`]: one `Mutex<State>` holding a `LogData` +
+//! `ProjectionData` per shard, with `write` taking the lock for the whole unit of work so append +
+//! apply commit together (TD-007 §1 atomic class). All apply/eligibility/lease/metrics logic lives in
+//! `pqueue-projection` and is shared with the durable backends; this crate only locks and delegates.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemEvent, ItemId, ItemState, LeaseToken, PriorityModel,
-    PriorityValue, QueueDefinition, QueueId, TenantId, UtcTimestamp, apply_transition,
-    priority_sort,
+    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+};
+use pqueue_engine::{
+    AdvanceInstanceFenceCommand, ClaimCompatibility, CommitCapabilities, CommitEntryOutcome,
+    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionPort, EntryRecovery,
+    IdempotencyDecision, IndexHit, IndexQueryPort, PayloadUpdate, PurgeItemsCommand, PurgePort,
+    PushPort, PushSpec, QueueCounters, QueueIdempotencyCache, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort,
+    UpdateFieldsCommand, UpdateFieldsPort, WriteSideRecordsCommand, build_push_items,
+    require_item_level_claim, validate_gate_command, validate_gate_push, validate_instance_fence,
+    validate_purge_force,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
     CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LogRead,
-    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand, PushItem,
-    QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand, ShardId, ShardKey,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
+    FinalizeOutcome, FinalizePort, IdGen, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView,
+    LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PushCommand,
+    PushItem, QueueCommand, QueueKey, QueueMetrics, ReclaimDriver, ReplacePendingCommand,
     SnapshotRef, SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
 };
+use pqueue_projection::{LogData, ProjectionData, commit};
 
 // ---------------------------------------------------------------------------
-// Projection record + eligibility key
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct ItemRecord {
-    item_id: ItemId,
-    client_item_key: ClientItemKey,
-    priority: Option<PriorityValue>,
-    not_before: Option<UtcTimestamp>,
-    group_key: Option<GroupKey>,
-    /// Rendered into `ClaimedItem.payload` by `ClaimPort` (built in chunk 1c); stored at push.
-    #[allow(dead_code)]
-    payload: Option<Bytes>,
-    state: ItemState,
-    item_version: u64,
-    attempt_count: u32,
-    /// Retry bound; read when retry-exhaustion is wired (Finalize-Retry beyond this → terminal).
-    #[allow(dead_code)]
-    max_attempts: u32,
-    created_seq: u64,
-    lease_token: Option<LeaseToken>,
-    lease_expires_at: Option<UtcTimestamp>,
-    fenced: bool,
-    superseded: bool,
-}
-
-/// Priority-ordered eligibility key. Ascending order = claim order: priced items first (tag 0,
-/// then `priority_sort` bytes), unpriced last (tag 1), FIFO by `created_seq` within ties.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct EligKey {
-    sort: Vec<u8>,
-    created_seq: u64,
-    item: ItemId,
-}
-
-fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
-    let sort = match &rec.priority {
-        Some(p) => {
-            let mut v = vec![0u8];
-            v.extend(priority_sort(p, model));
-            v
-        }
-        None => vec![1u8],
-    };
-    EligKey {
-        sort,
-        created_seq: rec.created_seq,
-        item: rec.item_id.clone(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// State (logs and projections are DISJOINT fields so Backend::write can hand out
-// &mut LogWriter + &mut ProjectionWriter simultaneously — review M2)
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct LogData {
-    epoch: u64,
-    entries: Vec<CommandEnvelope>,
-    /// Persisted command_position high-water — a stored field, NOT recomputed from `entries.len()`,
-    /// so it survives log retention/compaction and `item_version` never regresses (TD-007 §4).
-    high_water: Option<CommandPosition>,
-    snapshots: Vec<(SnapshotRef, ProjectionSnapshot)>,
-}
-
-struct ProjectionData {
-    items: HashMap<ItemId, ItemRecord>,
-    by_key: HashMap<ClientItemKey, ItemId>,
-    eligible: BTreeSet<EligKey>,
-    next_seq: u64,
-    priority_model: PriorityModel,
-    paused: bool,
-}
-
-impl ProjectionData {
-    fn new(priority_model: PriorityModel) -> Self {
-        Self {
-            items: HashMap::new(),
-            by_key: HashMap::new(),
-            eligible: BTreeSet::new(),
-            next_seq: 0,
-            priority_model,
-            paused: false,
-        }
-    }
-
-    fn insert_pending(&mut self, item: pqueue_engine::PushItem) {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        let rec = ItemRecord {
-            item_id: item.item_id.clone(),
-            client_item_key: item.client_item_key.clone(),
-            priority: item.priority,
-            not_before: item.not_before,
-            group_key: item.group_key,
-            payload: item.payload,
-            state: ItemState::Pending,
-            item_version: 1,
-            attempt_count: 0,
-            max_attempts: item.max_attempts,
-            created_seq: seq,
-            lease_token: None,
-            lease_expires_at: None,
-            fenced: false,
-            superseded: false,
-        };
-        self.eligible.insert(elig_key(&rec, &self.priority_model));
-        self.by_key
-            .insert(rec.client_item_key.clone(), rec.item_id.clone());
-        self.items.insert(rec.item_id.clone(), rec);
-    }
-
-    /// Drive the lifecycle state machine for one item, keeping the eligibility index in sync and
-    /// bumping `item_version` (API-001: version bumps on every committed mutation).
-    fn transition(&mut self, id: &ItemId, ev: ItemEvent) -> EngineResult<ItemState> {
-        let model = self.priority_model;
-        let (old_key, new_key, new_state) = {
-            let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
-            // A superseded id (replaced by upsert) must never re-enter eligible or mutate
-            // (TD-007 §2.3): the orchestration ports map this to `-ERR pqueue superseded`.
-            if rec.superseded {
-                return Err(EngineError::Superseded);
-            }
-            let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
-            let new = apply_transition(rec.state, ev)
-                .map_err(|_| EngineError::Invalid("illegal lifecycle transition"))?;
-            rec.state = new;
-            rec.item_version += 1;
-            let nk = (new == ItemState::Pending).then(|| elig_key(rec, &model));
-            (old, nk, new)
-        };
-        if let Some(k) = old_key {
-            self.eligible.remove(&k);
-        }
-        if let Some(k) = new_key {
-            self.eligible.insert(k);
-        }
-        Ok(new_state)
-    }
-
-    fn apply_command(&mut self, cmd: &QueueCommand) -> EngineResult<()> {
-        match cmd {
-            // Queue creation is handled by the control plane; idempotent no-op if replayed here.
-            QueueCommand::CreateQueue(_) => Ok(()),
-            QueueCommand::Push(c) => {
-                for it in &c.items {
-                    self.insert_pending(it.clone());
-                }
-                Ok(())
-            }
-            QueueCommand::Claim(c) => {
-                for id in &c.item_ids {
-                    self.transition(id, ItemEvent::Claim)?;
-                    let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
-                    rec.lease_token = Some(c.lease_token.clone());
-                    rec.lease_expires_at = Some(c.lease_expires_at);
-                    rec.attempt_count += 1; // delivery count (flavor-diff 7)
-                }
-                Ok(())
-            }
-            QueueCommand::RenewLease(c) => {
-                for id in &c.item_ids {
-                    let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
-                    rec.lease_expires_at = Some(c.lease_expires_at);
-                    rec.item_version += 1;
-                }
-                Ok(())
-            }
-            QueueCommand::Finalize(c) => {
-                for o in &c.outcomes {
-                    let ev = match o.kind {
-                        FinalizeKind::Complete => ItemEvent::FinalizeComplete,
-                        FinalizeKind::Fail => ItemEvent::FinalizeFail,
-                        FinalizeKind::Retry => ItemEvent::FinalizeRetry,
-                        FinalizeKind::Release => ItemEvent::FinalizeRelease,
-                        FinalizeKind::Rearm => ItemEvent::FinalizeRearm,
-                    };
-                    self.transition(&o.item_id, ev)?;
-                    let rec = self
-                        .items
-                        .get_mut(&o.item_id)
-                        .ok_or(EngineError::NotFound)?;
-                    rec.lease_token = None;
-                    rec.lease_expires_at = None;
-                    rec.fenced = false;
-                    if matches!(o.kind, FinalizeKind::Rearm) {
-                        rec.attempt_count = 0;
-                    }
-                }
-                Ok(())
-            }
-            QueueCommand::ReplacePending(c) => {
-                // Supersede the old pending item; the old id thereafter reads as deleted/superseded.
-                let model = self.priority_model;
-                if let Some(rec) = self.items.get_mut(&c.superseded_item_id) {
-                    let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
-                    rec.superseded = true;
-                    if let Some(k) = old {
-                        self.eligible.remove(&k);
-                    }
-                }
-                self.by_key.remove(&c.client_item_key);
-                self.insert_pending(c.replacement.clone());
-                Ok(())
-            }
-            QueueCommand::LeaseExpired(c) => {
-                for id in &c.item_ids {
-                    self.transition(id, ItemEvent::LeaseExpired)?;
-                    let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
-                    rec.lease_token = None;
-                    rec.lease_expires_at = None;
-                    rec.attempt_count += 1; // reclaim charges an attempt
-                }
-                Ok(())
-            }
-            QueueCommand::CohortExpired(c) => {
-                let model = self.priority_model;
-                let ids: Vec<ItemId> = self
-                    .items
-                    .values()
-                    .filter(|r| {
-                        r.group_key.as_ref() == Some(&c.group_key) && !r.state.is_terminal()
-                    })
-                    .map(|r| r.item_id.clone())
-                    .collect();
-                for id in ids {
-                    if let Some(rec) = self.items.get_mut(&id) {
-                        let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
-                        rec.state = ItemState::Failed; // forced terminal (cohort-incomplete)
-                        rec.item_version += 1;
-                        if let Some(k) = old {
-                            self.eligible.remove(&k);
-                        }
-                    }
-                }
-                Ok(())
-            }
-            QueueCommand::FenceLease(c) => {
-                for id in &c.item_ids {
-                    if let Some(rec) = self.items.get_mut(id) {
-                        rec.fenced = true;
-                    }
-                }
-                Ok(())
-            }
-            QueueCommand::UnfenceLease(c) => {
-                for id in &c.item_ids {
-                    if let Some(rec) = self.items.get_mut(id) {
-                        rec.fenced = false;
-                    }
-                }
-                Ok(())
-            }
-            QueueCommand::PauseQueue => {
-                self.paused = true;
-                Ok(())
-            }
-            QueueCommand::ResumeQueue => {
-                self.paused = false;
-                Ok(())
-            }
-            QueueCommand::PurgeItems(c) => {
-                let model = self.priority_model;
-                for id in &c.item_ids {
-                    if let Some(rec) = self.items.remove(id) {
-                        self.by_key.remove(&rec.client_item_key);
-                        if rec.state == ItemState::Pending {
-                            self.eligible.remove(&elig_key(&rec, &model));
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// UoW writer views (disjoint borrows of logs / projections)
+// UoW writer views (disjoint borrows of logs / projections — review M2)
 // ---------------------------------------------------------------------------
 
 struct LogWriterView<'a> {
-    logs: &'a mut HashMap<ShardKey, LogData>,
+    logs: &'a mut HashMap<QueueKey, LogData>,
 }
 
 impl LogWriter for LogWriterView<'_> {
     fn append(
         &mut self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         commands: &[CommandEnvelope],
+        expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        let log = self.logs.get_mut(shard).ok_or(EngineError::NotFound)?;
-        let mut positions = Vec::with_capacity(commands.len());
-        for cmd in commands {
-            let seq = log.entries.len() as u64;
-            log.entries.push(cmd.clone());
-            let pos = CommandPosition::new(shard.clone(), log.epoch, seq);
-            log.high_water = Some(pos.clone());
-            positions.push(pos);
+        for env in commands {
+            validate_gate_command(false, &env.command)?;
         }
-        Ok(positions)
+        self.logs
+            .get_mut(shard)
+            .ok_or(EngineError::NotFound)?
+            .append(shard, commands, expected_epoch)
     }
 }
 
 struct ProjectionWriterView<'a> {
-    projections: &'a mut HashMap<ShardKey, ProjectionData>,
+    projections: &'a mut HashMap<QueueKey, ProjectionData>,
 }
 
 impl ProjectionWriter for ProjectionWriterView<'_> {
@@ -342,25 +73,84 @@ impl ProjectionWriter for ProjectionWriterView<'_> {
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
         for (pos, cmd) in positions.iter().zip(commands) {
-            let proj = self
-                .projections
-                .get_mut(&pos.shard_key)
-                .ok_or(EngineError::NotFound)?;
-            proj.apply_command(&cmd.command)?;
+            self.projections
+                .get_mut(&pos.queue)
+                .ok_or(EngineError::NotFound)?
+                .apply_command(&cmd.command)?;
         }
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// The backend
+// State + backend
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct State {
-    logs: HashMap<ShardKey, LogData>,
-    projections: HashMap<ShardKey, ProjectionData>,
+    logs: HashMap<QueueKey, LogData>,
+    projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
+    /// Per-queue retained request-id idempotency cache (TD-007 §4). Kept under the SAME `State` lock as
+    /// the log/projection so a request-id'd write does check + append + record in one atomic unit of work.
+    /// The cached outcome is the response ids the original request produced, so a replay returns them
+    /// verbatim without re-appending. Empty for the default (request-id-less) push path.
+    idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+    /// Per-queue retained request-id cache for the vectorized claimed-work COMMIT path (epic
+    /// pqueue-2201fd37). Same `QueueIdempotencyCache` machinery as `idempotency`, but the cached outcome is
+    /// the whole `Vec<CommitEntryOutcome>` so a body+request_id replay returns the prior per-entry outcomes
+    /// verbatim with NO double-write. Held under the same `State` lock so check + append + record is atomic.
+    commit_idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
+}
+
+/// Project the retained per-entry recovery records into the public per-entry outcomes (the commit return /
+/// replay value). The recovery record is the superset (it ALSO carries the consumed input id, instance fence,
+/// and side-record keys for `explain_commit`).
+fn outcomes_from_recovery(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
+    recovery
+        .iter()
+        .map(|r| match &r.status {
+            CommitEntryStatus::Committed => CommitEntryOutcome::Committed {
+                lifecycle_item_ids: r.lifecycle_item_ids.clone(),
+            },
+            CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
+        })
+        .collect()
+}
+
+/// Stable body fingerprint for request-id conflict detection: a non-cryptographic hash over the
+/// serialized push specs. A different body under the same request id is a `RequestIdConflict`; an equal
+/// body replays. (Memory is the reference backend; the durable relational backend uses SHA-256 over the
+/// same serialization — both only need determinism + collision-safety, not cryptographic strength.)
+fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(BodyHash(h.finish()))
+}
+
+/// Stable body fingerprint for the vectorized commit path: a non-cryptographic hash over the serialized
+/// commit entries (the request_id is the cache KEY, not part of the body). A different body under the same
+/// request id is a `RequestIdConflict`; an equal body replays the prior per-entry outcomes.
+fn commit_body_hash(entries: &[pqueue_engine::CommitTransitionEntry]) -> EngineResult<BodyHash> {
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(BodyHash(h.finish()))
+}
+
+/// `now + retention_ms` as the idempotency entry expiry.
+fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp {
+    let total = now.seconds as i128 * 1_000_000_000
+        + now.nanoseconds as i128
+        + retention_ms as i128 * 1_000_000;
+    UtcTimestamp::new(
+        total.div_euclid(1_000_000_000) as i64,
+        total.rem_euclid(1_000_000_000) as u32,
+    )
+    .expect("valid ts")
 }
 
 /// In-memory atomic-class backend. One `Mutex<State>`; `write` takes the lock for the whole unit of
@@ -368,6 +158,11 @@ struct State {
 pub struct MemoryBackend {
     state: Mutex<State>,
     cmd_seq: AtomicU64,
+    /// This instance's node id, packed into every minted [`ItemId`] (ADR-009) so concurrent writers never
+    /// collide. `0` for the default single-instance backend.
+    node_id: u8,
+    /// Per-(queue, epoch) item-id sequence — see [`QueueCounters`].
+    counters: QueueCounters,
 }
 
 impl Default for MemoryBackend {
@@ -375,6 +170,8 @@ impl Default for MemoryBackend {
         Self {
             state: Mutex::new(State::default()),
             cmd_seq: AtomicU64::new(0),
+            node_id: 0,
+            counters: QueueCounters::default(),
         }
     }
 }
@@ -384,8 +181,11 @@ impl MemoryBackend {
         Self::default()
     }
 
-    fn launch_shard(key: &QueueKey) -> ShardKey {
-        ShardKey::new(key.tenant_id.clone(), key.queue_id.clone(), ShardId::ZERO)
+    /// Tag this backend with `node_id` — the value packed into the disambiguation byte of every minted
+    /// [`ItemId`]. Distinct nodes competing for the same queue MUST pass distinct ids.
+    pub fn with_node_id(mut self, node_id: u8) -> Self {
+        self.node_id = node_id;
+        self
     }
 
     fn make_envelope(
@@ -398,7 +198,6 @@ impl MemoryBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("mem-{n}")),
             request_id: None,
-            shard_id: ShardId::ZERO,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -406,38 +205,21 @@ impl MemoryBackend {
         }
     }
 
-    /// Append `env` to the shard log and apply it to the projection under the already-held lock —
-    /// the atomic append+apply unit of work the claim/upsert/reclaim ports rely on.
+    /// Append `env` to the shard log and apply it to the projection under the already-held lock — the
+    /// atomic append+apply unit of work the claim/upsert/reclaim ports rely on (shared `commit`).
     fn commit_locked(
         state: &mut State,
-        shard: &ShardKey,
+        shard: &QueueKey,
         env: CommandEnvelope,
+        expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
-        let log = state.logs.get_mut(shard).ok_or(EngineError::NotFound)?;
-        let seq = log.entries.len() as u64;
-        let pos = CommandPosition::new(shard.clone(), log.epoch, seq);
-        log.entries.push(env.clone());
-        log.high_water = Some(pos);
-        let proj = state
-            .projections
-            .get_mut(shard)
-            .ok_or(EngineError::NotFound)?;
-        proj.apply_command(&env.command)
-    }
-
-    fn to_claimed(rec: &ItemRecord) -> Option<ClaimedItem> {
-        Some(ClaimedItem {
-            item_id: rec.item_id.clone(),
-            client_item_key: rec.client_item_key.clone(),
-            item_version: rec.item_version,
-            priority: rec.priority.clone(),
-            group_key: rec.group_key.clone(),
-            not_before: rec.not_before,
-            lease_token: rec.lease_token.clone()?,
-            lease_expires_at: rec.lease_expires_at?,
-            attempt_count: rec.attempt_count,
-            payload: rec.payload.clone(),
-        })
+        let State {
+            logs, projections, ..
+        } = state;
+        validate_gate_command(false, &env.command)?;
+        let log = logs.get_mut(shard).ok_or(EngineError::NotFound)?;
+        let proj = projections.get_mut(shard).ok_or(EngineError::NotFound)?;
+        commit(log, proj, shard, env, expected_epoch)
     }
 }
 
@@ -448,23 +230,17 @@ impl ClaimPort for MemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
+            // Resolve the claim unit from the compatibility options. Item-level (the default) is unchanged;
+            // this backend refuses richer claim units with `Unavailable` rather than silently downgrading
+            // them to item-level delivery. The item-level hot path skips this entirely (byte-identical).
+            if req.compatibility != ClaimCompatibility::default() {
+                let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
+                require_item_level_claim(&req.compatibility, req.max_items as u64, def)?;
+            }
             // Select priority-ordered eligible candidates (Invariant 1: per-item, in eligible order).
             let candidates: Vec<ItemId> = {
                 let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
-                if proj.paused {
-                    return Ok(Claimed::default());
-                }
-                proj.eligible
-                    .iter()
-                    .filter_map(|k| proj.items.get(&k.item))
-                    .filter(|r| {
-                        r.state == ItemState::Pending
-                            && !r.superseded
-                            && r.not_before.map(|nb| nb <= req.now).unwrap_or(true)
-                    })
-                    .take(req.max_items)
-                    .map(|r| r.item_id.clone())
-                    .collect()
+                proj.eligible_candidates(req.now, req.max_items)
             };
             if candidates.is_empty() {
                 return Ok(Claimed::default());
@@ -476,21 +252,20 @@ impl ClaimPort for MemoryBackend {
                 lease_expires_at: req.lease_expires_at,
             });
             let env = self.make_envelope(cmd, candidates.clone(), req.now);
-            Self::commit_locked(&mut g, &req.shard, env)?;
+            Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
             // Render the now-leased records into the rich claimed-item shape.
             let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
-            let items: Vec<ClaimedItem> = candidates
-                .iter()
-                .filter_map(|id| proj.items.get(id))
-                .filter_map(Self::to_claimed)
-                .collect();
+            let items: Vec<ClaimedItem> = proj.render_claimed(&candidates);
             // Every just-leased candidate must render (lease fields are Some under this lock).
             debug_assert_eq!(
                 items.len(),
                 candidates.len(),
                 "leased candidate failed to render"
             );
-            Ok(Claimed { items })
+            Ok(Claimed {
+                items,
+                ..Default::default()
+            })
         })();
         std::future::ready(result)
     }
@@ -499,43 +274,64 @@ impl ClaimPort for MemoryBackend {
 impl UpsertPort for MemoryBackend {
     fn replace_if_pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         client_item_key: &ClientItemKey,
-        new_item_id: ItemId,
         priority: Option<PriorityValue>,
         group_key: Option<GroupKey>,
         not_before: Option<UtcTimestamp>,
         payload: Option<Bytes>,
+        fields: BTreeMap<String, Bytes>,
+        metadata: Metadata,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
             let existing = {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-                proj.by_key.get(client_item_key).cloned()
+                proj.lookup_by_key(client_item_key)
             };
             let max_attempts = g
                 .queues
-                .get(&shard.queue_key())
+                .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
-            let build_item = |item_id: ItemId| PushItem {
+            // The command id stays a backend-local sequence; the item id is minted from
+            // (epoch, node, per-queue counter) like a push so it never collides across writers (ADR-009).
+            let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, 1);
+            let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
+            let item = PushItem {
                 client_item_key: client_item_key.clone(),
-                item_id,
-                priority: priority.clone(),
+                item_id: new_item_id,
+                priority,
                 not_before,
-                group_key: group_key.clone(),
+                group_key,
                 max_attempts,
-                payload: payload.clone(),
+                payload,
+                fields,
+                metadata,
+                cohort_size: None,
+                gate_keys: Vec::new(),
+            };
+            let mk = |command: QueueCommand| CommandEnvelope {
+                command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
+                request_id: None,
+                item_ids: vec![new_item_id],
+                command,
+                checksum: CommandChecksum(0),
+                created_at: now,
             };
             match existing {
                 None => {
-                    // No collision: plain insert.
-                    let cmd = QueueCommand::Push(PushCommand {
-                        items: vec![build_item(new_item_id.clone())],
-                    });
-                    let env = self.make_envelope(cmd, vec![new_item_id.clone()], now);
-                    Self::commit_locked(&mut g, shard, env)?;
+                    // Pre-commit unique-index validation (ADR-010 §5.1): a violating insert appends nothing.
+                    {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.index_validate(&item.item_id, &item.fields, None)?;
+                    }
+                    let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
+                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
                     })
@@ -543,20 +339,21 @@ impl UpsertPort for MemoryBackend {
                 Some(existing_id) => {
                     let state = {
                         let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-                        proj.items
-                            .get(&existing_id)
-                            .ok_or(EngineError::NotFound)?
-                            .state
+                        proj.item_state(&existing_id).ok_or(EngineError::NotFound)?
                     };
                     match state {
                         ItemState::Pending => {
-                            let cmd = QueueCommand::ReplacePending(ReplacePendingCommand {
+                            // The superseded item is removed in the same command, so it does not conflict.
+                            {
+                                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                                proj.index_validate_replace(&existing_id, &item)?;
+                            }
+                            let env = mk(QueueCommand::ReplacePending(ReplacePendingCommand {
                                 client_item_key: client_item_key.clone(),
-                                superseded_item_id: existing_id.clone(),
-                                replacement: build_item(new_item_id.clone()),
-                            });
-                            let env = self.make_envelope(cmd, vec![new_item_id.clone()], now);
-                            Self::commit_locked(&mut g, shard, env)?;
+                                superseded_item_id: existing_id,
+                                replacement: item,
+                            }));
+                            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
                             Ok(UpsertOutcome::Replaced {
                                 new_item_id,
                                 superseded_item_id: existing_id,
@@ -576,40 +373,531 @@ impl UpsertPort for MemoryBackend {
     }
 }
 
+impl PushPort for MemoryBackend {
+    fn push(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let mut g = self.state.lock().expect("poisoned");
+            let max_attempts = g
+                .queues
+                .get(&shard.clone())
+                .map(|d| d.retry_policy.max_attempts)
+                .unwrap_or(1);
+            // The command id stays a backend-local sequence; the ITEM ids are minted from
+            // (epoch, node, per-queue counter) so concurrent writers to one queue never collide (ADR-009).
+            let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            // Pre-commit unique-index validation (ADR-010 §5.1): a violating push appends nothing.
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.index_validate_push(&push_items)?;
+            }
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
+                request_id: None,
+                item_ids: ids.clone(),
+                command: QueueCommand::Push(PushCommand { items: push_items }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            };
+            // commit_locked fetches the shard's projection first (NotFound if absent) BEFORE appending,
+            // and Push apply is infallible, so the log can never lead the projection.
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+
+    /// Request-id'd push with retained replay/conflict/expired semantics (API-001 / TD-007 §4). Unlike the
+    /// default trait impl (which refuses with `Unavailable`), the memory reference backend wires a per-queue
+    /// [`QueueIdempotencyCache`]: a retried body under the same `request_id` REPLAYS the original ids without
+    /// a second append, a different body under that id is `RequestIdConflict`, and a retry after the
+    /// queue's `request_id_retention_ms` window is treated as a genuinely new request (push semantics —
+    /// the prior leases/ids are gone). The caller's `request_id` propagates into the committed
+    /// [`CommandEnvelope`] (no longer hardcoded `request_id: None`), so the durable log records it.
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
+            let mut g = self.state.lock().expect("poisoned");
+            let def = g.queues.get(shard).ok_or(EngineError::NotFound)?;
+            let max_attempts = def.retry_policy.max_attempts;
+            let expires_at = request_expires_at(now, def.request_id_retention_ms);
+            // Check the retained cache FIRST (still under the State lock, so check+append+record is atomic).
+            match g.idempotency.entry(shard.clone()).or_default().check(
+                &request_id,
+                fingerprint,
+                now,
+            ) {
+                // A live record with the same body — replay the original response ids, append nothing.
+                IdempotencyDecision::Replay(ids) => return Ok(ids),
+                // Same request id, different body — structural conflict (API-001 request-id-conflict).
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                // No record, or the retention window elapsed: proceed as a fresh push (push treats an
+                // expired entry as a genuinely new logical request, per the module mapping in `idempotency`).
+                IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+            }
+            // The ITEM ids are minted from (epoch, node, per-queue counter) so concurrent writers never
+            // collide (ADR-009), exactly as the request-id-less push path does.
+            let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.index_validate_push(&push_items)?;
+            }
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
+                // Propagate the caller's request id into the durable envelope (no longer `request_id: None`).
+                request_id: Some(request_id.clone()),
+                item_ids: ids.clone(),
+                command: QueueCommand::Push(PushCommand { items: push_items }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            };
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            // Record the outcome only AFTER a successful commit, so a rejected append leaves no replay entry.
+            g.idempotency.entry(shard.clone()).or_default().record(
+                request_id,
+                fingerprint,
+                ids.clone(),
+                expires_at,
+            );
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+}
+
 impl FinalizePort for MemoryBackend {
     fn finalize(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
-            // Pre-commit fencing check: an operator-fenced lease's finalize is StaleLease, and the
-            // Finalize command MUST NOT be appended if it would be rejected (no log/projection
-            // divergence). Batch is all-or-nothing in this slice.
+            // Pre-commit validation so apply_command(Finalize) is infallible (commit has no rollback):
+            // each item must be Leased and not fenced, else reject WITHOUT appending.
             {
-                // Pre-commit validation so apply_command(Finalize) is infallible (B1: commit_locked
-                // appends before applying, no rollback). Each item must be Leased and not fenced,
-                // else reject WITHOUT appending.
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-                for o in &outcomes {
-                    match proj.items.get(&o.item_id) {
-                        None => return Err(EngineError::NotFound),
-                        Some(rec) if rec.fenced => return Err(EngineError::StaleLease),
-                        Some(rec) if rec.state.is_terminal() => return Err(EngineError::Terminal),
-                        Some(rec) if rec.state != ItemState::Leased => {
-                            return Err(EngineError::Invalid("item is not leased"));
-                        }
-                        Some(_) => {}
-                    }
-                }
+                proj.finalize_validate(&outcomes)?;
             }
-            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id.clone()).collect();
+            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             let cmd = QueueCommand::Finalize(FinalizeCommand { outcomes });
             let env = self.make_envelope(cmd, item_ids, now);
-            Self::commit_locked(&mut g, shard, env)?;
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl CommitTransitionPort for MemoryBackend {
+    /// Authoritative vectorized claimed-work commit (Snorri StateStore boundary, epic pqueue-2201fd37). The
+    /// whole operation runs under ONE `State` lock so request-id check + per-entry validate + append + apply
+    /// + record is a single atomic unit of work.
+    fn commit_transition(
+        &self,
+        shard: &QueueKey,
+        transition: CommitTransition,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
+        let result = (|| {
+            let CommitTransition {
+                request_id,
+                entries,
+            } = transition;
+            let fingerprint = commit_body_hash(&entries)?;
+            let mut g = self.state.lock().expect("poisoned");
+            let (max_attempts, retention) = {
+                let def = g.queues.get(shard).ok_or(EngineError::NotFound)?;
+                (def.retry_policy.max_attempts, def.request_id_retention_ms)
+            };
+
+            // (1) Request-id idempotency over the WHOLE commit body (same machinery as the push path). A
+            //     retained body+id REPLAYS the prior per-entry outcomes (no re-write); a different body under
+            //     that id is `RequestIdConflict`; an expired/absent entry proceeds fresh.
+            if let Some(rid) = &request_id {
+                match g
+                    .commit_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .check(rid, fingerprint, now)
+                {
+                    IdempotencyDecision::Replay(recovery) => {
+                        return Ok(outcomes_from_recovery(&recovery));
+                    }
+                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                    IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                }
+            }
+
+            // (2) Per entry: validate the lease-token + version-fenced claim_ref AND the optional instance
+            //     fence, then commit the entry's side-records + fence advance + lifecycle push + input finalize
+            //     atomically. A rejected entry mutates nothing. Each entry's `EntryRecovery` (the superset of
+            //     its outcome) is retained so `explain_commit` can reconstruct the transition.
+            let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let claim_ref = entry.claim_ref;
+                let consumed_input_id = claim_ref.item_id;
+                let reject = |e: EngineError| EntryRecovery {
+                    consumed_input_id,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(e),
+                };
+
+                if let Err(e) = {
+                    let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                    proj.commit_validate(std::slice::from_ref(&claim_ref), now)
+                } {
+                    recovery.push(reject(e));
+                    continue;
+                }
+
+                // C6: validate the caller-supplied instance fence against the stored fence (absent == 0).
+                // A stale `expected` -> Conflict, a non-monotonic `next` -> Invalid; NOTHING is written.
+                if let Some(fence) = &entry.instance_fence {
+                    let stored = {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.instance_fence(&fence.instance_key).unwrap_or(0)
+                    };
+                    if let Err(e) = validate_instance_fence(stored, fence) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                }
+
+                // Capture the recovery facts BEFORE moving the entry's records into commands.
+                let side_record_keys: Vec<Vec<u8>> =
+                    entry.side_records.iter().map(|r| r.key.clone()).collect();
+                let instance = entry
+                    .instance_fence
+                    .as_ref()
+                    .map(|f| (f.instance_key.clone(), f.next));
+
+                // Build the entry's envelopes WITHOUT committing yet, so a build-time rejection (e.g. a unique
+                // -index conflict on a lifecycle item) leaves nothing mutated. The caller's request_id
+                // propagates into every envelope (no `request_id: None` on this path).
+                let mk = |command: QueueCommand, item_ids: Vec<ItemId>| {
+                    let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
+                    CommandEnvelope {
+                        command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
+                        request_id: request_id.clone(),
+                        item_ids,
+                        command,
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    }
+                };
+                let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+                if !entry.side_records.is_empty() {
+                    envelopes.push(mk(
+                        QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                            records: entry.side_records,
+                        }),
+                        Vec::new(),
+                    ));
+                }
+                if let Some(fence) = entry.instance_fence {
+                    envelopes.push(mk(
+                        QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                            instance_key: fence.instance_key,
+                            expected: fence.expected,
+                            next: fence.next,
+                        }),
+                        Vec::new(),
+                    ));
+                }
+                let mut lifecycle_item_ids = Vec::new();
+                if !entry.lifecycle_items.is_empty() {
+                    let epoch = expected_epoch.unwrap_or(0);
+                    let counter_base =
+                        self.counters
+                            .reserve(shard, epoch, entry.lifecycle_items.len() as u32);
+                    let (push_items, ids) = build_push_items(
+                        entry.lifecycle_items,
+                        epoch,
+                        self.node_id,
+                        counter_base,
+                        max_attempts,
+                    );
+                    if let Err(e) = {
+                        let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                        proj.index_validate_push(&push_items)
+                    } {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                    lifecycle_item_ids = ids.clone();
+                    envelopes.push(mk(
+                        QueueCommand::Push(PushCommand { items: push_items }),
+                        ids,
+                    ));
+                }
+                envelopes.push(mk(
+                    QueueCommand::Finalize(FinalizeCommand {
+                        outcomes: vec![FinalizeOutcome::new(claim_ref.item_id, entry.finalize)],
+                    }),
+                    vec![claim_ref.item_id],
+                ));
+
+                // Commit the entry's envelopes under the held lock. The epoch cannot change while we hold the
+                // lock, so either the first append fences (EpochFenced, before any mutation) or all of the
+                // entry's appends commit — each entry's writes are atomic.
+                for env in envelopes {
+                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+                }
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    instance,
+                    side_record_keys,
+                    lifecycle_item_ids,
+                    status: CommitEntryStatus::Committed,
+                });
+            }
+
+            // (3) Record the whole-body recovery only AFTER success, so a later replay/explain returns it
+            //     verbatim with no second append.
+            let outcomes = outcomes_from_recovery(&recovery);
+            if let Some(rid) = request_id {
+                let expires_at = request_expires_at(now, retention);
+                g.commit_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .record(rid, fingerprint, recovery, expires_at);
+            }
+            Ok(outcomes)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl RecoveryReadPort for MemoryBackend {
+    /// Reconstruct a committed transition from the retained commit idempotency record (epic
+    /// pqueue-2201fd37 acceptance #5). The retained `Vec<EntryRecovery>` already holds every field; we only
+    /// re-attach the `request_id`. `Ok(None)` when nothing is retained under that id (never committed, or
+    /// compacted away).
+    fn explain_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
+        let g = self.state.lock().expect("poisoned");
+        let found = g
+            .commit_idempotency
+            .get(shard)
+            .and_then(|c| c.peek(&request_id))
+            .map(|entries| CommitRecovery {
+                request_id,
+                entries,
+            });
+        std::future::ready(Ok(found))
+    }
+
+    /// Read an opaque non-work side record by key (recovery/audit read). Disjoint from the work-item
+    /// projection, so it never reflects claimable work and survives input finalization.
+    fn side_record(
+        &self,
+        shard: &QueueKey,
+        key: &[u8],
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let g = self.state.lock().expect("poisoned");
+        let found = g
+            .projections
+            .get(shard)
+            .and_then(|proj| proj.side_record(key).cloned());
+        std::future::ready(Ok(found))
+    }
+}
+
+impl RenewLeasePort for MemoryBackend {
+    fn renew(
+        &self,
+        shard: &QueueKey,
+        item_ids: Vec<ItemId>,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.renew_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::RenewLease(RenewLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_expires_at: new_lease_expires_at,
+            });
+            let env = self.make_envelope(cmd, item_ids, now);
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReassignLeasePort for MemoryBackend {
+    fn reassign(
+        &self,
+        shard: &QueueKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: LeaseToken,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.reassign_validate(&item_ids)?;
+            }
+            let cmd = QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: item_ids.clone(),
+                lease_token: new_lease_token,
+                lease_expires_at: new_lease_expires_at,
+            });
+            let env = self.make_envelope(cmd, item_ids, now);
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl PurgePort for MemoryBackend {
+    fn purge(
+        &self,
+        shard: &QueueKey,
+        item_ids: Vec<ItemId>,
+        force: bool,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            // Pre-commit: enforce the force gate per id (a leased item needs force) and collect the ids
+            // actually present (absent ids are no-ops, like Redis XDEL). Validation precedes the append.
+            let present: Vec<ItemId> = {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                let mut present = Vec::new();
+                for id in &item_ids {
+                    // De-dup: a repeated id removes once and counts once (Redis XDEL semantics; the
+                    // apply arm's second `remove` would be a no-op but `present.len()` would over-count).
+                    if present.contains(id) {
+                        continue;
+                    }
+                    if let Some(state) = proj.item_state(id) {
+                        validate_purge_force(state == ItemState::Leased, force)?;
+                        present.push(*id);
+                    }
+                }
+                present
+            };
+            if present.is_empty() {
+                return Ok(0);
+            }
+            let count = present.len() as u64;
+            let cmd = QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: present.clone(),
+                force,
+            });
+            let env = self.make_envelope(cmd, present, now);
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            Ok(count)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl UpdateFieldsPort for MemoryBackend {
+    fn update_fields(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: PayloadUpdate,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.update_fields_validate(&item_id, expected_item_version)?;
+                // Pre-commit unique-index validation (ADR-010 §5.1): a violating update appends nothing.
+                proj.index_validate_update(&item_id, &field_ops)?;
+            }
+            let cmd = QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id,
+                field_ops,
+                payload,
+            });
+            let env = self.make_envelope(cmd, vec![item_id], now);
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            // Read the bumped version back from the just-applied projection.
+            g.projections
+                .get(shard)
+                .and_then(|p| p.item_version(&item_id))
+                .ok_or(EngineError::NotFound)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReclaimPort for MemoryBackend {
+    fn reclaim_expired(
+        &self,
+        shard: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let mut g = self.state.lock().expect("poisoned");
+            let mut ids = {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.expired_leases(now)
+            };
+            if let Some(limit) = limit {
+                ids.truncate(limit);
+            }
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Per-queue and FENCED (unlike the global ReclaimDriver::tick, which passes None).
+            let cmd = QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: ids.clone(),
+            });
+            let env = self.make_envelope(cmd, ids.clone(), now);
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            Ok(ids)
         })();
         std::future::ready(result)
     }
@@ -624,33 +912,25 @@ impl ReclaimDriver for MemoryBackend {
             let mut g = self.state.lock().expect("poisoned");
             // Collect expired leases per shard (read), then reclaim them (write) — no client traffic
             // required, closing the orphan-on-quiet-queue gap (TD-007 §3).
-            let mut expired: Vec<(ShardKey, Vec<ItemId>)> = Vec::new();
-            for (shard, proj) in g.projections.iter() {
-                let ids: Vec<ItemId> = proj
-                    .items
-                    .values()
-                    .filter(|r| {
-                        r.state == ItemState::Leased
-                            && r.lease_expires_at.map(|exp| exp < now).unwrap_or(false)
-                    })
-                    .map(|r| r.item_id.clone())
-                    .collect();
-                if !ids.is_empty() {
-                    expired.push((shard.clone(), ids));
-                }
-            }
+            let expired: Vec<(QueueKey, Vec<ItemId>)> = g
+                .projections
+                .iter()
+                .filter_map(|(shard, proj)| {
+                    let ids = proj.expired_leases(now);
+                    (!ids.is_empty()).then(|| (shard.clone(), ids))
+                })
+                .collect();
             let mut report = TickReport::default();
             for (shard, ids) in expired {
                 let cmd = QueueCommand::LeaseExpired(LeaseExpiredCommand {
                     item_ids: ids.clone(),
                 });
                 let env = self.make_envelope(cmd, ids.clone(), now);
-                Self::commit_locked(&mut g, &shard, env)?;
+                Self::commit_locked(&mut g, &shard, env, None)?;
                 report.leases_reclaimed += ids.len() as u64;
             }
-            // Cohort-timeout firing and progress-bound metering need cohort-deadline / eligible_since
-            // state not yet modeled; they land with the cohort + observability features (plan §3,
-            // TD-007 §3 D2 meter-only). Not fired here, so they are reported as zero rather than faked.
+            // Cohort-timeout firing and progress-bound metering need state not yet modeled; reported as
+            // zero rather than faked (plan §3, TD-007 §3 D2 meter-only).
             Ok(report)
         })();
         std::future::ready(result)
@@ -660,6 +940,25 @@ impl ReclaimDriver for MemoryBackend {
 impl Backend for MemoryBackend {
     fn durability_class(&self) -> DurabilityClass {
         DurabilityClass::Atomic
+    }
+
+    /// Authoritative-commit capabilities (epic pqueue-2201fd37). The atomic in-memory reference backend
+    /// implements the full vectorized claimed-work commit boundary: atomic per-entry transition, vectorized
+    /// commit, lease-token + version + lease-expiry validation, retained whole-body request-id idempotency,
+    /// opaque non-work side records, and authoritative recovery/explain reads. Delayed/timer lifecycle work is
+    /// supported (`not_before` on lifecycle items). The boundary is `Atomic`.
+    fn commit_capabilities(&self) -> CommitCapabilities {
+        CommitCapabilities {
+            atomic_transition_commit: true,
+            vectorized_commit: true,
+            lease_validation: true,
+            retained_commit_idempotency: true,
+            non_work_side_records: true,
+            authoritative_recovery_reads: true,
+            delayed_awaits_timers: true,
+            durability_class: DurabilityClass::Atomic,
+            consistency: "atomic append+apply under one in-memory lock",
+        }
     }
 
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
@@ -692,8 +991,8 @@ impl ControlPlaneStore for MemoryBackend {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             if let Some(existing) = g.queues.get(&key) {
                 // Idempotent create: compatible iff the placement-identity fields match (API-001).
-                if existing.group_co_residency != definition.group_co_residency
-                    || existing.shard_count != definition.shard_count
+                if existing.ordering_mode != definition.ordering_mode
+                    || existing.priority_model != definition.priority_model
                 {
                     return Err(EngineError::QueueDefinitionConflict);
                 }
@@ -702,11 +1001,15 @@ impl ControlPlaneStore for MemoryBackend {
                     definition: existing.clone(),
                 });
             }
-            let shard = Self::launch_shard(&key);
+            let shard = key.clone();
             g.logs.entry(shard.clone()).or_default();
-            g.projections
-                .entry(shard)
-                .or_insert_with(|| ProjectionData::new(definition.priority_model));
+            g.projections.entry(shard).or_insert_with(|| {
+                ProjectionData::new(
+                    definition.priority_model,
+                    definition.recurrence,
+                    &definition.secondary_indexes,
+                )
+            });
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
                 created: true,
@@ -749,7 +1052,7 @@ impl ControlPlaneStore for MemoryBackend {
 
     fn current_epoch(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = Ok(self
             .state
@@ -757,8 +1060,22 @@ impl ControlPlaneStore for MemoryBackend {
             .expect("poisoned")
             .logs
             .get(shard)
-            .map(|l| l.epoch)
+            .map(|l| l.epoch())
             .unwrap_or(0));
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = {
+            let mut g = self.state.lock().expect("poisoned");
+            g.logs
+                .get_mut(shard)
+                .map(|l| l.advance_epoch())
+                .ok_or(EngineError::NotFound)
+        };
         std::future::ready(result)
     }
 }
@@ -766,28 +1083,14 @@ impl ControlPlaneStore for MemoryBackend {
 impl LogRead for MemoryBackend {
     fn read_from(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
         let result = (|| {
             let g = self.state.lock().expect("poisoned");
             let log = g.logs.get(shard).ok_or(EngineError::NotFound)?;
-            let start = match &from {
-                Some(p) => p.sequence as usize + 1,
-                None => 0,
-            };
-            let mut entries = Vec::new();
-            for (i, cmd) in log.entries.iter().enumerate().skip(start).take(limit) {
-                entries.push((
-                    CommandPosition::new(shard.clone(), log.epoch, i as u64),
-                    cmd.clone(),
-                ));
-            }
-            let next = (start + entries.len() < log.entries.len()).then(|| {
-                CommandPosition::new(shard.clone(), log.epoch, (start + entries.len()) as u64)
-            });
-            Ok(CommandPage { entries, next })
+            Ok(log.read_from(shard, from, limit))
         })();
         std::future::ready(result)
     }
@@ -796,84 +1099,65 @@ impl LogRead for MemoryBackend {
 impl ProjectionRead for MemoryBackend {
     fn select_eligible(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let g = self.state.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-            if proj.paused {
-                return Ok(Vec::new());
-            }
-            let mut out = Vec::new();
-            for key in proj.eligible.iter() {
-                if out.len() >= limit {
-                    break;
-                }
-                if let Some(rec) = proj.items.get(&key.item) {
-                    let due = rec.not_before.as_ref().map(|nb| *nb <= now).unwrap_or(true);
-                    if rec.state == ItemState::Pending && !rec.superseded && due {
-                        out.push(rec.item_id.clone());
-                    }
-                }
-            }
-            Ok(out)
+            Ok(proj.select_eligible(now, limit))
         })();
         std::future::ready(result)
     }
 
     fn peek(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
         let result = (|| {
             let g = self.state.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-            let mut out = Vec::new();
-            for key in proj.eligible.iter() {
-                if out.len() >= limit {
-                    break;
-                }
-                if let Some(rec) = proj.items.get(&key.item)
-                    && rec.state == ItemState::Pending
-                    && !rec.superseded
-                {
-                    out.push(ItemView {
-                        item_id: rec.item_id.clone(),
-                        client_item_key: rec.client_item_key.clone(),
-                        priority: rec.priority.clone(),
-                        item_version: rec.item_version,
-                    });
-                }
-            }
-            Ok(out)
+            Ok(proj.peek(limit))
         })();
         std::future::ready(result)
     }
 
     fn pending(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
         let result = (|| {
             let g = self.state.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-            let out: Vec<LeaseView> = proj
-                .items
-                .values()
-                .filter(|r| r.state == ItemState::Leased)
-                .filter_map(|r| {
-                    Some(LeaseView {
-                        item_id: r.item_id.clone(),
-                        lease_token: r.lease_token.clone()?,
-                        lease_expires_at: r.lease_expires_at?,
-                        attempt_count: r.attempt_count,
-                    })
-                })
-                .collect();
-            Ok(out)
+            Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn claimed_view(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.render_claimed(ids))
+        })();
+        std::future::ready(result)
+    }
+
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.live_items_by_key(keys))
         })();
         std::future::ready(result)
     }
@@ -884,21 +1168,39 @@ impl ProjectionRead for MemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         let result = (|| {
             let g = self.state.lock().expect("poisoned");
-            let shard = MemoryBackend::launch_shard(queue);
+            let shard = queue.clone();
             let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
-            let mut m = QueueMetrics::default();
-            for r in proj.items.values() {
-                if r.superseded {
-                    continue;
-                }
-                match r.state {
-                    ItemState::Pending => m.pending += 1,
-                    ItemState::Leased => m.leased += 1,
-                    ItemState::Complete => m.complete += 1,
-                    ItemState::Failed => m.failed += 1,
-                }
-            }
-            Ok(m)
+            Ok(proj.metrics())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl IndexQueryPort for MemoryBackend {
+    fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_get_unique(index, key)
+        })();
+        std::future::ready(result)
+    }
+
+    fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
+        let result = (|| {
+            let g = self.state.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.index_lookup(index, key)
         })();
         std::future::ready(result)
     }
@@ -907,27 +1209,21 @@ impl ProjectionRead for MemoryBackend {
 impl SnapshotStore for MemoryBackend {
     fn write_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
             let log = g.logs.get_mut(shard).ok_or(EngineError::NotFound)?;
-            let snap_ref = SnapshotRef {
-                shard_key: shard.clone(),
-                position,
-                ref_id: format!("snap-{}", log.snapshots.len()),
-            };
-            log.snapshots.push((snap_ref.clone(), snapshot));
-            Ok(snap_ref)
+            Ok(log.write_snapshot(shard, position, snapshot))
         })();
         std::future::ready(result)
     }
 
     fn latest_snapshot(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
         let result = Ok(self
             .state
@@ -935,7 +1231,7 @@ impl SnapshotStore for MemoryBackend {
             .expect("poisoned")
             .logs
             .get(shard)
-            .and_then(|l| l.snapshots.last().map(|(r, _)| r.clone())));
+            .and_then(|l| l.latest_snapshot()));
         std::future::ready(result)
     }
 
@@ -947,20 +1243,16 @@ impl SnapshotStore for MemoryBackend {
             let g = self.state.lock().expect("poisoned");
             let log = g
                 .logs
-                .get(&snapshot_ref.shard_key)
+                .get(&snapshot_ref.queue)
                 .ok_or(EngineError::NotFound)?;
-            log.snapshots
-                .iter()
-                .find(|(r, _)| r.ref_id == snapshot_ref.ref_id)
-                .map(|(_, s)| s.clone())
-                .ok_or(EngineError::NotFound)
+            log.read_snapshot(snapshot_ref)
         })();
         std::future::ready(result)
     }
 
     fn high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
         let result = Ok(self
             .state
@@ -968,27 +1260,19 @@ impl SnapshotStore for MemoryBackend {
             .expect("poisoned")
             .logs
             .get(shard)
-            .and_then(|l| l.high_water.clone()));
+            .and_then(|l| l.high_water()));
         std::future::ready(result)
     }
 
     fn set_high_water(
         &self,
-        shard: &ShardKey,
+        shard: &QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
             let log = g.logs.get_mut(shard).ok_or(EngineError::NotFound)?;
-            // Monotonic: reject a lower position (TD-007 §4).
-            if let Some(cur) = &log.high_water
-                && !cur.precedes(&position)
-                && cur != &position
-            {
-                return Err(EngineError::Invalid("high-water regression"));
-            }
-            log.high_water = Some(position);
-            Ok(())
+            log.set_high_water(position)
         })();
         std::future::ready(result)
     }
@@ -1037,7 +1321,7 @@ impl Default for SeqIdGen {
 impl IdGen for SeqIdGen {
     fn next_item_id(&self) -> ItemId {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
-        ItemId::new(format!("item-{n}")).expect("valid id")
+        ItemId::from_u64(n)
     }
 
     fn next_command_id(&self) -> CommandId {

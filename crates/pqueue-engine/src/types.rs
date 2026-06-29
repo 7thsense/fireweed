@@ -6,22 +6,12 @@
 
 use pqueue_core::{QueueId, TenantId};
 
-/// Shard identity within a queue. `shard_id` is never client-visible (ADR-004); at launch
-/// every queue has exactly one shard (plan §2.5), but the type carries `shard_id` so the
-/// post-launch multi-shard path needs no signature change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ShardId(pub u32);
-
-impl ShardId {
-    /// The single launch shard.
-    pub const ZERO: ShardId = ShardId(0);
-
-    pub fn as_u32(self) -> u32 {
-        self.0
-    }
-}
-
-/// Tenant + queue identity.
+/// Tenant + queue identity — the unit a log/projection is owned and partitioned by.
+///
+/// The queue is the unit of sharding (ADR-008): a whole queue is owned by exactly one node, so the
+/// log, projection, and ownership lease are all keyed by `(tenant_id, queue_id)`. A relational backend
+/// MAY internally hash-partition its item table (`hash(tenant,queue) % N`, TD-002) for vacuum/index-size
+/// isolation, but that partition is client-invisible and never an ownership/routing key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QueueKey {
     pub tenant_id: TenantId,
@@ -37,72 +27,46 @@ impl QueueKey {
     }
 }
 
-/// Tenant + queue + shard identity — the unit a log/projection is partitioned by.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ShardKey {
-    pub tenant_id: TenantId,
-    pub queue_id: QueueId,
-    pub shard_id: ShardId,
-}
-
-impl ShardKey {
-    pub fn new(tenant_id: TenantId, queue_id: QueueId, shard_id: ShardId) -> Self {
-        Self {
-            tenant_id,
-            queue_id,
-            shard_id,
-        }
-    }
-
-    pub fn queue_key(&self) -> QueueKey {
-        QueueKey::new(self.tenant_id.clone(), self.queue_id.clone())
-    }
-}
-
-impl PartialOrd for ShardKey {
+impl PartialOrd for QueueKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for ShardKey {
+impl Ord for QueueKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.tenant_id
             .as_str()
             .cmp(other.tenant_id.as_str())
             .then(self.queue_id.as_str().cmp(other.queue_id.as_str()))
-            .then(self.shard_id.0.cmp(&other.shard_id.0))
     }
 }
 
-/// Position of a committed command within a shard's log. Ordered by `(backend_epoch, sequence)`.
+/// Position of a committed command within a queue's log. Ordered by `(backend_epoch, sequence)`.
 ///
 /// The engine derives `item_version` and the monotonic `command_position` high-water mark from
 /// committed positions; per TD-007 §4 the high-water mark is persisted in the projection/snapshot
 /// (not recomputed from a compacted log), so replay is monotonic under retention.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CommandPosition {
-    pub shard_key: ShardKey,
+    pub queue: QueueKey,
     pub backend_epoch: u64,
     pub sequence: u64,
 }
 
 impl CommandPosition {
-    pub fn new(shard_key: ShardKey, backend_epoch: u64, sequence: u64) -> Self {
+    pub fn new(queue: QueueKey, backend_epoch: u64, sequence: u64) -> Self {
         Self {
-            shard_key,
+            queue,
             backend_epoch,
             sequence,
         }
     }
 
-    /// Monotonic ordering within a shard: epoch first, then sequence. Positions on different
-    /// shards are not comparable for monotonicity; `command_position` is shard-local at launch.
+    /// Monotonic ordering within a queue: epoch first, then sequence. Positions on different queues
+    /// are not comparable for monotonicity; `command_position` is per-queue (ADR-008).
     pub fn precedes(&self, other: &Self) -> bool {
-        debug_assert_eq!(
-            self.shard_key, other.shard_key,
-            "positions on different shards"
-        );
+        debug_assert_eq!(self.queue, other.queue, "positions on different queues");
         (self.backend_epoch, self.sequence) < (other.backend_epoch, other.sequence)
     }
 }

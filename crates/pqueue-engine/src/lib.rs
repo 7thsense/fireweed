@@ -9,10 +9,13 @@ mod active_scope;
 mod auth;
 mod claim_validation;
 mod command;
+mod control_plane;
+mod density;
 mod error;
 mod finalize_validation;
 mod idempotency;
 mod operator;
+mod ownership;
 mod port;
 mod types;
 
@@ -22,16 +25,28 @@ pub use active_scope::{
 };
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
-    ClaimCompatibility, ClaimUnit, GroupBatching, validate_claim_compatibility,
+    ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
+    validate_claim_compatibility,
 };
+pub use control_plane::{
+    AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState, OwnerResolution,
+    QueueControlPlane, QueueLease, lease_decide_acquire, lease_decide_begin_drain,
+    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
+    resolve_target,
+};
+pub use density::{RenewSweep, ResidentQueues, renew_all_resident};
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
+pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
 pub use command::{
-    ClaimCommand, CohortExpiredCommand, CommandChecksum, CommandEnvelope, CommandId,
+    AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
+    CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PurgeItemsCommand, PushCommand, PushItem, QueueCommand, RenewLeaseCommand,
-    ReplacePendingCommand, UnfenceLeaseCommand,
+    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
+    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, SetGatesCommand,
+    SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
+    build_push_items, validate_gate_command, validate_gate_push,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{
@@ -39,12 +54,17 @@ pub use finalize_validation::{
     validate_rearm,
 };
 pub use port::{
-    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandPage, ControlPlaneStore,
-    CreateQueueOutcome, FinalizePort, IdGen, ItemView, LeaseView, LogRead, LogWriter,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, QueueMetrics, ReclaimDriver, SnapshotRef,
-    SnapshotStore, TickReport, UpsertOutcome, UpsertPort,
+    Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, Clock, CohortFinalizePort,
+    CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitCapabilities, CommitEntryOutcome,
+    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
+    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery,
+    FinalizePort, IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView, LeaseView,
+    LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
+    PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RecoveryReadPort, RenewLeasePort, SetGatesPort, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
 };
-pub use types::{CommandPosition, DurabilityClass, QueueKey, ShardId, ShardKey};
+pub use types::{CommandPosition, DurabilityClass, QueueKey};
 
 #[cfg(test)]
 mod tests {
@@ -89,6 +109,10 @@ mod tests {
             EngineError::RequestExpired.resp_token(),
             Some("-ERR pqueue request_expired")
         );
+        assert_eq!(
+            EngineError::EpochFenced.resp_token(),
+            Some("-ERR pqueue epoch_stale")
+        );
         // NotFound (to nil) and Forbidden (to -NOPERM) have non-`-ERR` mappings; no token here.
         assert_eq!(EngineError::NotFound.resp_token(), None);
         assert_eq!(EngineError::Forbidden("x").resp_token(), None);
@@ -102,10 +126,34 @@ mod tests {
     }
 
     #[test]
+    fn gate_validation_rejects_when_capability_absent() {
+        let gated = PushSpec {
+            gate_keys: vec!["hold".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_gate_push(false, &[gated]).unwrap_err(),
+            EngineError::Unavailable
+        );
+        assert!(validate_gate_push(true, &[PushSpec::default()]).is_ok());
+        assert_eq!(
+            validate_gate_command(
+                false,
+                &QueueCommand::SetGates(SetGatesCommand {
+                    gate_keys: vec!["hold".to_string()],
+                    blocked: true,
+                })
+            )
+            .unwrap_err(),
+            EngineError::Unavailable
+        );
+    }
+
+    #[test]
     fn command_position_is_shard_local_monotonic() {
         let tenant = pqueue_core::TenantId::new("t").unwrap();
         let queue = pqueue_core::QueueId::new("q").unwrap();
-        let shard = ShardKey::new(tenant, queue, ShardId::ZERO);
+        let shard = QueueKey::new(tenant, queue);
         let p1 = CommandPosition::new(shard.clone(), 0, 1);
         let p2 = CommandPosition::new(shard.clone(), 0, 2);
         let p3 = CommandPosition::new(shard, 1, 0);

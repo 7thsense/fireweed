@@ -5,91 +5,51 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-# TLS-capable Postgres connections for managed cloud endpoints (e.g. Databricks
-# Lakebase, which requires sslmode=require). Off by default so the plain
-# NoTls/testcontainers path needs no rustls toolchain.
-tls = ["dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots"]
-# Lakebase OAuth credential provider that shells out to the authenticated
-# Databricks CLI (`database generate-database-credential`). Implies TLS.
-lakebase = ["tls", "tokio/process"]
-
-[dependencies]
-pqueue-core = { path = "../pqueue-core" }
-pqueue-storage = { path = "../pqueue-storage" }
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-time-0_3"] }
-serde_json = "1.0"
-sha2 = "0.11"
-time = "0.3"
-tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "sync"] }
-async-trait = "0.1"
-tokio-postgres-rustls = { version = "0.13", optional = true }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "logging", "tls12"] }
-webpki-roots = { version = "0.26", optional = true }
-
-[dev-dependencies]
-tokio = { version = "1.44", features = ["full"] }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
-pqueue-core = { path = "../pqueue-core" }
-pqueue-storage = { path = "../pqueue-storage" }
-
 [lib]
 path = "src/lib.rs"
 
-[[test]]
-name = "postgres_schema_migration_tests"
-path = "tests/postgres_schema_migration_tests.rs"
+# Driven adapter: postgres (atomic durability class). Durable command LOG in postgres tables; the
+# priority-ordered projection is the shared `pqueue-projection` materialization, rebuilt from the log.
+# Mirrors `pqueue-sqlite` exactly — same template, same guarantees — over the SYNC `postgres` client.
+# Depends inward on the domain (engine/core) + the shared projection — the correct hexagonal direction.
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+pqueue-projection = { path = "../pqueue-projection" }
+postgres = "0.19"
+serde = "1"
+serde_json = "1"
+bytes = "1"
+# Lease-token hashing for the relational projection (hash-only at rest; parity with pqueue-sqlite).
+sha2 = "0.11"
+
+[dev-dependencies]
+# A NON-tokio executor drives these tests: the sync `postgres` client runs its own internal tokio runtime
+# per call, which PANICS ("cannot start a runtime from within a runtime") if driven from a `#[tokio::test]`
+# runtime. `futures::executor::block_on` has no ambient tokio context, so the client's runtime starts
+# cleanly. This is the test-side face of the blocking-executor caveat documented in `lib.rs`.
+futures = "0.3"
+# The library facade, driven as a COORDINATED owner over the postgres backend + control plane for the B5
+# durable multi-instance competition test. `default-features = false` so we don't pull the other adapters.
+pqueue = { path = "../pqueue", default-features = false }
+# Runs the shared backend-conformance suite against the postgres backend (env-gated on PQUEUE_PG_TEST_URL).
+pqueue-conformance = { path = "../pqueue-conformance" }
+# The E0/E1 single-deployment baseline suite emits verification-ledger rows (TP-002 E0/E1) via this crate.
+pqueue-release = { path = "../pqueue-release" }
 
 [[test]]
-name = "postgres_transaction_flow_tests"
-path = "tests/postgres_transaction_flow_tests.rs"
+name = "performance_single_deployment_baseline_tests"
+path = "tests/performance_single_deployment_baseline_tests.rs"
 
 [[test]]
-name = "postgres_retention_tests"
-path = "tests/postgres_retention_tests.rs"
+name = "conformance"
+path = "tests/conformance.rs"
 
 [[test]]
-name = "postgres_concurrency_claim_tests"
-path = "tests/postgres_concurrency_claim_tests.rs"
+name = "durability"
+path = "tests/durability.rs"
 
+# BQ-12: the postgres RELATIONAL backend's core + relational-reconnect class (env-gated on PQUEUE_PG_TEST_URL).
 [[test]]
-name = "postgres_group_summary_tests"
-path = "tests/postgres_group_summary_tests.rs"
-
-[[test]]
-name = "postgres_lease_lifecycle_tests"
-path = "tests/postgres_lease_lifecycle_tests.rs"
-
-[[test]]
-name = "postgres_durability_idempotency_tests"
-path = "tests/postgres_durability_idempotency_tests.rs"
-
-[[test]]
-name = "postgres_gate_tests"
-path = "tests/postgres_gate_tests.rs"
-
-[[test]]
-name = "postgres_group_batching_tests"
-path = "tests/postgres_group_batching_tests.rs"
-
-[[test]]
-name = "postgres_cohort_tests"
-path = "tests/postgres_cohort_tests.rs"
-
-[[test]]
-name = "postgres_recurrence_purge_tests"
-path = "tests/postgres_recurrence_purge_tests.rs"
-
-[[test]]
-name = "postgres_discovery_tests"
-path = "tests/postgres_discovery_tests.rs"
-
-[[test]]
-name = "postgres_shard_lease_tests"
-path = "tests/postgres_shard_lease_tests.rs"
-
-[[test]]
-name = "lakebase_live_tests"
-path = "tests/lakebase_live_tests.rs"
+name = "relational_conformance"
+path = "tests/relational_conformance.rs"

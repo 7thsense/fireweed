@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
+# nightly-gate.sh — wraps the release gate (smoke lane) plus deferral linting.
+#
+# The pre-migration nightly also ran a concurrency-registry check over
+# crates/pqueue-storage/concurrency_registry.toml; that crate AND its registry
+# were deleted in the Phase-6 hexagonal migration, so the check is dropped (the
+# per-queue ownership model under ADR-008 has no intra-queue shard concurrency
+# registry to verify).
 set -euo pipefail
 
-bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 \
-    --tp002-e0e1-source pqueue-7e2b3132 \
-    --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 \
-    --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4
-bash scripts/ci/check-concurrency-verification.sh crates/pqueue-storage/concurrency_registry.toml
-bash scripts/ci/lint-deferrals.sh docs/helix/04-build/BUILD-001-implementation-plan.md
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+bash "${SCRIPT_DIR}/release-gate.sh"
+bash "${SCRIPT_DIR}/lint-deferrals.sh" docs/helix/04-build/BUILD-001-implementation-plan.md
 echo "nightly gate passed"

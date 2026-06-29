@@ -5,13 +5,15 @@ ddx:
     - prd
     - concerns
     - api-native-client-interface
+    - adr-queue-as-shard-unit-and-projection-families
   review:
-    self_hash: 032d34fcd4b1f8f9635686537cf579808d339f92494ecdfa56ca18462d338ad9
+    self_hash: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
     deps:
-      api-native-client-interface: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
-      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-    reviewed_at: "2026-06-20T19:01:18Z"
+      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # ADR-002: Auth, Tenancy, and Storage Isolation
@@ -50,17 +52,17 @@ pqueue will use a layered auth and tenancy model:
 2. **Tenant**: storage and authorization boundary named by `tenant_id`.
 3. **Queue namespace**: client-visible queue identifier named by `queue_id`,
    unique within a tenant.
-4. **Shard**: physical routing and capacity unit named by
-   `tenant_id/queue_id/shard_id`.
+4. **Queue ownership**: the queue is the unit of sharding (ADR-008) — a whole
+   queue is owned by exactly one node at a time, placed by a deterministic
+   function of `(tenant_id, queue_id)`. An optional internal item-table partition
+   (`hash(tenant_id, queue_id) % N`, TD-002) is a client-invisible storage detail,
+   never an ownership/routing/authorization unit.
 5. **Group**: `group_key` is a client-visible logical ordering/compatibility
    partition within a queue (ADR-004). Claim result order is exact per-group
-   order only on a `group_co_residency=true` queue, where
-   `shard_id = hash(group_key) mod shard_count` co-locates a group's items on
-   one shard; on a `group_co_residency=false` queue `group_key` restricts the
-   claim domain but does not promise per-group total order across shards.
-   `shard_id` MUST co-locate a `group_key`'s items when co-residency is enabled,
-   but `shard_id` is never a client-visible ordering or progress scope, and
-   `group_key` carries no progress-bound meaning (progress is queue-global).
+   order on any queue, because every item of a `group_key` is co-resident on the
+   queue's single owner by construction (ADR-008). `group_key` carries no
+   progress-bound meaning (progress is queue-global, computed locally on the
+   owner).
 
 The core queue engine requires an already-resolved `PrincipalContext` for
 service-mode operations. It does not implement login, signup, session storage,
@@ -88,7 +90,7 @@ The first service implementation uses operation-scoped permissions:
 | `operator:inspect` | API-002 operator reads (`GetItem`, `ListItems`, `GetQueueAdminState`, `GetOperation`, `ListOperations`) |
 | `operator:repair` | API-002 repair/redrive/archive/retention/pause/resume |
 | `operator:purge` | API-002 bulk operator `PurgeQueueItems` (most destructive; may require a distinct grant) |
-| `admin:shard` | shard placement, resharding, and backend migration (migration design) |
+| `admin:queue` | queue placement / ownership handoff and backend migration (migration design) |
 
 The operator surface (`operator:inspect`/`operator:repair`/`operator:purge`) is
 defined by API-002. Operator mutations may act on leased and terminal items and
@@ -136,8 +138,9 @@ is allowed by backend profile or deployment class:
 | Dedicated database or cluster per tenant class | Large, regulated, or noisy tenants. |
 
 The control plane may assign queues or tenants to different Postgres databases,
-clusters, object buckets, or log partitions through backend profile and shard
-placement metadata. That placement is not visible in the native queue API.
+clusters, object buckets, or log partitions through backend profile and
+queue-owner assignment metadata. That placement is not visible in the native
+queue API.
 
 ## Noisy-Neighbor Controls
 
@@ -146,7 +149,7 @@ requires:
 
 - queue and tenant identifiers in metrics;
 - configurable max batch size and lease duration per queue;
-- backend profile and shard count per queue;
+- backend profile per queue;
 - pqueue deployment/tenant rate-limit and capacity outcomes in API-001 error
   semantics (the envelope rate-limit error and the per-item `rate_limited`
   partial-batch status protect the pqueue deployment, not a caller's downstream
@@ -156,11 +159,11 @@ requires:
   eligible work within its configured limits;
 - queue density: a single node MUST support at least 1000 concurrently active
   queues without cross-queue degradation. This makes noisy-neighbor isolation a
-  density concern as well as a capacity one: per-queue and per-`(queue,shard)`
-  background work (lease-expiry sweeps, cross-shard progress aggregation, summary
-  recompute, recurring rearm, idempotency/retention GC) MUST be multiplexed onto
-  bounded shared per-node resources (worker pools, connection pools, sweeper
-  batches), never one task, loop, or connection per queue or per shard, so that
+  density concern as well as a capacity one: per-queue background work
+  (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring
+  rearm, idempotency/retention GC) MUST be multiplexed onto bounded shared
+  per-node resources (worker pools, connection pools, sweeper batches), never one
+  task, loop, or connection per queue, so that
   the 1000th active queue costs no more than bounded incremental resource and
   every active queue still meets its progress bound.
 

@@ -90,19 +90,19 @@ mod tests {
             queue_id: QueueId::new("q").unwrap(),
             priority_model: PriorityModel::timestamp_ascending(),
             ordering_mode: OrderingMode::Strict,
-            group_co_residency: false,
             progress_bound_ms: 60_000,
             eligibility_policy: EligibilityPolicy::default(),
             cohort_policy: None,
             recurrence,
             request_id_retention_ms: 60_000,
             client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
             max_lease_duration_ms: 60_000,
             retry_policy: RetryPolicy { max_attempts: 3 },
             max_push_batch_size: 100,
             max_claim_batch_size: 100,
             max_eligible_group_size: None,
-            shard_count: 1,
+            secondary_indexes: vec![],
         }
     }
     fn ts(s: i64) -> UtcTimestamp {

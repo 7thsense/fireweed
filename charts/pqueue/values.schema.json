@@ -11,7 +11,7 @@
     "resources",
     "probes",
     "config",
-    "backend",
+    "storage",
     "persistence"
   ],
   "properties": {
@@ -166,24 +166,16 @@
         }
       }
     },
-    "backend": {
+    "storage": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "profile",
         "shardCount",
-        "postgres",
-        "objectLog",
-        "sqliteProjection"
+        "log",
+        "projection",
+        "volume"
       ],
       "properties": {
-        "profile": {
-          "type": "string",
-          "enum": [
-            "postgres_native",
-            "object_log_sqlite_projection"
-          ]
-        },
         "shardCount": {
           "type": "object",
           "additionalProperties": false,
@@ -202,68 +194,76 @@
             }
           }
         },
-        "postgres": {
+        "log": {
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "existingSecret",
-            "databaseUrlKey"
+            "backend",
+            "objectLog",
+            "postgres"
           ],
           "properties": {
-            "existingSecret": {
+            "backend": {
               "type": "string",
-              "minLength": 1
+              "enum": [
+                "postgres",
+                "objectlog"
+              ]
             },
-            "databaseUrlKey": {
-              "type": "string",
-              "minLength": 1
+            "objectLog": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "root"
+              ],
+              "properties": {
+                "root": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "postgres": {
+              "$ref": "#/$defs/postgresSecret"
             }
           }
         },
-        "objectLog": {
+        "projection": {
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "endpoint",
-            "bucket",
-            "region",
-            "segmentMaxCommands",
-            "existingSecret",
-            "accessKeyIdKey",
-            "secretAccessKeyKey"
+            "backend",
+            "sqlite",
+            "postgres"
           ],
           "properties": {
-            "endpoint": {
+            "backend": {
               "type": "string",
-              "minLength": 1
+              "enum": [
+                "inmemory",
+                "sqlite",
+                "postgres"
+              ]
             },
-            "bucket": {
-              "type": "string",
-              "minLength": 1
+            "sqlite": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
             },
-            "region": {
-              "type": "string",
-              "minLength": 1
-            },
-            "segmentMaxCommands": {
-              "type": "integer",
-              "minimum": 2
-            },
-            "existingSecret": {
-              "type": "string",
-              "minLength": 1
-            },
-            "accessKeyIdKey": {
-              "type": "string",
-              "minLength": 1
-            },
-            "secretAccessKeyKey": {
-              "type": "string",
-              "minLength": 1
+            "postgres": {
+              "$ref": "#/$defs/postgresSecret"
             }
           }
         },
-        "sqliteProjection": {
+        "volume": {
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -326,21 +326,33 @@
     }
   },
   "$defs": {
+    "postgresSecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existingSecret",
+        "databaseUrlKey"
+      ],
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "databaseUrlKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "probe": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "path",
         "initialDelaySeconds",
         "periodSeconds",
         "timeoutSeconds",
         "failureThreshold"
       ],
       "properties": {
-        "path": {
-          "type": "string",
-          "minLength": 1
-        },
         "initialDelaySeconds": {
           "type": "integer",
           "minimum": 0

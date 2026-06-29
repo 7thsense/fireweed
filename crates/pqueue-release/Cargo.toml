@@ -1,0 +1,21 @@
+# Release-evidence tooling: the verification-ledger row schema (TP-001/TP-002/TP-003), a JSONL emitter that
+# evidence suites use (as a dev-dependency) to record measured release evidence, and the `pqueue-verify-ledger`
+# binary the CI gate runs to strict-validate a ledger and assert required E0-E3 evidence is present. This
+# rebuilds the subsystem removed with pqueue-service in the hexagonal migration (BQ-43).
+[package]
+name = "pqueue-release"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pqueue-verify-ledger"
+path = "src/bin/pqueue-verify-ledger.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

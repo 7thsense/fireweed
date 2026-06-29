@@ -1,16 +1,20 @@
 //! Engine-owned command model — the durable append unit of the log and the input to the
 //! projection. Commands are the only way state changes (CQRS write side, ADR-001).
 
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
+
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition, RequestId,
-    UtcTimestamp,
+    ClientItemKey, CohortId, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, RequestId, UtcTimestamp,
 };
 
-use crate::types::ShardId;
+use crate::QueueKey;
+use crate::error::{EngineError, EngineResult};
 
 /// Unique id for a committed command record.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CommandId(pub String);
 
 impl CommandId {
@@ -20,21 +24,32 @@ impl CommandId {
 }
 
 /// CRC-32 of the command payload for in-transit integrity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CommandChecksum(pub u32);
 
 /// The typed command variants. Client-driven commands plus the transitions the
 /// `ReclaimDriver` fires (TD-007 §3) and the durable-state commands (TD-007 §4).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum QueueCommand {
     CreateQueue(CreateQueueCommand),
     Push(PushCommand),
     Claim(ClaimCommand),
+    CohortClaim(CohortClaimCommand),
     RenewLease(RenewLeaseCommand),
+    CohortRenewLease(CohortRenewLeaseCommand),
+    /// Transfer an in-flight lease to a new consumer (RESP cross-consumer `XCLAIM`): swap the lease token
+    /// AND charge one delivery (it is a re-delivery to a different worker). Same-consumer `XCLAIM` is a
+    /// no-charge [`RenewLeaseCommand`] instead.
+    ReassignLease(ReassignLeaseCommand),
     Finalize(FinalizeCommand),
+    CohortFinalize(CohortFinalizeCommand),
     /// Pending-item replacement (RESP `XADD`-on-key upsert, Invariant 2). Atomic class only.
     ReplacePending(ReplacePendingCommand),
+    /// In-place merge of a live (Pending or Leased) item's hot-storage `fields`/`payload` with no lifecycle
+    /// change (FAC-1, ADR-009). The write side of the `LiveItemView` map; bumps `item_version`. Atomic
+    /// class only. Lets an owner-runtime keep compound per-item work state in pqueue instead of a shadow.
+    UpdateFields(UpdateFieldsCommand),
     // --- ReclaimDriver-fired (TD-007 §3) ---
     LeaseExpired(LeaseExpiredCommand),
     CohortExpired(CohortExpiredCommand),
@@ -44,19 +59,142 @@ pub enum QueueCommand {
     PauseQueue,
     ResumeQueue,
     PurgeItems(PurgeItemsCommand),
+    /// Operator gate flip (BQ-14d, API-001 g2 `SetGates`): block or unblock the given gate keys for the
+    /// queue. A blocked gate key makes every item carrying it ineligible (relational anti-join against
+    /// `pqueue_gate_state`); unblocking restores eligibility. A relational-mode feature — the in-memory
+    /// family applies this as a no-op (it stores no gate state).
+    SetGates(SetGatesCommand),
+    /// Write bounded OPAQUE non-work side records (Snorri authoritative-commit boundary, ADR-009 / epic
+    /// pqueue-2201fd37). Each record is a `key -> payload` pair stored in a projection map that is
+    /// ENTIRELY SEPARATE from the work-item index: a side record is NOT claimable/peekable work, never
+    /// enters the eligibility index, `by_key`, or metrics-as-work, and survives input finalization. pqueue
+    /// treats both key and payload as opaque bytes (the consumer owns any meaning). Emitted only on the
+    /// vectorized claimed-work commit path.
+    WriteSideRecords(WriteSideRecordsCommand),
+    /// Advance a caller-supplied OPAQUE instance/state fence (Snorri authoritative-commit boundary, ADR-009
+    /// / epic pqueue-2201fd37). Sets the stored fence for `instance_key` to `next` — validated pre-commit
+    /// (stored == `expected`, `next > expected`) so the apply is infallible. The fence map is SEPARATE from
+    /// the work-item projection (not claimable/peekable). `instance_key` is opaque bytes pqueue never
+    /// interprets. Emitted only on the vectorized claimed-work commit path.
+    AdvanceInstanceFence(AdvanceInstanceFenceCommand),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CreateQueueCommand {
     pub definition: QueueDefinition,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PushCommand {
     pub items: Vec<PushItem>,
 }
 
-#[derive(Debug, Clone)]
+/// Build `PushItem`s + their ids for one push (ADR-009). Each id is minted **locally** as
+/// `ItemId::mint(epoch, node, counter_base + i)`: `epoch` is the owner's fence epoch, `node` the owning
+/// node id, and `counter_base..` a per-(queue, epoch) sequence reserved from [`QueueCounters`].
+/// Single-writer-per-epoch makes `(epoch, counter)` unique within a queue; `node` is defense-in-depth so
+/// even a split-brain (two writers, same epoch) cannot collide. No central sequence is consulted — this
+/// works identically on the log (the only cross-node backend). The dedup `client_item_key` defaults to the
+/// item id's string when the spec omits it. Shared by every backend's `PushPort` impl.
+pub fn build_push_items(
+    specs: Vec<crate::PushSpec>,
+    epoch: u64,
+    node: u8,
+    counter_base: u32,
+    max_attempts: u32,
+) -> (Vec<PushItem>, Vec<ItemId>) {
+    let mut items = Vec::with_capacity(specs.len());
+    let mut ids = Vec::with_capacity(specs.len());
+    for (i, s) in specs.into_iter().enumerate() {
+        let item_id = ItemId::mint(epoch, node, counter_base.wrapping_add(i as u32));
+        let key = s
+            .client_item_key
+            .unwrap_or_else(|| ClientItemKey::new(item_id.to_string()).expect("id is non-empty"));
+        ids.push(item_id);
+        items.push(PushItem {
+            client_item_key: key,
+            item_id,
+            priority: s.priority,
+            not_before: s.not_before,
+            group_key: s.group_key,
+            max_attempts,
+            payload: s.payload,
+            fields: s.fields,
+            metadata: s.metadata,
+            cohort_size: s.cohort_size,
+            gate_keys: s.gate_keys,
+        });
+    }
+    (items, ids)
+}
+
+/// Reject gate-bearing pushes on backends that do not enforce gate state.
+///
+/// This is deliberately separate from [`crate::DurabilityClass`]: the in-memory reference backend is
+/// atomic, but it is still not gate-capable because its shared log-replay projection does not store or
+/// evaluate gate state.
+pub fn validate_gate_push(supports_gates: bool, specs: &[crate::PushSpec]) -> EngineResult<()> {
+    if !supports_gates && specs.iter().any(|spec| !spec.gate_keys.is_empty()) {
+        return Err(EngineError::Unavailable);
+    }
+    Ok(())
+}
+
+/// Reject gate-state commands on backends that would otherwise log them without enforcing them.
+pub fn validate_gate_command(supports_gates: bool, command: &QueueCommand) -> EngineResult<()> {
+    if supports_gates {
+        return Ok(());
+    }
+    match command {
+        QueueCommand::SetGates(_) => Err(EngineError::Unavailable),
+        QueueCommand::Push(c) if c.items.iter().any(|item| !item.gate_keys.is_empty()) => {
+            Err(EngineError::Unavailable)
+        }
+        QueueCommand::ReplacePending(c) if !c.replacement.gate_keys.is_empty() => {
+            Err(EngineError::Unavailable)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Per-queue item-id counter that **resets when the fence epoch advances**, so the 32-bit `counter` field
+/// of [`ItemId`] only ever spans a single owner tenure — it cannot wrap in practice (a tenure pushing 2^32
+/// items is centuries away at any real rate; see ADR-009). Each backend embeds one and reserves a
+/// contiguous base per push batch under a brief leaf lock (never held while any other lock is taken).
+#[derive(Default)]
+pub struct QueueCounters {
+    inner: Mutex<HashMap<QueueKey, (u64, u32)>>,
+}
+
+impl QueueCounters {
+    /// Reserve `count` consecutive counter values for `queue` at `epoch`, returning the base. Advancing the
+    /// epoch (a re-acquire) resets the sequence to 0 so a fresh tenure starts low and dense.
+    pub fn reserve(&self, queue: &QueueKey, epoch: u64, count: u32) -> u32 {
+        let mut g = self.inner.lock().expect("queue-counter mutex poisoned");
+        let entry = g.entry(queue.clone()).or_insert((epoch, 0));
+        if entry.0 != epoch {
+            *entry = (epoch, 0);
+        }
+        let base = entry.1;
+        entry.1 = entry.1.wrapping_add(count);
+        base
+    }
+
+    /// Restart recovery: ensure `queue` resumes minting *past* an id already present in durable storage.
+    /// Call once per recovered [`ItemId`] (or just the max) during rebuild/reopen — a push afterward then
+    /// never re-mints an existing id. Decoding `(epoch, counter)` straight from the id keeps this format-
+    /// agnostic. Monotone: only ever advances the stored `(epoch, next)` for a queue, never rewinds.
+    pub fn observe(&self, queue: &QueueKey, id: ItemId) {
+        let (epoch, next) = (id.epoch(), id.counter().wrapping_add(1));
+        let mut g = self.inner.lock().expect("queue-counter mutex poisoned");
+        let entry = g.entry(queue.clone()).or_insert((epoch, next));
+        if epoch > entry.0 || (epoch == entry.0 && next > entry.1) {
+            *entry = (epoch, next);
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PushItem {
     pub client_item_key: ClientItemKey,
     pub item_id: ItemId,
@@ -65,35 +203,110 @@ pub struct PushItem {
     pub group_key: Option<GroupKey>,
     pub max_attempts: u32,
     pub payload: Option<Bytes>,
+    /// Structured hot-storage fields for compound work records. Defaulted for backwards-compatible log
+    /// replay of commands written before structured fields existed.
+    #[serde(default)]
+    pub fields: BTreeMap<String, Bytes>,
+    /// Caller-owned metadata for compatibility predicates and claim responses. Defaulted for log replay of
+    /// commands written before metadata existed.
+    #[serde(default)]
+    pub metadata: Metadata,
+    /// Declared cohort size (BQ-14c, TD-002 cohort formation): when set together with `group_key`, this
+    /// item is a member of a cohort of `cohort_size` total members (the cohort key IS the `group_key`). The
+    /// relational projection forms `pqueue_cohorts` from these declarations and a `whole_cohort` claim is
+    /// admissible once the cohort is complete (`member_count == cohort_size`). `None` = not a cohort member
+    /// (the common case; the in-memory family does not form cohorts and ignores this field). A divergent
+    /// `cohort_size` for the same `group_key` is a conflict (TD-002 §cohort).
+    #[serde(default)]
+    pub cohort_size: Option<u64>,
+    /// Gate keys this item carries (BQ-14d, TD-002 §gate / API-001 g2). When ANY of these keys is in a
+    /// `blocked` state for the queue (set via the `SetGates` command), the item is INELIGIBLE — the
+    /// relational eligibility predicate anti-joins item gate keys against `pqueue_gate_state`. Empty = no
+    /// gates (the common case).
+    ///
+    /// SCOPE: gates are a RELATIONAL-mode feature only (like cohorts/group batching). The in-memory
+    /// log-replay family does not store gate keys, does not enforce `SetGates`, and treats both as inert —
+    /// so carrying gate keys on a log-replay-backed queue is silently non-enforcing. Enforcing this at the
+    /// port (rejecting gate use on a non-gate-capable backend) is the operator-facing follow-up tracked by
+    /// the BQ-14d fresh-eyes review.
+    #[serde(default)]
+    pub gate_keys: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClaimCommand {
     pub item_ids: Vec<ItemId>,
     pub lease_token: LeaseToken,
     pub lease_expires_at: UtcTimestamp,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CohortClaimCommand {
+    pub cohort_id: CohortId,
+    pub item_ids: Vec<ItemId>,
+    pub lease_token: LeaseToken,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RenewLeaseCommand {
     pub item_ids: Vec<ItemId>,
     pub lease_expires_at: UtcTimestamp,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CohortRenewLeaseCommand {
+    pub cohort_id: CohortId,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReassignLeaseCommand {
+    pub item_ids: Vec<ItemId>,
+    /// The new owner's lease token (the `XCLAIM` consumer).
+    pub lease_token: LeaseToken,
+    pub lease_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FinalizeCommand {
     pub outcomes: Vec<FinalizeOutcome>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CohortFinalizeCommand {
+    pub cohort_id: CohortId,
+    pub kind: FinalizeKind,
+    #[serde(default)]
+    pub not_before: Option<UtcTimestamp>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FinalizeOutcome {
     pub item_id: ItemId,
     pub kind: FinalizeKind,
+    /// Queue-native retry backoff: when `kind == Retry` and the item returns to Pending, it is ineligible
+    /// until this timestamp. `None` = immediately re-eligible (the default). Ignored for non-Retry kinds.
+    /// `#[serde(default)]` keeps logs written before retry backoff existed replay-compatible.
+    #[serde(default)]
+    pub not_before: Option<UtcTimestamp>,
+}
+
+impl FinalizeOutcome {
+    /// A finalize outcome with no retry backoff (`not_before: None`) — the common case for
+    /// complete/fail/release/rearm and an immediate retry.
+    pub fn new(item_id: ItemId, kind: FinalizeKind) -> Self {
+        Self {
+            item_id,
+            kind,
+            not_before: None,
+        }
+    }
 }
 
 /// The five finalize dispositions (API-001). Over RESP only `Complete` is a stock `XACK`;
 /// the rest are library-only (plan §3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FinalizeKind {
     Complete,
     Fail,
@@ -102,7 +315,7 @@ pub enum FinalizeKind {
     Rearm,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReplacePendingCommand {
     /// The key whose pending item is being superseded.
     pub client_item_key: ClientItemKey,
@@ -112,40 +325,236 @@ pub struct ReplacePendingCommand {
     pub replacement: PushItem,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LeaseExpiredCommand {
     pub item_ids: Vec<ItemId>,
 }
 
-#[derive(Debug, Clone)]
+/// In-place merge of a live item's hot-storage fields/payload (FAC-1). `field_ops` is a per-key delta:
+/// `Some(bytes)` sets/overwrites the key, `None` removes it. `payload` either leaves the payload untouched
+/// or replaces it (`Set(None)` clears). Bumps `item_version`. Touches neither lifecycle state nor the
+/// lease — orthogonal to claim/renew/finalize.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateFieldsCommand {
+    pub item_id: ItemId,
+    pub field_ops: BTreeMap<String, Option<Bytes>>,
+    pub payload: PayloadUpdate,
+}
+
+/// Disposition of an item's payload under [`UpdateFieldsCommand`]: leave it as-is, or replace it
+/// (`Set(None)` clears it).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PayloadUpdate {
+    Keep,
+    Set(Option<Bytes>),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CohortExpiredCommand {
     pub group_key: GroupKey,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FenceLeaseCommand {
     pub item_ids: Vec<ItemId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UnfenceLeaseCommand {
     pub item_ids: Vec<ItemId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PurgeItemsCommand {
     pub item_ids: Vec<ItemId>,
     pub force: bool,
 }
 
+/// One opaque non-work side record (Snorri authoritative-commit boundary). Both `key` and `payload` are
+/// OPAQUE bytes — pqueue stores them verbatim and never interprets them. Distinct from a work item: a side
+/// record carries no lifecycle, lease, priority, or eligibility.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SideRecord {
+    #[serde(default)]
+    pub key: Vec<u8>,
+    #[serde(default)]
+    pub payload: Bytes,
+}
+
+/// Write a batch of opaque non-work [`SideRecord`]s in one durable command. Apply is infallible
+/// (insert-or-overwrite by key) and touches nothing in the work-item / eligibility projection.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct WriteSideRecordsCommand {
+    #[serde(default)]
+    pub records: Vec<SideRecord>,
+}
+
+/// Advance a caller-supplied opaque instance/state fence to `next` (Snorri authoritative-commit boundary).
+/// Validated pre-commit, so apply is infallible (overwrite the stored fence for `instance_key` with `next`).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AdvanceInstanceFenceCommand {
+    #[serde(default)]
+    pub instance_key: Vec<u8>,
+    #[serde(default)]
+    pub expected: u64,
+    #[serde(default)]
+    pub next: u64,
+}
+
+/// Block or unblock gate keys for the queue (BQ-14d, API-001 g2 `SetGates`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SetGatesCommand {
+    pub gate_keys: Vec<String>,
+    /// `true` blocks the keys (items carrying them become ineligible); `false` unblocks them.
+    pub blocked: bool,
+}
+
 /// A durable command record — the append unit for the log.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommandEnvelope {
     pub command_id: CommandId,
     pub request_id: Option<RequestId>,
-    pub shard_id: ShardId,
     pub item_ids: Vec<ItemId>,
     pub command: QueueCommand,
     pub checksum: CommandChecksum,
     pub created_at: UtcTimestamp,
+}
+
+#[cfg(test)]
+mod serde_tests {
+    //! Round-trip every command variant through JSON, so a durable backend can persist the log and
+    //! replay it (Phase 3 enabler). No `PartialEq` on the command tree, so fidelity is checked by
+    //! re-serializing the decoded value and comparing the JSON.
+    use super::*;
+    use bytes::Bytes;
+    use pqueue_core::{PriorityValue, UtcTimestamp};
+
+    fn iid(s: &str) -> ItemId {
+        // Test ids are arbitrary labels; map each to a stable, distinct packed `ItemId` (these tests only
+        // assert serde round-trips the value — the exact bits are immaterial).
+        ItemId::from_u64(
+            s.bytes()
+                .fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(b as u64)),
+        )
+    }
+    fn ts(s: i64) -> UtcTimestamp {
+        UtcTimestamp::new(s, 0).unwrap()
+    }
+    fn item() -> PushItem {
+        PushItem {
+            client_item_key: ClientItemKey::new("k").unwrap(),
+            item_id: iid("a"),
+            priority: Some(PriorityValue::Int64(7)),
+            not_before: Some(ts(5)),
+            group_key: Some(GroupKey::new("g").unwrap()),
+            max_attempts: 3,
+            payload: Some(Bytes::from_static(b"payload")),
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            cohort_size: Some(4),
+            gate_keys: Vec::new(),
+        }
+    }
+
+    fn envelope(command: QueueCommand) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::new("c1"),
+            request_id: Some(RequestId::new("r1").unwrap()),
+            item_ids: vec![iid("a")],
+            command,
+            checksum: CommandChecksum(42),
+            created_at: ts(1),
+        }
+    }
+
+    fn all_variants() -> Vec<QueueCommand> {
+        vec![
+            QueueCommand::Push(PushCommand {
+                items: vec![item()],
+            }),
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("a")],
+                lease_token: LeaseToken::new("lease").unwrap(),
+                lease_expires_at: ts(100),
+            }),
+            QueueCommand::RenewLease(RenewLeaseCommand {
+                item_ids: vec![iid("a")],
+                lease_expires_at: ts(200),
+            }),
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome {
+                    item_id: iid("a"),
+                    kind: FinalizeKind::Retry,
+                    not_before: Some(ts(500)),
+                }],
+            }),
+            QueueCommand::ReplacePending(ReplacePendingCommand {
+                client_item_key: ClientItemKey::new("k").unwrap(),
+                superseded_item_id: iid("old"),
+                replacement: item(),
+            }),
+            QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id: iid("a"),
+                field_ops: BTreeMap::from([
+                    ("state".to_string(), Some(Bytes::from_static(b"leased"))),
+                    ("stale".to_string(), None),
+                ]),
+                payload: PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
+            }),
+            QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: vec![iid("a")],
+            }),
+            QueueCommand::CohortExpired(CohortExpiredCommand {
+                group_key: GroupKey::new("g").unwrap(),
+            }),
+            QueueCommand::FenceLease(FenceLeaseCommand {
+                item_ids: vec![iid("a")],
+            }),
+            QueueCommand::UnfenceLease(UnfenceLeaseCommand {
+                item_ids: vec![iid("a")],
+            }),
+            QueueCommand::PauseQueue,
+            QueueCommand::ResumeQueue,
+            QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![iid("a")],
+                force: true,
+            }),
+            QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: vec![SideRecord {
+                    key: b"state/run-1".to_vec(),
+                    payload: Bytes::from_static(b"opaque-state"),
+                }],
+            }),
+            QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                instance_key: b"instance/run-1".to_vec(),
+                expected: 7,
+                next: 8,
+            }),
+        ]
+    }
+
+    #[test]
+    fn every_command_variant_round_trips_through_json() {
+        for command in all_variants() {
+            let env = envelope(command);
+            let json = serde_json::to_string(&env).expect("serialize");
+            let decoded: CommandEnvelope = serde_json::from_str(&json).expect("deserialize");
+            let reencoded = serde_json::to_string(&decoded).expect("re-serialize");
+            assert_eq!(json, reencoded, "round-trip mismatch for {json}");
+        }
+    }
+
+    #[test]
+    fn payload_bytes_and_priority_survive_round_trip() {
+        let env = envelope(QueueCommand::Push(PushCommand {
+            items: vec![item()],
+        }));
+        let json = serde_json::to_string(&env).unwrap();
+        let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
+        let QueueCommand::Push(p) = &decoded.command else {
+            panic!("expected push");
+        };
+        assert_eq!(p.items[0].payload.as_deref(), Some(&b"payload"[..]));
+        assert_eq!(p.items[0].priority, Some(PriorityValue::Int64(7)));
+    }
 }

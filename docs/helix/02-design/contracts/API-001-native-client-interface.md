@@ -5,28 +5,40 @@ ddx:
     - prd
     - concerns
     - adr-cqrs-log-projection-storage-model
+    - adr-queue-as-shard-unit-and-projection-families
   review:
-    self_hash: 6b76e5c4c37c91d40e8d5229d9eeae516f71385aa06e856fb41a4a19ee5856e8
+    self_hash: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
     deps:
-      adr-cqrs-log-projection-storage-model: 709f701130b5bd00666a1abeef4fb104555a623d39b9fec1fdb9b3167789de10
-      concerns: 122b700fbf6049b7fa177b99efa27c5fce011775767d682458a0e2872981fb54
-      prd: 382115039de93226b051a09e719c7e1c50f12563d96c1ba85ef142c0ae5d0ce0
-    reviewed_at: "2026-06-20T19:00:41Z"
+      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
+      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+      concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
+      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
+    reviewed_at: "2026-06-25T04:21:18Z"
 ---
 
 # Contract
 
 **Contract ID**: API-001
-**Type**: library / HTTP API / SDK
+**Type**: native command contract (transport-neutral)
 **Version**: v1
 **Status**: complete
-**Related**: PRD, ADR-001
+**Related**: PRD, ADR-001, ADR-007 (hexagonal architecture & the two realized interfaces)
+
+> **Realized surfaces (ADR-007).** The hexagonal build realizes this transport-neutral contract through
+> **two** first-class faces: the **Rust library** (`pqueue` crate — full surface) and the **RESP/Redis-
+> Streams wire front** (`pqueue-resp` — the stock worker hot path, with the richer operations marked
+> `library-only` in TD-006 §3). The **HTTP/JSON service** surface described below is retained as a valid
+> transport-neutral binding of the same command model, but was **not** built in this architecture (the
+> legacy HTTP `pqueue-service` crate was deleted); the `/v1` route table is therefore an illustrative
+> mapping, not a current implementation surface. Capability classification per face lives in the TD-006 §3
+> matrix.
 
 ## Purpose
 
 This contract defines the native pqueue client interface for queue definition,
-idempotent batch writes, mutable priority updates, batch claims, lease renewal,
-and batch finalization.
+idempotent batch writes, structured hot item storage, mutable priority updates,
+live item reads by caller key, batch claims, lease renewal, and batch
+finalization.
 
 The contract is transport-neutral. A Rust client, TypeScript client, HTTP API,
 or embedded library binding may expose idiomatic names, but MUST preserve these
@@ -46,7 +58,7 @@ mutable priority, mutable schedule, or pqueue's full batch/update semantics.
 ## Scope and Boundaries
 
 - In scope: native client operations for queue creation, item write/update,
-  claim, lease renewal, finalize, and basic queue metrics.
+  live hot-item read, claim, lease renewal, finalize, and basic queue metrics.
 - In scope: request/response fields, required identifiers, lifecycle outcomes,
   idempotency behavior, lease semantics, and batch error behavior.
 - In scope: first-class exposure surfaces and HTTP route shape.
@@ -73,9 +85,10 @@ message, endpoint, or payload element named here is part of the contract.
 | `priority` | tagged scalar | yes when item should be orderable | MUST match the queue's declared priority model. | Timestamp queues use RFC 3339 UTC timestamps. |
 | `not_before` | timestamp | no | If present, item MUST NOT be claimable before this timestamp. | Distinct from priority. |
 | `payload` | opaque bytes or JSON value | no | MUST be stored and returned to claimers without pqueue interpreting application meaning. | Transport adapters define encoding. |
+| `fields` | map string -> opaque bytes | no | MUST be stored as caller-defined structured item fields and returned to claimers and live-item reads without pqueue interpreting application meaning. Field names MUST be UTF-8 strings. Transport adapters MAY reserve field names for pqueue system fields; reserved names MUST be documented by the adapter. | This is the hot-storage field model for compound work records. It is distinct from `metadata`, which is for predicates/observability. |
 | `metadata` | JSON object / map | no | MUST be caller-defined and queryable only through supported predicates. | Used for gates, group keys, and observability dimensions. |
-| `group_key` | string | no (yes when `group_co_residency=true`) | MAY identify a claim compatibility / ordering partition within a queue. When a claim's effective domain is a single `group_key` **on a `group_co_residency=true` queue**, claim result order is the exact per-group priority order (ADR-004). On a `group_co_residency=false` queue, `group_key` is a valid claim-domain restriction filter but does NOT promise per-group total order across shards. On a queue with `group_co_residency=true`, every item MUST carry `group_key` and all items sharing a `group_key` are co-resident on one shard. `group_key` carries no progress-bound meaning; progress is queue-global. | Examples: job, callback/cohort, account, connector, campaign. |
-| `gate_keys` | array of strings | no | MAY declare zero or more opaque gate keys for the item. An item MUST be ineligible for claim while any of its gate keys is `blocked` in the queue's gate state (see Eligibility Precedence). pqueue MUST NOT interpret gate-key meaning. An item with no gate keys is never gate-blocked. Each key MUST match `^[A-Za-z0-9._:-]{1,256}$`; duplicates within one item MUST be collapsed to a set; the set size MUST NOT exceed the queue's `eligibility_policy.max_gate_keys_per_item`. Valid only when the queue's `eligibility_policy.gate_keys = dynamic`; otherwise the item fails per-item `invalid`. | Distinct from `group_key` (claim compatibility/co-residency, not eligibility) and from downstream rate pacing (not modeled by pqueue). Gate keys are opaque and independent of whichever `group_key` topology a queue uses (ADR-004). |
+| `group_key` | string | no (yes on cohort / group-batching queues) | MAY identify a claim compatibility / ordering partition within a queue. When a claim's effective domain is a single `group_key`, claim result order is the exact per-group priority order (ADR-004): because the queue is the unit of sharding (ADR-008), every item of a `group_key` is co-resident on the queue's single owner **by construction**, so per-group order always holds. On a queue with `cohort_policy.enabled` or group batching enabled, every item MUST carry `group_key`. `group_key` carries no progress-bound meaning; progress is queue-global. | Examples: job, callback/cohort, account, connector, campaign. |
+| `gate_keys` | array of strings | no | MAY declare zero or more opaque gate keys for the item. An item MUST be ineligible for claim while any of its gate keys is `blocked` in the queue's gate state (see Eligibility Precedence). pqueue MUST NOT interpret gate-key meaning. An item with no gate keys is never gate-blocked. Each key MUST match `^[A-Za-z0-9._:-]{1,256}$`; duplicates within one item MUST be collapsed to a set; the set size MUST NOT exceed the queue's `eligibility_policy.max_gate_keys_per_item`. Valid only when the queue's `eligibility_policy.gate_keys = dynamic`; otherwise the item fails per-item `invalid`. | Distinct from `group_key` (claim compatibility/ordering, not eligibility) and from downstream rate pacing (not modeled by pqueue). Gate keys are opaque and independent of whichever `group_key` topology a queue uses (ADR-004). |
 | `cohort_size` | integer | conditional | Required on every item of a queue with `cohort_policy.enabled=true`; MUST NOT be present otherwise (else per-item `invalid`). MUST be greater than 0. MUST be identical for every item sharing one `group_key`; a conflicting value on a later member MUST be rejected per item with `conflict`. Fixed at the first accepted member of the `group_key` and immutable thereafter. | Expected complete-cohort member count (analogue of `batch_checksum`). The cohort key is `group_key`; cohort identity = all items sharing a `group_key` on a cohort-enabled queue. |
 | `lifecycle_state` | enum | response | MUST be one of `pending`, `leased`, `complete`, `failed`. Retry is represented as pending with retry metadata and `not_before`. A **recurring** item (see Queue Definition `recurrence`) cycles between `pending` and `leased` indefinitely and reaches `complete`/`failed` only on an explicit terminal finalize. After `recurrence.until` the item stops being re-armed but does **not** change lifecycle state until a terminal finalize occurs or the item is removed by `PurgeItems`. | Recurring items never auto-terminate. |
 | `item_result.status` | enum | response | MUST be one of `accepted`, `updated`, `duplicate`, `claimed`, `renewed`, `completed`, `failed`, `retried`, `released`, `rearmed`, `purged`, `not_found`, `invalid`, `conflict`, `stale_lease`, `terminal`, `rate_limited`, `unavailable`. | Per-item outcome. `rearmed` is the per-item success status of a `rearm` finalize; `purged` is the per-item success status of a `PurgeItems` removal. `rate_limited` denotes a pqueue deployment/tenant capacity limit only (P1) — specifically the partial-batch case where pqueue accepts some items and declines others of one request under a capacity control; whole-request capacity rejection uses the envelope rate-limit error instead. `rate_limited` is never a downstream-API rate signal. |
@@ -109,6 +122,7 @@ transport contract explicitly defines another encoding.
 |---------|--------------|----------|-------|-------|
 | `POST /v1/tenants/{tenant_id}/queues` | HTTP operation | yes | MUST bind to `CreateQueue`. | Control-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:push` | HTTP operation | yes | MUST bind to `BatchPush`. | Data-plane route. |
+| `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:get` | HTTP operation | should | MUST bind to `BatchGetLiveItems` when the HTTP surface implements hot-item reads. | Data-plane read route; Rust and RESP bindings expose this capability first. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:update` | HTTP operation | yes | MUST bind to `BatchUpdate`. | Data-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/gates:set` | HTTP operation | yes | MUST bind to `SetGates`. | Eligibility-control-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:claim` | HTTP operation | yes | MUST bind to `BatchClaim`. | Data-plane route. |
@@ -116,7 +130,7 @@ transport contract explicitly defines another encoding.
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/leases:renew` | HTTP operation | yes | MUST bind to `BatchRenewLeases`. | Data-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:finalize` | HTTP operation | yes | MUST bind to `BatchFinalize`. | Data-plane route. |
 | `GET /v1/tenants/{tenant_id}/queues/{queue_id}/metrics` | HTTP operation | yes | MUST bind to `GetQueueMetrics`. | Observability route. |
-| `POST /v1/tenants/{tenant_id}/scopes:discover` | HTTP operation | should | MUST bind to `DiscoverActiveScopes`. MUST be implemented (P0/MUST) in native service mode and MAY be omitted by compatibility adapters. Tenant-scoped; MAY accept an optional `queue_id` in the body to drill into one queue's groups. Read-only; no side effects; results aggregated across the queue's shards. MUST support pagination (`page_token`) or enforce a documented per-tenant queue ceiling. | First tenant-scoped (multi-queue) data-plane route. |
+| `POST /v1/tenants/{tenant_id}/scopes:discover` | HTTP operation | should | MUST bind to `DiscoverActiveScopes`. MUST be implemented (P0/MUST) in native service mode and MAY be omitted by compatibility adapters. Tenant-scoped; MAY accept an optional `queue_id` in the body to drill into one queue's groups. Read-only; no side effects; results read from the queue's owner. MUST support pagination (`page_token`) or enforce a documented per-tenant queue ceiling. | First tenant-scoped (multi-queue) data-plane route. |
 
 The HTTP binding MAY add transport headers for authentication, trace context,
 content encoding, and idempotent retry metadata. Those headers MUST NOT change
@@ -132,13 +146,12 @@ the native operation semantics defined by this contract.
 | `priority_model.direction` | enum | yes | MUST be `ascending` or `descending`. | Timestamp scheduled queues usually use `ascending`. |
 | `priority_model.tie_breaker` | enum | yes | MUST define deterministic order for equal priority values. | v1 default SHOULD be `created_sequence`. |
 | `ordering_mode` | enum | yes | MUST be `strict` or `bounded_relaxed`. | Determines claim ordering. |
-| `group_co_residency` | boolean | no | Default false. **Immutable after creation.** If true, the queue MUST place items by `shard_id = hash(group_key) mod shard_count`, MUST require `group_key` on every pushed item, thereby co-locates each `group_key` on one shard, and thereby enables exact per-group claim order. Required by claim modes that need whole-group atomicity (`compatibility.group_batching`; `compatibility.whole_cohort`); those modes on a `group_co_residency=false` queue MUST be rejected `invalid-request`. Carries no progress meaning; the progress bound is always queue-global. | Placement capability, not a progress/claim-scope field. |
 | `progress_bound_ms` | integer | yes | MUST be greater than 0. | Eligible items cannot be ignored beyond this bound. |
 | `eligibility_policy.metadata_blockers` | object | no | If present, keys map to arrays of blocked JSON scalar values. An item whose metadata key equals any blocked value MUST be ineligible. Nested object and array equality are not part of v1. | Generic support for paused, suppressed, disabled, or quota-blocked states. |
 | `eligibility_policy.gate_keys` | enum | no | MUST be one of `none`, `dynamic`. Default `none`. **Immutable after `CreateQueue`.** When `dynamic`, items MAY carry `gate_keys` and `SetGates` is permitted. When `none`, item `gate_keys` MUST be rejected per-item `invalid` and `SetGates` MUST fail the envelope with `gates-not-enabled`. | No in-place enable path because queue definitions are immutable. |
 | `eligibility_policy.max_gate_keys_per_item` | integer | conditionally required | **MUST be present and > 0 whenever `gate_keys = dynamic`** (it has no meaning otherwise and MUST be absent/ignored when `gate_keys = none`). If omitted on a `dynamic` queue, `CreateQueue` MUST apply the deployment default `default_max_gate_keys_per_item` and MUST persist the effective value. Server MAY enforce a lower deployment cap; an item exceeding the effective value fails per-item `invalid`. | Bounds anti-join fan-in per item. |
 | `eligibility_policy.max_gates_per_request` | integer | no | Per-queue override of the deployment cap on the number of canonical `{gate_key, state}` entries in one `SetGates` envelope. MUST be > 0 if present. If absent, the deployment default `default_max_gates_per_request` applies. | Normative home for the cap used by `SetGates`. |
-| `cohort_policy.enabled` | boolean | no | Default false. If true, the queue MUST be created with the group co-residency placement capability (`group_co_residency=true`, ADR-004 / placement) so each `group_key` is co-resident on one shard; every pushed item MUST carry `group_key` and `cohort_size`. If a cohort-enabled queue is created without group co-residency, `CreateQueue` MUST fail with `queue-definition-conflict`. | Opt-in; queues without it are unaffected. Cohort key = `group_key`. Progress remains queue-global. |
+| `cohort_policy.enabled` | boolean | no | Default false. If true, every pushed item MUST carry `group_key` and `cohort_size`; each `group_key`'s members are co-resident on the queue's single owner by construction (ADR-008), which is what makes whole-cohort claims owner-local and atomic. | Opt-in; queues without it are unaffected. Cohort key = `group_key`. Progress remains queue-global. |
 | `cohort_policy.completion_bound_ms` | integer | conditional | Required when `cohort_policy.enabled=true`. MUST be greater than 0. **`CreateQueue` MUST reject `completion_bound_ms > progress_bound_ms` with `queue-definition-conflict`.** Bounds how long a cohort may remain not claim-eligible before it is expired per `on_incomplete`, measured per the formula in the cohort-expiry rules. | Cohort-lifecycle liveness timeout, NOT a progress scope. The hard `<= progress_bound_ms` check preserves FR-12 for withheld eligible members. |
 | `cohort_policy.on_incomplete` | enum | conditional | Required when `cohort_policy.enabled=true`. v1 MUST be `expire_cohort`: at the cohort expiry deadline, all current members become terminal `failed` with failure code `cohort-incomplete` via `CohortExpired`. | `degrade_to_items` is reserved for a future minor and MUST NOT be accepted in v1. |
 | `cohort_policy.max_cohort_size` | integer | conditional | Required when `cohort_policy.enabled=true`. MUST be greater than 0 and MUST be `<= max_claim_batch_size`. A `cohort_size` above this MUST be rejected per item with `invalid`. | Guarantees every complete cohort fits one claim. |
@@ -150,10 +163,8 @@ the native operation semantics defined by this contract.
 | `retry_policy.max_attempts` | integer | yes | MUST be greater than 0. A `retry` finalize beyond this count MUST make the item terminal `failed`. The `retry` budget is **per recurring cycle**: a successful `rearm` MUST reset the item's transient-retry counter to 0. The `rearm` outcome (see Batch Finalize) MUST NOT count against `max_attempts` and MUST NOT cause terminal `failed`. `max_attempts` bounds only the transient-failure `retry` path within a single cycle. | Defines terminal retry exhaustion. |
 | `max_push_batch_size` | integer | yes | MUST be greater than 0. | Server may enforce a lower deployment cap. |
 | `max_claim_batch_size` | integer | yes | MUST be greater than 0. | Server may enforce a lower deployment cap. |
-| `max_eligible_group_size` | integer | required when group batching is enabled | MUST be greater than 0 and MUST be `<= max_claim_batch_size`, so any single whole eligible group fits one claim. Bounds a group's non-terminal member count: `BatchPush` MUST fail per-item with `group-too-large` when accepting an item would push its `group_key`'s non-terminal member count over this value. Only meaningful on queues created with group co-residency (`group_co_residency=true`); ignored otherwise. | Required precondition for `compatibility.group_batching`. |
-| `CreateQueue.shard_count` | integer | no | MUST be >= 1 if present; defaults to 1. Server MAY reject values above a deployment policy cap with `invalid-request`, and MAY override by policy. Fixed at create and immutable. `shard_count > 1` requests the horizontally sharded execution path. | Number of physical shards (ADR-004 / TD-003). `shard_id` is never client-visible. |
+| `max_eligible_group_size` | integer | required when group batching is enabled | MUST be greater than 0 and MUST be `<= max_claim_batch_size`, so any single whole eligible group fits one claim. Bounds a group's non-terminal member count: `BatchPush` MUST fail per-item with `group-too-large` when accepting an item would push its `group_key`'s non-terminal member count over this value. | Required precondition for `compatibility.group_batching`. |
 | `CreateQueue.response` | object | yes | MUST include the stored queue definition and `created` boolean. | `created=false` means compatible idempotent create. |
-| `CreateQueue.response.shard_count` | integer | yes | MUST echo the effective stored `shard_count` (after any policy override). | Lets clients learn the effective shard count. |
 
 `max_eligible_group_size` is enforced only at push: push, update, retry, lease
 expiry, and gate reopen never increase a group's non-terminal member count, so
@@ -161,26 +172,25 @@ push is the sole growth point and the sole rejection point. Because
 `max_eligible_group_size <= max_claim_batch_size`, every whole eligible group
 always fits one `group_batching` claim.
 
-`group_co_residency`, `shard_count`, `ordering_mode`, and `priority_model`
-participate in the queue's stable configuration identity used for idempotent
-create (see Precedence and Compatibility). A repeated `CreateQueue` with the same
-`tenant_id`/`queue_id` but a differing `group_co_residency` or `shard_count`
-value MUST be rejected as a definition conflict (`queue-definition-conflict`).
+`ordering_mode` and `priority_model` participate in the queue's stable
+configuration identity used for idempotent create (see Precedence and
+Compatibility). A repeated `CreateQueue` with the same `tenant_id`/`queue_id` but
+a differing `ordering_mode` or `priority_model` value MUST be rejected as a
+definition conflict (`queue-definition-conflict`).
 
-A cohort-enabled queue requires `group_co_residency=true`; a `recurring` queue
-that carries `group_key` SHOULD enable `group_co_residency=true` so each
-recurring singleton stays on one shard for its lifetime and re-arm never
-relocates the item. `recurrence.mode=recurring` and `cohort_policy.enabled=true`
-are mutually exclusive on the same queue (ADR-004); `CreateQueue` MUST reject a
-queue that sets both with envelope `invalid-request`.
+Because the queue is the unit of sharding (ADR-008), a `recurring` item and every
+member of a `group_key` stay co-resident on the queue's single owner by
+construction, so re-arm never relocates an item and whole-cohort/whole-group
+claims are always owner-local. `recurrence.mode=recurring` and
+`cohort_policy.enabled=true` are mutually exclusive on the same queue (ADR-004);
+`CreateQueue` MUST reject a queue that sets both with envelope `invalid-request`.
 
 The deployment defines two required deployment defaults that back the per-queue
 gate caps: `default_max_gate_keys_per_item` (integer > 0) and
 `default_max_gates_per_request` (integer > 0). A queue that omits its own
 `eligibility_policy.max_gate_keys_per_item` or
 `eligibility_policy.max_gates_per_request` override inherits the corresponding
-deployment default, so neither cap is ever undefined. `shard_count` is similarly
-bounded by a deployment policy cap (`deployment_max_shard_count`).
+deployment default, so neither cap is ever undefined.
 
 ### Batch Push
 
@@ -192,6 +202,7 @@ bounded by a deployment policy cap (`deployment_max_shard_count`).
 | `items[].priority` | tagged scalar | yes | MUST match queue priority model. | Invalid values fail per item. |
 | `items[].not_before` | timestamp | no | MUST make item ineligible until the timestamp. | `priority` still determines order once eligible. |
 | `items[].payload` | opaque bytes or JSON value | no | MUST be stored as caller data. | May be omitted for pointer-only queues. |
+| `items[].fields` | map string -> opaque bytes | no | MUST be stored as the item's structured hot record and returned by claims and live reads while the item remains live. | Preferred field model for compound work records. |
 | `items[].metadata` | JSON object / map | no | MUST be stored as caller metadata. | Size limits are deployment-defined. |
 | `items[].gate_keys` | array of strings | no | MUST be stored as the item's gate-key set after validation (charset, length, dedup, cardinality cap per Common Types / Queue Definition). Empty or absent means no dynamic gate applies. Present when the queue is `gate_keys = none` MUST fail that item with `invalid`. | Dynamic eligibility gate keys. |
 | `BatchPush.response.results[]` | array | yes | MUST preserve request item order. | Each result includes submitted `client_item_key`. |
@@ -203,6 +214,22 @@ or metadata after initial acceptance.
 Successful first acceptance MUST create `item_version=1`. Duplicate pushes MUST
 return the current `item_id` and `item_version` without incrementing
 `item_version`.
+
+### Batch Get Live Items
+
+| Element | Type / Shape | Required | Rules | Notes |
+|---------|--------------|----------|-------|-------|
+| `BatchGetLiveItems` | operation | should | MUST read one or more items by `client_item_key` without mutating lifecycle state. | Hot-storage read path. |
+| `keys[]` | array of `client_item_key` | yes | MUST preserve request order in the response. Duplicate keys MAY be repeated in the response. | Enables multi-key fan-in from one queue owner. |
+| `results[]` | array of nullable `LiveItemView` | yes | MUST be aligned with `keys[]`. A missing, purged, terminal, or superseded item MUST render as null/absent. | "Live" is the queue-resident hot-work set. |
+| `LiveItemView.lifecycle_state` | enum | yes | MUST be `pending` or `leased`. Leased items are still live because they are still in queue ownership until finalization or purge. | Claim ownership does not remove hot storage visibility. |
+| `LiveItemView.payload` | opaque bytes or JSON value | no | MUST equal the current item's stored payload. | Compatibility with existing opaque-payload clients. |
+| `LiveItemView.fields` | map string -> opaque bytes | no | MUST equal the current item's structured field map. | Primary compound-object access path. |
+
+`BatchGetLiveItems` MUST NOT resurrect or expose terminal history. Once an item is
+completed, failed, purged, or superseded by replacement, lookup by its
+`client_item_key` MUST return absent unless a newer live item under the same key
+exists.
 
 ### Batch Update
 
@@ -243,54 +270,46 @@ flip, which changes *queue* gate state and touches no item row at all.
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
-| `SetGates` | operation | yes when `gate_keys = dynamic` | MUST set the blocked/open state of one or more gate keys for one queue. O(1) in affected items; the acknowledged commit path is O(keys × shards occupied). Per-shard application is atomic; the queue converges (below). | Queue-scoped only; not tenant-wide. |
+| `SetGates` | operation | yes when `gate_keys = dynamic` | MUST set the blocked/open state of one or more gate keys for one queue. O(1) in affected items; applied atomically on the queue's single owner. | Queue-scoped only; not tenant-wide. |
 | `request_id` | string | yes | MUST provide envelope idempotency per the shared idempotency rules, fingerprinted over the canonical gate set (below). Retried by `request_id` to drive convergence. | |
 | `gates[]` | array | yes | MUST contain one or more `{gate_key, state}` entries. After canonicalization (dedup by `gate_key`, last write wins, sorted), MUST NOT exceed the queue's effective `max_gates_per_request`. Empty batch MUST fail `invalid-request`. | |
 | `gates[].gate_key` | string | yes | MUST match `^[A-Za-z0-9._:-]{1,256}$`. | Opaque. |
 | `gates[].state` | enum | yes | MUST be one of `blocked`, `open`. | Default state of any unset key is `open` (fail-open). |
 | `SetGates.response.gate_epoch` | integer | yes | MUST return the queue gate epoch assigned to this committed gate set (monotonic per queue). A claimer or caller MAY pass this back to fence reads. | The visibility token. |
-| `SetGates.response.shards[]` | array | yes | MUST report, per occupied shard, `{shard opaque-handle, applied_command_position, converged: bool}`. `shard_id` itself is never client-visible (ADR-004); the handle is opaque. | Per-shard convergence report. |
+| `SetGates.response.applied_command_position` | opaque | yes | MUST report the committed command position at which this `gate_epoch` was applied on the queue's owner. | Single-owner commit point. |
 | `SetGates.response.gates[]` | array | yes | MUST report, for each canonical input key, its `gate_key` and the requested committed `state`, in canonical (sorted) order. | A state report, not a per-item batch. |
 
 **Validation atomicity.** If any entry is invalid (bad charset, unknown `state`,
 over cap, or the queue is not `gate_keys = dynamic`), the **entire envelope MUST
-fail validation and MUST apply nothing on any shard**. Validation is evaluated
-before any shard append.
+fail validation and MUST apply nothing**. Validation is evaluated before any
+append on the queue's owner.
 
-**Per-shard atomicity + queue convergence.** pqueue does not assume a cross-shard
-distributed transaction; the storage contract exposes only per-shard append.
-Therefore the same canonical gate set, tagged with one queue **`gate_epoch`**,
-MUST be applied to every shard the queue occupies; **each shard's gate
-application is individually atomic**. A `SetGates` MUST be **idempotently retried
-by `request_id` and `gate_epoch` until every occupied shard has durably applied
-that epoch's gate set** (per the durable-ack and `commit-timeout` rules). The
-response's `shards[].converged` reports per-shard progress; the operation is
-**fully converged** only when every occupied shard reports the committed
-`applied_command_position` for this `gate_epoch`. Because group co-residency
-places a whole group on one shard, a gate that blocks a single group is
-single-shard and converges atomically; only a gate key spanning multiple groups
-fans out, and during convergence such a key MAY be blocking on some shards before
-others — which is correct, because each shard's items are independently gated and
-no cross-shard item set needs simultaneous visibility (a group never spans
-shards).
+**Single-owner atomicity.** Because the queue is the unit of sharding (ADR-008),
+a queue has exactly one owner, so the canonical gate set tagged with one queue
+**`gate_epoch`** is applied atomically in a single owner-local commit — there is
+no cross-shard fan-out and no multi-shard convergence to reconcile. A `SetGates`
+MUST be **idempotently retried by `request_id` and `gate_epoch` until the owner
+has durably applied that epoch's gate set** (per the durable-ack and
+`commit-timeout` rules), and is committed once the owner reports the
+`applied_command_position` for this `gate_epoch`.
 
-**Effect.** Setting a gate key to `blocked` on a shard MUST make every `pending`,
-non-leased item on that shard carrying that key ineligible for claim, with no
-per-item mutation and no `item_version` change. Setting it to `open` MUST restore
+**Effect.** Setting a gate key to `blocked` MUST make every `pending`, non-leased
+item on the queue carrying that key ineligible for claim, with no per-item
+mutation and no `item_version` change. Setting it to `open` MUST restore
 eligibility unless another gate key or eligibility rule still blocks the item.
 Gate changes MUST NOT affect already-leased or terminal items, and MUST NOT
 change any item's `eligible_since`. Time spent gate-blocked is ineligible time
 and MUST NOT be reported toward the progress bound (Eligibility Precedence;
 FR-10); v1 does NOT deduct the blocked interval on reopen.
 
-**Claim linearization with a projection-position fence.** A `BatchClaim` against
-a shard whose local projection has applied the gate command position for the
+**Claim linearization with a projection-position fence.** A `BatchClaim` on a
+queue whose local projection has applied the gate command position for the
 latest committed `gate_epoch` MUST NOT return an item blocked by that gate.
 Because log-backed backends serve claims from a local projection that may lag the
-committed log, the engine MUST enforce a **projection-position fence**: a claim on
-a shard MUST only return items after confirming that shard's projection has
-applied at least the gate command position of every `gate_epoch` known-committed
-at claim-selection start. A claim whose candidate selection demonstrably began
+committed log, the engine MUST enforce a **projection-position fence**: a claim
+MUST only return items after confirming the owner's projection has applied at
+least the gate command position of every `gate_epoch` known-committed at
+claim-selection start. A claim whose candidate selection demonstrably began
 before a `SetGates` commit (its read snapshot precedes that gate command
 position) MAY still complete and return such items. A claim MUST NOT return newly
 blocked work merely because its local projection has not yet replayed the gate
@@ -310,11 +329,11 @@ already-leased items even after a gate later closes.
 | `compatibility.same_group_key` | boolean | no | If true, returned items MUST share one server-selected `group_key`. | Used for downstream batch compatibility. |
 | `compatibility.group_key` | string | no | If present, returned items MUST match this exact group key. | Caller-selected group. |
 | `compatibility.metadata_equals` | object | no | If present, returned items MUST have metadata equal to every specified key/value pair. | v1 predicate shape. |
-| `compatibility.group_batching` | object | no | If present, the server MUST select whole eligible groups instead of individual items (see group-batching prose). MUST NOT be combined with `same_group_key` or an explicit `group_key`. MAY be combined with `metadata_equals` (filters within each whole group). Valid ONLY on queues created with group co-residency (`group_co_residency=true`, ADR-004 / D2) that also define `max_eligible_group_size`; otherwise envelope error `invalid-request`. | New whole-eligible-group claim mode; distinct from `same_group_key`. |
+| `compatibility.group_batching` | object | no | If present, the server MUST select whole eligible groups instead of individual items (see group-batching prose). MUST NOT be combined with `same_group_key` or an explicit `group_key`. MAY be combined with `metadata_equals` (filters within each whole group). Valid ONLY on queues that define `max_eligible_group_size`; otherwise envelope error `invalid-request`. | New whole-eligible-group claim mode; distinct from `same_group_key`. |
 | `compatibility.group_batching.max_groups` | integer | yes when `group_batching` present | MUST be greater than 0. Caps the number of distinct `group_key` values selected in one claim. | Bounds distinct groups, not total items. |
 | `compatibility.group_batching.group_completeness` | enum | yes when `group_batching` present | v1 MUST be `whole_eligible`: each selected group MUST be returned as ALL of its currently-eligible items within the effective claim domain (per Eligibility Precedence), as an all-or-nothing unit. | Reserved enum for future relaxation. |
 | `compatibility.whole_cohort` | boolean | no | If true, the server MUST select exactly one complete, claim-eligible cohort and MUST atomically lease **every** member under one shared `cohort_lease_token`, or return empty when no complete claim-eligible cohort exists. The server MUST NOT lease a partial cohort and MUST NOT make any cohort member available to a non-`whole_cohort` claim. Valid only when `cohort_policy.enabled=true` (else envelope `invalid-request`). MUST NOT be combined with `same_group_key`, `compatibility.group_key`, or `compatibility.group_batching` (else envelope `invalid-request`). | The third claim unit: all-or-nothing complete-cohort claim. |
-| `BatchClaim.response.items[]` | array | yes | MUST return claimed items in deterministic result order for the queue's ordering mode, computed over the request's **effective claim domain** (the candidate set after the queue Eligibility Precedence and the request's `group_key` / `same_group_key` / `metadata_equals` filters and any active claim-unit mode). When the effective claim domain is a single `group_key` on a `group_co_residency=true` queue, this order is the exact per-group priority order; on a `group_co_residency=false` queue a `group_key` filter restricts the domain but does not promise per-group total order across shards. Returned items MUST all satisfy the request's declared filters (no item outside the caller's filter is ever returned). `shard_id` MUST NOT influence result order. | Each item includes `lease_token` (except whole-cohort results, see below). |
+| `BatchClaim.response.items[]` | array | yes | MUST return claimed items in deterministic result order for the queue's ordering mode, computed over the request's **effective claim domain** (the candidate set after the queue Eligibility Precedence and the request's `group_key` / `same_group_key` / `metadata_equals` filters and any active claim-unit mode). When the effective claim domain is a single `group_key`, this order is the exact per-group priority order (the group is owner-local by construction, ADR-008). Returned items MUST all satisfy the request's declared filters (no item outside the caller's filter is ever returned). Internal storage placement MUST NOT influence result order. | Each item includes `lease_token` (except whole-cohort results, see below). |
 | `claimed_item.lease_expires_at` | timestamp | yes | MUST indicate when item may become eligible if not renewed/finalized. | Server time. |
 | `cohort_lease_token` | string | conditional | Present at the top level of a `whole_cohort` claim response when a cohort was leased; absent otherwise. It is the ONLY lease handle for the cohort. | Cohort is the lease unit. |
 | `cohort_id` | string | conditional | Present with `cohort_lease_token`; stable cohort identity for renew/finalize/observability. | |
@@ -351,7 +370,7 @@ returns.
 | `lease_expires_at` | yes | When the lease expires if not renewed or finalized (server time). |
 | `priority` | yes when the queue is orderable | The item's priority in the queue's declared priority model. |
 | `not_before` | conditional | Present when the item carries a `not_before`; absent otherwise. |
-| `group_key` | conditional | Present when the queue is `group_co_residency=true` (where it is required on every item) or when the item was pushed with a `group_key`; absent otherwise. |
+| `group_key` | conditional | Present when the queue requires `group_key` on every item (`cohort_policy.enabled` or group batching enabled) or when the item was pushed with a `group_key`; absent otherwise. |
 | `payload` | conditional | Present when the item was pushed with a payload; returned verbatim and uninterpreted. |
 | `metadata` | conditional | Present when the item carries caller metadata; returned verbatim. |
 | `gate_keys` | conditional | Present **only** on queues created with `eligibility_policy.gate_keys = dynamic` and only when the item declared one or more gate keys; **absent** on `gate_keys = none` queues. |
@@ -388,13 +407,12 @@ nothing. Items with a null `group_key` are not eligible for a `group_batching`
 claim. A `group_batching` claim MUST acquire an exclusive logical lock on each
 selected `group_key` for the claim's serialized critical section, acquiring locks
 for all claim modes in a single canonical order (ascending by group lock identity
-within the shard) to avoid deadlock; a contended group's lock is skipped
+on the queue's owner) to avoid deadlock; a contended group's lock is skipped
 (non-blocking), never split. No concurrent claim of any mode may lease a subset
 of a locked group, so whole-group atomicity holds against generic and
-`same_group_key` claims. `group_batching` is valid only on queues created with
-group co-residency (`group_co_residency=true`); group selection is shard-local
-and the target shard is resolved server-side (the request carries no `shard_id`),
-chosen so the claim drains the queue-global oldest groups first. `group_batching`
+`same_group_key` claims. `group_batching` is valid only on queues that
+define `max_eligible_group_size`; group selection is owner-local by construction
+(ADR-008) and drains the queue's oldest groups first. `group_batching`
 introduces no rate or quota admission stage; pacing to downstream systems is the
 caller's responsibility (see PRD downstream-rate non-goal).
 
@@ -422,9 +440,9 @@ cohort that is not complete-and-claim-eligible by its expiry deadline
 (`min(cohort_created_at, first_eligible_at) + completion_bound_ms`) MUST be
 expired per `on_incomplete`. If a complete cohort's `cohort_size` exceeds
 `max_items`, the envelope MUST fail with `batch-too-large` (it MUST NOT split or
-silently skip the cohort). `whole_cohort` selection is shard-local because the
-queue's group co-residency capability places every `group_key` on one shard
-(ADR-004 / D2).
+silently skip the cohort). `whole_cohort` selection is owner-local because the
+queue is the unit of sharding, so every `group_key`'s members are co-resident on
+the queue's single owner by construction (ADR-008).
 
 **Caller-driven downstream pacing.** pqueue does not enforce downstream API rate
 limits or quotas; the claim path applies **no downstream-rate admission or
@@ -499,20 +517,19 @@ by 0–5:
    (`compatibility.group_batching`, bounded by `max_groups`), or `whole_cohort`
    (`cohort_policy`). Whole-group/whole-cohort units are selected only from
    base-eligible items (0–5) within the effective claim domain and are leased
-   all-or-nothing per their owning contracts. **No `claim_scope` field exists**;
-   group co-residency (D2/ADR-004) is a placement capability, not a claim scope.
-   Whole-group / whole-cohort atomicity is provided by co-residency placement, not
-   by any scope field.
+   all-or-nothing per their owning contracts. **No `claim_scope` field exists**.
+   Whole-group / whole-cohort atomicity is provided by the queue's single owner
+   (every `group_key`'s members are co-resident by construction, ADR-008), not by
+   any scope or placement field.
 8. **Progress protection (FR-9/FR-12, queue-global)**: progress-bound protection
    is folded **into** claim-unit ordering, not applied as a post-selection stage:
    among base-eligible items (and their representatives, for unit modes), the
    progress guard MAY reorder selection to prevent starvation, but MUST NOT promote
    an item excluded by 0–5. The progress bound is **queue-global** (D1): one
-   queue-wide bound, aggregated across shards (TD-003); the gate predicate
-   (condition 5) is applied per shard before aggregation so gate-blocked items
-   never count toward queue-global oldest-eligible age. Per-group fairness is
-   achieved by routing workers via `DiscoverActiveScopes`, not by a per-group
-   progress invariant.
+   queue-wide bound, computed **locally** on the queue's single owner (TD-003); the
+   gate predicate (condition 5) is applied so gate-blocked items never count toward
+   the queue's oldest-eligible age. Per-group fairness is achieved by routing
+   workers via `DiscoverActiveScopes`, not by a per-group progress invariant.
 
 **Eligible age** is measured from the item's stored `eligible_since` and is
 reported only while the item is base-eligible (conditions 0–5). A gate flip
@@ -608,8 +625,8 @@ its initial value). The item row is deleted (never a live row again under the sa
 | `GetQueueMetrics` | operation | yes | MUST return point-in-time queue metrics for one queue. | Observability operation. |
 | `metrics.lifecycle_counts` | object | yes | MUST include `pending`, `leased`, `complete`, and `failed`. `failed` MUST NOT be inflated by recurring items; a recurring item reaches `failed` only via an explicit terminal finalize or in-cycle retry exhaustion. | May be approximate if documented. |
 | `metrics.retry_backlog` | integer | yes | MUST count pending items with transient-retry metadata that are not terminal. Recurring items that are merely re-armed (no in-cycle `retry` outstanding) MUST NOT be counted. | May be approximate if documented. |
-| `metrics.oldest_eligible_age_ms` | integer / null | yes | MUST be null if no eligible item exists. For a sharded queue, MUST be the queue-global oldest-eligible age computed across all shards (the maximum eligible age over shards = `now() - min(oldest_eligible_at)`). MUST be authoritative/exact as of the aggregate `as_of` (minimum shard watermark). | Single queue-global bound (D1). |
-| `metrics.progress_bound_risk_count` | integer | yes | MUST count or estimate eligible items near `progress_bound_ms` summed across shards. MAY be approximate when documented; the oldest-eligible age MUST remain exact. | Counts MAY lag; age MUST NOT. |
+| `metrics.oldest_eligible_age_ms` | integer / null | yes | MUST be null if no eligible item exists. MUST be the queue's oldest-eligible age computed **locally** on its single owner (`now() - min(oldest_eligible_at)` over the owner's group rows). MUST be authoritative/exact as of the owner's projection `as_of`. | Single queue-global bound (D1), computed locally. |
+| `metrics.progress_bound_risk_count` | integer | yes | MUST count or estimate eligible items near `progress_bound_ms` on the queue's owner. MAY be approximate when documented; the oldest-eligible age MUST remain exact. | Counts MAY lag; age MUST NOT. |
 | `metrics.active_leases` | integer | yes | MUST count active leases. | |
 | `metrics.recurring_pending` | integer | conditional | On a `recurring` queue MUST count recurring items in `pending` (armed/idle), whether or not `not_before` is in the future. MUST be 0 / omitted on `oneshot` queues. MAY be approximate if documented. | Idle recurring inventory. |
 | `metrics.recurring_leased` | integer | conditional | On a `recurring` queue MUST count recurring items currently `leased` (actively ticking). MAY be approximate if documented. | Active recurring work. |
@@ -630,15 +647,15 @@ like any eligible item.
 | `tenant_id` | string | yes | MUST scope discovery; results MUST be restricted to queues the principal holds `queue:read` for. | Per-queue authorization, see Authorization Rules. |
 | `queue_id` | string | no | If present, discovery MUST be restricted to that queue and `granularity` defaults to `group`. If absent, discovery spans the principal's authorized queues (tenant-scoped top-N across queues) and `granularity` defaults to `queue`. | Operation-specific exception to the global `queue_id` requirement. |
 | `granularity` | enum | no | MUST be `queue` or `group`. `group` MUST require a resolvable `queue_id`. | Default per `queue_id` presence. |
-| `group_key` | string | no | If present, results MUST be restricted to that group key. Valid whether or not the queue has `group_co_residency=true`. | Reuses claim group vocabulary; carries no claim-unit semantics. |
-| `max_results` | integer | no | If present, MUST be greater than 0; bounds returned descriptors after the cross-shard merge. Server MAY enforce a lower deployment cap. | Top-N by rank, AFTER auth + enumeration bounding. |
+| `group_key` | string | no | If present, results MUST be restricted to that group key. Valid on any queue. | Reuses claim group vocabulary; carries no claim-unit semantics. |
+| `max_results` | integer | no | If present, MUST be greater than 0; bounds returned descriptors after ranking. Server MAY enforce a lower deployment cap. | Top-N by rank, AFTER auth + enumeration bounding. |
 | `page_token` | string | no | Opaque forward cursor. When more authorized queues exist than the enumeration bound, the server MUST return `response.next_page_token`; the caller MUST page to enumerate all queues. `max_results` bounds returned descriptors, NOT control-plane enumeration or auth fanout. | Bounds enumeration/auth fanout. |
-| `response.as_of` | timestamp | yes | MUST be the **observed projection frontier**: the most conservative (minimum) per-row `updated_at` watermark across EVERY shard read for the result, including shards that returned no rows and shards that were stale or unowned at read time (their last-known watermark). `oldest_eligible_age_ms` is exact as of this frontier; `eligible_count`/`progress_bound_risk_count`, when present, MAY lag it. | Observed-frontier guarantee, NOT a global serializable point-in-time. |
+| `response.as_of` | timestamp | yes | MUST be the **observed projection frontier**: for a single-queue (group-granularity) discovery, the minimum per-row `updated_at` watermark over the queue owner's rows read; for a tenant-wide (queue-granularity) discovery, the most conservative (minimum) such watermark across the queues read, including a queue whose owner was stale or unreachable at read time (its last-known watermark). `oldest_eligible_age_ms` is exact as of this frontier; `eligible_count`/`progress_bound_risk_count`, when present, MAY lag it. | Observed-frontier guarantee, NOT a global serializable point-in-time. |
 | `response.next_page_token` | string / null | no | Present when more authorized queues remain to enumerate. | Pagination. |
-| `response.active_scopes[]` | array | yes | MUST be ordered by `oldest_eligible_age_ms` descending (oldest-eligible first), across all the queue's shards, using the queue's Eligibility Precedence predicate, gate-current at read time. Scopes with no eligible work MUST be omitted. Empty array is valid. | Top-N, NOT a per-shard top-N union. |
+| `response.active_scopes[]` | array | yes | MUST be ordered by `oldest_eligible_age_ms` descending (oldest-eligible first), using the queue's Eligibility Precedence predicate, gate-current at read time. Group-granularity ranking is owner-local (no cross-owner merge); queue-granularity ranks across the tenant's queues. Scopes with no eligible work MUST be omitted. Empty array is valid. | Top-N. |
 | `active_scopes[].queue_id` | string | yes | MUST identify the queue. | |
 | `active_scopes[].group_key` | string / null | present when `granularity=group` | MUST identify the group when group granularity is used; MUST be absent for queue granularity. Items with no `group_key` MUST be aggregated under a single `null` group descriptor when `granularity=group`. This `null` descriptor is the **ungrouped-items** scope and is NOT a per-queue rollup row. | Null-group handling, see below. |
-| `active_scopes[].oldest_eligible_age_ms` | integer | yes | MUST be the eligible age of the oldest eligible item in the descriptor's scope, across the queue's shards, using the Eligibility Precedence predicate, gate-current. MUST be exact as of `as_of`. | Same semantic as `metrics.oldest_eligible_age_ms`. |
+| `active_scopes[].oldest_eligible_age_ms` | integer | yes | MUST be the eligible age of the oldest eligible item in the descriptor's scope on the queue's owner, using the Eligibility Precedence predicate, gate-current. MUST be exact as of `as_of`. | Same semantic as `metrics.oldest_eligible_age_ms`. |
 | `active_scopes[].eligible_count` | integer / null | no | If present, MAY be approximate/lagged and MUST be documented as such. v1 MAY omit it. | Routing hint, not a claim guarantee. |
 | `active_scopes[].progress_bound_risk_count` | integer / null | no | If present, MAY be approximate/lagged and MUST be documented as such. v1 MAY omit it. | At-risk hint. |
 
@@ -660,20 +677,16 @@ gate-blocked, discovery MUST advance to the next item satisfying Eligibility
 Precedence and report THAT item's age, rather than excluding the scope. A scope
 is omitted only when NO item in it currently satisfies Eligibility Precedence.
 
-**Cross-shard aggregation.** When a queue spans multiple shards,
-`oldest_eligible_age_ms` and counts MUST be aggregated across all the queue's
-shards before `max_results` is applied. The shard set, shard lease validity, and
-epoch fencing are owned by the control-plane / shard-ownership design (TD-003);
-discovery reads each shard's per-group summary projection (keyed
-`(tenant_id, queue_id, shard_id, group_key)`) and merges by `(queue_id,
-group_key)` taking the minimum oldest-eligible timestamp (== maximum age) and
-summing counts BEFORE applying `max_results`. The returned top-N MUST be the true
-cross-shard top-N, never a per-shard top-N union. This merge is correct whether
-or not the queue has `group_co_residency=true`: under co-residency each
-`group_key` appears in exactly one shard's summary (the merge is a union of
-disjoint groups), and without co-residency a `group_key` MAY appear in several
-shards' summaries (the merge takes the min timestamp across them). Discovery MUST
-NOT require co-residency.
+**Owner-local ranking.** Because the queue is the unit of sharding (ADR-008), a
+queue has one owner, so group-granularity discovery reads that owner's per-group
+summary projection (keyed `(tenant_id, queue_id, group_key)`) and ranks it
+directly — there is no cross-owner merge and no per-shard top-N union. The
+owner's lease validity and epoch fencing are owned by the control-plane /
+ownership design (TD-003). A queue with no live owner for longer than
+`progress_bound_ms` is a progress-bound violation surfaced by TD-003. For
+queue-granularity (tenant-wide) discovery, each queue contributes its single
+owner-local oldest-eligible value and the server ranks across queues before
+applying `max_results`.
 
 **Group descriptors and progress (D1).** A `group` descriptor names a fairness
 routing target, NOT an independently progress-bounded scheduling partition. The
@@ -694,12 +707,13 @@ which the server derives as the min oldest-eligible across the queue's group row
 reservation: a descriptor reported active MAY be empty by claim time, and an
 active scope MAY be absent if it became eligible after `as_of`. `as_of` is an
 **observed projection frontier**, not a global serializable snapshot: it is the
-most conservative watermark across every shard read (empty, stale, and unowned
-shards included). Results are exact AS OF that frontier for
-`oldest_eligible_age_ms`; absence of a scope means "no eligible item observed at
-or before `as_of` on the shards read," not a proof of global absence. Workers
-MUST treat `BatchClaim` as authoritative for reservation. Discovery MUST NOT
-affect any item's progress-bound clock.
+most conservative watermark over the owner rows read (for queue-granularity,
+across the queues read, a stale/unreachable owner included at its last-known
+watermark). Results are exact AS OF that frontier for `oldest_eligible_age_ms`;
+absence of a scope means "no eligible item observed at or before `as_of` on the
+owners read," not a proof of global absence. Workers MUST treat `BatchClaim` as
+authoritative for reservation. Discovery MUST NOT affect any item's
+progress-bound clock.
 
 ### Versioning Rules
 
@@ -738,12 +752,13 @@ affect any item's progress-bound clock.
   same `cohort_id`, and the same `cohort_lease_token` while the cohort lease is
   active; after the cohort lease is finalized, released, or expired, replay MUST
   fail with `request-expired`.
-- Configuration identity: `group_co_residency`, `shard_count`, `ordering_mode`,
-  `priority_model`, `recurrence.mode`, `eligibility_policy.gate_keys`, and
-  `cohort_policy.enabled` participate in the queue's stable configuration identity
-  used for idempotent create. A repeated `CreateQueue` with the same
-  `tenant_id`/`queue_id` but a differing value for any of these MUST be rejected
-  as a definition conflict (`queue-definition-conflict`).
+- Configuration identity: `ordering_mode`, `priority_model`, `recurrence.mode`,
+  `eligibility_policy.gate_keys`, and `cohort_policy.enabled` participate in the
+  queue's stable configuration identity used for idempotent create (there is no
+  `shard_count` or `group_co_residency` — the queue is the unit of sharding,
+  ADR-008). A repeated `CreateQueue` with the same `tenant_id`/`queue_id` but a
+  differing value for any of these MUST be rejected as a definition conflict
+  (`queue-definition-conflict`).
 - Push idempotency for cohort members: `BatchPush` convergence on
   `client_item_key` MUST be evaluated and committed in the same transaction as,
   and strictly **before**, any cohort `member_count` mutation. A duplicate
@@ -765,7 +780,7 @@ affect any item's progress-bound clock.
   the recorded per-item result and MUST NOT re-delete.
 - Discovery semantics: `DiscoverActiveScopes` is a non-transactional read
   returning a top-N ranking computed as of an observed projection frontier
-  (`as_of`) across the shards read, with no claim reservation. It MUST NOT be used
+  (`as_of`) over the queue owners read, with no claim reservation. It MUST NOT be used
   as an atomic multi-group or cohort selector. It is advisory for reservation but
   is the per-group fairness routing mechanism. A compatibility adapter MAY omit
   discovery and MUST document the omission.
@@ -783,8 +798,9 @@ affect any item's progress-bound clock.
   one `cohort_lease_token`, or no cohort member is leased; the cohort row is the
   lock unit, taken by item/`whole_group` claims, `whole_cohort` claims, and the
   expiry sweeper, so a member is never simultaneously individually-claimed,
-  cohort-claimed, and expired. Because each `group_key` is co-resident on one shard
-  (ADR-004), these whole-unit atomicity guarantees are shard-local. `BatchPush`,
+  cohort-claimed, and expired. Because every `group_key`'s members are co-resident
+  on the queue's single owner by construction (ADR-008), these whole-unit
+  atomicity guarantees are owner-local. `BatchPush`,
   `BatchUpdate`, `BatchRenewLeases`, and `BatchFinalize` remain best-effort with
   per-item outcomes (except that cohort renew/finalize act on the whole cohort
   under `cohort_id`+`cohort_lease_token`). These whole-group and whole-cohort modes
@@ -792,11 +808,11 @@ affect any item's progress-bound clock.
 - Ordering: response result arrays for push, update, renew, and finalize MUST
   preserve request order. Claim responses MUST preserve the queue's deterministic
   claim result order **within the request's effective claim domain** (ADR-004); a
-  single-`group_key` domain on a `group_co_residency=true` queue yields exact
-  per-group order. Ordering across distinct `group_key`s within one response (e.g.
+  single-`group_key` domain yields exact per-group order (the group is owner-local
+  by construction). Ordering across distinct `group_key`s within one response (e.g.
   a `group_batching` multi-group claim) is unspecified except as that claim mode's
-  own contract defines it. `shard_id` MUST NOT influence client-visible result
-  order.
+  own contract defines it. Internal storage placement MUST NOT influence
+  client-visible result order.
 - Backward compatibility: v1 clients MAY ignore unknown response fields. v1
   servers MUST NOT remove or rename fields in this contract without a new major
   version.
@@ -824,13 +840,12 @@ HTTP. Library bindings SHOULD map the same `code` values to typed errors.
 | Target item is terminal | Per-item `terminal` | no | Do not update/finalize terminal items except through repair APIs. |
 | Lease token is stale, missing, or expired | Per-item `stale_lease` | no for same token | Re-claim if item becomes eligible. |
 | Item not found by `item_id` or `client_item_key` | Per-item `not_found` | maybe | Verify reference or wait for eventual visibility only if backend documents it. |
-| Item pushed without `group_key` to a `group_co_residency=true` queue | Per-item `invalid` | yes after fix | Supply `group_key`. |
-| `group_batching` combined with `same_group_key` or explicit `group_key`, or `max_groups` <= 0, or used on a queue without group co-residency or without `max_eligible_group_size` | Envelope error `invalid-request` | yes after fix | Use one claim mode; enable `group_batching` only on `group_co_residency=true` queues that define `max_eligible_group_size`. |
+| Item pushed without `group_key` to a queue that requires it (`cohort_policy.enabled` or group batching) | Per-item `invalid` | yes after fix | Supply `group_key`. |
+| `group_batching` combined with `same_group_key` or explicit `group_key`, or `max_groups` <= 0, or used on a queue without `max_eligible_group_size` | Envelope error `invalid-request` | yes after fix | Use one claim mode; enable `group_batching` only on queues that define `max_eligible_group_size`. |
 | Next selected whole group exceeds `max_items` for a `group_batching` claim | Envelope error `batch-too-large` | yes after fix | Raise `max_items` so one whole group fits; ensure `max_eligible_group_size <= max_claim_batch_size`. |
 | `BatchPush` item would push its `group_key` over `max_eligible_group_size` | Per-item `group-too-large` | yes after fix | Drain the group, or raise `max_eligible_group_size` (still `<= max_claim_batch_size`). |
 | `whole_cohort=true` on a queue without `cohort_policy.enabled` | Envelope error `invalid-request` | yes after fix | Enable cohort policy, or use group-aware claim. |
 | `whole_cohort` combined with `same_group_key`, `group_key`, or `group_batching` | Envelope error `invalid-request` | yes after fix | Use exactly one claim unit. |
-| Cohort-enabled queue created without group co-residency capability | `queue-definition-conflict` | yes after fix | Create the queue with `group_co_residency=true`. |
 | `completion_bound_ms > progress_bound_ms` at `CreateQueue` | `queue-definition-conflict` | yes after fix | Set `completion_bound_ms <= progress_bound_ms`. |
 | `cohort_size` conflicts across members of one `group_key` | Per-item `conflict` | yes after fix | Push all members with the same `cohort_size`. |
 | Member would overfill `cohort_size` (`member_count` would exceed `cohort_size`) | Per-item `conflict` | no | The cohort is already full; do not push extra members. |
@@ -846,7 +861,7 @@ HTTP. Library bindings SHOULD map the same `code` values to typed errors.
 | `SetGates` on a queue with `gate_keys = none` | Envelope error `gates-not-enabled` | no | Create a queue with `eligibility_policy.gate_keys = dynamic`. |
 | Item carries `gate_keys` on a `gate_keys = none` queue | Per-item `invalid` | yes after fix | Remove `gate_keys` or use a gate-enabled queue. |
 | `SetGates` batch exceeds `max_gates_per_request`, is empty, or has an invalid key/state | Envelope error `invalid-request` (whole envelope rejected, nothing applied) | yes after fix | Correct/split the gate set. |
-| `SetGates` not converged across all occupied shards before `commit-timeout` | Envelope `commit-timeout` (some shards may have applied this `gate_epoch`) | yes by same `request_id` | Retry by `request_id`; convergence is idempotent per `gate_epoch`. |
+| `SetGates` not durably applied on the queue's owner before `commit-timeout` | Envelope `commit-timeout` | yes by same `request_id` | Retry by `request_id`; application is idempotent per `gate_epoch`. |
 | Discovery `granularity=group` with no resolvable queue | Envelope error `invalid-request` | yes after fix | Provide a `queue_id` for group-granularity discovery. |
 | Discovery names a queue the principal cannot read | Envelope error `queue-forbidden` or `queue-not-found` | no | Use a queue visible to the caller. |
 | pqueue deployment or tenant capacity limit exceeded | Envelope error (rate-limit / capacity error) | yes | Back off per retry guidance. This applies ONLY to pqueue's own deployment/tenant capacity controls (P1) and is an envelope-level admission outcome — pqueue rejects or defers the whole request before per-item processing. pqueue does not rate-limit on behalf of a caller's downstream API. |
@@ -1001,8 +1016,8 @@ HTTP. Library bindings SHOULD map the same `code` values to typed errors.
 Whole-eligible-group claim (`group_batching`). Response: up to 300 distinct
 wholly-available `group_key` values, all currently-eligible items per selected
 group that match `connector=marketo`, each item carrying its own `lease_token`;
-total items <= 5000; no group partially returned. Target shard resolved
-server-side.
+total items <= 5000; no group partially returned. Selection is owner-local
+(every group is co-resident on the queue's owner by construction).
 
 ```json
 {
@@ -1080,7 +1095,7 @@ topology:
   "request_id": "req_20260606_gate_001",
   "gate_epoch": 42,
   "gates": [ { "gate_key": "acct_7", "state": "blocked" } ],
-  "shards": [ { "shard": "<opaque>", "applied_command_position": "...", "converged": true } ]
+  "applied_command_position": "..."
 }
 ```
 
@@ -1110,8 +1125,8 @@ model depends on batching.
 
 `CreateQueue` is included in the native API because queue definition controls
 client-visible priority, eligibility, idempotency, and batch semantics. Broader
-administrative operations such as shard placement, backend migration, repair,
-redrive, and retention management should be defined in separate operator
+administrative operations such as queue placement / ownership, backend migration,
+repair, redrive, and retention management should be defined in separate operator
 contracts. Targeted recurring teardown (`PurgeItems`, addressed per-key/item-id)
 is in-band native scope (P0); broad operator purge/redrive/retention (queue-wide,
 time-window, or policy-driven) remains a separate P1 operator contract. The two
@@ -1123,21 +1138,21 @@ boundary is reached, but commands must not be acknowledged before that durable
 commit boundary. All storage modes must preserve the same client semantics once
 a response is returned.
 
-The client claim contract is backend- and shard-count-agnostic. A multi-shard
-backend routes group/cohort claims to the single shard owning the group (group
-co-residency), fans out non-group claims and returns a deterministic merged
-order, and computes one queue-global progress bound across shards. A fan-out
-claim is a composition of independent per-shard atomic claims anchored by a
-queue-scope claim-intent keyed on `request_id`: it MAY return a committed partial
-set when some shards are unavailable, retries of the same `request_id` converge
-to one stable lease set, and `request-expired` is evaluated over the union of
-leases across all shards. None of this changes the normative claim semantics
-already in this contract (atomic per-lease creation, claim idempotency,
-`max_items` as an upper bound, deterministic ordering). The mechanics are
-specified in TD-001 (multi-shard claim and cross-shard progress), TD-003 (shard
-ownership/fencing/progress), and TD-004 (object-log backend). Shard placement,
-rebalance, drain, and backend migration administrative surfaces are
-operator-contract concerns per the note above.
+The client claim contract is backend-agnostic. Because the queue is the unit of
+sharding (ADR-008), every claim is served by the queue's single owner against its
+own projection: there is no cross-owner fan-out, k-way merge, or claim-intent
+coordination, and the queue-global progress bound is computed locally on the
+owner. A claim is atomic per the contract above (atomic per-lease creation, claim
+idempotency, `max_items` as an upper bound, deterministic ordering); replaying a
+`request_id` returns the same owner-local lease set, and `request-expired` is
+evaluated over those leases. Horizontal scale is **cross-queue** — distributing
+queues across owners (a producer that outgrows one owner's throughput partitions
+its stream across multiple queues at the application layer). The mechanics are
+specified in TD-001 (single-owner claim + projection families), TD-003 (queue
+ownership/fencing), TD-006 (client routing to the owner via HRW + `MOVED`-style
+redirect), and TD-004 (object-log backend). Queue placement, ownership handoff,
+drain, and backend migration administrative surfaces are operator-contract
+concerns per the note above.
 
 ## Validation Checklist
 

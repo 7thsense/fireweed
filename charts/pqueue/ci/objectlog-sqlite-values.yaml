@@ -1,0 +1,12 @@
+# Static render values: objectlog log with sqlite projection axis selected.
+#
+# The chart must express this intended storage shape directly. The current
+# pqueue-server binary rejects this combination until the sqlite projection is
+# wired to the object-log path.
+storage:
+  log:
+    backend: objectlog
+  projection:
+    backend: sqlite
+image:
+  tag: ci

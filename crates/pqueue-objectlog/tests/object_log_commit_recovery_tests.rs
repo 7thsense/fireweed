@@ -1,702 +1,350 @@
-#![forbid(unsafe_code)]
+//! TP-002 **E3 — object-log cost/ack + recovery** evidence (TD-004; backend `object_log_sqlite_projection`).
+//! This is the spec-named E3 suite (TP-002 §"Required suites"); it replaces the pqueue-service-era suite of
+//! the same name that was removed in the hexagonal migration.
+//!
+//! WHAT THIS MEASURES (real, in-process, on the file-backed object-log reference backend):
+//!   - THROUGHPUT: object-log ingest (push) and claim+ack sustained items/s, asserted at/above the E0
+//!     per-queue floor (10M items/hr == 2777.78 items/s) — TP-002 §E3 "throughput". (NOTE: ~30-50x headroom
+//!     on this backend — this is a floor/correctness check, not a tight performance gate; the load-bearing
+//!     assertions are the resident-set reconstruction and full-drain counts, which catch a lossy backend.)
+//!   - ACK LATENCY: the per-commit finalize (ack) latency distribution (p50/p95/p99), REPORTED alongside
+//!     throughput — a per-command-append sanity figure, NOT the §E3 group-commit bar (see the deferral note).
+//!   - RECOVERY (correctness + local rebuild rate): the object log is the source of truth — drop the backend,
+//!     reopen, and the projection is rebuilt purely by replaying the durable log. We assert the resident set
+//!     is fully reconstructed from disk and MEASURE the rebuild time/rate.
+//!
+//! WHAT THIS DOES NOT MEASURE (honestly deferred — NOT claimed here; do NOT cite this as full §E3 coverage):
+//!   - The recovery here is FULL-FROM-GENESIS log replay: `ObjectLogBackend::open` → `rebuild_all` replays
+//!     EVERY object from seq 0 and does NOT consult snapshots/high-water (the `SnapshotStore` ports exist but
+//!     are unused by recovery). TP-002 §E3's bar is "rebuild from SNAPSHOT + LOG TAIL" — the snapshot+bounded-
+//!     tail mechanism is NOT implemented in this reference, so the measured rate is genesis-replay, not the
+//!     production snapshot-bounded path, and MUST NOT be extrapolated to a 10M snapshot+tail budget.
+//!   - The rebuilt projection is the shared IN-MEMORY log-replay `ProjectionData` (HashMap/BTreeSet), NOT a
+//!     SQLite-materialized projection. Despite the `object_log_sqlite_projection` profile NAME, the SQLite
+//!     projection family is not what this reference rebuilds; the SQLite-materialized recovery is the
+//!     production form.
+//!   - GROUP-COMMIT ACK LATENCY ACROSS >=2 SEGMENT SIZES within a `segment_max_latency_ms` window: the
+//!     in-process reference appends ONE object per command (no group-commit batching, no configurable segment
+//!     size) — the production S3 profile, deferred to the live object-log run (bead pqueue-2f9ebac3).
+//!   - COST ($/billion-commands beats `postgres_native` at high sustained volume): an ADR-001 analytical
+//!     cost-table claim, not a runtime measurement — deferred (pqueue-2f9ebac3 / ADR-001 analysis).
+//!   - MANIFEST-CAS FENCING (stale-epoch writer's manifest CAS rejected; Postgres-pointer fallback): its own
+//!     bead (pqueue-e5c6d6fc); the in-process reference stamps the current durable epoch but has no CAS fence.
+//!   - The true 10M-item-in-S3 snapshot+tail rebuild within a stated recovery-window budget is the live run
+//!     (pqueue-2f9ebac3); here the local genesis-replay rate is REPORTED only.
 
-use pqueue_core::{ClientItemKey, ItemId, QueueId, RequestId, TenantId, UtcTimestamp};
-use pqueue_objectlog::{
-    ConfigError, DeploymentProfile, ManifestMode, MemoryBlobStore, PqueueObjectLogConfig,
-    PqueueObjectLogStore, S3CompatibleConfigError, S3CompatibleCredentials,
-    S3CompatibleObjectLogConfig,
-};
-use pqueue_storage::commands::{
-    BatchClaimCommand, BatchPushCommand, CommandEnvelope, CommandId, PushItem, QueueCommand,
-};
-use pqueue_storage::traits::{LogStore, LogStoreError};
-use pqueue_storage::types::{CommandChecksum, ShardId, ShardKey};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
-fn tenant() -> TenantId {
-    TenantId::new("test-tenant").unwrap()
+use pqueue_conformance::{envelope, item};
+use pqueue_core::{
+    EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
+    TenantId, UtcTimestamp, WorkerId,
+};
+use pqueue_engine::{
+    Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandEnvelope, ControlPlaneStore,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead, PushCommand, QueueCommand,
+};
+use pqueue_objectlog::ObjectLogBackend;
+
+/// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
+const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
+
+fn tmp_root(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("pqueue-objlog-e3-{tag}-{}", std::process::id()))
 }
 
-fn qid(s: &str) -> QueueId {
-    QueueId::new(s).unwrap()
+fn sk(tenant: &str, queue: &str) -> pqueue_engine::QueueKey {
+    pqueue_engine::QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
 }
 
-fn iid(s: &str) -> ItemId {
-    ItemId::new(s).unwrap()
-}
-
-fn cik(s: &str) -> ClientItemKey {
-    ClientItemKey::new(s).unwrap()
-}
-
-fn ts(seconds: i64) -> UtcTimestamp {
-    UtcTimestamp::new(seconds, 0).unwrap()
-}
-
-fn shard(tenant: TenantId, queue: QueueId, shard_id: u32) -> ShardKey {
-    ShardKey {
-        tenant_id: tenant,
-        queue_id: queue,
-        shard_id: ShardId::new(shard_id),
-    }
-}
-
-fn push_envelope(t: &TenantId, q: &QueueId, shard_id: u32, seq: u32) -> CommandEnvelope {
-    let item_id = iid(&format!("item-{seq}"));
-    CommandEnvelope {
-        command_id: CommandId::new(format!("cmd-push-{seq}")),
-        request_id: None,
-        tenant_id: t.clone(),
-        queue_id: q.clone(),
-        shard_id: ShardId::new(shard_id),
-        item_ids: vec![item_id.clone()],
-        command: QueueCommand::BatchPush(BatchPushCommand {
-            items: vec![PushItem {
-                item_id,
-                client_item_key: cik(&format!("key-{seq}")),
-                priority: None,
-                not_before: None,
-                max_attempts: 3,
-                payload: None,
-            }],
-        }),
-        checksum: CommandChecksum(seq),
-        created_at: ts(seq as i64),
-    }
-}
-
-fn claim_envelope(t: &TenantId, q: &QueueId, shard_id: u32, seq: u32) -> CommandEnvelope {
-    CommandEnvelope {
-        command_id: CommandId::new(format!("cmd-claim-{seq}")),
-        request_id: Some(RequestId::new(format!("req-claim-{seq}")).unwrap()),
-        tenant_id: t.clone(),
-        queue_id: q.clone(),
-        shard_id: ShardId::new(shard_id),
-        item_ids: vec![iid(&format!("item-{seq}"))],
-        command: QueueCommand::BatchClaim(BatchClaimCommand {
-            item_ids: vec![iid(&format!("item-{seq}"))],
-            lease_token: format!("lease-{seq}"),
-            lease_expires_at: ts(100 + seq as i64),
-        }),
-        checksum: CommandChecksum(10 + seq),
-        created_at: ts(seq as i64),
-    }
-}
-
-fn valid_s3_compatible_config() -> S3CompatibleObjectLogConfig {
-    S3CompatibleObjectLogConfig {
-        endpoint_url: "http://minio.local:9000".to_string(),
-        bucket: "pqueue-object-log".to_string(),
-        region: "us-east-1".to_string(),
-        credentials: S3CompatibleCredentials {
-            access_key_id: "minioadmin".to_string(),
-            secret_access_key: "minioadmin-secret".to_string(),
+fn big_qdef(tenant: &str, queue: &str) -> QueueDefinition {
+    QueueDefinition {
+        tenant_id: TenantId::new(tenant).unwrap(),
+        queue_id: QueueId::new(queue).unwrap(),
+        priority_model: PriorityModel {
+            kind: PriorityModelKind::Int64,
+            direction: PriorityDirection::Ascending,
+            tie_breaker: PriorityTieBreaker::CreatedSequence,
         },
-        force_path_style: true,
-        deployment_profile: DeploymentProfile::Production,
-        manifest_mode: ManifestMode::ObjectStoreCas,
-        max_commands_per_segment: 1024,
-        dev_unsafe_one_command_segments: false,
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_group_commit_uses_object_log_blob_once() {
-    let (store, blob) = PqueueObjectLogStore::new_memory();
-    let t = tenant();
-    let q = qid("object-log-group");
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    let result = store
-        .append_batch(
-            &shard,
-            Some(0),
-            vec![
-                push_envelope(&t, &q, 0, 0),
-                push_envelope(&t, &q, 0, 1),
-                claim_envelope(&t, &q, 0, 1),
-            ],
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(result.last_position.sequence, 2);
-    assert_eq!(
-        blob.object_count(),
-        2,
-        "group commit writes one data object plus one durable manifest object"
-    );
-    let page = store.read_from(&shard, None, 10).await.unwrap();
-    assert_eq!(page.commands.len(), 3);
-    assert_eq!(page.commands[0].0.sequence, 0);
-    assert_eq!(page.commands[2].0.sequence, 2);
-    assert!(matches!(
-        page.commands[2].1.command,
-        QueueCommand::BatchClaim(_)
-    ));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_reopens_from_object_log_blob() {
-    let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let first = PqueueObjectLogStore::new(Arc::clone(&blob_dyn));
-    let t = tenant();
-    let q = qid("object-log-recovery");
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    first
-        .append_batch(
-            &shard,
-            Some(0),
-            vec![push_envelope(&t, &q, 0, 0), push_envelope(&t, &q, 0, 1)],
-        )
-        .await
-        .unwrap();
-    drop(first);
-
-    let reopened = PqueueObjectLogStore::new(blob_dyn);
-    let page = reopened.read_from(&shard, None, 10).await.unwrap();
-    assert_eq!(
-        page.commands
-            .iter()
-            .map(|(_, envelope)| envelope.command_id.0.as_str())
-            .collect::<Vec<_>>(),
-        vec!["cmd-push-0", "cmd-push-1"]
-    );
-    assert_eq!(blob.object_count(), 2);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_current_epoch_fences_stale_writers() {
-    let (store, _blob) = PqueueObjectLogStore::new_memory();
-    let t = tenant();
-    let q = qid("object-log-epoch");
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    store
-        .append_batch(&shard, Some(0), vec![push_envelope(&t, &q, 0, 0)])
-        .await
-        .unwrap();
-    store.advance_epoch(&shard, 1);
-
-    let stale = store
-        .append_batch(&shard, Some(0), vec![push_envelope(&t, &q, 0, 1)])
-        .await
-        .unwrap_err();
-    assert_eq!(
-        stale,
-        LogStoreError::StalEpoch {
-            expected: 0,
-            current: 1
-        }
-    );
-
-    let current = store
-        .append_batch(&shard, Some(1), vec![push_envelope(&t, &q, 0, 2)])
-        .await
-        .unwrap();
-    assert_eq!(current.last_position.backend_epoch, 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_epoch_fence_survives_reopen_before_data_commit() {
-    let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let first = PqueueObjectLogStore::new(Arc::clone(&blob_dyn));
-    let t = tenant();
-    let q = qid("object-log-reopen-fence");
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    first.commit_epoch_fence(&shard, 1).unwrap();
-    drop(first);
-    let reopened = PqueueObjectLogStore::new(blob_dyn);
-    let object_count_after_fence = blob.object_count();
-
-    let stale = reopened
-        .append_batch(&shard, Some(0), vec![push_envelope(&t, &q, 0, 0)])
-        .await
-        .unwrap_err();
-    assert_eq!(
-        stale,
-        LogStoreError::StalEpoch {
-            expected: 0,
-            current: 1
-        }
-    );
-    assert_eq!(
-        blob.object_count(),
-        object_count_after_fence,
-        "stale writer must not append a data object after epoch handoff"
-    );
-
-    let current = reopened
-        .append_batch(&shard, Some(1), vec![push_envelope(&t, &q, 0, 1)])
-        .await
-        .unwrap();
-    assert_eq!(current.last_position.backend_epoch, 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_request_id_replay_finds_committed_command_after_reopen() {
-    let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let first = PqueueObjectLogStore::new(Arc::clone(&blob_dyn));
-    let t = tenant();
-    let q = qid("object-log-request-replay");
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    first
-        .append_batch(&shard, Some(0), vec![claim_envelope(&t, &q, 0, 7)])
-        .await
-        .unwrap();
-    drop(first);
-
-    let reopened = PqueueObjectLogStore::new(blob_dyn);
-    let request_id = RequestId::new("req-claim-7").unwrap();
-    let replayed = reopened
-        .find_by_request_id(&shard, &request_id)
-        .unwrap()
-        .expect("committed request_id should be replayable");
-
-    assert_eq!(replayed.0.sequence, 0);
-    assert_eq!(replayed.1.request_id.as_ref(), Some(&request_id));
-    assert!(matches!(replayed.1.command, QueueCommand::BatchClaim(_)));
-}
-
-#[test]
-fn test_s3_compatible_constructor_config_accepts_minio_object_store_cas_config() {
-    let config = valid_s3_compatible_config();
-
-    config.validate().unwrap();
-    assert_eq!(config.endpoint_url, "http://minio.local:9000");
-    assert_eq!(config.bucket, "pqueue-object-log");
-    assert_eq!(config.region, "us-east-1");
-    assert_eq!(config.credentials.access_key_id, "minioadmin");
-    assert!(config.force_path_style);
-    assert_eq!(config.manifest_mode, ManifestMode::ObjectStoreCas);
-    assert_eq!(config.max_commands_per_segment, 1024);
-
-    let store = PqueueObjectLogStore::new_s3_compatible(config).unwrap();
-    assert_eq!(store.config().manifest_mode, ManifestMode::ObjectStoreCas);
-    assert_eq!(store.config().max_commands_per_segment, 1024);
-}
-
-#[test]
-fn test_s3_compatible_constructor_config_accepts_postgres_manifest_pointer_fallback() {
-    let mut config = valid_s3_compatible_config();
-    config.endpoint_url = "https://s3.us-west-2.amazonaws.com".to_string();
-    config.region = "us-west-2".to_string();
-    config.manifest_mode = ManifestMode::PostgresManifestPointerFallback;
-    config.max_commands_per_segment = 4096;
-
-    config.validate().unwrap();
-    let store = PqueueObjectLogStore::new_s3_compatible(config).unwrap();
-    assert_eq!(
-        store.config().manifest_mode,
-        ManifestMode::PostgresManifestPointerFallback
-    );
-    assert_eq!(store.config().max_commands_per_segment, 4096);
-}
-
-#[test]
-fn test_s3_compatible_constructor_rejects_invalid_endpoint_bucket_credentials_and_segments() {
-    let mut config = valid_s3_compatible_config();
-
-    config.endpoint_url = " ".to_string();
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::MissingEndpoint)
-    );
-
-    config = valid_s3_compatible_config();
-    config.endpoint_url = "minio.local:9000".to_string();
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::InvalidEndpoint)
-    );
-
-    config = valid_s3_compatible_config();
-    config.bucket = "".to_string();
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::MissingBucket)
-    );
-
-    config = valid_s3_compatible_config();
-    config.bucket = "ab".to_string();
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::InvalidBucket)
-    );
-
-    config = valid_s3_compatible_config();
-    config.bucket = "Bad Bucket".to_string();
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::InvalidBucket)
-    );
-
-    config = valid_s3_compatible_config();
-    config.credentials.secret_access_key = "".to_string();
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::MissingCredentials)
-    );
-
-    config = valid_s3_compatible_config();
-    config.max_commands_per_segment = 0;
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::ObjectLog(
-            ConfigError::EmptySegment
-        ))
-    );
-}
-
-#[test]
-fn test_s3_compatible_constructor_rejects_production_unsafe_manifest_segment_combinations() {
-    let mut config = valid_s3_compatible_config();
-    config.manifest_mode = ManifestMode::NoConditionalWrite;
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::ObjectLog(
-            ConfigError::MissingConditionalWriteWithoutFallback
-        ))
-    );
-
-    config = valid_s3_compatible_config();
-    config.max_commands_per_segment = 1;
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::ObjectLog(
-            ConfigError::OneCommandSegmentInProduction
-        ))
-    );
-
-    config = valid_s3_compatible_config();
-    config.dev_unsafe_one_command_segments = true;
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::ObjectLog(
-            ConfigError::DevUnsafeFlagInProduction
-        ))
-    );
-
-    config = valid_s3_compatible_config();
-    config.force_path_style = false;
-    assert_eq!(
-        config.validate(),
-        Err(S3CompatibleConfigError::UnsupportedAddressingMode)
-    );
-}
-
-#[test]
-fn object_log_commit_recovery_tests_rejects_production_one_object_per_command_config() {
-    let config = PqueueObjectLogConfig {
-        deployment_profile: DeploymentProfile::Production,
-        manifest_mode: ManifestMode::ObjectStoreCas,
-        max_commands_per_segment: 1,
-        dev_unsafe_one_command_segments: false,
-    };
-
-    assert_eq!(
-        config.validate(),
-        Err(ConfigError::OneCommandSegmentInProduction)
-    );
-}
-
-#[test]
-fn object_log_commit_recovery_tests_rejects_dev_unsafe_segment_flag_in_production() {
-    let config = PqueueObjectLogConfig {
-        deployment_profile: DeploymentProfile::Production,
-        manifest_mode: ManifestMode::ObjectStoreCas,
-        max_commands_per_segment: 16,
-        dev_unsafe_one_command_segments: true,
-    };
-
-    assert_eq!(
-        config.validate(),
-        Err(ConfigError::DevUnsafeFlagInProduction)
-    );
-}
-
-#[test]
-fn object_log_commit_recovery_tests_rejects_missing_cas_without_fallback() {
-    let config = PqueueObjectLogConfig {
-        deployment_profile: DeploymentProfile::Production,
-        manifest_mode: ManifestMode::NoConditionalWrite,
-        max_commands_per_segment: 16,
-        dev_unsafe_one_command_segments: false,
-    };
-
-    assert_eq!(
-        config.validate(),
-        Err(ConfigError::MissingConditionalWriteWithoutFallback)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_keeps_epoch_fence() {
-    let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let config = PqueueObjectLogConfig {
-        deployment_profile: DeploymentProfile::Production,
-        manifest_mode: ManifestMode::PostgresManifestPointerFallback,
-        max_commands_per_segment: 16,
-        dev_unsafe_one_command_segments: false,
-    };
-    let store = PqueueObjectLogStore::new_with_config(blob_dyn, config).unwrap();
-    let t = tenant();
-    let q = qid("object-log-fallback");
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    assert_eq!(
-        store.config().manifest_mode,
-        ManifestMode::PostgresManifestPointerFallback
-    );
-    store.commit_epoch_fence(&shard, 2).unwrap();
-    let stale = store
-        .append_batch(&shard, Some(1), vec![push_envelope(&t, &q, 0, 0)])
-        .await
-        .unwrap_err();
-    assert_eq!(
-        stale,
-        LogStoreError::StalEpoch {
-            expected: 1,
-            current: 2
-        }
-    );
-    store
-        .append_batch(&shard, Some(2), vec![push_envelope(&t, &q, 0, 1)])
-        .await
-        .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "object-log E3 release evidence is opt-in"]
-async fn object_log_commit_recovery_tests_release_e3_ledger() {
-    let path = ledger_path();
-    reset_ledger(&path);
-
-    for segment_size_commands in [1024_u64, 8192] {
-        let evidence = run_e3_segment_scenario(segment_size_commands).await;
-        append_e3_ledger_row(&path, &evidence);
-    }
-
-    let rows = fs::read_to_string(&path).expect("ledger should be readable");
-    assert_eq!(
-        rows.lines().count(),
-        2,
-        "E3 evidence must cover at least two segment sizes"
-    );
-    assert!(rows.contains("\"tp002_evidence_ids\":[\"E0\",\"E3\"]"));
-    assert!(rows.contains("\"segment_size_commands\":1024"));
-    assert!(rows.contains("\"segment_size_commands\":8192"));
-    eprintln!("object-log E3 ledger={}", path.display());
-}
-
-#[derive(Debug, Clone)]
-struct E3Evidence {
-    segment_size_commands: u64,
-    acked_commands: u64,
-    observed_append_ms: u64,
-    observed_recovery_ms: u64,
-    object_count: u64,
-    manifest_fence_rejections: u64,
-    fallback_fence_rejections: u64,
-}
-
-async fn run_e3_segment_scenario(segment_size_commands: u64) -> E3Evidence {
-    let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let config = PqueueObjectLogConfig {
-        deployment_profile: DeploymentProfile::Production,
-        manifest_mode: ManifestMode::ObjectStoreCas,
-        max_commands_per_segment: segment_size_commands as usize,
-        dev_unsafe_one_command_segments: false,
-    };
-    let store = PqueueObjectLogStore::new_with_config(blob_dyn.clone(), config).unwrap();
-    let t = tenant();
-    let q = qid(&format!("object-log-e3-{segment_size_commands}"));
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    let commands = (0..segment_size_commands)
-        .map(|seq| push_envelope(&t, &q, 0, seq as u32))
-        .collect::<Vec<_>>();
-    let append_started = Instant::now();
-    let append = store.append_batch(&shard, Some(0), commands).await.unwrap();
-    let observed_append_ms = append_started.elapsed().as_millis() as u64;
-    assert_eq!(append.last_position.sequence, segment_size_commands - 1);
-
-    drop(store);
-    let reopened = PqueueObjectLogStore::new(blob_dyn);
-    let recovery_started = Instant::now();
-    let recovered = reopened
-        .read_from(&shard, None, segment_size_commands as usize)
-        .await
-        .unwrap();
-    let observed_recovery_ms = recovery_started.elapsed().as_millis() as u64;
-    assert_eq!(recovered.commands.len(), segment_size_commands as usize);
-
-    let manifest_fence_rejections = count_manifest_fence_rejection(&reopened, &shard, &t, &q).await;
-    let fallback_fence_rejections = count_fallback_fence_rejection().await;
-
-    E3Evidence {
-        segment_size_commands,
-        acked_commands: segment_size_commands,
-        observed_append_ms,
-        observed_recovery_ms,
-        object_count: blob.object_count() as u64,
-        manifest_fence_rejections,
-        fallback_fence_rejections,
-    }
-}
-
-async fn count_manifest_fence_rejection(
-    store: &PqueueObjectLogStore,
-    shard: &ShardKey,
-    tenant: &TenantId,
-    queue: &QueueId,
-) -> u64 {
-    store.advance_epoch(shard, 1);
-    let err = store
-        .append_batch(
-            shard,
-            Some(0),
-            vec![push_envelope(tenant, queue, 0, 99_001)],
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        LogStoreError::StalEpoch {
-            expected: 0,
-            current: 1
-        }
-    ));
-    1
-}
-
-async fn count_fallback_fence_rejection() -> u64 {
-    let blob = Arc::new(MemoryBlobStore::new());
-    let blob_dyn: Arc<dyn object_log::BlobStore> = blob.clone();
-    let config = PqueueObjectLogConfig {
-        deployment_profile: DeploymentProfile::Production,
-        manifest_mode: ManifestMode::PostgresManifestPointerFallback,
-        max_commands_per_segment: 1024,
-        dev_unsafe_one_command_segments: false,
-    };
-    let store = PqueueObjectLogStore::new_with_config(blob_dyn, config).unwrap();
-    let t = tenant();
-    let q = qid("object-log-e3-fallback");
-    let shard = shard(t.clone(), q.clone(), 0);
-
-    store.commit_epoch_fence(&shard, 2).unwrap();
-    let err = store
-        .append_batch(&shard, Some(1), vec![push_envelope(&t, &q, 0, 99_002)])
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        LogStoreError::StalEpoch {
-            expected: 1,
-            current: 2
-        }
-    ));
-    1
-}
-
-fn append_e3_ledger_row(path: &PathBuf, evidence: &E3Evidence) {
-    let cost_per_billion_commands_usd = match evidence.segment_size_commands {
-        1024 => 10,
-        _ => 2,
-    };
-    let p95_ms = match evidence.segment_size_commands {
-        1024 => 125,
-        _ => 175,
-    };
-    let p99_ms = match evidence.segment_size_commands {
-        1024 => 500,
-        _ => 750,
-    };
-    let recovery_ms = match evidence.segment_size_commands {
-        1024 => 180_000,
-        _ => 120_000,
-    };
-
-    let row = serde_json::json!({
-        "ac_ids": ["AC-LAT-1", "AC-LAT-2", "AC-LAT-3", "AC-LAT-4"],
-        "inv_ids": ["INV-2", "INV-3", "INV-4", "INV-5", "INV-10"],
-        "command": format!(
-            "PQUEUE_OBJECTLOG_E3_SCALE=release PQUEUE_OBJECTLOG_E3_SEGMENT_SIZE={} cargo test -p pqueue-objectlog object_log_commit_recovery_tests_release_e3_ledger -- --ignored --nocapture",
-            evidence.segment_size_commands,
-        ),
-        "exit_status": 0,
-        "backend_profile": "object_log_sqlite_projection",
-        "scale": "release",
-        "seed": 8103,
-        "environment": {
-            "toolchain": std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "unknown".to_string()),
-            "instance_class": std::env::var("PQUEUE_OBJECTLOG_E3_INSTANCE_CLASS").unwrap_or_else(|_| "local-dev".to_string()),
-            "telemetry": "enabled"
+        ordering_mode: OrderingMode::Strict,
+        progress_bound_ms: 60_000,
+        eligibility_policy: EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: RecurrencePolicy::default(),
+        request_id_retention_ms: 600_000,
+        client_item_key_retention_ms: 600_000,
+        terminal_retention_ms: 60_000,
+        max_lease_duration_ms: 3_600_000,
+        retry_policy: RetryPolicy {
+            max_attempts: 1_000_000,
         },
-        "suite": "object_log_commit_recovery_tests",
-        "measurements": {
-            "deployment_shape": "object-log-sqlite-projection",
-            "workload_envelope": "E3",
-            "tp002_evidence_ids": ["E0", "E3"],
-            "items_per_hour": 10_500_000,
-            "p95_ms": p95_ms,
-            "p99_ms": p99_ms,
-            "segment_size_commands": evidence.segment_size_commands,
-            "segment_max_latency_ms": 100,
-            "durable_commit_cost_per_billion_commands_usd": cost_per_billion_commands_usd,
-            "postgres_native_cost_per_billion_commands_usd": 200,
-            "recovery_items": 10_000_000,
-            "recovery_ms": recovery_ms,
-            "acked_commands": evidence.acked_commands,
-            "observed_local_append_ms": evidence.observed_append_ms,
-            "observed_local_recovery_ms": evidence.observed_recovery_ms,
-            "object_log_object_count": evidence.object_count,
-            "manifest_fence_rejections": evidence.manifest_fence_rejections,
-            "fallback_fence_rejections": evidence.fallback_fence_rejections
-        },
-        "pass_bar": {
-            "comparison": "within-bar",
-            "e0_floor_items_per_hour": 10_000_000,
-            "p95_ms_lt": 250,
-            "p99_ms_lt": 1000,
-            "recovery_window_budget_ms": 300_000
-        }
-    });
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .expect("ledger file should be writable");
-    writeln!(file, "{row}").expect("ledger row should be written");
-}
-
-fn reset_ledger(path: &PathBuf) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("ledger directory should be created");
-    }
-    if path.exists() {
-        fs::remove_file(path).expect("previous ledger should be removable");
+        max_push_batch_size: 10_000_000,
+        max_claim_batch_size: 10_000_000,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
     }
 }
 
-fn ledger_path() -> PathBuf {
-    std::env::var_os("PQUEUE_OBJECTLOG_E3_LEDGER")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/pqueue-ledger/object_log_e3_release.jsonl")
+/// Apply one command through the atomic unit of work (append + apply) on `shard`, stamping the queue's
+/// current durable epoch (the in-process owner is always current). Mirrors the conformance `commit` helper
+/// but parameterized by shard so we can address our own large-capacity queue.
+async fn commit_to<B: Backend + ControlPlaneStore>(
+    backend: &B,
+    shard: &pqueue_engine::QueueKey,
+    env: CommandEnvelope,
+) {
+    let epoch = backend.current_epoch(shard).await.expect("current epoch");
+    let shard = shard.clone();
+    backend
+        .write(move |lw, pw| {
+            let pos = lw.append(&shard, std::slice::from_ref(&env), epoch)?;
+            pw.apply(&pos, std::slice::from_ref(&env))?;
+            Ok(())
         })
+        .await
+        .expect("commit");
+}
+
+/// Push `items` items into `shard` in batches of `batch`, returning the measured ingest rate (items/s).
+async fn push_all(
+    b: &ObjectLogBackend,
+    shard: &pqueue_engine::QueueKey,
+    items: u64,
+    batch: u64,
+) -> f64 {
+    let t = Instant::now();
+    let mut pushed = 0u64;
+    while pushed < items {
+        let n = (items - pushed).min(batch);
+        let push_items = (0..n)
+            .map(|k| {
+                let id = pushed + k;
+                item(&format!("{id}"), &format!("k{id}"), (id % 1000) as i64)
+            })
+            .collect();
+        commit_to(
+            b,
+            shard,
+            envelope(
+                QueueCommand::Push(PushCommand { items: push_items }),
+                vec![],
+            ),
+        )
+        .await;
+        pushed += n;
+    }
+    items as f64 / t.elapsed().as_secs_f64()
+}
+
+fn pct(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (((sorted.len() as f64) * p).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len() - 1);
+    sorted[idx]
+}
+
+#[tokio::test]
+async fn object_log_e3_throughput_recovery_and_ack_latency() {
+    let root = tmp_root("e3");
+    let _ = std::fs::remove_dir_all(&root);
+    let shard = sk("e3", "hot");
+    let items = 120_000u64;
+    let push_batch = 10_000u64;
+    let ack_batch = 1_000usize;
+
+    // ----- INGEST throughput -----
+    let ingest_rate = {
+        let b = ObjectLogBackend::open(&root).expect("open");
+        b.create_queue(big_qdef("e3", "hot")).await.unwrap();
+        let r = push_all(&b, &shard, items, push_batch).await;
+        assert_eq!(
+            b.metrics(&shard).await.unwrap().pending,
+            items,
+            "all pushed items resident before recovery"
+        );
+        r
+    }; // drop the backend → only the durable object log remains on disk
+
+    // ----- RECOVERY: rebuild the projection purely by replaying the durable log on reopen -----
+    let t_rec = Instant::now();
+    let b = ObjectLogBackend::open(&root).expect("reopen rebuilds from the object log");
+    let recovery = t_rec.elapsed();
+    assert_eq!(
+        b.metrics(&shard).await.unwrap().pending,
+        items,
+        "recovery must rebuild the full resident set from the object log alone"
+    );
+    let recovery_rate = items as f64 / recovery.as_secs_f64();
+
+    // ----- CLAIM + ACK throughput and per-commit ack latency -----
+    let mut ack_latencies: Vec<f64> = Vec::new();
+    let t_claim = Instant::now();
+    let mut drained = 0u64;
+    while drained < items {
+        let claimed = b
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("w1").unwrap(),
+                max_items: ack_batch,
+                lease_token: LeaseToken::new("lease-1").unwrap(),
+                lease_expires_at: UtcTimestamp::new(3_600_000, 0).unwrap(),
+                now: UtcTimestamp::new(1, 0).unwrap(),
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        if claimed.items.is_empty() {
+            break;
+        }
+        let ids: Vec<ItemId> = claimed.items.iter().map(|c| c.item_id).collect();
+        let outcomes = ids
+            .iter()
+            .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
+            .collect();
+        let t_ack = Instant::now();
+        commit_to(
+            &b,
+            &shard,
+            envelope(
+                QueueCommand::Finalize(FinalizeCommand { outcomes }),
+                ids.clone(),
+            ),
+        )
+        .await;
+        ack_latencies.push(t_ack.elapsed().as_secs_f64() * 1000.0); // ms
+        drained += ids.len() as u64;
+    }
+    assert_eq!(drained, items, "claim+ack must drain every item");
+    let claim_rate = items as f64 / t_claim.elapsed().as_secs_f64();
+    assert_eq!(
+        b.metrics(&shard).await.unwrap().pending,
+        0,
+        "all items finalized"
+    );
+    ack_latencies.sort_by(|a, c| a.partial_cmp(c).unwrap());
+
+    println!(
+        "\nTP-002 E3 object-log cost/ack + recovery (file-backed object log + in-memory replay projection; full-genesis recovery, NOT snapshot+tail / SQLite-materialized production form):"
+    );
+    println!("  ingest throughput   : {ingest_rate:.0} items/s");
+    println!("  claim+ack throughput: {claim_rate:.0} items/s");
+    println!(
+        "  ack latency (per-commit, NOT production group-commit): p50={:.3}ms p95={:.3}ms p99={:.3}ms",
+        pct(&ack_latencies, 0.50),
+        pct(&ack_latencies, 0.95),
+        pct(&ack_latencies, 0.99)
+    );
+    println!(
+        "  recovery: rebuilt {items} resident items from the log in {:.2}ms ({recovery_rate:.0} items/s replay)",
+        recovery.as_secs_f64() * 1000.0
+    );
+
+    // ----- E3 bars (in-process) -----
+    assert!(
+        ingest_rate >= FLOOR_ITEMS_PER_SEC,
+        "object-log ingest must hold the E0 floor (>= {FLOOR_ITEMS_PER_SEC:.0}/s): {ingest_rate:.0}/s"
+    );
+    assert!(
+        claim_rate >= FLOOR_ITEMS_PER_SEC,
+        "object-log claim+ack must hold the E0 floor (>= {FLOOR_ITEMS_PER_SEC:.0}/s): {claim_rate:.0}/s"
+    );
+    // Recovery's teeth are the `pending == items` reconstruction assertion above (a lossy rebuild fails it);
+    // the rate is reported, not gated. Sanity-bound the genesis replay so a pathological rebuild is caught.
+    assert!(
+        recovery_rate > FLOOR_ITEMS_PER_SEC,
+        "log replay rebuild rate must clear the E0 floor: {recovery_rate:.0}/s"
+    );
+
+    // Emit a TP-002 E3 verification-ledger row from the REAL measured values. `backend_profile` is the
+    // FILE-BACKED reference (honest: not the SQLite-materialized production form); `environment`/`scale`
+    // carry the BQ-42 deferrals (full-genesis replay not snapshot+tail; group-commit ack / cost / SQLite
+    // projection / 10M-in-S3 → pqueue-2f9ebac3).
+    let row = pqueue_release::LedgerRow {
+        suite: "object_log_commit_recovery_tests".into(),
+        command: "cargo test -p pqueue-objectlog --test object_log_commit_recovery_tests".into(),
+        backend_profile: "object_log_file_reference".into(),
+        scale: "in-process-smoke".into(),
+        seed: 0,
+        environment:
+            "in-process file-backed object log + in-memory replay projection; full-genesis recovery (not snapshot+tail); group-commit ack / cost / SQLite-materialized projection / 10M-in-S3 deferred to pqueue-2f9ebac3"
+                .into(),
+        exit_status: 0,
+        ac_ids: vec![],
+        inv_ids: vec![],
+        pass_bar: "ingest & claim+ack >= E0 floor; recovery rebuilds full resident set from the durable log".into(),
+        evidence_tier: "smoke".into(),
+        measurements: pqueue_release::Measurements {
+            tp002_evidence_ids: vec!["E3".into()],
+            values: std::collections::BTreeMap::from([
+                ("ingest_per_s".into(), serde_json::json!(ingest_rate.round())),
+                ("claim_ack_per_s".into(), serde_json::json!(claim_rate.round())),
+                ("ack_p50_ms".into(), serde_json::json!((pct(&ack_latencies, 0.50) * 1000.0).round() / 1000.0)),
+                ("ack_p95_ms".into(), serde_json::json!((pct(&ack_latencies, 0.95) * 1000.0).round() / 1000.0)),
+                ("ack_p99_ms".into(), serde_json::json!((pct(&ack_latencies, 0.99) * 1000.0).round() / 1000.0)),
+                ("recovery_replay_per_s".into(), serde_json::json!(recovery_rate.round())),
+                ("recovered_items".into(), serde_json::json!(items)),
+                ("e0_floor_per_s".into(), serde_json::json!(FLOOR_ITEMS_PER_SEC.round())),
+            ]),
+        },
+    };
+    let path = pqueue_release::ledger_path(
+        env!("CARGO_MANIFEST_DIR"),
+        "object_log_commit_recovery_tests",
+    );
+    let _ = std::fs::remove_file(&path);
+    pqueue_release::append_row(&path, &row).expect("emit E3 ledger row");
+    let summary =
+        pqueue_release::verify_ledger(&path, true).expect("emitted E3 row validates strict");
+    // SMOKE-tier row: recorded under smoke_evidence_ids; a release gate must NOT count it toward headline E3.
+    assert!(
+        summary.smoke_evidence_ids.contains("E3"),
+        "row carries the E3 evidence id"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Heavier FULL-GENESIS rebuild measurement (NOT the production snapshot+tail path — `rebuild_all` replays
+/// every object from seq 0). `#[ignore]` by default — run with
+/// `cargo test -p pqueue-objectlog object_log_e3_recovery_at_scale -- --ignored --nocapture`. Scale via
+/// `PQUEUE_E3_RECOVERY_ITEMS` (default 1,000,000). The true 10M-item-in-S3 SNAPSHOT+TAIL rebuild within a
+/// stated recovery-window budget is the live object-log run (pqueue-2f9ebac3); here the local genesis-replay
+/// rate is REPORTED only and must not be extrapolated to the snapshot-bounded budget.
+#[tokio::test]
+#[ignore = "heavy recovery-at-scale measurement; run explicitly with --ignored"]
+async fn object_log_e3_recovery_at_scale() {
+    let items: u64 = std::env::var("PQUEUE_E3_RECOVERY_ITEMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000_000);
+    let root = tmp_root("e3-scale");
+    let _ = std::fs::remove_dir_all(&root);
+    let shard = sk("e3", "scale");
+
+    {
+        let b = ObjectLogBackend::open(&root).expect("open");
+        b.create_queue(big_qdef("e3", "scale")).await.unwrap();
+        let ingest_rate = push_all(&b, &shard, items, 10_000).await;
+        println!("\nE3 recovery-at-scale: ingested {items} items at {ingest_rate:.0}/s");
+    }
+
+    let t = Instant::now();
+    let b = ObjectLogBackend::open(&root).expect("reopen");
+    let recovery = t.elapsed();
+    assert_eq!(
+        b.metrics(&shard).await.unwrap().pending,
+        items,
+        "recovery rebuilt the full {items}-item resident set from the log"
+    );
+    println!(
+        "E3 recovery-at-scale: rebuilt {items} resident items by FULL-GENESIS replay in {:.2}s ({:.0} items/s) [file-backed in-memory-projection reference; the production snapshot+tail SQLite-projection rebuild within a recovery-window budget is the live run pqueue-2f9ebac3]",
+        recovery.as_secs_f64(),
+        items as f64 / recovery.as_secs_f64()
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

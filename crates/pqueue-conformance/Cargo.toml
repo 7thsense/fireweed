@@ -1,0 +1,18 @@
+[package]
+name = "pqueue-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Backend-conformance harness: the behavioral no-stub suite (plan §6), parameterized over any backend
+# that implements the engine ports, so every driven adapter (memory/sqlite/postgres/objectlog) runs the
+# SAME tests. Depends only on the domain (engine + core) — the correct hexagonal direction; adapters
+# depend on THIS as a dev-dependency.
+[dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
+bytes = "1"

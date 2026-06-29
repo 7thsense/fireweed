@@ -13,9 +13,15 @@ path = "src/lib.rs"
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
+bytes = "1"
+serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "macros"] }
+# CancellationToken to signal the serve loop to stop accepting and drain (handlers are owned by a
+# tokio::task::JoinSet, so the drain is hard-bounded — see serve_with_shutdown).
+tokio-util = { version = "0.7" }
 
 [dev-dependencies]
 pqueue-memory = { path = "../pqueue-memory" }
-redis = { version = "1", features = ["tokio-comp"] }
+pqueue-sqlite = { path = "../pqueue-sqlite" }
+redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
