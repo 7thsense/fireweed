@@ -20,10 +20,11 @@ use std::sync::{Arc, Mutex};
 use pqueue_core::WorkerId;
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, ControlPlaneStore, FinalizeOutcome, FinalizePort, IndexQueryPort,
-    LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort, acquire_and_fence,
+    CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome, FinalizePort,
+    IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
+    PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort,
+    RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
+    acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,10 +42,11 @@ pub use pqueue_core::{
     RetryPolicy, TenantId, TimestampError, UtcTimestamp,
 };
 pub use pqueue_engine::{
-    ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommitCapabilities,
-    CommitEntryStatus, CommitRecovery, ControlPlaneConfig, CreateQueueOutcome, EngineError,
-    EngineResult, EntryRecovery, FinalizeKind, GroupBatching, IndexHit, InstanceFence, ItemView,
-    LiveItemView, PayloadUpdate, QueueKey, QueueMetrics, ScheduleUpdate, SideRecord, UpsertOutcome,
+    ActiveScope, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommitCapabilities,
+    CommitEntryStatus, CommitRecovery, ControlPlaneConfig, CreateQueueOutcome,
+    DiscoveryGranularity, EngineError, EngineResult, EntryRecovery, FinalizeKind, GroupBatching,
+    IndexHit, InstanceFence, ItemView, LiveItemView, PayloadUpdate, QueueKey, QueueMetrics,
+    ScheduleUpdate, SideRecord, UpsertOutcome,
 };
 
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
@@ -82,6 +84,7 @@ pub trait LibBackend:
     + SetGatesPort
     + ProjectionRead
     + IndexQueryPort
+    + DiscoveryPort
     + ControlPlaneStore
     + Send
     + Sync
@@ -105,6 +108,7 @@ impl<T> LibBackend for T where
         + SetGatesPort
         + ProjectionRead
         + IndexQueryPort
+        + DiscoveryPort
         + ControlPlaneStore
         + Send
         + Sync
@@ -779,6 +783,30 @@ impl<B: LibBackend> Pqueue<B> {
     /// Non-destructive priority-ordered view of eligible items.
     pub async fn peek(&self, queue: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
         self.backend.peek(queue, limit).await
+    }
+
+    /// Discover `queue`'s **active scopes** — the scopes (the queue rolled up, or its per-group detail at
+    /// [`DiscoveryGranularity::Group`]) that currently hold eligible work — ranked **oldest-eligible first**
+    /// (the most-starved scope leads; deterministic group-key tiebreak). Each [`ActiveScope`] carries the
+    /// scope's TRUE `oldest_eligible_age_ms` (age from `now`) and eligible count, so a worker can route to
+    /// the most-aged work and a stalled queue (eligible work piling up with nothing claiming it) is visible
+    /// as a growing `oldest_eligible_age_ms` even with no live serving owner (FR-41). The queue has one owner
+    /// (ADR-008), so this owner-local ranking is authoritative for the queue without a cross-owner merge.
+    ///
+    /// AUTHZ (ADR-002): this trusted library facade has **no principal** — it returns the UNFILTERED ranked
+    /// discovery for the addressed queue. Excluding scopes a caller is not authorized to see is the
+    /// **auth layer's** concern (the RESP/server front stamps the principal and filters); it is deliberately
+    /// not invented here. RELATIONAL-class: the per-group summary exists only on the relational family; the
+    /// in-memory / log-replay family returns [`EngineError::Unavailable`].
+    pub async fn discover_active_scopes(
+        &self,
+        queue: &QueueKey,
+        granularity: DiscoveryGranularity,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        let now = self.clock.now();
+        self.backend
+            .discover_active_scopes(queue, granularity, now)
+            .await
     }
 
     /// Read one live hot-storage item by caller-supplied key. Returns `None` once the item is complete,

@@ -659,6 +659,9 @@ impl pqueue_engine::SetGatesPort for PostgresBackend {}
 // Reschedule is not wired on the durable log-replay postgres backend yet; it refuses with the default `Unavailable`.
 impl pqueue_engine::ReschedulePort for PostgresBackend {}
 
+// Active-scope discovery is a relational-class feature (per-group summary); the log-replay postgres family refuses it.
+impl pqueue_engine::DiscoveryPort for PostgresBackend {}
+
 /// Recovery/explain reads inherit the `Unavailable` default (no authoritative commit boundary on this path).
 impl pqueue_engine::RecoveryReadPort for PostgresBackend {}
 

@@ -817,12 +817,18 @@ pub trait ReclaimPort: Send + Sync {
 /// RELATIONAL-ONLY: the in-memory log-replay family maintains no per-group summary, so it does not
 /// implement this port (a relational-class feature, kept out of the shared core suite — parity preserved).
 pub trait DiscoveryPort: Send + Sync {
+    /// The default impl returns [`EngineError::Unavailable`] so the in-memory / log-replay family (which
+    /// maintains no per-group summary) refuses discovery rather than fabricating an empty result — the
+    /// relational family overrides it with the real `pqueue_group_summary` rollup.
     fn discover_active_scopes(
         &self,
-        shard: &QueueKey,
-        granularity: crate::active_scope::DiscoveryGranularity,
-        now: UtcTimestamp,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::active_scope::ActiveScope>>> + Send;
+        _shard: &QueueKey,
+        _granularity: crate::active_scope::DiscoveryGranularity,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::active_scope::ActiveScope>>> + Send
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
 }
 
 // ---------------------------------------------------------------------------

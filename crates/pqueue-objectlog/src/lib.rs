@@ -773,6 +773,9 @@ impl pqueue_engine::SetGatesPort for ObjectLogBackend {}
 // refuses it with the default `Unavailable`.
 impl pqueue_engine::ReschedulePort for ObjectLogBackend {}
 
+// Active-scope discovery is a relational-class feature (per-group summary); the object-log family refuses it.
+impl pqueue_engine::DiscoveryPort for ObjectLogBackend {}
+
 /// Recovery/explain reads are unavailable: this eventual-apply backend has no authoritative commit boundary
 /// (it inherits the `Unavailable` default).
 impl pqueue_engine::RecoveryReadPort for ObjectLogBackend {}

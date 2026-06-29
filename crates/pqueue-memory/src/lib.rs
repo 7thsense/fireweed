@@ -839,6 +839,9 @@ impl PurgePort for MemoryBackend {
 // default `Unavailable` (it stores no gate state). Surfaced so MemoryBackend satisfies the lib facade bound.
 impl pqueue_engine::SetGatesPort for MemoryBackend {}
 
+// Active-scope discovery is a relational-class feature (per-group summary); the in-memory family refuses it.
+impl pqueue_engine::DiscoveryPort for MemoryBackend {}
+
 impl pqueue_engine::ReschedulePort for MemoryBackend {
     fn reschedule(
         &self,

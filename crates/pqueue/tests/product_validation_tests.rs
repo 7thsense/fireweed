@@ -23,8 +23,8 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use pqueue::{
-    ClaimCompatibility, ClientItemKey, EngineError, GroupBatching, LibBackend, Nack, NewItem,
-    Pqueue, ScheduleUpdate, UpsertOutcome,
+    ActiveScope, ClaimCompatibility, ClientItemKey, DiscoveryGranularity, EngineError,
+    GroupBatching, LibBackend, Nack, NewItem, Pqueue, ScheduleUpdate, UpsertOutcome,
 };
 use pqueue_core::{
     CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GateKeyPolicy, GroupKey, ItemId,
@@ -1829,10 +1829,14 @@ const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0; // E0 per-queue floor: 2
 ///     claim+ack rate is far above the E0 floor (high headroom — this is a sanity floor, NOT the algorithmic-
 ///     cost ladder; that, and concurrent contention, are BQ-41);
 ///   - the hot backlog is uncorrupted by the small queue's drain (no cross-queue mutation).
-/// DEFERRED (-> pqueue-289c8d5a / pqueue-c33c367e): DiscoverActiveScopes ranking authorized active scopes by
-/// oldest-eligible age, unauthorized-scope exclusion (auth layer per ADR-002), the AC-LAT-1 p95<250ms/
-/// p99<1000ms latency bars at release scale (provisioned perf env), bounded-per-node worker pools, and the
-/// CONCURRENT noisy-neighbor measurement (BQ-41). NOT claimed in the row.
+/// ASSERTED (BQ pqueue-289c8d5a): DiscoverActiveScopes on the relational backend via the same lib facade —
+/// active scopes ranked by TRUE oldest-eligible age (most-starved first), a stalled queue with eligible work
+/// + no live serving owner visible through a growing oldest_eligible_age_ms (FR-41), and the per-queue
+/// rollup. The facade returns the UNFILTERED ranking; unauthorized-scope exclusion is the auth layer's
+/// concern (ADR-002 — no principal in the trusted library).
+/// DEFERRED (provisioned perf env, NOT available in-repo): the AC-LAT-1 p95<250ms/p99<1000ms latency bars at
+/// release scale. ALSO out of scope here: the CONCURRENT noisy-neighbor measurement (BQ-41) and
+/// bounded-per-node worker pools (pqueue-c33c367e).
 #[tokio::test]
 async fn noisy_neighbor_scale_e2e() {
     let (pq, _clock) = deployment();
@@ -1981,10 +1985,94 @@ async fn noisy_neighbor_scale_e2e() {
         "hot backlog undisturbed by the small queue"
     );
 
+    // --- ASSERTED DiscoverActiveScopes (BQ pqueue-289c8d5a) on the relational backend (per-group summary) ---
+    // The active-scope rollup is a relational-class feature; driven on the relational backend via the same
+    // lib facade. Three groups made eligible at increasing times → discovery ranks them by TRUE
+    // oldest-eligible age (most-starved first). The facade returns the UNFILTERED ranking (no principal —
+    // unauthorized-scope exclusion is the auth layer's concern per ADR-002).
+    let disc_clock = Arc::new(ManualClock::at(0));
+    let rel = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::in_memory().expect("relational backend")),
+        disc_clock.clone(),
+    );
+    let dq = qk("nn", "discover");
+    rel.create_queue(qdef(
+        "nn",
+        "discover",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    ))
+    .await
+    .unwrap();
+    let grouped = |g: &str| NewItem {
+        group_key: Some(GroupKey::new(g).unwrap()),
+        payload: Some(Bytes::from_static(b"work")),
+        ..Default::default()
+    };
+    // Make three groups eligible at t=0, t=100, t=200 (oldest-eligible time increases per group).
+    disc_clock.set(0);
+    rel.push(&dq, grouped("g-old")).await.unwrap();
+    disc_clock.set(100);
+    rel.push(&dq, grouped("g-mid")).await.unwrap();
+    disc_clock.set(200);
+    rel.push(&dq, grouped("g-new")).await.unwrap();
+    // Discover at a later time: ranked oldest-eligible first (the most-aged/starved group leads).
+    disc_clock.set(1000);
+    let scopes: Vec<ActiveScope> = rel
+        .discover_active_scopes(&dq, DiscoveryGranularity::Group)
+        .await
+        .unwrap();
+    assert_eq!(scopes.len(), 3, "three active groups hold eligible work");
+    assert!(
+        scopes
+            .windows(2)
+            .all(|w| w[0].oldest_eligible_age_ms >= w[1].oldest_eligible_age_ms),
+        "active scopes ranked by TRUE oldest-eligible age (most-starved first): {scopes:?}"
+    );
+    assert_eq!(
+        scopes[0].group_key.as_deref(),
+        Some("g-old"),
+        "the most-aged group leads the ranking"
+    );
+    let discovery_ranks_by_age =
+        scopes.len() == 3 && scopes[0].group_key.as_deref() == Some("g-old");
+
+    // STALLED-queue visibility (FR-41): with eligible work and NOTHING claiming it, the oldest-eligible age
+    // keeps GROWING — a stalled queue with no live serving owner is visible through the discovery surface.
+    disc_clock.set(2000);
+    let later = rel
+        .discover_active_scopes(&dq, DiscoveryGranularity::Group)
+        .await
+        .unwrap();
+    let old_later = later
+        .iter()
+        .find(|s| s.group_key.as_deref() == Some("g-old"))
+        .expect("g-old still active (eligible work, undrained)");
+    assert!(
+        old_later.oldest_eligible_age_ms > scopes[0].oldest_eligible_age_ms,
+        "a stalled queue's oldest-eligible age grows while nothing drains it — visible via DiscoverActiveScopes (FR-41)"
+    );
+    let stalled_queue_visible = old_later.oldest_eligible_age_ms > scopes[0].oldest_eligible_age_ms;
+    // The Queue-granularity rollup is one scope for the whole queue (group_key dropped), aged to the most
+    // starved group — the per-queue oldest_eligible_age_ms surface a router/operator ranks queues by.
+    let rollup = rel
+        .discover_active_scopes(&dq, DiscoveryGranularity::Queue)
+        .await
+        .unwrap();
+    assert_eq!(
+        rollup.len(),
+        1,
+        "Queue granularity rolls the groups up to one per-queue scope"
+    );
+    assert!(
+        rollup[0].group_key.is_none(),
+        "the per-queue rollup drops group_key"
+    );
+
     emit_ac(
         "AC-E2E-6",
         &[],
-        "SINGLE-THREADED correctness-isolation (per-queue ownership): small/hot/K-queue claims each return only their own items (zero cross-queue leakage, all non-empty); K queues independently claimable; small queue fully drains (completeness) and clears the E0 floor at this in-memory operating point (sanity, high headroom); hot backlog uncorrupted [DEFERRED -> pqueue-289c8d5a: DiscoverActiveScopes ranking + authz exclusion + AC-LAT-1 latency-at-release-scale; CONCURRENT noisy-neighbor contention + algorithmic-cost ladder is BQ-41; bounded-per-node-pools pqueue-c33c367e]",
+        "SINGLE-THREADED correctness-isolation (per-queue ownership): small/hot/K-queue claims each return only their own items (zero cross-queue leakage, all non-empty); K queues independently claimable; small queue fully drains (completeness) and clears the E0 floor at this in-memory operating point (sanity, high headroom); hot backlog uncorrupted; and ASSERTED DiscoverActiveScopes on the relational backend (BQ pqueue-289c8d5a): active scopes ranked by TRUE oldest-eligible age (most-starved first), a stalled queue with eligible work + no live serving owner visible via a growing oldest_eligible_age_ms (FR-41), and the per-queue rollup — the facade returns the UNFILTERED ranking (unauthorized-scope exclusion is the auth layer per ADR-002) [DEFERRED: AC-LAT-1 latency-at-release-scale needs the provisioned perf env; CONCURRENT noisy-neighbor contention + algorithmic-cost ladder is BQ-41; bounded-per-node-pools pqueue-c33c367e]",
         BTreeMap::from([
             ("hot_backlog".into(), serde_json::json!(hot_backlog)),
             ("active_queues".into(), serde_json::json!(k)),
@@ -2000,6 +2088,14 @@ async fn noisy_neighbor_scale_e2e() {
             (
                 "hot_pending_after_small_drain".into(),
                 serde_json::json!(hot_pending_after),
+            ),
+            (
+                "discovery_ranks_active_scopes_by_oldest_eligible_age".into(),
+                serde_json::json!(discovery_ranks_by_age),
+            ),
+            (
+                "stalled_queue_visible_via_discovery".into(),
+                serde_json::json!(stalled_queue_visible),
             ),
         ]),
     );

@@ -630,6 +630,9 @@ impl pqueue_engine::SetGatesPort for SqliteBackend {}
 // sqlite backend has not wired it yet, so it refuses with the default `Unavailable`.
 impl pqueue_engine::ReschedulePort for SqliteBackend {}
 
+// Active-scope discovery is a relational-class feature (per-group summary); the log-replay sqlite family refuses it.
+impl pqueue_engine::DiscoveryPort for SqliteBackend {}
+
 /// Recovery/explain reads inherit the `Unavailable` default; the authoritative commit boundary lives on
 /// `SqliteRelationalBackend`, not this log-replay backend.
 impl pqueue_engine::RecoveryReadPort for SqliteBackend {}
