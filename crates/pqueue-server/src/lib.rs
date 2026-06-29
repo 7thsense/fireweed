@@ -32,7 +32,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 mod object_log_sqlite;
-pub use object_log_sqlite::{ObjectLogSqliteBackend, SegmentedObjectLogSqliteBackend};
+pub use object_log_sqlite::{
+    ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,
+};
 pub use pqueue_objectlog::segmented::SegmentConfig;
 
 /// Which durable backend the server runs over.
@@ -55,6 +57,15 @@ pub enum Backend {
     SegmentedObjectLogSqlite {
         object_root: PathBuf,
         projection_path: PathBuf,
+        config: SegmentConfig,
+    },
+    /// Segmented group-commit object log (`SegmentedObjectLog<LocalFsBlobStore>`) plus an IN-MEMORY
+    /// `ProjectionData` projection (Fix B). Same durable authority + ack-after-seal coordination as
+    /// `SegmentedObjectLogSqlite`, but the per-segment projection write is a cheap in-memory `apply_command`
+    /// rather than a SQLite transaction; the projection is rebuilt by `read_all` replay on open. The fast
+    /// durable single-node path (`PQUEUE_OBJECT_LOG_MODE=segmented` + `PQUEUE_PROJECTION_BACKEND=inmemory`).
+    SegmentedObjectLogInMemory {
+        object_root: PathBuf,
         config: SegmentConfig,
     },
 }
@@ -743,6 +754,29 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     .with_node_id(node_id),
             );
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
+            backend.spawn_flusher();
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{node_id}"))
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            start_with_ownership(
+                backend,
+                cp,
+                owner,
+                clock,
+                &config.listen,
+                config.reclaim_interval,
+                &config.queues,
+            )
+            .await
+        }
+        Backend::SegmentedObjectLogInMemory {
+            object_root,
+            config: segment_config,
+        } => {
+            let backend = Arc::new(
+                SegmentedObjectLogInMemoryBackend::open(object_root, segment_config)?
+                    .with_node_id(node_id),
+            );
             backend.spawn_flusher();
             let cp = Arc::new(InMemoryControlPlane::default());
             let owner = OwnerId::new(format!("node-{node_id}"))

@@ -51,10 +51,35 @@ fn parse_backend() -> Backend {
             "PQUEUE_SQLITE_LOG_PATH",
             "/var/lib/pqueue/pqueue-log.db",
         ))),
-        ("objectlog", "inmemory") => Backend::ObjectLog(PathBuf::from(env_or(
-            "PQUEUE_OBJECT_LOG_ROOT",
-            "/var/lib/pqueue/object-log",
-        ))),
+        ("objectlog", "inmemory") => {
+            let object_root = PathBuf::from(env_or(
+                "PQUEUE_OBJECT_LOG_ROOT",
+                "/var/lib/pqueue/object-log",
+            ));
+            // `file` (default) = the per-command file `ObjectLogBackend`; `segmented` = the group-commit
+            // substrate over an IN-MEMORY projection (Fix B): durable via the sealed log, fast apply.
+            match env_or("PQUEUE_OBJECT_LOG_MODE", "file").as_str() {
+                "file" => Backend::ObjectLog(object_root),
+                "segmented" => {
+                    let target_bytes = parse_usize("PQUEUE_SEGMENT_TARGET_BYTES", 262_144);
+                    let max_latency_ms = parse_u64("PQUEUE_SEGMENT_MAX_LATENCY_MS", 20);
+                    let config =
+                        SegmentConfig::new(target_bytes, max_latency_ms).unwrap_or_else(|e| {
+                            eprintln!("invalid segment configuration: {e}");
+                            std::process::exit(2);
+                        });
+                    Backend::SegmentedObjectLogInMemory {
+                        object_root,
+                        config,
+                    }
+                }
+                other => unsupported_storage(
+                    &log,
+                    &projection,
+                    &format!("unknown PQUEUE_OBJECT_LOG_MODE={other:?}; expected file|segmented"),
+                ),
+            }
+        }
         ("objectlog", "sqlite") => {
             let object_root = PathBuf::from(env_or(
                 "PQUEUE_OBJECT_LOG_ROOT",
@@ -192,7 +217,7 @@ async fn async_main() {
     }
     if env::args().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_OBJECT_LOG_MODE=file|segmented   (objectlog+sqlite only; file=per-command, segmented=group-commit)\n  PQUEUE_SEGMENT_TARGET_BYTES=262144      (segmented: byte-size seal trigger)\n  PQUEUE_SEGMENT_MAX_LATENCY_MS=20        (segmented: latency seal trigger)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
+            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_OBJECT_LOG_MODE=file|segmented   (objectlog+sqlite or objectlog+inmemory; file=per-command, segmented=group-commit)\n  PQUEUE_SEGMENT_TARGET_BYTES=262144      (segmented: byte-size seal trigger)\n  PQUEUE_SEGMENT_MAX_LATENCY_MS=20        (segmented: latency seal trigger)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
         );
         return;
     }

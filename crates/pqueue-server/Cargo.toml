@@ -23,6 +23,7 @@ pqueue-resp = { path = "../pqueue-resp" }
 pqueue-memory = { path = "../pqueue-memory" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
+pqueue-projection = { path = "../pqueue-projection" }
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync"] }
 # CancellationToken to signal a graceful drain to the RESP serve loop on shutdown.

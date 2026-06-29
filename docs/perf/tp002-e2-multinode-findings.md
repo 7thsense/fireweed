@@ -6,7 +6,11 @@ single-node backend is now fast, but the release bars are only **marginally and 
 co-located owners on this 12-core box (a hardware/co-location ceiling, characterized below). The hypothesized
 backend follow-up (decoupling the SQLite apply from the coord mutex) was implemented and measured to
 **regress** ingest — see **Finding 4**; it was not adopted, and the ceiling is confirmed to be the shared box
-(CPU), not the backend's locking. **Date:** 2026-06-29.
+(CPU), not the backend's locking. The seal-CPU follow-up from the old "Completion path" (kill the segment
+double-serialization with a binary codec; add an in-memory-projection segmented backend) was then
+**implemented and measured** — see **Finding 5**. Both are real wins single-node, but the 8-owner E2 ceiling
+**persists** (3 fresh runs after the fix, all fail the 3.5× scale-out and worst-per-queue-ingest bars), so
+both beads stay OPEN with the honest measured numbers. **Date:** 2026-06-29.
 
 ## Delivered in this pass (Part B)
 
@@ -141,14 +145,84 @@ its acquire before the second resolves), it surfaces reliably under any faster i
 ONLY on the unowned path — the hot already-owned path stays lock-free); a concurrent first-writer that loses
 the gate re-resolves and reuses the winner's session. Whole workspace test suite green.
 
+## Finding 5 — the seal-CPU follow-up (Fix A + Fix B) shipped; real single-node wins, ceiling unmoved (2026-06-29)
+
+The old "Completion path" called for a backend CPU-efficiency follow-up: **cut the per-item CPU of a seal**
+(the segment was JSON-serialized) and offer an in-memory projection. Both landed.
+
+**Fix A — kill the double serialization (`crates/pqueue-objectlog/src/segmented.rs`).** The substrate used to
+serialize every command **twice** in verbose JSON: once per command just to *measure* its buffered size
+(`serde_json::to_vec(env).len()`, bytes discarded), and again to serialize the whole batch on seal
+(`to_json(&segment)`). Now each envelope is encoded **once** with `postcard` (compact binary, serde-native)
+when it is buffered; `buffered_bytes` is the length of the kept bytes (free, no throwaway serialize); and the
+sealed segment is the **framed length-prefixed concatenation** of those kept bytes — `[magic "PQSG"][u8 ver=2]
+[u64 epoch][u64 first_seq][u32 count][ (u32 len, bytes)… ]` — with **no re-serialize on seal**. The
+per-segment FNV checksum now covers the records-blob region and is verified before any record is decoded on
+`read_all`. The per-command envelope **clone** on the enqueue critical section is also gone (the envelope is
+moved into the coordinator's `pending` and enqueued into the buffer by reference). `postcard` is added
+`default-features = false, features = ["alloc"]` — its only new transitive crate beyond the workspace baseline
+is `cobs` (serde/thiserror are already in-tree). All `pqueue-objectlog` tests stay green (round-trip,
+ack-after-commit, epoch-fence, recovery, **live MinIO CAS/fence**).
+
+**Fix B — in-memory projection over the segmented log (new fast backend,
+`SegmentedObjectLogInMemoryBackend`).** Same group-commit ack-after-seal coordination as the SQLite segmented
+backend, but the per-segment projection write is a cheap in-memory `ProjectionData::apply_command` per
+command instead of a batched SQLite transaction. Durable boundary is unchanged (the sealed segment + manifest
+entry); the projection is a derived view **rebuilt by `read_all` replay** in `create_queue` on open. Wired
+config-flagged: `PQUEUE_OBJECT_LOG_MODE=segmented` + `PQUEUE_PROJECTION_BACKEND=inmemory` selects it (the file
+`ObjectLogBackend` remains the `objectlog`+`inmemory`+`file` path). **Recovery verified live:** push 3,000
+items → `XLEN 3000`; restart the container against the **same** volume → `XLEN 3000` (replayed from the log).
+
+### Single-node measurement (one segmented node, container on the bridge, tmpfs, 12-core box)
+
+A single queue driven by N concurrent RESP connections (pipelined `XADD`, then `XREADGROUP >`+`XACK`). A
+*single* closed-loop connection is latency-bound by the flusher (~135 items/s at `seg_max_latency_ms=1`,
+identical for both backends — it is the 1 ms seal cadence, not the backend); throughput comes from concurrent
+connections co-buffering into each segment, exactly as the E2 harness drives it. Items/s:
+
+| conns | objectlog+sqlite+segmented (Fix A) push / claim+finalize | objectlog+inmemory+segmented (Fix B) push / claim+finalize |
+|---|---|---|
+| 8 | 3,048 / 22,692 | 3,067 / 28,483 |
+| 16 | 5,211 / 24,109 | 5,498 / 28,661 |
+| 32 | 10,926 / 24,199 | 12,510 / 28,082 |
+| 64 | 15,058 / 23,076 | 16,346 / 28,777 |
+
+Both backends clear the 2,777.78/s floor by a wide margin once concurrency co-buffers, and at 32+ conns the
+durable group-commit **push** rate exceeds the non-durable `memory`-engine ceiling (~8,870/s) because the
+memory engine has no batching. **Fix B (in-memory projection) is faster than SQLite at every point** —
+~8–14 % on push, ~20–25 % on claim+finalize (the force-sealed claim path is the projection-write-bound one,
+so dropping the SQLite transaction shows there most).
+
+### E2 multi-node (the bead metric) — ceiling unmoved by Fix A
+
+Re-ran the headline harness on the **sqlite** projection (the bead's required backend) **3× consecutively**
+on this 12-core box after Fix A (default tuning: 1 queue/owner, 8 conns/queue, W=4, seg latency 1 ms, 12,000
+items/queue):
+
+| run | 8/2 ingest multiple (bar ≥3.5×) | worst ingest/q (floor 2,778) | worst claim+finalize/q | verdict |
+|---|---|---|---|---|
+| 1 | 2.36× | 1,744 | 12,166 | NOT MET |
+| 2 | 2.83× | 1,768 | 7,121 | NOT MET |
+| 3 | 3.06× | 2,463 | 11,062 | NOT MET |
+
+Non-decreasing ingest (bar 1) and one-owner-per-queue (bar 4, 56 cross-node confirmations) **PASS** on every
+run; the scale-out multiple (bar 2) and worst-per-queue ingest (bar 3) **FAIL** on every run. This is the
+**same co-location CPU ceiling** as Findings 3–4: Fix A lowers the *per-seal* CPU, but at 8 server containers
++ a ~64-thread load driver on 12 cores the binding resource is total CPU/scheduler contention, not seal-CPU,
+so the savings do not lift the 8-owner per-queue ingest off the floor. **No release row emitted; no number
+cherry-picked. Both beads stay OPEN.** Fix A and Fix B are adopted regardless — they are real, measured wins
+that make the durable single-node path materially faster and add the fast in-memory durable backend.
+
 ## Completion path
 - Re-run on a host with more cores, or with the 8 owner nodes on **separate machines** and the driver on its
   own host (the real ADR-008 topology) — removes the co-location contention; the per-queue floors then hold
   with the single-node margins from Finding 2. On a pass the harness emits the `evidence_tier=release` E2
   rows automatically. **This is the real path** (the wall is the shared box, not the backend).
-- A backend CPU-EFFICIENCY follow-up (separate bead), if more headroom is wanted on a co-located box: cut the
-  **per-item CPU of a seal** (the segment is serialized with `serde_json`; a faster codec would lower the
-  seal cost that caps per-queue ingest). NOTE: a concurrency RESTRUCTURE (decoupling the apply) is explicitly
-  NOT this path — see Finding 4; it has been measured-and-rejected.
+- The backend CPU-EFFICIENCY follow-up (cut the per-item seal CPU with a binary codec) is **now done** —
+  Finding 5 (Fix A). It is a real win single-node but did NOT lift the 8-owner ingest off the floor, because
+  the co-located-box ceiling is total CPU/scheduler contention, not seal-CPU. The remaining headroom on a
+  co-located box would have to come from fewer moving parts on the box (e.g. fewer driver threads), not from
+  the backend. NOTE: a concurrency RESTRUCTURE (decoupling the apply) is explicitly NOT a path — see
+  Finding 4; it has been measured-and-rejected.
 
 No release row was emitted and no evidence was faked. The smoke row records the honest measured ceiling.
