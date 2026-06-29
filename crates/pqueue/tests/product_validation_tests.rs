@@ -76,6 +76,7 @@ fn qdef_attempts(
             tie_breaker: PriorityTieBreaker::CreatedSequence,
         },
         ordering_mode: ordering,
+        max_rank_error: 0,
         progress_bound_ms: 60_000,
         eligibility_policy: EligibilityPolicy::default(),
         cohort_policy: None,
@@ -89,6 +90,19 @@ fn qdef_attempts(
         max_claim_batch_size: 1_000_000,
         max_eligible_group_size: None,
         secondary_indexes: vec![],
+    }
+}
+
+/// A bounded-relaxed queue carrying an explicit `max_rank_error` (rank positions); see AC-E2E-8.
+fn qdef_relaxed(
+    tenant: &str,
+    queue: &str,
+    direction: PriorityDirection,
+    max_rank_error: u32,
+) -> QueueDefinition {
+    QueueDefinition {
+        max_rank_error,
+        ..qdef(tenant, queue, direction, OrderingMode::BoundedRelaxed)
     }
 }
 
@@ -354,6 +368,27 @@ fn skewed_items(n: u64) -> Vec<NewItem> {
         .collect()
 }
 
+/// Distinct ascending int64 priorities `0..n` (so an item's strict-priority position equals its priority),
+/// each carrying a coarse locality `group_key` (even/odd) so bounded-relaxed selection has same-group work
+/// to batch within a rank window. Opaque payload/metadata match [`drain_priorities`]'s round-trip asserts.
+fn distinct_grouped_items(n: u64) -> Vec<NewItem> {
+    (0..n)
+        .map(|i| {
+            let pri = i as i64;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("opaque".to_string(), Bytes::from_static(b"meta"));
+            let group = if i % 2 == 0 { "even" } else { "odd" };
+            NewItem {
+                priority: Some(PriorityValue::Int64(pri)),
+                group_key: Some(GroupKey::new(group).unwrap()),
+                payload: Some(Bytes::from(format!("payload@{pri}").into_bytes())),
+                fields,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
 /// AC-E2E-8 (TP-003): prove pqueue is NOT timestamp-only or Seventh-Sense-only. (a) A strict `int64`
 /// DESCENDING queue delivers in strict priority order with 0 inversions; (b) a bounded-relaxed queue is
 /// accepted and makes progress (INV-4) with opaque payload/metadata round-tripping — using only generic
@@ -394,42 +429,62 @@ async fn generic_priority_bounded_relaxed_e2e() {
         "lowest priority delivered last"
     );
 
-    // ----- (b) BOUNDED-RELAXED: accepted + progress (INV-4); opaque round-trip -----
-    // HONEST SCOPE: OrderingMode::BoundedRelaxed is accepted but currently selects identically to Strict —
-    // the projection ignores ordering_mode and there is no rank-error-bound config. So the observed rank
-    // error is 0 (trivially within any bound). The genuine bounded-relaxed proof (a NON-ZERO rank error
-    // within a declared bound + relaxed selection) is DEFERRED to pqueue-b725d3ee.
+    // ----- (b) BOUNDED-RELAXED: genuine non-zero rank error within the declared bound (INV-6) + progress (INV-4) -----
+    // A queue with ordering_mode=BoundedRelaxed and an explicit max_rank_error bound. Items carry distinct
+    // ascending priorities (so an item's strict position == its priority) plus a locality group_key, so the
+    // relaxed claim path batches same-group work within the rank window — delivering a genuinely reordered
+    // sequence whose rank error is NON-ZERO yet stays <= the declared bound (pqueue-b725d3ee).
+    let bound: u32 = 8;
     let relaxed = qk("generic", "bounded-relaxed");
-    pq.create_queue(qdef(
+    pq.create_queue(qdef_relaxed(
         "generic",
         "bounded-relaxed",
         PriorityDirection::Ascending,
-        OrderingMode::BoundedRelaxed,
+        bound,
     ))
     .await
     .expect("a bounded-relaxed queue is accepted");
-    pq.push_batch(&relaxed, skewed_items(n)).await.unwrap();
+    pq.push_batch(&relaxed, distinct_grouped_items(n))
+        .await
+        .unwrap();
     let relaxed_order = drain_priorities(&pq, &relaxed, 32).await;
-    // INV-4 progress: every eligible item was eventually claimed (the queue fully drained).
+    // INV-4 progress: every eligible item was eventually claimed (the queue fully drained), and each
+    // distinct priority appears exactly once (the oldest/highest-priority item is never starved).
     assert_eq!(
         relaxed_order.len() as u64,
         n,
         "INV-4: all bounded-relaxed items make progress"
     );
-    // Current behavior == strict ascending ⇒ rank error 0 (within any bound). Measured, not assumed.
-    let relaxed_inversions = relaxed_order.windows(2).filter(|w| w[0] > w[1]).count();
+    let mut seen = relaxed_order.clone();
+    seen.sort_unstable();
     assert_eq!(
-        relaxed_inversions, 0,
-        "bounded-relaxed currently selects strict-ascending (rank error 0; relaxed selection deferred to pqueue-b725d3ee)"
+        seen,
+        (0..n as i64).collect::<Vec<_>>(),
+        "INV-4: every distinct priority delivered exactly once (no starvation, no loss)"
+    );
+    // Rank error = max |delivered_index - strict_position|. Here strict_position == priority value, so we
+    // measure it directly from the delivery order. Measured, not assumed.
+    let rank_error = relaxed_order
+        .iter()
+        .enumerate()
+        .map(|(delivered, &pri)| (delivered as i64 - pri).unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        rank_error > 0,
+        "INV-6: bounded-relaxed must genuinely reorder (non-zero rank error), got {rank_error}"
+    );
+    assert!(
+        rank_error <= bound as u64,
+        "INV-6: rank error {rank_error} must stay within the declared bound {bound}"
     );
 
     emit_ac(
         "AC-E2E-8",
-        // INV-6 here substantiates ONLY its STRICT clause (0 inversions); INV-6's bounded-relaxed
-        // rank-error-bound clause is unimplemented + deferred (see the measurements). INV-4 is a full-drain
-        // progress proxy at smoke scale.
+        // INV-6 substantiates BOTH clauses now: the STRICT clause (0 inversions) AND the bounded-relaxed
+        // rank-error-bound clause (0 < rank_error <= bound). INV-4 is a full-drain + exactly-once progress proxy.
         &["INV-6", "INV-4"],
-        "strict int64-descending claim order has 0 inversions; opaque payload/metadata round-trips; bounded-relaxed accepted + makes progress (INV-4) [non-zero rank-error-within-bound deferred to pqueue-b725d3ee]; no Seventh Sense field required",
+        "strict int64-descending claim order has 0 inversions; opaque payload/metadata round-trips; bounded-relaxed delivers a genuinely reordered sequence with a NON-ZERO rank error within the declared bound (INV-6) and full-drain progress (INV-4); no Seventh Sense field required",
         BTreeMap::from([
             ("items_per_queue".into(), serde_json::json!(n)),
             (
@@ -442,17 +497,15 @@ async fn generic_priority_bounded_relaxed_e2e() {
             ),
             (
                 "inv6_bounded_relaxed_clause".into(),
-                serde_json::json!("DEFERRED (rank-error bound unimplemented) -> pqueue-b725d3ee"),
+                serde_json::json!(format!(
+                    "met (rank_error {rank_error} within bound {bound})"
+                )),
             ),
-            (
-                "relaxed_progress_inversions".into(),
-                serde_json::json!(relaxed_inversions),
-            ),
+            ("max_rank_error_bound".into(), serde_json::json!(bound)),
+            ("measured_rank_error".into(), serde_json::json!(rank_error)),
             (
                 "bounded_relaxed_selection".into(),
-                serde_json::json!(
-                    "strict-equivalent (relaxed selection unimplemented) -> pqueue-b725d3ee"
-                ),
+                serde_json::json!("block-locality reorder within max_rank_error (pqueue-b725d3ee)"),
             ),
             ("seventh_sense_fields_used".into(), serde_json::json!(0)),
         ]),

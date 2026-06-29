@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, IndexSpec, ItemEvent, ItemId, ItemState, LeaseToken, Metadata,
-    PriorityModel, PriorityValue, RecurrenceMode, RecurrencePolicy, UtcTimestamp, apply_transition,
-    failure_event, priority_sort,
+    OrderingMode, PriorityModel, PriorityValue, RecurrenceMode, RecurrencePolicy, UtcTimestamp,
+    apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
@@ -123,6 +123,12 @@ fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
         created_seq: rec.created_seq,
         item: rec.item_id,
     }
+}
+
+/// Bounded-relaxed locality key: items sharing a `group_key` cluster together; ungrouped items (None) sort
+/// last so grouped work batches ahead within a rank window. Total + `Ord` so selection is deterministic.
+fn locality_key(rec: &ItemRecord) -> (bool, Option<&GroupKey>) {
+    (rec.group_key.is_none(), rec.group_key.as_ref())
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +334,12 @@ pub struct ProjectionData {
     eligible: BTreeSet<EligKey>,
     next_seq: u64,
     priority_model: PriorityModel,
+    /// Queue ordering discipline (ADR / TP-003). `Strict` selects in exact priority order; `BoundedRelaxed`
+    /// permits the claim path to reorder within `max_rank_error` rank positions for locality/throughput.
+    ordering_mode: OrderingMode,
+    /// Effective rank-error bound for `BoundedRelaxed` selection (positions). `0` (and `Strict`) =>
+    /// strict-equivalent selection. See [`ProjectionData::eligible_candidates`].
+    max_rank_error: u32,
     /// The queue's recurrence policy (BQ pqueue-8cbae731). Read by the `Finalize{Rearm}` apply arm to
     /// enforce `RecurrencePolicy.until`: a rearm whose next occurrence (`not_before`) falls past `until`
     /// ends the series (the item goes terminal) instead of re-arming. Defaults to `Oneshot`/no-`until`.
@@ -352,6 +364,8 @@ pub struct ProjectionData {
 impl ProjectionData {
     pub fn new(
         priority_model: PriorityModel,
+        ordering_mode: OrderingMode,
+        max_rank_error: u32,
         recurrence: RecurrencePolicy,
         specs: &[IndexSpec],
     ) -> Self {
@@ -370,6 +384,8 @@ impl ProjectionData {
             eligible: BTreeSet::new(),
             next_seq: 0,
             priority_model,
+            ordering_mode,
+            max_rank_error,
             recurrence,
             paused: false,
             indexes,
@@ -823,11 +839,58 @@ impl ProjectionData {
     /// Priority-ordered eligible candidates (pending, not superseded, due at `now`), capped at `max`.
     /// Returns empty while the queue is paused. This is the claim/select selection (Invariant 1:
     /// per-item, in eligible order).
+    ///
+    /// Under `OrderingMode::Strict` (or a `0` bound) this is exact strict priority order. Under
+    /// `OrderingMode::BoundedRelaxed` with `max_rank_error > 0` it delegates to the bounded-relaxed
+    /// selection (`relaxed_candidates`), which may reorder for locality WITHIN the declared bound.
     pub fn eligible_candidates(&self, now: UtcTimestamp, max: usize) -> Vec<ItemId> {
         if self.paused {
             return Vec::new();
         }
-        self.eligible
+        let bound = match self.ordering_mode {
+            OrderingMode::BoundedRelaxed => self.max_rank_error,
+            OrderingMode::Strict => 0,
+        };
+        if bound == 0 {
+            // Strict / 0-bound: byte-for-byte the original strict selection (no relaxation).
+            return self
+                .eligible
+                .iter()
+                .filter_map(|k| self.items.get(&k.item))
+                .filter(|r| {
+                    r.state == ItemState::Pending
+                        && !r.superseded
+                        && r.not_before.map(|nb| nb <= now).unwrap_or(true)
+                })
+                .take(max)
+                .map(|r| r.item_id)
+                .collect();
+        }
+        self.relaxed_candidates(now, max, bound)
+    }
+
+    /// Bounded-relaxed claim selection (TP-003 INV-6 + INV-4). Takes the strict-priority eligible prefix
+    /// (the lowest-rank `max` items — selection itself never starves anything), then reorders each
+    /// consecutive block of `bound + 1` items by locality so same-group work is batched together for claim
+    /// throughput/locality. `bound == max_rank_error`; locality key = `group_key` (None sorts last),
+    /// tie-broken by strict order (a stable sort preserves strict order within a group).
+    ///
+    /// INV-6 (bounded rank error): an item only ever moves WITHIN its block of `bound + 1` consecutive
+    /// strict positions, so its delivered position deviates from its strict position by at most `bound` —
+    /// in either direction. The bound holds per claim AND composes across batched claims: because
+    /// selection is the strict prefix, an item with strict rank `r` is always claimed in the same batch it
+    /// would be under strict ordering, and only reordered within that batch's blocks.
+    ///
+    /// INV-4 (progress / no starvation): selection is the exact strict prefix, so no eligible item is ever
+    /// passed over for selection — every pushed item is claimed in strict batch order. The intra-block
+    /// reordering only permutes delivery order within the `bound`, it never defers an item to a later batch.
+    fn relaxed_candidates(&self, now: UtcTimestamp, max: usize, bound: u32) -> Vec<ItemId> {
+        if max == 0 {
+            return Vec::new();
+        }
+        // Strict-priority eligible prefix (the reference order the rank error is measured against).
+        let mut selected: Vec<&ItemRecord> = self
+            .eligible
             .iter()
             .filter_map(|k| self.items.get(&k.item))
             .filter(|r| {
@@ -836,8 +899,15 @@ impl ProjectionData {
                     && r.not_before.map(|nb| nb <= now).unwrap_or(true)
             })
             .take(max)
-            .map(|r| r.item_id)
-            .collect()
+            .collect();
+
+        // Reorder each consecutive block of `bound + 1` items by locality. A stable sort keeps strict
+        // order within equal locality keys, so a 0-bound block (size 1) is a no-op (strict-equivalent).
+        let block = bound as usize + 1;
+        for chunk in selected.chunks_mut(block) {
+            chunk.sort_by(|a, b| locality_key(a).cmp(&locality_key(b)));
+        }
+        selected.into_iter().map(|r| r.item_id).collect()
     }
 
     /// `ProjectionRead::select_eligible`.
@@ -1264,6 +1334,90 @@ mod tests {
         proj.items.get(&iid(id)).unwrap().item_version
     }
 
+    fn push_item_g(id: &str, key: &str, priority: i64, group: &str) -> PushItem {
+        PushItem {
+            group_key: Some(GroupKey::new(group).unwrap()),
+            ..push_item(id, key, priority)
+        }
+    }
+
+    /// Bounded-relaxed claim selection (TP-003 INV-6 + INV-4). A deterministic eligible set with
+    /// group-locality keys + a rank-error bound: assert the delivered order is genuinely reordered
+    /// (NON-ZERO rank error) yet every item's displacement from its strict-priority position stays
+    /// `<= bound` (INV-6), and that strict mode / a 0 bound still picks the exact strict head order.
+    #[test]
+    fn bounded_relaxed_selection_reorders_within_the_rank_bound() {
+        let bound = 2u32;
+        // Strict (ascending) order by priority is items 1..=5; groups make locality reorder within a
+        // window of `bound + 1`. "a" sorts before "z", so the "a"-group items get batched ahead.
+        let pushes = vec![
+            push_item_g("1", "k1", 1, "z"),
+            push_item_g("2", "k2", 2, "a"),
+            push_item_g("3", "k3", 3, "a"),
+            push_item_g("4", "k4", 4, "z"),
+            push_item_g("5", "k5", 5, "z"),
+        ];
+
+        let build = |mode: OrderingMode, b: u32| {
+            let mut log = LogData::default();
+            let mut proj = ProjectionData::new(model(), mode, b, RecurrencePolicy::default(), &[]);
+            for p in &pushes {
+                commit(
+                    &mut log,
+                    &mut proj,
+                    &shard(),
+                    env(QueueCommand::Push(PushCommand {
+                        items: vec![p.clone()],
+                    })),
+                    None,
+                )
+                .unwrap();
+            }
+            proj
+        };
+
+        // Strict reference order (what the rank error is measured against).
+        let strict = build(OrderingMode::Strict, 0);
+        let strict_order = strict.eligible_candidates(ts(1_000), 100);
+        assert_eq!(
+            strict_order,
+            vec![iid("1"), iid("2"), iid("3"), iid("4"), iid("5")],
+            "strict selects exact priority-ascending head order"
+        );
+
+        // A BoundedRelaxed queue with a 0 bound is byte-for-byte strict (no regression).
+        let zero = build(OrderingMode::BoundedRelaxed, 0);
+        assert_eq!(
+            zero.eligible_candidates(ts(1_000), 100),
+            strict_order,
+            "a 0 bound is strict-equivalent"
+        );
+
+        // Bounded-relaxed with bound=2: locality reorders within the window.
+        let relaxed = build(OrderingMode::BoundedRelaxed, bound);
+        let order = relaxed.eligible_candidates(ts(1_000), 100);
+        assert_eq!(order.len(), 5, "INV-4: every eligible item is selected");
+        assert_ne!(order, strict_order, "selection genuinely relaxed");
+
+        // Measure rank error = max |delivered_pos - strict_pos| over all items.
+        let strict_pos: std::collections::HashMap<ItemId, usize> = strict_order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect();
+        let rank_error = order
+            .iter()
+            .enumerate()
+            .map(|(delivered, id)| (delivered as i64 - strict_pos[id] as i64).unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(rank_error > 0, "INV-6: relaxation observed (non-zero)");
+        assert!(
+            rank_error <= bound as u64,
+            "INV-6: rank error {rank_error} exceeds bound {bound}"
+        );
+    }
+
     /// BQ-20: an epoch advance fences future appends to the new epoch but does NOT rewind the log; a
     /// position replayed across the boundary carries its TRUE per-entry epoch (not a relabel to the
     /// current one), so `read_from` is consistent with the durably-stamped position and the high-water
@@ -1312,7 +1466,13 @@ mod tests {
     fn item_version_is_monotonic_per_item() {
         let sk = shard();
         let mut log = LogData::default();
-        let mut proj = ProjectionData::new(model(), RecurrencePolicy::default(), &[]);
+        let mut proj = ProjectionData::new(
+            model(),
+            OrderingMode::Strict,
+            0,
+            RecurrencePolicy::default(),
+            &[],
+        );
 
         commit(
             &mut log,
@@ -1376,7 +1536,13 @@ mod tests {
     fn high_water_survives_log_compaction() {
         let sk = shard();
         let mut log = LogData::default();
-        let mut proj = ProjectionData::new(model(), RecurrencePolicy::default(), &[]);
+        let mut proj = ProjectionData::new(
+            model(),
+            OrderingMode::Strict,
+            0,
+            RecurrencePolicy::default(),
+            &[],
+        );
         for p in [10_i64, 20, 30] {
             commit(
                 &mut log,

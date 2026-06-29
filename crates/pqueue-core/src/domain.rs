@@ -290,6 +290,12 @@ pub enum OrderingMode {
     BoundedRelaxed,
 }
 
+/// Default rank-error bound (strict-equivalent). A `0` bound means claim selection never deviates from
+/// strict priority order, so a `BoundedRelaxed` queue with a `0` bound behaves byte-for-byte like `Strict`.
+pub fn default_max_rank_error() -> u32 {
+    0
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MetadataValue {
     Null,
@@ -560,6 +566,11 @@ pub struct CreateQueue {
     pub queue_id: QueueId,
     pub priority_model: PriorityModel,
     pub ordering_mode: OrderingMode,
+    /// Maximum rank error (in priority-rank positions) the claim path may introduce under
+    /// `OrderingMode::BoundedRelaxed`. A delivered item's rank error is how far its delivered position
+    /// deviates from its strict-priority position; selection keeps that deviation `<= max_rank_error`.
+    /// Only meaningful when `ordering_mode == BoundedRelaxed`; ignored (treated as `0`) under `Strict`.
+    pub max_rank_error: u32,
     pub progress_bound_ms: u64,
     pub eligibility_policy: EligibilityPolicy,
     pub cohort_policy: CohortPolicy,
@@ -582,6 +593,11 @@ pub struct QueueDefinition {
     pub queue_id: QueueId,
     pub priority_model: PriorityModel,
     pub ordering_mode: OrderingMode,
+    /// Maximum rank error (in priority-rank positions) tolerated on the claim path under
+    /// `OrderingMode::BoundedRelaxed` (see [`CreateQueue::max_rank_error`]). `#[serde(default)]` keeps
+    /// existing persisted definitions + the wire compatible (absent => `0`, i.e. strict-equivalent).
+    #[serde(default = "default_max_rank_error")]
+    pub max_rank_error: u32,
     pub progress_bound_ms: u64,
     pub eligibility_policy: EligibilityPolicy,
     pub cohort_policy: Option<CohortPolicy>,
@@ -669,6 +685,12 @@ impl CreateQueue {
         {
             return Err(CreateQueueError::invalid_request(
                 "timestamp priority queues must use created_sequence tie breaking",
+            ));
+        }
+
+        if self.max_rank_error != 0 && self.ordering_mode != OrderingMode::BoundedRelaxed {
+            return Err(CreateQueueError::invalid_request(
+                "max_rank_error is only meaningful when ordering_mode=bounded_relaxed",
             ));
         }
 
@@ -830,6 +852,7 @@ impl CreateQueue {
             queue_id: self.queue_id,
             priority_model: self.priority_model,
             ordering_mode: self.ordering_mode,
+            max_rank_error: self.max_rank_error,
             progress_bound_ms: self.progress_bound_ms,
             eligibility_policy,
             cohort_policy: if self.cohort_policy.enabled {

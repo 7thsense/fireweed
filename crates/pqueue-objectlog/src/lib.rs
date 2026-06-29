@@ -345,6 +345,8 @@ impl Inner {
             let shard = key.clone();
             let mut proj = ProjectionData::new(
                 definition.priority_model,
+                definition.ordering_mode,
+                definition.max_rank_error,
                 definition.recurrence,
                 &definition.secondary_indexes,
             );
@@ -996,6 +998,8 @@ impl ControlPlaneStore for ObjectLogBackend {
                     shard,
                     ProjectionData::new(
                         outcome.definition.priority_model,
+                        outcome.definition.ordering_mode,
+                        outcome.definition.max_rank_error,
                         outcome.definition.recurrence,
                         &outcome.definition.secondary_indexes,
                     ),

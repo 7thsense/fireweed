@@ -14,6 +14,7 @@ fn valid_create_queue() -> CreateQueue {
         queue_id: QueueId::new("scheduled_actions").unwrap(),
         priority_model: PriorityModel::timestamp_ascending(),
         ordering_mode: OrderingMode::Strict,
+        max_rank_error: 0,
         progress_bound_ms: 10_000,
         eligibility_policy: pqueue_core::EligibilityPolicy::default(),
         cohort_policy: CohortPolicy::disabled(),

@@ -246,6 +246,8 @@ impl Inner {
             let shard = key.clone();
             let mut proj = ProjectionData::new(
                 definition.priority_model,
+                definition.ordering_mode,
+                definition.max_rank_error,
                 definition.recurrence,
                 &definition.secondary_indexes,
             );
@@ -924,6 +926,8 @@ impl ControlPlaneStore for PostgresBackend {
                 shard,
                 ProjectionData::new(
                     definition.priority_model,
+                    definition.ordering_mode,
+                    definition.max_rank_error,
                     definition.recurrence,
                     &definition.secondary_indexes,
                 ),

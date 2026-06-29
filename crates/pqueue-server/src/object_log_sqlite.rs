@@ -1566,6 +1566,8 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
             self.log.create_queue(&definition)?;
             let proj = Arc::new(Mutex::new(ProjectionData::new(
                 definition.priority_model,
+                definition.ordering_mode,
+                definition.max_rank_error,
                 definition.recurrence,
                 &definition.secondary_indexes,
             )));
@@ -1979,6 +1981,7 @@ mod recovery_tests {
                 tie_breaker: PriorityTieBreaker::CreatedSequence,
             },
             ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
             progress_bound_ms: 60_000,
             eligibility_policy: EligibilityPolicy::default(),
             cohort_policy: None,

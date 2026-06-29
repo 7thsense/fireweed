@@ -141,6 +141,7 @@ pub fn qdef() -> QueueDefinition {
             tie_breaker: PriorityTieBreaker::CreatedSequence,
         },
         ordering_mode: OrderingMode::Strict,
+        max_rank_error: 0,
         progress_bound_ms: 60_000,
         eligibility_policy: EligibilityPolicy::default(),
         cohort_policy: None,

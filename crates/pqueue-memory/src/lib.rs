@@ -1054,6 +1054,8 @@ impl ControlPlaneStore for MemoryBackend {
             g.projections.entry(shard).or_insert_with(|| {
                 ProjectionData::new(
                     definition.priority_model,
+                    definition.ordering_mode,
+                    definition.max_rank_error,
                     definition.recurrence,
                     &definition.secondary_indexes,
                 )
