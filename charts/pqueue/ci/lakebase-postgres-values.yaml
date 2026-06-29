@@ -1,0 +1,27 @@
+# Static render values: Lakebase postgres_native profile.
+#
+# The database URLs live in Kubernetes Secrets. Each database-url value must be
+# a libpq key=value DSN such as:
+# host=<pooler-or-direct-host> port=5432 user=<user> password=<secret> dbname=databricks_postgres sslmode=require
+storage:
+  lakebase:
+    enabled: true
+    endpointMode: pooler
+    databaseName: databricks_postgres
+    port: 5432
+    sslMode: require
+    auth:
+      mode: service-principal-oauth
+      existingSecret: pqueue-lakebase-oauth
+  log:
+    backend: postgres
+    postgres:
+      existingSecret: pqueue-lakebase-dsn
+      databaseUrlKey: database-url
+  projection:
+    backend: postgres
+    postgres:
+      existingSecret: pqueue-lakebase-dsn
+      databaseUrlKey: database-url
+image:
+  tag: ci-tls

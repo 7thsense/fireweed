@@ -170,12 +170,103 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "lakebase",
         "shardCount",
         "log",
         "projection",
         "volume"
       ],
       "properties": {
+        "lakebase": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "endpointMode",
+            "databaseName",
+            "port",
+            "sslMode",
+            "auth"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "endpointMode": {
+              "type": "string",
+              "enum": [
+                "pooler",
+                "direct"
+              ]
+            },
+            "databaseName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "sslMode": {
+              "type": "string",
+              "enum": [
+                "require"
+              ]
+            },
+            "auth": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "existingSecret",
+                "databricksHostKey",
+                "databaseInstanceNameKey",
+                "clientIdKey",
+                "clientSecretKey",
+                "tokenKey",
+                "postgresUserKey"
+              ],
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "native-password",
+                    "service-principal-oauth",
+                    "pat-oauth"
+                  ]
+                },
+                "existingSecret": {
+                  "type": "string"
+                },
+                "databricksHostKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "databaseInstanceNameKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "clientIdKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "clientSecretKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tokenKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "postgresUserKey": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
         "shardCount": {
           "type": "object",
           "additionalProperties": false,
