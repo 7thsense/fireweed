@@ -16,6 +16,13 @@ path = "src/lib.rs"
 name = "pqueue-verify-ledger"
 path = "src/bin/pqueue-verify-ledger.rs"
 
+# Cost-model evidence: computes $/billion-commands for object_log_sqlite_projection (from REAL E3 measured
+# segment/object counts + cited S3 prices) vs the postgres_native high-volume baseline, and emits the ADR-001
+# cost-evidence artifact + the E3 cost-model ledger row (bead pqueue-1cd90d1c).
+[[bin]]
+name = "pqueue-cost-model"
+path = "src/bin/pqueue-cost-model.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

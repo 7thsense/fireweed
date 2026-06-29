@@ -56,3 +56,19 @@ on emit. The in-process segment-counter smoke row stays smoke-tier.
 
 A real S3 list-pagination bug (recovery past 1000 manifest objects — ListObjectsV2 single-page limit) was
 found and fixed during this run (commit `aed308d`).
+
+## Cost half of E3
+
+The `segments_sealed` / `objects_put` / `commands` counts above feed the E3 **cost model** — the release
+evidence for ADR-001's directional `$/command` claim. The model scales these measured object/segment counts
+to a billion commands, prices them against cited S3/DB inputs, and compares against the `postgres_native`
+high-volume baseline (`docs/perf/tp002-e0e1-postgres-release-10m.md`): at the documented baseline
+`object_log_sqlite_projection` is **$292.80/B-commands vs $984.04/B-commands** for `postgres_native`
+(3.36x cheaper), with full breakdown, cited prices, and a sensitivity/crossover table in
+`docs/perf/tp002-e3-cost-model.md`. The calculator is `pqueue_release::cost` (fixture-tested); regenerate the
+artifact + smoke-tier cost-model ledger row with:
+
+```
+cargo run -p pqueue-release --bin pqueue-cost-model -- \
+  --out docs/perf/tp002-e3-cost-model.md --ledger docs/perf/evidence/tp002-e3-cost-model.jsonl
+```

@@ -603,6 +603,615 @@ pub mod e2 {
     }
 }
 
+/// TP-002 **E3 cost model** (ADR-001 "Napkin Cost Comparison" → release evidence).
+///
+/// ADR-001 asserts, *directionally*, that the `object_log_sqlite_projection` backend has a lower
+/// $/command than an always-on relational authority at high volume, because batched object-storage commits
+/// (request-priced PUTs + cheap `$/GB-month` storage, **no** per-I/O or provisioned-IOPS charge) beat a
+/// provisioned database instance that must hold the resident backlog and sustain the high-churn
+/// `SKIP LOCKED` claim index. This module turns that direction into a reproducible, fixture-tested
+/// **calculation**: it scales the REAL E3 measured object/segment counts to a billion commands, prices
+/// them against cited inputs, prices the `postgres_native` baseline (instance-hours at the measured E0
+/// throughput + storage + provisioned IOPS), and returns a structured [`CostComparison`].
+///
+/// It is a PURE function of its inputs — no IO, no process exit — so the comparison is unit-testable from a
+/// fixture and the calculator can be shown to RESPOND to its inputs (crank a price until the crossover) rather
+/// than being hard-wired to a conclusion.
+///
+/// ## Apples-to-apples (the honesty bar)
+///
+/// `object_log_sqlite_projection` ALSO runs a compute node (it batches commands into segments and projects
+/// them into SQLite), so this is NOT "free S3 vs a paid DB". Both sides are charged compute for the same
+/// always-on billing window. The legitimate, modelled win is two-fold and each is a separate, inspectable
+/// line item:
+/// 1. **Durable storage + I/O**: the durable log lives on object storage (`$/GB-month` + request-priced
+///    PUTs, *no per-I/O charge*) instead of DB storage + **provisioned IOPS** sized for the claim-index
+///    churn (the MVCC-bloat finding in `docs/perf/tp002-e0e1-postgres-release-10m.md` documents how
+///    IOPS-bound that path is).
+/// 2. **Node sizing**: the object-log node can be smaller/cheaper than the IOPS-bound claim authority — but
+///    this is exposed as a separate price input so a reviewer can set both nodes equal and confirm the win
+///    survives on the storage/I/O term alone.
+pub mod cost {
+    use super::{LedgerRow, Measurements};
+    use std::collections::BTreeMap;
+
+    /// One billion — the command count every cost figure is normalized to (`$/billion-commands`).
+    pub const BILLION: f64 = 1_000_000_000.0;
+    /// Hours in a 30-day month (`30 * 24 + 10`… AWS bills `$/GB-month` against 730 hours).
+    pub const HOURS_PER_MONTH: f64 = 730.0;
+    /// Bytes per **decimal** GB — cloud `$/GB-month` and `$/GB` pricing is decimal (10^9), not GiB.
+    pub const BYTES_PER_GB: f64 = 1_000_000_000.0;
+
+    /// Cited price inputs (US-East-1). Defaults come from [`PriceInputs::adr_001_us_east_1`]; every default is
+    /// traceable to ADR-001's "Napkin Cost Comparison" cited offer-file set except the EBS provisioned-IOPS
+    /// unit price, which ADR-001 does not cite and is noted as such ([`Self::iops_source`]).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct PriceInputs {
+        /// S3 Standard storage, `$/GB-month`.
+        pub s3_storage_per_gb_month: f64,
+        /// S3 PUT/COPY/POST/LIST, `$/1000 requests`.
+        pub s3_put_per_1k: f64,
+        /// S3 GET, `$/1000 requests`.
+        pub s3_get_per_1k: f64,
+        /// The `postgres_native` provisioned DB instance, `$/hour` (the always-on claim authority).
+        pub pg_instance_per_hour: f64,
+        /// DB storage, `$/GB-month`.
+        pub pg_storage_per_gb_month: f64,
+        /// Provisioned IOPS, `$/IOPS-month` (one provisioned I/O operation per second for a month).
+        pub pg_iops_per_month_each: f64,
+        /// The `object_log_sqlite_projection` compute node, `$/hour` (it batches + projects; can be smaller).
+        pub objectlog_node_per_hour: f64,
+        /// Provenance of the S3/DB instance/storage prices.
+        pub instance_source: &'static str,
+        /// Provenance of the provisioned-IOPS unit price (NOT cited by ADR-001 — stated honestly).
+        pub iops_source: &'static str,
+    }
+
+    impl PriceInputs {
+        /// ADR-001's cited US-East-1 inputs (S3 Standard; Aurora PostgreSQL `db.r7g.large` standard as the
+        /// `postgres_native` instance; EC2 `i4i.large` — NVMe-backed, suits the SQLite projection + segment
+        /// buffer — as the object-log node). The provisioned-IOPS unit price is AWS EBS `io2` first-tier,
+        /// which ADR-001 does not cite; it is flagged in [`Self::iops_source`].
+        pub fn adr_001_us_east_1() -> Self {
+            PriceInputs {
+                s3_storage_per_gb_month: 0.023,
+                s3_put_per_1k: 0.005,
+                s3_get_per_1k: 0.0004,
+                pg_instance_per_hour: 0.276,
+                pg_storage_per_gb_month: 0.10,
+                pg_iops_per_month_each: 0.065,
+                objectlog_node_per_hour: 0.172,
+                instance_source: "ADR-001 Napkin Cost Comparison, US-East-1: AWS S3 pricing (AmazonS3 offer file pub. \
+                     2026-05-28); Aurora PostgreSQL db.r7g.large standard $0.276/hr + $0.10/GB-mo storage \
+                     (AmazonRDS offer file pub. 2026-06-05); EC2 i4i.large $0.172/hr (AmazonEC2 offer file \
+                     pub. 2026-06-04)",
+                iops_source: "AWS EBS io2 provisioned-IOPS first tier $0.065/IOPS-month (AWS EBS pricing page, \
+                     accessed 2026-06-29) — NOT cited by ADR-001; stated as the one non-ADR price input",
+            }
+        }
+    }
+
+    /// Measured object-log counts the cost scales to a billion commands. The headline fixture uses the REAL
+    /// E3 numbers from `docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl`; the production-fill
+    /// constructors model segments filled to their byte target (the E3 segments were latency-bound and small,
+    /// which OVER-states PUT cost — see [`Self::e3_size_dominant`]).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ObjectLogCounts {
+        /// A short label for the scenario (appears in the artifact's sensitivity table).
+        pub label: String,
+        /// Commands committed in the measured (or modelled) sample.
+        pub commands: f64,
+        /// Objects PUT for those commands (segment object + manifest object per seal in E3 ⇒ 2/segment).
+        pub objects_put: f64,
+        /// Segments sealed for those commands.
+        pub segments_sealed: f64,
+    }
+
+    impl ObjectLogCounts {
+        /// REAL E3 size-dominant config (`target_bytes=4096, max_latency=1000ms`): 2048 commands → 34 segments,
+        /// 68 objects. These segments sealed mostly on the latency cap with small synthetic commands, so the
+        /// objects-per-command ratio is HIGHER (worse for cost) than a throughput-saturated production run that
+        /// fills segments to their byte target — i.e. this is the pessimistic-but-measured case.
+        pub fn e3_size_dominant() -> Self {
+            ObjectLogCounts {
+                label: "E3 measured (size-dominant: 4 KiB target / 1000 ms cap)".into(),
+                commands: 2048.0,
+                objects_put: 68.0,
+                segments_sealed: 34.0,
+            }
+        }
+
+        /// REAL E3 latency-dominant config (`target_bytes=8 MiB, max_latency=50ms`): 2048 commands → 50 segments,
+        /// 100 objects. The tighter 50 ms cap seals more, smaller segments ⇒ the highest measured PUT-per-command.
+        pub fn e3_latency_dominant() -> Self {
+            ObjectLogCounts {
+                label: "E3 measured (latency-dominant: 8 MiB target / 50 ms cap)".into(),
+                commands: 2048.0,
+                objects_put: 100.0,
+                segments_sealed: 50.0,
+            }
+        }
+
+        /// Production-fill model: segments filled to `target_bytes` with `bytes_per_command`-sized commands,
+        /// `objects_per_segment` objects per seal (2 in E3: one segment object + one manifest object). This is
+        /// what a throughput-saturated owner produces (ADR-001's "16 MiB segments ⇒ <\$2 in PUTs" case).
+        pub fn filled(
+            label: impl Into<String>,
+            target_bytes: f64,
+            bytes_per_command: f64,
+            objects_per_segment: f64,
+        ) -> Self {
+            let commands_per_segment = (target_bytes / bytes_per_command).max(1.0);
+            let segments = 1000.0; // arbitrary sample; only the ratios objects/cmd & seg/cmd are used
+            ObjectLogCounts {
+                label: label.into(),
+                commands: commands_per_segment * segments,
+                objects_put: objects_per_segment * segments,
+                segments_sealed: segments,
+            }
+        }
+
+        /// Mean commands per sealed segment (segment fill, for display).
+        pub fn commands_per_segment(&self) -> f64 {
+            self.commands / self.segments_sealed
+        }
+    }
+
+    /// Workload + retention/recovery assumptions, and the MEASURED `postgres_native` E0 throughput. Defaults
+    /// from [`WorkloadAssumptions::tp002_high_volume_baseline`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct WorkloadAssumptions {
+        /// Compute billing window, hours. Default 730 (an always-on month): the queue's DB instance and the
+        /// object-log node both run continuously to hold the resident backlog and serve live traffic — you do
+        /// not tear the queue authority down between batches. [`CostBreakdown`] also reports the
+        /// `processing_hours` it takes to push a billion commands through at the measured throughput, which
+        /// confirms one always-on instance has ample headroom.
+        pub billing_window_hours: f64,
+        /// Logical bytes per durable command record (ADR-001 baseline: 1 KiB encoded record).
+        pub bytes_per_command: f64,
+        /// Commands per fully-processed item (push + claim + finalize ⇒ 3); used to fold the measured E0
+        /// ingest and claim+finalize item rates into an end-to-end command throughput.
+        pub commands_per_item: f64,
+        /// Resident durable working set (items) the backend must retain. Default 10,000,000 — the E0/E3 shape.
+        pub resident_items: f64,
+        /// Index/tuple overhead multiplier on the relational store's resident bytes (heap + claim/priority
+        /// indexes + idempotency). Object storage retains the projection snapshot without this DB overhead.
+        pub pg_index_overhead: f64,
+        /// Provisioned IOPS the `postgres_native` claim-index churn must reserve to stay off the IOPS floor
+        /// (the MVCC-bloat finding shows the drain is read-IOPS-bound). Set to 0 to model free local disk.
+        pub pg_provisioned_iops: f64,
+        /// Durable-log recovery window, hours: how much committed log object storage retains *behind* the
+        /// latest snapshot so a node can rebuild. Object-log storage cost is tied to THIS, not total history.
+        pub recovery_window_hours: f64,
+        /// How many full snapshot+tail recoveries happen per billing window (drives recovery GET volume).
+        pub recoveries_per_window: f64,
+        /// MEASURED E0 ingest throughput, items/s (`docs/perf/tp002-e0e1-postgres-release-10m.md`).
+        pub pg_ingest_per_s: f64,
+        /// MEASURED E0 claim+finalize (drain) throughput, items/s.
+        pub pg_claim_finalize_per_s: f64,
+    }
+
+    impl WorkloadAssumptions {
+        /// The TP-002 high-volume baseline: an always-on month, 1 KiB records, 10M resident, a 24 h recovery
+        /// window, and the MEASURED E0 throughputs (ingest 20,431/s, claim+finalize 6,145/s). The provisioned
+        /// IOPS default (12,000) reserves headroom for the claim-index churn the E0 evidence documents.
+        pub fn tp002_high_volume_baseline() -> Self {
+            WorkloadAssumptions {
+                billing_window_hours: HOURS_PER_MONTH,
+                bytes_per_command: 1024.0,
+                commands_per_item: 3.0,
+                resident_items: 10_000_000.0,
+                pg_index_overhead: 2.5,
+                pg_provisioned_iops: 12_000.0,
+                recovery_window_hours: 24.0,
+                recoveries_per_window: 1.0,
+                pg_ingest_per_s: 20_431.0,
+                pg_claim_finalize_per_s: 6_145.0,
+            }
+        }
+
+        /// End-to-end command throughput (commands/s) folded from the measured per-item E0 rates: each item is
+        /// one push (at the ingest rate) plus a claim+finalize pair (at the drain rate); the per-item wall time
+        /// is the sum, and the command rate is `commands_per_item / per_item_seconds`.
+        pub fn pg_command_throughput_per_s(&self) -> f64 {
+            let per_item_seconds = 1.0 / self.pg_ingest_per_s + 1.0 / self.pg_claim_finalize_per_s;
+            self.commands_per_item / per_item_seconds
+        }
+    }
+
+    /// The itemized cost of ONE backend for a billion commands. Every line is a separate, inspectable term.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CostBreakdown {
+        /// Object-log: PUT requests scaled to a billion commands. Postgres: 0.
+        pub put_requests: f64,
+        /// Object-log: cost of those PUTs. Postgres: 0.
+        pub put_cost: f64,
+        /// Object-log: recovery GET requests over the billing window. Postgres: 0.
+        pub get_requests: f64,
+        /// Object-log: cost of those recovery GETs. Postgres: 0.
+        pub get_cost: f64,
+        /// Durable bytes retained (GB): object-log = snapshot + recovery-window log; postgres = resident heap
+        /// + index overhead.
+        pub storage_gb: f64,
+        /// Cost of the retained storage over the billing window.
+        pub storage_cost: f64,
+        /// Provisioned IOPS reserved (postgres only).
+        pub provisioned_iops: f64,
+        /// Cost of the provisioned IOPS over the billing window (postgres only).
+        pub iops_cost: f64,
+        /// Compute node hours billed (the always-on window).
+        pub compute_hours: f64,
+        /// Hours to push a billion commands through at the measured throughput (utilization check; ≤ window).
+        pub processing_hours: f64,
+        /// Cost of the compute node over the billing window.
+        pub compute_cost: f64,
+        /// Sum of every line above — the backend's `$/billion-commands`.
+        pub total: f64,
+    }
+
+    /// The structured comparison: each backend's `$/billion-commands` with full breakdown, the ratio, and which
+    /// side wins under the supplied inputs.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CostComparison {
+        /// `object_log_sqlite_projection` total `$/billion-commands`.
+        pub objectlog_per_billion: f64,
+        /// `postgres_native` total `$/billion-commands`.
+        pub postgres_per_billion: f64,
+        /// `postgres_per_billion / objectlog_per_billion` (> 1 ⇒ object-log is cheaper, by this multiple).
+        pub ratio: f64,
+        /// `true` iff `objectlog_per_billion < postgres_per_billion` under these inputs (NOT hard-coded).
+        pub objectlog_wins: bool,
+        /// End-to-end postgres command throughput used for `processing_hours` (commands/s).
+        pub pg_command_throughput_per_s: f64,
+        /// Itemized object-log cost.
+        pub objectlog: CostBreakdown,
+        /// Itemized postgres cost.
+        pub postgres: CostBreakdown,
+    }
+
+    /// Compute the `$/billion-commands` comparison. Pure: a deterministic function of `(counts, workload,
+    /// prices)`, no IO.
+    pub fn compute_comparison(
+        counts: &ObjectLogCounts,
+        w: &WorkloadAssumptions,
+        p: &PriceInputs,
+    ) -> CostComparison {
+        let month_fraction = w.billing_window_hours / HOURS_PER_MONTH;
+
+        // ----- object_log_sqlite_projection -----
+        let objects_per_command = counts.objects_put / counts.commands;
+        let put_requests = objects_per_command * BILLION;
+        let put_cost = put_requests / 1000.0 * p.s3_put_per_1k;
+
+        // Durable storage: the projection snapshot (resident working set) + the committed log retained behind
+        // it for the recovery window. The command rate at a billion-per-window sets how much log a window holds.
+        let snapshot_bytes = w.resident_items * w.bytes_per_command;
+        let command_rate_per_hour = BILLION / w.billing_window_hours;
+        let recovery_log_commands = command_rate_per_hour * w.recovery_window_hours;
+        let recovery_log_bytes = recovery_log_commands * w.bytes_per_command;
+        let ol_storage_gb = (snapshot_bytes + recovery_log_bytes) / BYTES_PER_GB;
+        let ol_storage_cost = ol_storage_gb * p.s3_storage_per_gb_month * month_fraction;
+
+        // Recovery GETs: rebuild reads the snapshot (≈1 manifest+snapshot fetch) plus the recovery-window
+        // segments, once per recovery. Tiny next to PUTs but modelled for completeness.
+        let recovery_segments = recovery_log_commands / counts.commands_per_segment();
+        let get_requests = (recovery_segments + 1.0) * w.recoveries_per_window;
+        let get_cost = get_requests / 1000.0 * p.s3_get_per_1k;
+
+        let ol_compute_hours = w.billing_window_hours;
+        let processing_hours = BILLION / w.pg_command_throughput_per_s() / 3600.0;
+        let ol_compute_cost = ol_compute_hours * p.objectlog_node_per_hour;
+
+        let objectlog = CostBreakdown {
+            put_requests,
+            put_cost,
+            get_requests,
+            get_cost,
+            storage_gb: ol_storage_gb,
+            storage_cost: ol_storage_cost,
+            provisioned_iops: 0.0,
+            iops_cost: 0.0,
+            compute_hours: ol_compute_hours,
+            processing_hours,
+            compute_cost: ol_compute_cost,
+            total: put_cost + get_cost + ol_storage_cost + ol_compute_cost,
+        };
+
+        // ----- postgres_native -----
+        let pg_storage_gb =
+            w.resident_items * w.bytes_per_command * w.pg_index_overhead / BYTES_PER_GB;
+        let pg_storage_cost = pg_storage_gb * p.pg_storage_per_gb_month * month_fraction;
+        let pg_iops_cost = w.pg_provisioned_iops * p.pg_iops_per_month_each * month_fraction;
+        let pg_compute_cost = w.billing_window_hours * p.pg_instance_per_hour;
+
+        let postgres = CostBreakdown {
+            put_requests: 0.0,
+            put_cost: 0.0,
+            get_requests: 0.0,
+            get_cost: 0.0,
+            storage_gb: pg_storage_gb,
+            storage_cost: pg_storage_cost,
+            provisioned_iops: w.pg_provisioned_iops,
+            iops_cost: pg_iops_cost,
+            compute_hours: w.billing_window_hours,
+            processing_hours,
+            compute_cost: pg_compute_cost,
+            total: pg_compute_cost + pg_storage_cost + pg_iops_cost,
+        };
+
+        let ratio = postgres.total / objectlog.total;
+        CostComparison {
+            objectlog_per_billion: objectlog.total,
+            postgres_per_billion: postgres.total,
+            ratio,
+            objectlog_wins: objectlog.total < postgres.total,
+            pg_command_throughput_per_s: w.pg_command_throughput_per_s(),
+            objectlog,
+            postgres,
+        }
+    }
+
+    /// Build the TP-002 E3 **cost-model** ledger row from a computed comparison. The row is **smoke-tier**: it
+    /// is a derived CALCULATION over the measured E3/E0 counts (cited prices, stated assumptions), NOT a fresh
+    /// live measurement — so it is recorded and strict-validated for visibility but never counts as headline
+    /// release evidence on its own (the live MinIO E3 run carries the release-tier `E3`). It is traceable
+    /// (`tp002_evidence_ids=["E3"]`) and carries the computed numbers + the inputs that produced them.
+    pub fn build_cost_row(
+        comparison: &CostComparison,
+        counts: &ObjectLogCounts,
+        w: &WorkloadAssumptions,
+        p: &PriceInputs,
+        command: &str,
+    ) -> LedgerRow {
+        let round2 = |x: f64| (x * 100.0).round() / 100.0;
+        let values = BTreeMap::from([
+            ("cost_model".to_string(), serde_json::json!(true)),
+            (
+                "objectlog_usd_per_billion_commands".to_string(),
+                serde_json::json!(round2(comparison.objectlog_per_billion)),
+            ),
+            (
+                "postgres_usd_per_billion_commands".to_string(),
+                serde_json::json!(round2(comparison.postgres_per_billion)),
+            ),
+            (
+                "postgres_over_objectlog_ratio".to_string(),
+                serde_json::json!(round2(comparison.ratio)),
+            ),
+            (
+                "objectlog_below_postgres".to_string(),
+                serde_json::json!(comparison.objectlog_wins),
+            ),
+            (
+                "objectlog_put_cost_usd".to_string(),
+                serde_json::json!(round2(comparison.objectlog.put_cost)),
+            ),
+            (
+                "objectlog_node_compute_usd".to_string(),
+                serde_json::json!(round2(comparison.objectlog.compute_cost)),
+            ),
+            (
+                "objectlog_storage_usd".to_string(),
+                serde_json::json!(round2(comparison.objectlog.storage_cost)),
+            ),
+            (
+                "postgres_compute_usd".to_string(),
+                serde_json::json!(round2(comparison.postgres.compute_cost)),
+            ),
+            (
+                "postgres_provisioned_iops_usd".to_string(),
+                serde_json::json!(round2(comparison.postgres.iops_cost)),
+            ),
+            (
+                "postgres_processing_hours_per_billion".to_string(),
+                serde_json::json!(round2(comparison.postgres.processing_hours)),
+            ),
+            (
+                "objectlog_counts_label".to_string(),
+                serde_json::json!(counts.label),
+            ),
+            (
+                "objects_per_command".to_string(),
+                serde_json::json!(round2(counts.objects_put / counts.commands * 1000.0) / 1000.0),
+            ),
+            (
+                "billing_window_hours".to_string(),
+                serde_json::json!(w.billing_window_hours),
+            ),
+            (
+                "recovery_window_hours".to_string(),
+                serde_json::json!(w.recovery_window_hours),
+            ),
+            (
+                "pg_provisioned_iops".to_string(),
+                serde_json::json!(w.pg_provisioned_iops),
+            ),
+            (
+                "price_source".to_string(),
+                serde_json::json!(p.instance_source),
+            ),
+            (
+                "iops_price_source".to_string(),
+                serde_json::json!(p.iops_source),
+            ),
+        ]);
+
+        LedgerRow {
+            suite: "tp002_e3_cost_model".into(),
+            command: command.into(),
+            backend_profile: "object_log_sqlite_projection".into(),
+            scale: "smoke".into(),
+            seed: 0,
+            environment: format!(
+                "derived cost model (pqueue-cost-model): REAL E3 counts ({label}: {cmds} commands, \
+                 {objs} objects, {segs} segments) scaled to 1e9 commands vs postgres_native at the measured \
+                 E0 throughput ({tput:.0} commands/s); cited prices [{src}]; always-on {win}h window, \
+                 {iops} provisioned IOPS",
+                label = counts.label,
+                cmds = counts.commands,
+                objs = counts.objects_put,
+                segs = counts.segments_sealed,
+                tput = comparison.pg_command_throughput_per_s,
+                src = p.instance_source,
+                win = w.billing_window_hours,
+                iops = w.pg_provisioned_iops,
+            ),
+            exit_status: 0,
+            ac_ids: vec![],
+            inv_ids: vec![],
+            pass_bar:
+                "E3 cost model: object_log_sqlite_projection $/billion-commands < postgres_native \
+                 $/billion-commands at the documented high-volume baseline with cited prices"
+                    .into(),
+            evidence_tier: "smoke".into(),
+            measurements: Measurements {
+                tp002_evidence_ids: vec!["E3".into()],
+                values,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// FIXTURE 1 — the REAL E3 size-dominant measured counts + the cited ADR-001 prices at the documented
+        /// high-volume baseline: object_log_sqlite_projection is below postgres_native, and the numbers land
+        /// where the hand calculation says.
+        #[test]
+        fn real_e3_counts_objectlog_below_postgres() {
+            let counts = ObjectLogCounts::e3_size_dominant();
+            let w = WorkloadAssumptions::tp002_high_volume_baseline();
+            let p = PriceInputs::adr_001_us_east_1();
+            let c = compute_comparison(&counts, &w, &p);
+
+            // The headline claim: object-log is below postgres at the high-volume baseline.
+            assert!(
+                c.objectlog_wins,
+                "object_log should be below postgres: ol={:.2} pg={:.2}",
+                c.objectlog_per_billion, c.postgres_per_billion
+            );
+            assert!(c.ratio > 3.0, "expected >3x, got {:.2}x", c.ratio);
+
+            // PUTs: 68/2048 objects/command * 1e9 / 1000 * $0.005 ≈ $166.
+            assert!(
+                (c.objectlog.put_cost - 166.02).abs() < 1.0,
+                "put_cost={:.2}",
+                c.objectlog.put_cost
+            );
+            // Postgres is dominated by its always-on instance + provisioned IOPS, not compute-time.
+            assert!(
+                (c.postgres.compute_cost - 201.48).abs() < 1.0,
+                "pg compute={:.2}",
+                c.postgres.compute_cost
+            );
+            assert!(
+                (c.postgres.iops_cost - 780.0).abs() < 1.0,
+                "pg iops={:.2}",
+                c.postgres.iops_cost
+            );
+            // The instance-hours utilization check: one always-on instance has ample headroom (a billion
+            // commands take ~20 h of a 730 h month at the measured throughput).
+            assert!(
+                c.postgres.processing_hours < 25.0 && c.postgres.processing_hours > 15.0,
+                "processing_hours={:.2}",
+                c.postgres.processing_hours
+            );
+        }
+
+        /// FIXTURE 2 — the calculator RESPONDS to inputs (it is not hard-wired to "object-log wins"):
+        /// cranking the S3 PUT price crosses the result over to postgres, and PUT cost is monotonic in price.
+        #[test]
+        fn crossover_when_put_price_cranked() {
+            let counts = ObjectLogCounts::e3_size_dominant();
+            let w = WorkloadAssumptions::tp002_high_volume_baseline();
+            let base = PriceInputs::adr_001_us_east_1();
+            let baseline = compute_comparison(&counts, &w, &base);
+            assert!(baseline.objectlog_wins);
+
+            // Crank S3 PUT 10x: object-log now exceeds postgres ⇒ the win flips. Not hard-coded.
+            let mut dear = base.clone();
+            dear.s3_put_per_1k = base.s3_put_per_1k * 10.0;
+            let crossed = compute_comparison(&counts, &w, &dear);
+            assert!(
+                !crossed.objectlog_wins,
+                "10x PUT price should flip the result: ol={:.2} pg={:.2}",
+                crossed.objectlog_per_billion, crossed.postgres_per_billion
+            );
+            // Monotonic: higher PUT price ⇒ strictly higher object-log total.
+            assert!(crossed.objectlog_per_billion > baseline.objectlog_per_billion);
+        }
+
+        /// FIXTURE 3 — the real crossover the artifact reports: with the postgres IOPS floor removed (free
+        /// local disk) AND the pessimistic small E3 segments, postgres wins; filling segments to a production
+        /// byte target flips object-log back ahead even at zero postgres IOPS. Proves the win is earned by the
+        /// modelled terms, not assumed.
+        #[test]
+        fn iops_floor_and_segment_fill_drive_the_crossover() {
+            let p = PriceInputs::adr_001_us_east_1();
+            let mut w_no_iops = WorkloadAssumptions::tp002_high_volume_baseline();
+            w_no_iops.pg_provisioned_iops = 0.0;
+
+            // Zero postgres IOPS + tiny latency-bound E3 segments ⇒ postgres is the cheaper side.
+            let tiny = compute_comparison(&ObjectLogCounts::e3_size_dominant(), &w_no_iops, &p);
+            assert!(
+                !tiny.objectlog_wins,
+                "no-IOPS postgres should beat tiny-segment object-log: ol={:.2} pg={:.2}",
+                tiny.objectlog_per_billion, tiny.postgres_per_billion
+            );
+
+            // Fill segments to 16 MiB at 1 KiB/command (2 objects/segment) ⇒ object-log wins even at 0 IOPS.
+            let filled =
+                ObjectLogCounts::filled("16 MiB fill", 16.0 * 1024.0 * 1024.0, 1024.0, 2.0);
+            let big = compute_comparison(&filled, &w_no_iops, &p);
+            assert!(
+                big.objectlog_wins,
+                "filled segments should beat no-IOPS postgres: ol={:.2} pg={:.2}",
+                big.objectlog_per_billion, big.postgres_per_billion
+            );
+        }
+
+        /// The win survives even when the object-log node is priced IDENTICALLY to the postgres instance —
+        /// i.e. the apples-to-apples win does not depend on cherry-picking a smaller node; the storage/I/O term
+        /// carries it.
+        #[test]
+        fn win_survives_equal_node_pricing() {
+            let counts = ObjectLogCounts::e3_size_dominant();
+            let w = WorkloadAssumptions::tp002_high_volume_baseline();
+            let mut p = PriceInputs::adr_001_us_east_1();
+            p.objectlog_node_per_hour = p.pg_instance_per_hour; // same node both sides
+            let c = compute_comparison(&counts, &w, &p);
+            assert!(
+                c.objectlog_wins,
+                "win must survive equal node pricing: ol={:.2} pg={:.2}",
+                c.objectlog_per_billion, c.postgres_per_billion
+            );
+        }
+
+        /// The folded command throughput matches the hand calculation from the measured E0 item rates.
+        #[test]
+        fn command_throughput_folds_measured_e0_rates() {
+            let w = WorkloadAssumptions::tp002_high_volume_baseline();
+            // 3 / (1/20431 + 1/6145) ≈ 14,173 commands/s.
+            let t = w.pg_command_throughput_per_s();
+            assert!((t - 14_172.6).abs() < 5.0, "throughput={t:.1}");
+        }
+
+        /// The smoke-tier cost row is traceable and strict-valid, and never masquerades as release evidence.
+        #[test]
+        fn cost_row_is_smoke_tier_and_traceable() {
+            let counts = ObjectLogCounts::e3_size_dominant();
+            let w = WorkloadAssumptions::tp002_high_volume_baseline();
+            let p = PriceInputs::adr_001_us_east_1();
+            let c = compute_comparison(&counts, &w, &p);
+            let row = build_cost_row(&c, &counts, &w, &p, "pqueue-cost-model");
+            assert_eq!(row.evidence_tier, "smoke");
+            assert_eq!(row.measurements.tp002_evidence_ids, vec!["E3".to_string()]);
+            assert!(super::super::strict_row_errors(&row).is_empty());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
