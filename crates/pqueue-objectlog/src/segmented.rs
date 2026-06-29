@@ -1125,24 +1125,44 @@ impl BlobStore for S3BlobStore {
     }
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
-        let query = vec![
-            ("list-type".to_string(), "2".to_string()),
-            ("prefix".to_string(), prefix.to_string()),
-        ];
+        // ListObjectsV2 returns at most `MaxKeys` (default + cap 1000) keys per response. A queue that has
+        // sealed more than 1000 segments therefore has a >1000-entry manifest, so a SINGLE-page list would
+        // silently truncate it — returning a stale tail to `recover_manifest` (→ the next seal's manifest CAS
+        // collides with an existing index = a spurious `Conflict`) AND dropping segments from `read_all` /
+        // `read_from` (→ silent data loss on recovery). So follow the `NextContinuationToken` until the result
+        // is no longer truncated, accumulating every page's keys. (Exercised by the TP-002 E3 10M-item live
+        // recovery run, whose recovery queue exceeds 1000 sealed segments.)
         let path = format!("/{}", self.bucket);
-        let (status, body) = self.request("GET", &path, &query, &[], &[])?;
-        if status != 200 {
-            return Err(EngineError::Storage(format!(
-                "S3 LIST {prefix} failed: HTTP {status}: {}",
-                String::from_utf8_lossy(&body)
-            )));
+        let mut keys = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut query = vec![
+                ("list-type".to_string(), "2".to_string()),
+                ("prefix".to_string(), prefix.to_string()),
+            ];
+            if let Some(token) = &continuation {
+                query.push(("continuation-token".to_string(), token.clone()));
+            }
+            let (status, body) = self.request("GET", &path, &query, &[], &[])?;
+            if status != 200 {
+                return Err(EngineError::Storage(format!(
+                    "S3 LIST {prefix} failed: HTTP {status}: {}",
+                    String::from_utf8_lossy(&body)
+                )));
+            }
+            let xml = String::from_utf8_lossy(&body);
+            keys.extend(scrape_keys(&xml));
+            match next_continuation_token(&xml) {
+                Some(token) => continuation = Some(token),
+                None => break,
+            }
         }
-        Ok(scrape_keys(&String::from_utf8_lossy(&body)))
+        Ok(keys)
     }
 }
 
-/// Scrape `<Key>…</Key>` values out of an S3 ListObjectsV2 XML body (small-result single page is sufficient
-/// for the per-queue manifest/segment listings the substrate issues).
+/// Scrape `<Key>…</Key>` values out of an S3 ListObjectsV2 XML body. The substrate pages the whole result
+/// ([`S3BlobStore::list`]), so this scrapes one page's keys; the caller concatenates the pages.
 fn scrape_keys(xml: &str) -> Vec<String> {
     let mut keys = Vec::new();
     let mut rest = xml;
@@ -1156,6 +1176,25 @@ fn scrape_keys(xml: &str) -> Vec<String> {
         }
     }
     keys
+}
+
+/// The `NextContinuationToken` of a truncated ListObjectsV2 page, or `None` when the listing is complete.
+/// Only honored when `<IsTruncated>true</IsTruncated>` (a non-truncated page carries no further token).
+fn next_continuation_token(xml: &str) -> Option<String> {
+    let truncated = scrape_tag(xml, "IsTruncated").as_deref() == Some("true");
+    if !truncated {
+        return None;
+    }
+    scrape_tag(xml, "NextContinuationToken").filter(|t| !t.is_empty())
+}
+
+/// Extract the text of the first `<tag>…</tag>` element from an XML body (small, dependency-free).
+fn scrape_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].to_string())
 }
 
 /// Parse `(status_code, body)` from a raw HTTP/1.1 response (headers terminated by `\r\n\r\n`).
@@ -1375,5 +1414,40 @@ mod fs_blob_store_tests {
         );
         // A second create-only PUT at the recovered manifest tail still loses the CAS (durable fence).
         assert!(!s.put_if_absent("t/a/q/b/manifest/0.json", b"dup").unwrap());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ListObjectsV2 pagination scraping (the >1000-object correctness fix)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod list_pagination_tests {
+    use super::{next_continuation_token, scrape_keys, scrape_tag};
+
+    #[test]
+    fn scrape_keys_reads_every_key_on_a_page() {
+        let xml = "<ListBucketResult><Contents><Key>m/0.json</Key></Contents>\
+                   <Contents><Key>m/1.json</Key></Contents></ListBucketResult>";
+        assert_eq!(scrape_keys(xml), vec!["m/0.json", "m/1.json"]);
+    }
+
+    #[test]
+    fn truncated_page_yields_the_continuation_token() {
+        // A truncated ListObjectsV2 page (>1000 objects) carries the token to fetch the next page.
+        let xml = "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                   <NextContinuationToken>abc123==</NextContinuationToken>\
+                   <Contents><Key>m/0999.json</Key></Contents></ListBucketResult>";
+        assert_eq!(scrape_tag(xml, "IsTruncated").as_deref(), Some("true"));
+        assert_eq!(next_continuation_token(xml).as_deref(), Some("abc123=="));
+    }
+
+    #[test]
+    fn final_page_has_no_continuation_token() {
+        // The last page is NOT truncated, so listing stops (no token honored even if one were present).
+        let complete = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                        <Contents><Key>m/0.json</Key></Contents></ListBucketResult>";
+        assert_eq!(next_continuation_token(complete), None);
+        let empty = "<ListBucketResult></ListBucketResult>";
+        assert_eq!(next_continuation_token(empty), None);
     }
 }

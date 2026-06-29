@@ -47,7 +47,8 @@
 //! Optional overrides: `PQUEUE_S3_TEST_BUCKET` (default `pqueue-test`), `PQUEUE_S3_TEST_ACCESS_KEY` /
 //! `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`), `PQUEUE_E3_LOAD_BATCH` (items per push command during
 //! the recovery-load phase, default 1000), `PQUEUE_E3_ACK_PUSHES` (pushes per ack-latency config, default
-//! 2000), `PQUEUE_E3_ACK_CONCURRENCY` (concurrent push tasks, default 64).
+//! 2000), `PQUEUE_E3_ACK_CONCURRENCY` (concurrent push tasks, default 64), `PQUEUE_E3_LOAD_CONCURRENCY`
+//! (concurrent recovery-load tasks, default 8).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,7 +61,7 @@ use pqueue_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
     UtcTimestamp,
 };
-use pqueue_engine::{ControlPlaneStore, ProjectionRead, PushPort, PushSpec, QueueKey};
+use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey};
 use pqueue_objectlog::segmented::{BlobStore, S3BlobStore, SegmentConfig};
 use pqueue_server::SegmentedObjectLogSqliteBackend;
 
@@ -281,6 +282,27 @@ struct RecoveryResult {
     bar_met: bool,
 }
 
+/// Push with a bounded retry on the substrate's documented same-epoch manifest-CAS `Conflict` (the seal doc
+/// says such a transient race is "surfaced as a conflict so it is not mistaken for an ack" and the caller
+/// retries). After the S3 `list` pagination fix this is rare, but a bounded retry keeps a long load robust.
+async fn push_with_retry(
+    backend: &SegmentedObjectLogSqliteBackend,
+    shard: &QueueKey,
+    items: Vec<PushSpec>,
+) {
+    let mut attempt = 0u64;
+    loop {
+        match backend.push(shard, items.clone(), ts(), None).await {
+            Ok(_) => return,
+            Err(EngineError::Conflict) if attempt < 16 => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20 * attempt)).await;
+            }
+            Err(e) => panic!("push failed after {attempt} retries: {e:?}"),
+        }
+    }
+}
+
 /// Load `resident` items (pushes of `load_batch` items each) into a SQLite projection over MinIO, then reopen
 /// and measure snapshot-tail recovery via the `RecoveryStats` seam (bead pqueue-8a76daad).
 async fn run_recovery(s3: &S3Env, resident: u64, load_batch: u64) -> RecoveryResult {
@@ -288,9 +310,13 @@ async fn run_recovery(s3: &S3Env, resident: u64, load_batch: u64) -> RecoveryRes
     let def = qdef("e3", &qid);
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let proj = projection_path("recovery");
-    // Size-dominant config so the bulk load seals in large group-commit batches without waiting on the
-    // latency flusher (a generous latency cap is the trailing-buffer safety net).
-    let cfg = SegmentConfig::new(1_048_576, 2_000).unwrap();
+    // A large byte target + a generous latency cap so the bulk load seals FEW, LARGE segments: concurrent
+    // loaders fill the 8 MiB buffer fast (size-triggered seals), and the 10 s cap means even a load stall
+    // produces only a handful of latency-sealed segments. This keeps the per-queue manifest small (the seal
+    // cost amortizes over a big group-commit batch — the whole point of the segmented substrate) rather than
+    // one tiny segment per push.
+    let cfg = SegmentConfig::new(8_388_608, 10_000).unwrap();
+    let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
 
     let (command_count, total_commands, pending_loaded) = {
         let backend = Arc::new(
@@ -303,26 +329,45 @@ async fn run_recovery(s3: &S3Env, resident: u64, load_batch: u64) -> RecoveryRes
             .expect("create queue");
         let flusher = backend.spawn_flusher();
 
-        let mut pushed = 0u64;
-        let mut command_count = 0u64;
-        let mut next = 0u64;
-        while pushed < resident {
-            let n = (resident - pushed).min(load_batch);
-            let items: Vec<PushSpec> = (0..n).map(|k| spec(&format!("i{}", next + k))).collect();
-            backend.push(&shard, items, ts(), None).await.expect("push");
-            pushed += n;
-            next += n;
-            command_count += 1;
+        // Concurrent loaders, each owning a disjoint id range, co-buffer into shared group-commit segments.
+        let share = resident.div_ceil(load_concurrency);
+        let mut handles = Vec::new();
+        for w in 0..load_concurrency {
+            let start = w * share;
+            if start >= resident {
+                break;
+            }
+            let end = (start + share).min(resident);
+            let backend = backend.clone();
+            let shard = shard.clone();
+            handles.push(tokio::spawn(async move {
+                let mut commands = 0u64;
+                let mut id = start;
+                while id < end {
+                    let n = (end - id).min(load_batch);
+                    let items: Vec<PushSpec> =
+                        (0..n).map(|k| spec(&format!("i{}", id + k))).collect();
+                    push_with_retry(&backend, &shard, items).await;
+                    id += n;
+                    commands += 1;
+                }
+                commands
+            }));
         }
-        // Let the flusher seal any trailing buffered command so the projection is fully caught up before
-        // we snapshot (a clean shutdown). Poll until pending == resident or a generous deadline.
+        let mut command_count = 0u64;
+        for h in handles {
+            command_count += h.await.expect("load task joined");
+        }
+
+        // Let the flusher seal any trailing buffered command so the projection is fully caught up before we
+        // snapshot (a clean shutdown). Poll until pending == resident or a generous deadline (> the cap).
         let deadline = Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let pending = backend.metrics(&shard).await.unwrap().pending;
             if pending >= resident || Instant::now() >= deadline {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         flusher.abort();
         let total_commands = backend.segment_counters().commands_committed;
