@@ -37,6 +37,11 @@ pub use object_log_sqlite::{
 };
 pub use pqueue_objectlog::segmented::SegmentConfig;
 
+#[cfg(feature = "postgres")]
+mod postgres_native;
+#[cfg(feature = "postgres")]
+pub use postgres_native::PostgresNativeBackend;
+
 /// Which durable backend the server runs over.
 pub enum Backend {
     /// In-memory reference backend (atomic class; non-durable).
@@ -68,6 +73,12 @@ pub enum Backend {
         object_root: PathBuf,
         config: SegmentConfig,
     },
+    /// SYNC postgres durable-log adapter (atomic class), driven through the blocking-safe
+    /// [`PostgresNativeBackend`] wrapper so no sync postgres client call runs on a Tokio worker thread.
+    /// `url` is a libpq/postgres connection string; with the `tls` feature an `sslmode=require|prefer`
+    /// url connects over native-tls (Lakebase / cloud postgres). Requires the `postgres` cargo feature.
+    #[cfg(feature = "postgres")]
+    PostgresNative { url: String },
 }
 
 /// Server configuration.
@@ -778,6 +789,36 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     .with_node_id(node_id),
             );
             backend.spawn_flusher();
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{node_id}"))
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            start_with_ownership(
+                backend,
+                cp,
+                owner,
+                clock,
+                &config.listen,
+                config.reclaim_interval,
+                &config.queues,
+            )
+            .await
+        }
+        #[cfg(feature = "postgres")]
+        Backend::PostgresNative { url } => {
+            // The sync postgres `connect` (client handshake + log replay) MUST run off the reactor: the
+            // postgres client drives its own internal runtime per call, so connecting on a Tokio worker
+            // would panic ("cannot start a runtime from within a runtime"). Connect inside `spawn_blocking`,
+            // then drive the backend only through the blocking-safe wrapper.
+            let backend = tokio::task::spawn_blocking(move || {
+                pqueue_postgres::PostgresBackend::connect(&url).map(|b| b.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("postgres connect task join failed: {e}"))
+            })??;
+            let backend = Arc::new(PostgresNativeBackend::new(backend));
+            // Mirror every other backend's ownership wiring: an in-memory control plane coordinates lease
+            // ownership (single-node default); the postgres `queues.assignment_epoch` is the durable fence.
             let cp = Arc::new(InMemoryControlPlane::default());
             let owner = OwnerId::new(format!("node-{node_id}"))
                 .map_err(|e| EngineError::Storage(e.to_string()))?;

@@ -128,15 +128,32 @@ impl PostgresConnectConfig {
 
 /// Build one sync postgres client through the centralized pqueue-postgres connection helper.
 ///
-/// TLS-capable connectors are intentionally not created here yet: the current crate depends only on
-/// `postgres` and drives `NoTls`, while the server-runtime/pool boundary is tracked separately. Requiring
-/// TLS fails explicitly instead of falling back to plaintext.
+/// Without the `tls` feature the adapter is `NoTls`-only: an `sslmode=require` URL fails closed
+/// ([`EngineError::Unavailable`]) rather than silently falling back to plaintext, while `disable`/`prefer`
+/// connect over plaintext.
+///
+/// With the `tls` feature a non-`disable` `sslmode` connects over a native-tls connector (the Lakebase /
+/// cloud-postgres path); only `sslmode=disable` uses `NoTls`.
 pub fn connect(config: PostgresConnectConfig) -> EngineResult<Client> {
     let ssl_mode = config.parsed_ssl_mode()?;
-    if matches!(ssl_mode, PostgresSslMode::Require) {
-        return Err(EngineError::Unavailable);
+    let pg_config = config.postgres_config(now())?;
+    #[cfg(feature = "tls")]
+    {
+        if matches!(ssl_mode, PostgresSslMode::Disable) {
+            return st(pg_config.connect(NoTls));
+        }
+        let connector = native_tls::TlsConnector::new()
+            .map_err(|e| EngineError::Storage(format!("native-tls connector build failed: {e}")))?;
+        let connector = postgres_native_tls::MakeTlsConnector::new(connector);
+        st(pg_config.connect(connector))
     }
-    st(config.postgres_config(now())?.connect(NoTls))
+    #[cfg(not(feature = "tls"))]
+    {
+        if matches!(ssl_mode, PostgresSslMode::Require) {
+            return Err(EngineError::Unavailable);
+        }
+        st(pg_config.connect(NoTls))
+    }
 }
 
 fn parse_config(url: &str) -> EngineResult<Config> {
@@ -224,6 +241,10 @@ mod tests {
         assert_eq!(provider.postgres_user(), Some("sp-client"));
     }
 
+    // Without the `tls` feature, `sslmode=require` must fail closed rather than fall back to plaintext.
+    // With `tls` it instead drives a native-tls handshake (covered by the live env-gated suites), so this
+    // fail-closed assertion only applies to the NoTls build.
+    #[cfg(not(feature = "tls"))]
     #[test]
     fn required_ssl_fails_before_no_tls_connection_attempt() {
         let result = connect(PostgresConnectConfig::new(

@@ -117,10 +117,20 @@ fn parse_backend() -> Backend {
                 ),
             }
         }
+        #[cfg(feature = "postgres")]
+        ("postgres", "inmemory") => Backend::PostgresNative {
+            url: env_or(
+                "PQUEUE_PG_URL",
+                "postgres://postgres@127.0.0.1:5432/postgres",
+            ),
+        },
+        #[cfg(not(feature = "postgres"))]
         ("postgres", "inmemory") => unsupported_storage(
             &log,
             &projection,
-            "postgres log exists as an adapter but is not wired into the tokio RESP server yet",
+            "postgres adapter is wired through the blocking-safe PostgresNativeBackend, but this binary \
+             was built without the `postgres` cargo feature; rebuild with `--features postgres` (or \
+             `--features postgres,tls` for native-tls)",
         ),
         (_, "sqlite" | "postgres") => unsupported_storage(
             &log,
@@ -217,7 +227,7 @@ async fn async_main() {
     }
     if env::args().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_OBJECT_LOG_MODE=file|segmented   (objectlog+sqlite or objectlog+inmemory; file=per-command, segmented=group-commit)\n  PQUEUE_SEGMENT_TARGET_BYTES=262144      (segmented: byte-size seal trigger)\n  PQUEUE_SEGMENT_MAX_LATENCY_MS=20        (segmented: latency seal trigger)\n  PQUEUE_RECOVERY_MAX_TAIL_COMMANDS=1000000  (object_log_sqlite: recovery-window budget; reopen replays only the object-log tail beyond the projection snapshot high-water, warning if it exceeds this)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
+            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_PG_URL=postgres://user:pass@host:5432/db   (postgres backend; build --features postgres[,tls])\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_OBJECT_LOG_MODE=file|segmented   (objectlog+sqlite or objectlog+inmemory; file=per-command, segmented=group-commit)\n  PQUEUE_SEGMENT_TARGET_BYTES=262144      (segmented: byte-size seal trigger)\n  PQUEUE_SEGMENT_MAX_LATENCY_MS=20        (segmented: latency seal trigger)\n  PQUEUE_RECOVERY_MAX_TAIL_COMMANDS=1000000  (object_log_sqlite: recovery-window budget; reopen replays only the object-log tail beyond the projection snapshot high-water, warning if it exceeds this)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
         );
         return;
     }

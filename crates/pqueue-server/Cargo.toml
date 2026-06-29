@@ -24,10 +24,24 @@ pqueue-memory = { path = "../pqueue-memory" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-projection = { path = "../pqueue-projection" }
+# Optional: the SYNC postgres adapter, wired only behind the `postgres` feature and driven exclusively
+# through the blocking-safe `PostgresNativeBackend` wrapper (spawn_blocking) so no sync postgres client
+# call runs on a Tokio worker thread.
+pqueue-postgres = { path = "../pqueue-postgres", optional = true }
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync"] }
 # CancellationToken to signal a graceful drain to the RESP serve loop on shutdown.
 tokio-util = { version = "0.7" }
+# `block_on` to drive the postgres backend's (eagerly-computed) port futures from inside `spawn_blocking`,
+# off the Tokio reactor. Only used by the `postgres` feature path.
+futures = { version = "0.3", optional = true }
+
+[features]
+default = []
+# Wire `Backend::PostgresNative` (the sync postgres adapter behind the blocking-safe wrapper).
+postgres = ["dep:pqueue-postgres", "dep:futures"]
+# Connect the postgres adapter over native-tls (Lakebase / cloud postgres). Implies `postgres`.
+tls = ["postgres", "pqueue-postgres/tls"]
 
 [dev-dependencies]
 pqueue-core = { path = "../pqueue-core" }

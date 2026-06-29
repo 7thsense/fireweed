@@ -16,9 +16,16 @@ Projection backend:
 - `sqlite`
 - `postgres`
 
-The current `pqueue-server` binary only wires a subset of those combinations.
-Unsupported combinations fail loudly at startup instead of being hidden behind a
-synthetic combined backend name.
+The current `pqueue-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
+`objectlog/inmemory`, and `objectlog/sqlite` unconditionally. `postgres/inmemory`
+is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
+via the `PostgresNativeBackend` wrapper, never on a reactor worker — but only when
+the binary is built with the `postgres` cargo feature (`--features postgres`, or
+`--features postgres,tls` for native-tls). The default release image does **not**
+build that feature, so selecting `postgres` against the stock image fails loudly at
+startup with a message naming the required feature build. Other unsupported
+combinations also fail loudly at startup instead of being hidden behind a synthetic
+combined backend name.
 
 ## Default Values
 

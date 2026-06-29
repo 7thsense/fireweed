@@ -22,6 +22,16 @@ serde_json = "1"
 bytes = "1"
 # Lease-token hashing for the relational projection (hash-only at rest; parity with pqueue-sqlite).
 sha2 = "0.11"
+# TLS connector for managed/cloud postgres (e.g. Databricks Lakebase): only pulled with `--features tls`.
+# Without the feature the adapter is NoTls-only and an `sslmode=require` URL fails closed (no plaintext
+# fallback). With it, a non-disabled `sslmode` connects over native-tls instead of erroring.
+native-tls = { version = "0.2", optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
+
+[features]
+default = []
+# Enable a native-tls connector so `sslmode=prefer|require` connects over TLS (Lakebase + cloud postgres).
+tls = ["dep:native-tls", "dep:postgres-native-tls"]
 
 [dev-dependencies]
 # A NON-tokio executor drives these tests: the sync `postgres` client runs its own internal tokio runtime

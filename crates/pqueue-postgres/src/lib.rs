@@ -20,13 +20,14 @@
 //! invoked from within an ambient tokio runtime — doing so PANICS ("cannot start a runtime from within a
 //! runtime"), it does not merely starve. The conformance/durability tests therefore drive the backend
 //! with a NON-tokio executor (`futures::executor::block_on`), each scenario on its own connection. For a
-//! PRODUCTION `pqueue-server` (whose RESP loop + reclaim driver run under tokio), this backend must be
-//! driven off the runtime: every call wrapped in `spawn_blocking` (+ a connection pool), or replaced by
-//! the relational-projection `FOR UPDATE SKIP LOCKED` multi-node mode. That is a recorded POST-LAUNCH
-//! refinement; `pqueue-server` does NOT yet wire postgres into its backend selector, so no tokio-driven
-//! path reaches this client today. The launch posture is a single-node durable-log + in-memory projection
-//! with guarantees identical to sqlite. This is NOT a silent sqlite copy — the caveat is the reason it is
-//! single-node and not yet server-wired.
+//! PRODUCTION `pqueue-server` (whose RESP loop + reclaim driver run under tokio), this backend MUST be
+//! driven off the runtime. That is now done: `pqueue-server`'s `PostgresNativeBackend` wrapper (behind its
+//! `postgres` cargo feature) delegates every engine-port call — and the initial `connect` and the final
+//! `Client` drop — to `tokio::task::spawn_blocking` / a non-reactor OS thread, so no sync postgres call
+//! ever runs on a tokio worker. The launch posture remains a single-node durable-log + in-memory projection
+//! with guarantees identical to sqlite (a connection pool + `FOR UPDATE SKIP LOCKED` multi-node mode is the
+//! separate scale-out refinement). This is NOT a silent sqlite copy — the caveat is the reason the
+//! single-connection backend must only be reached through that blocking boundary.
 //!
 //! ## Serialization caveat for the future pooling work (recorded from the Chunk-4 fresh-eyes review)
 //!

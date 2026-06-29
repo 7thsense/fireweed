@@ -17,12 +17,20 @@ The release image entrypoint is `pqueue-service`, the RESP server built from
 | `PQUEUE_SEGMENT_TARGET_BYTES` | no | `262144` | `segmented`: byte-size seal trigger. |
 | `PQUEUE_SEGMENT_MAX_LATENCY_MS` | no | `20` | `segmented`: latency seal trigger. |
 | `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` | no | `1000000` | `objectlog/sqlite` recovery-window budget. A reopen recovers from the SQLite projection snapshot + its recorded high-water and replays only the object-log tail beyond it (not the full genesis log). A tail longer than this budget is logged as a recovery-window warning (the projection has fallen far behind the durable log). |
+| `PQUEUE_PG_URL` | when log is `postgres` | `postgres://postgres@127.0.0.1:5432/postgres` | libpq/postgres connection string for the `postgres/inmemory` backend. With `sslmode=require` (or `prefer`) the binary must be built `--features postgres,tls` to connect over native-tls; otherwise only `disable`/`prefer`-plaintext connect. |
 | `PQUEUE_BOOTSTRAP_QUEUES` | no | `t1:q1` | Comma-separated `tenant:queue` bootstrap list. |
 | `PQUEUE_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
 
 The current server composition root wires `memory/inmemory`, `sqlite/inmemory`,
-`objectlog/inmemory`, and `objectlog/sqlite`. Other combinations fail at startup
-with an explicit unsupported-storage message.
+`objectlog/inmemory`, and `objectlog/sqlite` unconditionally. `postgres/inmemory`
+is wired through the blocking-safe `PostgresNativeBackend` wrapper — the sync
+postgres client is driven only on Tokio's blocking-thread pool (`spawn_blocking`),
+never on a reactor worker — but only when the binary is built with the `postgres`
+cargo feature (`--features postgres`, or `--features postgres,tls` for native-tls).
+The default release image does **not** build that feature, so in the shipped image
+`postgres` still fails at startup with an explicit message pointing at the required
+feature build. Other combinations fail at startup with an explicit
+unsupported-storage message.
 
 `objectlog/sqlite` is a local single-owner development/runtime profile: the
 object log is the durable command authority and SQLite is rebuilt as a
