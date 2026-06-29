@@ -73,7 +73,8 @@ fn qdef(tenant: &str, queue: &str) -> QueueDefinition {
         max_push_batch_size: 10_000_000,
         max_claim_batch_size: 10_000_000,
         max_eligible_group_size: None,
-        secondary_indexes: vec![],    }
+        secondary_indexes: vec![],
+    }
 }
 
 /// Run ONE owner node's full workload (push then claim+ack `items_per_queue` across `queues_per_owner`
@@ -341,6 +342,37 @@ fn performance_cross_queue_scale_out_tests() {
         },
     };
     emit_and_verify("performance_cross_queue_scale_out_tests", &row, "E2");
+}
+
+#[test]
+fn live_multi_node_object_log_sqlite_projection_e2() {
+    if std::env::var("PQUEUE_LIVE_OBJECT_LOG_E2").as_deref() != Ok("1") {
+        eprintln!(
+            "LOUD-SKIP: live_multi_node_object_log_sqlite_projection_e2 requires \
+             PQUEUE_LIVE_OBJECT_LOG_E2=1 plus provisioned multi-node \
+             object_log_sqlite_projection cluster configuration"
+        );
+        return;
+    }
+
+    let missing: Vec<&str> = [
+        "PQUEUE_E2_OWNER_ENDPOINTS",
+        "PQUEUE_E2_OBJECT_LOG_ROOT",
+        "PQUEUE_E2_SQLITE_PROJECTION_ROOT",
+    ]
+    .into_iter()
+    .filter(|key| std::env::var(key).is_err())
+    .collect();
+    assert!(
+        missing.is_empty(),
+        "live E2 cluster run requested but missing required env: {}",
+        missing.join(", ")
+    );
+
+    panic!(
+        "live multi-node object_log_sqlite_projection E2 harness is gated here; \
+         pqueue-a983b5e2 owns the provisioned-cluster run and release-tier ledger emission"
+    );
 }
 
 /// Write `row` to its `<suite>.jsonl` ledger (one row per run) and assert it is WELL-FORMED — round-trips
