@@ -347,12 +347,99 @@ impl SegmentCounters {
 // On-store object formats
 // ---------------------------------------------------------------------------
 
-/// An immutable sealed segment object: a contiguous run of commands committed under one `epoch`.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Segment {
-    epoch: u64,
-    first_seq: u64,
-    commands: Vec<CommandEnvelope>,
+// ---------------------------------------------------------------------------
+// Sealed-segment binary frame (Fix A)
+// ---------------------------------------------------------------------------
+//
+// A sealed segment object is a small fixed header followed by a length-prefixed concatenation of the
+// per-command records that were buffered for it. Each record's bytes are the `postcard` encoding of one
+// `CommandEnvelope`, produced ONCE when the command was buffered (`enqueue`) and stored verbatim — the seal
+// never re-serializes. This replaces the prior format, which JSON-serialized every envelope a second time on
+// seal (and a THIRD throwaway time per command just to measure its buffered size). The on-store layout is:
+//
+//   magic   : b"PQSG"          (4 bytes)
+//   version : u8  = SEG_VERSION (segment-format marker; bumped from the JSON form)
+//   epoch   : u64 little-endian (the assignment epoch the run committed under)
+//   first_seq: u64 little-endian (the sequence of the first record)
+//   records : [ u32 count ][ for each: u32 len, len bytes ]   (the "records blob")
+//
+// The per-segment checksum stored in the manifest entry is the FNV-1a of the records-blob bytes only (the
+// header is reconstructable and excluded), validated on read before any record is decoded.
+
+/// Segment object magic + version. The version is bumped from the previous JSON segment form (pre-release,
+/// so no on-disk back-compat is owed — a stale object simply fails to parse rather than mis-decoding).
+const SEG_MAGIC: [u8; 4] = *b"PQSG";
+const SEG_VERSION: u8 = 2;
+const SEG_HEADER_LEN: usize = 4 + 1 + 8 + 8;
+
+/// Build a sealed-segment object from already-encoded per-command record bytes (no re-serialize). Returns
+/// `(object_bytes, checksum)` where `checksum` is the FNV-1a over the records-blob region only.
+fn build_segment_object(epoch: u64, first_seq: u64, records: &[Vec<u8>]) -> (Vec<u8>, u64) {
+    let records_len: usize = records.iter().map(|r| 4 + r.len()).sum();
+    let mut blob = Vec::with_capacity(4 + records_len);
+    blob.extend_from_slice(&(records.len() as u32).to_le_bytes());
+    for r in records {
+        blob.extend_from_slice(&(r.len() as u32).to_le_bytes());
+        blob.extend_from_slice(r);
+    }
+    let checksum = checksum(&blob);
+    let mut object = Vec::with_capacity(SEG_HEADER_LEN + blob.len());
+    object.extend_from_slice(&SEG_MAGIC);
+    object.push(SEG_VERSION);
+    object.extend_from_slice(&epoch.to_le_bytes());
+    object.extend_from_slice(&first_seq.to_le_bytes());
+    object.extend_from_slice(&blob);
+    (object, checksum)
+}
+
+/// Parse a sealed-segment object: validate the header, verify the records-blob checksum against the
+/// manifest entry, then `postcard`-decode each framed record. Returns `(epoch, first_seq, commands)`.
+fn parse_segment_object(
+    bytes: &[u8],
+    seg_key: &str,
+    expected_checksum: u64,
+) -> EngineResult<(u64, u64, Vec<CommandEnvelope>)> {
+    if bytes.len() < SEG_HEADER_LEN || bytes[..4] != SEG_MAGIC {
+        return Err(EngineError::Storage(format!(
+            "segment {seg_key} has a bad header"
+        )));
+    }
+    if bytes[4] != SEG_VERSION {
+        return Err(EngineError::Storage(format!(
+            "segment {seg_key} has unsupported format version {}",
+            bytes[4]
+        )));
+    }
+    let epoch = u64::from_le_bytes(bytes[5..13].try_into().expect("8 bytes"));
+    let first_seq = u64::from_le_bytes(bytes[13..21].try_into().expect("8 bytes"));
+    let blob = &bytes[SEG_HEADER_LEN..];
+    if checksum(blob) != expected_checksum {
+        return Err(EngineError::Storage(format!(
+            "segment checksum mismatch at {seg_key}"
+        )));
+    }
+    let mut cursor = 0usize;
+    let read_u32 = |buf: &[u8], cur: &mut usize| -> EngineResult<u32> {
+        if *cur + 4 > buf.len() {
+            return Err(EngineError::Storage(format!("segment {seg_key} truncated")));
+        }
+        let v = u32::from_le_bytes(buf[*cur..*cur + 4].try_into().expect("4 bytes"));
+        *cur += 4;
+        Ok(v)
+    };
+    let count = read_u32(blob, &mut cursor)? as usize;
+    let mut commands = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = read_u32(blob, &mut cursor)? as usize;
+        if cursor + len > blob.len() {
+            return Err(EngineError::Storage(format!("segment {seg_key} truncated")));
+        }
+        let env: CommandEnvelope =
+            postcard::from_bytes(&blob[cursor..cursor + len]).map_err(store_err)?;
+        commands.push(env);
+        cursor += len;
+    }
+    Ok((epoch, first_seq, commands))
 }
 
 /// One append-only manifest entry. A data entry names a segment; a `fence` entry records an epoch handoff
@@ -412,7 +499,9 @@ fn shard_prefix(shard: &QueueKey) -> String {
 // ---------------------------------------------------------------------------
 
 struct ShardBuf {
-    buffered: Vec<CommandEnvelope>,
+    /// Per-command `postcard` record bytes in arrival order (serialized ONCE here at buffer time). On seal
+    /// these are concatenated into the segment frame with no re-serialize (Fix A).
+    buffered: Vec<Vec<u8>>,
     buffered_bytes: usize,
     /// `now` (ms) of the oldest buffered command, for the latency seal trigger.
     oldest_buffered_ms: Option<i64>,
@@ -589,8 +678,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             for env in commands {
-                buf.buffered_bytes += serde_json::to_vec(env).map_err(store_err)?.len();
-                buf.buffered.push(env.clone());
+                // Serialize ONCE, here; keep the bytes. `buffered_bytes` is the size of the kept bytes (free)
+                // rather than a throwaway serialize-just-to-measure (Fix A: kills the double serialization).
+                let bytes = postcard::to_allocvec(env).map_err(store_err)?;
+                buf.buffered_bytes += bytes.len();
+                buf.buffered.push(bytes);
                 buf.oldest_buffered_ms.get_or_insert(now_ms);
             }
             let one_command_seal = self.config.dev_unsafe_one_command_segments;
@@ -673,16 +765,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
         }
 
-        // 3. Write the immutable, checksummed segment object (idempotent at its first-seq key).
+        // 3. Write the immutable, checksummed segment object (idempotent at its first-seq key). The segment
+        //    is the framed concatenation of the per-command bytes serialized once at buffer time — no
+        //    re-serialize on seal (Fix A). The checksum covers the records-blob region.
         let first_seq = cur_seq;
         let last_seq = first_seq + n as u64 - 1;
-        let segment = Segment {
-            epoch: cur_epoch,
-            first_seq,
-            commands: drained.clone(),
-        };
-        let seg_bytes = to_json(&segment)?;
-        let seg_checksum = checksum(&seg_bytes);
+        let (seg_bytes, seg_checksum) = build_segment_object(cur_epoch, first_seq, &drained);
         let seg_key = format!("{prefix}seg/{first_seq:020}.seg");
         self.store.put(&seg_key, &seg_bytes)?;
         {
@@ -773,18 +861,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 .store
                 .get(seg_key)?
                 .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
-            if checksum(&bytes) != entry.checksum {
-                return Err(EngineError::Storage(format!(
-                    "segment checksum mismatch at {seg_key}"
-                )));
-            }
-            let segment: Segment = serde_json::from_slice(&bytes).map_err(store_err)?;
-            for (i, env) in segment.commands.into_iter().enumerate() {
-                let pos = CommandPosition::new(
-                    shard.clone(),
-                    segment.epoch,
-                    segment.first_seq + i as u64,
-                );
+            let (epoch, first_seq, commands) =
+                parse_segment_object(&bytes, seg_key, entry.checksum)?;
+            for (i, env) in commands.into_iter().enumerate() {
+                let pos = CommandPosition::new(shard.clone(), epoch, first_seq + i as u64);
                 out.push((pos, env));
             }
         }
