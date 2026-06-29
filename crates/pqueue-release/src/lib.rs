@@ -277,6 +277,332 @@ pub fn missing_smoke_evidence(summary: &LedgerSummary, required: &[String]) -> V
         .collect()
 }
 
+/// TP-002 **E2** (cross-queue scale-out / ADR-008) release-bar judgment + ledger-row construction.
+///
+/// This is the SHARED, PURE judgment behind the TP-002 E2 verification-ledger row. The in-cluster load
+/// generator (`pqueue-loadgen emit-row`) folds three per-owner-count measured scale points (owners 2/4/8)
+/// into one row; this module decides whether that sweep cleared the four release bars and, if so, whether
+/// the row is `release`-tier (counts toward the headline E0–E3 requirement) or `smoke`-tier. It is a pure
+/// function of the measured inputs so the judgment is unit-testable from `pqueue-bench` WITHOUT provisioning
+/// a live cluster.
+///
+/// The four E2 release bars (every value MEASURED):
+/// 1. ingest aggregate strictly non-decreasing 2 → 4 → 8;
+/// 2. 8-owner ingest aggregate ≥ [`SCALE_MULTIPLE_BAR`]× the 2-owner aggregate;
+/// 3. worst per-queue throughput — ingest AND claim+finalize — ≥ the E0 floor ([`FLOOR_ITEMS_PER_SEC`]);
+/// 4. no queue served by more than one owner (live-proven: at 8 owners, every queue is unknown on every
+///    OTHER node, so the cross-node "no such queue" confirmation count equals the expected
+///    `owners * queues_per_owner * (owners - 1)`).
+pub mod e2 {
+    use super::{LedgerRow, Measurements};
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
+    pub const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
+    /// The E2 headline cross-node multiple: the 8-owner ingest aggregate must be at least this many times the
+    /// 2-owner aggregate.
+    pub const SCALE_MULTIPLE_BAR: f64 = 3.5;
+    /// The canonical owner counts an E2 sweep must cover (the bars compare 8 vs 2 and require 2→4→8 monotonic).
+    pub const CANONICAL_OWNER_COUNTS: [usize; 3] = [2, 4, 8];
+
+    /// One MEASURED scale point: the result of driving the segmented `object_log_sqlite_projection` workload
+    /// at ONE owner count. Mirrors the load generator's per-run `RunResult` wire type (identical field names
+    /// + serde shape) so the generator can use this directly as its `run`→`emit-row` wire type.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct E2ScalePoint {
+        /// Owner-node count for this scale point.
+        pub owners: usize,
+        /// Aggregate ingest throughput (items/s) across all queues at this owner count.
+        pub ingest_aggregate: f64,
+        /// Worst (minimum) single-queue ingest throughput (items/s) at this owner count.
+        pub ingest_min_per_queue: f64,
+        /// Aggregate claim+finalize (drain) throughput (items/s) at this owner count.
+        pub drain_aggregate: f64,
+        /// Worst (minimum) single-queue claim+finalize throughput (items/s) at this owner count.
+        pub drain_min_per_queue: f64,
+        /// Cross-node "no such queue" confirmations observed (every queue rejected by every non-owner node).
+        pub one_owner_confirmations: usize,
+        /// Queues owned per node (disjoint across nodes).
+        pub queues_per_owner: usize,
+        /// Items driven per queue.
+        pub items_per_queue: u64,
+        /// Concurrent connections per queue.
+        pub conns_per_queue: usize,
+    }
+
+    /// Per-node tuning recorded into the evidence row (passed by the orchestrator). Mirrors the load
+    /// generator's `TuningMeta` wire type (identical field names + serde shape).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct E2Tuning {
+        pub segment_max_latency_ms: u64,
+        pub segment_target_bytes: usize,
+        pub worker_threads_per_node: usize,
+        pub server_cpu_limit: String,
+        pub server_cpu_request: String,
+        pub loadgen_cpu_limit: String,
+        pub cores: usize,
+        pub kind_node_image: String,
+        pub sweep: u64,
+    }
+
+    /// The judged verdict: each bar's pass/fail, the measured quantities the bars were judged from, and the
+    /// AND of all four ([`bars_met`](Self::bars_met)) — the ONLY thing that promotes the row to `release`.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct E2Verdict {
+        /// Whether the canonical owner counts (2/4/8) are all present — bars cannot pass without them.
+        pub canonical_owners_present: bool,
+        /// Bar (1): ingest aggregate non-decreasing 2 → 4 → 8.
+        pub nondecreasing: bool,
+        /// Bar (2): the measured 8-owner / 2-owner ingest aggregate ratio.
+        pub ratio_8_2: f64,
+        /// Bar (2): `ratio_8_2 >= SCALE_MULTIPLE_BAR`.
+        pub scale_pass: bool,
+        /// Bar (3): worst per-queue ingest throughput across all scale points.
+        pub worst_ingest_per_queue: f64,
+        /// Bar (3): worst per-queue claim+finalize throughput across all scale points.
+        pub worst_drain_per_queue: f64,
+        /// Bar (3): both worst-per-queue throughputs clear the E0 floor.
+        pub floor_pass: bool,
+        /// Bar (4): cross-node confirmations measured at 8 owners.
+        pub one_owner_confirmations: usize,
+        /// Bar (4): the confirmation count one-owner-per-queue requires at 8 owners.
+        pub expected_confirmations: usize,
+        /// Bar (4): every queue is served by exactly one owner (confirmations == expected, and queues exist).
+        pub disjoint_pass: bool,
+        /// The AND of all four bars. `true` ⇒ the row is release-tier; `false` ⇒ smoke-tier.
+        pub bars_met: bool,
+    }
+
+    /// The cross-node "no such queue" confirmations one-owner-per-queue MUST produce at `owners` nodes each
+    /// owning `queues_per_owner` queues: every one of the `owners * queues_per_owner` queues is probed on the
+    /// `owners - 1` OTHER nodes and must be unknown on each. Fewer than this ⇒ some queue answered on more
+    /// than one node ⇒ bar (4) fails.
+    pub fn expected_one_owner_confirmations(owners: usize, queues_per_owner: usize) -> usize {
+        owners * queues_per_owner * owners.saturating_sub(1)
+    }
+
+    /// Judge the four E2 release bars from the MEASURED scale points. Pure: no IO, no process exit.
+    pub fn evaluate_e2_bars(points: &[E2ScalePoint]) -> E2Verdict {
+        let at = |n: usize| points.iter().find(|p| p.owners == n);
+        let canonical_owners_present = CANONICAL_OWNER_COUNTS.iter().all(|&n| at(n).is_some());
+
+        // Bar (3): worst per-queue across ALL scale points (the WORST single queue, not an average), for both
+        // ingest and claim+finalize. A single starved queue trips this.
+        let worst_ingest_per_queue = points
+            .iter()
+            .map(|p| p.ingest_min_per_queue)
+            .fold(f64::INFINITY, f64::min);
+        let worst_drain_per_queue = points
+            .iter()
+            .map(|p| p.drain_min_per_queue)
+            .fold(f64::INFINITY, f64::min);
+        let worst_per_queue = worst_ingest_per_queue.min(worst_drain_per_queue);
+        let floor_pass = worst_per_queue.is_finite() && worst_per_queue >= FLOOR_ITEMS_PER_SEC;
+
+        let (
+            nondecreasing,
+            ratio_8_2,
+            scale_pass,
+            one_owner_confirmations,
+            expected_confirmations,
+            disjoint_pass,
+        ) = if canonical_owners_present {
+            let (p2, p4, p8) = (at(2).unwrap(), at(4).unwrap(), at(8).unwrap());
+            let nondecreasing = p4.ingest_aggregate >= p2.ingest_aggregate
+                && p8.ingest_aggregate >= p4.ingest_aggregate;
+            let ratio_8_2 = p8.ingest_aggregate / p2.ingest_aggregate;
+            let scale_pass = ratio_8_2 >= SCALE_MULTIPLE_BAR;
+            let one_owner_confirmations = p8.one_owner_confirmations;
+            let expected_confirmations =
+                expected_one_owner_confirmations(p8.owners, p8.queues_per_owner);
+            let disjoint_pass = p8.queues_per_owner > 0
+                && expected_confirmations > 0
+                && one_owner_confirmations == expected_confirmations;
+            (
+                nondecreasing,
+                ratio_8_2,
+                scale_pass,
+                one_owner_confirmations,
+                expected_confirmations,
+                disjoint_pass,
+            )
+        } else {
+            (false, 0.0, false, 0, 0, false)
+        };
+
+        let bars_met =
+            canonical_owners_present && nondecreasing && scale_pass && floor_pass && disjoint_pass;
+
+        E2Verdict {
+            canonical_owners_present,
+            nondecreasing,
+            ratio_8_2,
+            scale_pass,
+            worst_ingest_per_queue,
+            worst_drain_per_queue,
+            floor_pass,
+            one_owner_confirmations,
+            expected_confirmations,
+            disjoint_pass,
+            bars_met,
+        }
+    }
+
+    /// Build the TP-002 E2 verification-ledger row from the MEASURED scale points + tuning + the judged
+    /// [`E2Verdict`]. The row's `evidence_tier`/`scale` are `release` IFF [`E2Verdict::bars_met`], else
+    /// `smoke` (never a faked release row). The row shape is byte-for-byte compatible with the live evidence
+    /// previously emitted by `pqueue-loadgen` (see `docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl`).
+    ///
+    /// `points` MUST cover the canonical owner counts (2/4/8); the per-owner-count values are read by owner
+    /// count.
+    pub fn build_e2_row(
+        points: &[E2ScalePoint],
+        tuning: &E2Tuning,
+        verdict: &E2Verdict,
+    ) -> LedgerRow {
+        let at = |n: usize| {
+            points
+                .iter()
+                .find(|p| p.owners == n)
+                .unwrap_or_else(|| panic!("build_e2_row needs a scale point for owners={n}"))
+        };
+        let tier = if verdict.bars_met { "release" } else { "smoke" };
+
+        let values = BTreeMap::from([
+            (
+                "owners_2_ingest_aggregate_per_s".to_string(),
+                serde_json::json!(at(2).ingest_aggregate.round()),
+            ),
+            (
+                "owners_4_ingest_aggregate_per_s".to_string(),
+                serde_json::json!(at(4).ingest_aggregate.round()),
+            ),
+            (
+                "owners_8_ingest_aggregate_per_s".to_string(),
+                serde_json::json!(at(8).ingest_aggregate.round()),
+            ),
+            (
+                "owners_2_claim_finalize_aggregate_per_s".to_string(),
+                serde_json::json!(at(2).drain_aggregate.round()),
+            ),
+            (
+                "owners_4_claim_finalize_aggregate_per_s".to_string(),
+                serde_json::json!(at(4).drain_aggregate.round()),
+            ),
+            (
+                "owners_8_claim_finalize_aggregate_per_s".to_string(),
+                serde_json::json!(at(8).drain_aggregate.round()),
+            ),
+            (
+                "scale_out_8_vs_2_ingest_multiple".to_string(),
+                serde_json::json!((verdict.ratio_8_2 * 100.0).round() / 100.0),
+            ),
+            (
+                "scale_multiple_bar".to_string(),
+                serde_json::json!(SCALE_MULTIPLE_BAR),
+            ),
+            (
+                "ingest_aggregate_non_decreasing".to_string(),
+                serde_json::json!(verdict.nondecreasing),
+            ),
+            (
+                "worst_ingest_per_queue_per_s".to_string(),
+                serde_json::json!(verdict.worst_ingest_per_queue.round()),
+            ),
+            (
+                "worst_claim_finalize_per_queue_per_s".to_string(),
+                serde_json::json!(verdict.worst_drain_per_queue.round()),
+            ),
+            (
+                "e0_floor_per_s".to_string(),
+                serde_json::json!(FLOOR_ITEMS_PER_SEC.round()),
+            ),
+            (
+                "one_owner_per_queue_confirmations".to_string(),
+                serde_json::json!(verdict.one_owner_confirmations),
+            ),
+            (
+                "queues_per_owner".to_string(),
+                serde_json::json!(at(8).queues_per_owner),
+            ),
+            (
+                "items_per_queue".to_string(),
+                serde_json::json!(at(8).items_per_queue),
+            ),
+            (
+                "conns_per_queue".to_string(),
+                serde_json::json!(at(8).conns_per_queue),
+            ),
+            (
+                "segment_max_latency_ms".to_string(),
+                serde_json::json!(tuning.segment_max_latency_ms),
+            ),
+            (
+                "segment_target_bytes".to_string(),
+                serde_json::json!(tuning.segment_target_bytes),
+            ),
+            (
+                "worker_threads_per_node".to_string(),
+                serde_json::json!(tuning.worker_threads_per_node),
+            ),
+            (
+                "server_cpu_limit".to_string(),
+                serde_json::json!(tuning.server_cpu_limit),
+            ),
+            (
+                "server_cpu_request".to_string(),
+                serde_json::json!(tuning.server_cpu_request),
+            ),
+            (
+                "loadgen_cpu_limit".to_string(),
+                serde_json::json!(tuning.loadgen_cpu_limit),
+            ),
+            (
+                "kind_node_image".to_string(),
+                serde_json::json!(tuning.kind_node_image),
+            ),
+            ("sweep".to_string(), serde_json::json!(tuning.sweep)),
+            ("cores".to_string(), serde_json::json!(tuning.cores)),
+            ("bars_met".to_string(), serde_json::json!(verdict.bars_met)),
+        ]);
+
+        LedgerRow {
+            suite: "performance_multi_node_object_log_e2_kind".into(),
+            command: "scripts/perf/tp002-e2-kind.sh (pqueue-loadgen run -> emit-row; kind: CPU-limited server pods + lean in-cluster load Job)".into(),
+            backend_profile: "object_log_sqlite_projection".into(),
+            scale: tier.into(),
+            seed: 0,
+            environment: format!(
+                "live multi-node ADR-008 owner cluster on a kind (Kubernetes-in-docker) cluster; \
+                 {cores} cores; node image {node_image}; owner counts 2/4/8; each owner an independent \
+                 pqueue-service Deployment(replicas=1)+Service on object_log_sqlite_projection in SEGMENTED \
+                 group-commit mode (TD-004) with its own object-log root + sqlite projection on an emptyDir \
+                 medium=Memory tmpfs, distinct PQUEUE_NODE_ID, disjoint PQUEUE_BOOTSTRAP_QUEUES, CPU \
+                 request={req}/limit={lim}, {worker} worker threads; load driven by a LEAN, SEPARATED \
+                 in-cluster Job (CPU limit {load}) speaking raw RESP pod->pod over Service ClusterIP to each \
+                 owner; each queue driven by {conns} concurrent connections",
+                cores = tuning.cores,
+                node_image = tuning.kind_node_image,
+                req = tuning.server_cpu_request,
+                lim = tuning.server_cpu_limit,
+                worker = tuning.worker_threads_per_node,
+                load = tuning.loadgen_cpu_limit,
+                conns = at(8).conns_per_queue,
+            ),
+            exit_status: 0,
+            ac_ids: vec![],
+            inv_ids: vec![],
+            pass_bar: "E2: ingest aggregate strictly non-decreasing 2->4->8; 8-owner ingest aggregate >= 3.5x 2-owner; worst per-queue ingest AND claim+finalize each >= E0 floor (2777.78/s); no queue served by more than one owner".into(),
+            evidence_tier: tier.into(),
+            measurements: Measurements {
+                tp002_evidence_ids: vec!["E2".into()],
+                values,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

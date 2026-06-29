@@ -560,6 +560,203 @@ fn live_multi_node_object_log_sqlite_projection_e2() {
     );
 }
 
+// ----------------------------------------------------------------------------------------------------
+// TP-002 §E2 RELEASE-GATE judgment — pure, in-process, NO live cluster (bead pqueue-952a256e).
+//
+// The four-bar judgment that decides whether a multi-node E2 sweep earns a RELEASE-tier ledger row (vs a
+// smoke row) lives in the SHARED, pure `pqueue_release::e2` module — the SAME function the in-cluster
+// `pqueue-loadgen emit-row` binary uses. This test exercises that judgment directly with SYNTHETIC scale
+// points so the release-tier gate is unit-tested WITHOUT provisioning a kind cluster: an all-bars-pass
+// sweep MUST emit `evidence_tier=release`, and a sweep that violates ANY single bar MUST stay `smoke`
+// (never a faked release row). It is logic-only (no IO beyond reading the committed evidence header for the
+// schema-compatibility check) and complements — does not replace — the in-process smoke measurement above
+// (`performance_cross_queue_scale_out_tests`) and the env-gated live headline.
+
+/// A canonical passing E2 scale point at `owners` owners (one queue per owner, plausible measured numbers).
+fn e2_point(
+    owners: usize,
+    ingest_aggregate: f64,
+    ingest_min_per_queue: f64,
+    drain_aggregate: f64,
+    drain_min_per_queue: f64,
+    one_owner_confirmations: usize,
+) -> pqueue_release::e2::E2ScalePoint {
+    pqueue_release::e2::E2ScalePoint {
+        owners,
+        ingest_aggregate,
+        ingest_min_per_queue,
+        drain_aggregate,
+        drain_min_per_queue,
+        one_owner_confirmations,
+        queues_per_owner: 1,
+        items_per_queue: 12_000,
+        conns_per_queue: 8,
+    }
+}
+
+fn e2_tuning() -> pqueue_release::e2::E2Tuning {
+    pqueue_release::e2::E2Tuning {
+        segment_max_latency_ms: 1,
+        segment_target_bytes: 262_144,
+        worker_threads_per_node: 2,
+        server_cpu_limit: "1300m".into(),
+        server_cpu_request: "1000m".into(),
+        loadgen_cpu_limit: "2000m".into(),
+        cores: 12,
+        kind_node_image: "kindest/node:v1.36.1".into(),
+        sweep: 1,
+    }
+}
+
+/// Three scale points (owners 2/4/8, one queue per owner) that clear ALL FOUR E2 release bars:
+/// (1) ingest aggregate strictly non-decreasing 6500 -> 13000 -> 25000; (2) 8/2 ingest ratio 3.85x >= 3.5x;
+/// (3) worst per-queue ingest (3000/s) AND claim+finalize (25000/s) both >= the 2777.78/s E0 floor;
+/// (4) one-owner-per-queue: 56 == expected (8 queues each unknown on the 7 other nodes).
+fn e2_passing_sweep() -> Vec<pqueue_release::e2::E2ScalePoint> {
+    let expected_8 = pqueue_release::e2::expected_one_owner_confirmations(8, 1);
+    assert_eq!(expected_8, 56, "8 owners * 1 q * 7 other nodes");
+    vec![
+        e2_point(2, 6_500.0, 3_200.0, 60_000.0, 27_000.0, 2),
+        e2_point(4, 13_000.0, 3_100.0, 110_000.0, 26_000.0, 12),
+        e2_point(8, 25_000.0, 3_000.0, 210_000.0, 25_000.0, expected_8),
+    ]
+}
+
+#[test]
+fn tp002_e2_release_rows_emit_only_on_pass() {
+    use pqueue_release::e2::{build_e2_row, evaluate_e2_bars};
+    let tuning = e2_tuning();
+
+    // ---- ALL FOUR BARS PASS -> release-tier, E2 evidence id. ----
+    let pass = e2_passing_sweep();
+    let verdict = evaluate_e2_bars(&pass);
+    assert!(
+        verdict.bars_met,
+        "all-bars-pass sweep must meet the bars: {verdict:?}"
+    );
+    assert!(verdict.nondecreasing && verdict.scale_pass && verdict.floor_pass && verdict.disjoint_pass);
+    let row = build_e2_row(&pass, &tuning, &verdict);
+    assert_eq!(
+        row.evidence_tier, "release",
+        "a sweep that clears all four bars must emit a release-tier row"
+    );
+    assert_eq!(row.scale, "release");
+    assert_eq!(
+        row.measurements.tp002_evidence_ids,
+        vec!["E2".to_string()],
+        "the release row must carry exactly the E2 evidence id"
+    );
+    // Strict-validate + confirm the gate counts E2 as RELEASE (headline) evidence, not smoke.
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("pq-e2-pass-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    pqueue_release::append_row(&path, &row).expect("emit release row");
+    let summary = pqueue_release::verify_ledger(&path, true).expect("release row validates strict");
+    assert!(
+        summary.evidence_ids.contains("E2") && !summary.smoke_evidence_ids.contains("E2"),
+        "a release-tier E2 row must count toward the headline (release) bucket, not smoke"
+    );
+    let _ = std::fs::remove_file(&path);
+
+    // ---- ONE BAR VIOLATED AT A TIME -> bars_met == false AND the row stays SMOKE (never release). ----
+    // Each case mutates the passing sweep in exactly one dimension so the failing bar is the only difference.
+
+    // (a) NON-MONOTONIC ingest aggregate: 8-owner ingest dips below the 4-owner (bar 1), while the 8/2 ratio
+    //     stays >= 3.5x so ONLY monotonicity fails.
+    let mut a = e2_passing_sweep();
+    a[1].ingest_aggregate = 30_000.0; // 4-owner spikes above the 8-owner (25000)
+    let va = evaluate_e2_bars(&a);
+    assert!(!va.nondecreasing, "(a) bar 1 (monotonicity) must fail");
+    assert!(va.scale_pass, "(a) only monotonicity should fail, not the ratio");
+    assert!(!va.bars_met);
+    assert_eq!(build_e2_row(&a, &tuning, &va).evidence_tier, "smoke");
+
+    // (b) 8/2 RATIO BELOW 3.5x: keep ingest monotonic but nearly flat so the scale multiple misses (bar 2).
+    let mut b = e2_passing_sweep();
+    b[1].ingest_aggregate = 6_600.0;
+    b[2].ingest_aggregate = 6_700.0; // monotonic, but 6700/6500 = 1.03x < 3.5x
+    let vb = evaluate_e2_bars(&b);
+    assert!(vb.nondecreasing, "(b) ingest is still monotonic");
+    assert!(!vb.scale_pass, "(b) bar 2 (8/2 >= 3.5x) must fail");
+    assert!(vb.ratio_8_2 < SCALE_MULTIPLE_BAR);
+    assert!(!vb.bars_met);
+    assert_eq!(build_e2_row(&b, &tuning, &vb).evidence_tier, "smoke");
+
+    // (c) WORST PER-QUEUE BELOW THE E0 FLOOR (claim+finalize side): one owner's slowest queue drains under
+    //     2777.78/s (bar 3). The ingest side is left healthy so ONLY the floor fails.
+    let mut c = e2_passing_sweep();
+    c[2].drain_min_per_queue = 2_000.0; // < 2777.78/s
+    let vc = evaluate_e2_bars(&c);
+    assert!(!vc.floor_pass, "(c) bar 3 (worst per-queue >= floor) must fail");
+    assert!(vc.worst_drain_per_queue < FLOOR_ITEMS_PER_SEC);
+    assert!(!vc.bars_met);
+    assert_eq!(build_e2_row(&c, &tuning, &vc).evidence_tier, "smoke");
+    // And the ingest-side floor is just as load-bearing: a starved ingest queue also fails bar 3.
+    let mut c2 = e2_passing_sweep();
+    c2[0].ingest_min_per_queue = 1_500.0;
+    let vc2 = evaluate_e2_bars(&c2);
+    assert!(!vc2.floor_pass && !vc2.bars_met, "(c') ingest floor is load-bearing too");
+    assert_eq!(build_e2_row(&c2, &tuning, &vc2).evidence_tier, "smoke");
+
+    // (d) A QUEUE SERVED BY MORE THAN ONE OWNER: the 8-owner cross-node confirmation count comes up SHORT of
+    //     the expected 56 (some queue answered on a second node), so one-owner-per-queue is NOT proven (bar 4).
+    let mut d = e2_passing_sweep();
+    d[2].one_owner_confirmations = 55; // expected 56
+    let vd = evaluate_e2_bars(&d);
+    assert!(!vd.disjoint_pass, "(d) bar 4 (one-owner-per-queue) must fail");
+    assert_eq!(vd.expected_confirmations, 56);
+    assert!(!vd.bars_met);
+    assert_eq!(build_e2_row(&d, &tuning, &vd).evidence_tier, "smoke");
+
+    // ---- A SMOKE / IN-PROCESS-STYLE SWEEP STAYS SMOKE-TIER. ----
+    // A reduced in-process run produces good per-queue floors but CANNOT clear the cross-node 8/2 >= 3.5x
+    // headline (single-node owners do not multiply like network-distributed ones). It must never be promoted
+    // to release evidence.
+    let smoke = vec![
+        e2_point(2, 5_000.0, 3_000.0, 40_000.0, 30_000.0, 2),
+        e2_point(4, 6_000.0, 3_000.0, 50_000.0, 30_000.0, 12),
+        e2_point(8, 7_000.0, 3_000.0, 60_000.0, 30_000.0, 56), // 7000/5000 = 1.4x < 3.5x
+    ];
+    let vs = evaluate_e2_bars(&smoke);
+    assert!(!vs.bars_met, "an in-process-style sweep cannot clear the cross-node bars");
+    let smoke_row = build_e2_row(&smoke, &tuning, &vs);
+    assert_eq!(
+        smoke_row.evidence_tier, "smoke",
+        "a smoke/in-process-style sweep stays smoke-tier"
+    );
+
+    // ---- SCHEMA COMPATIBILITY with the committed live E2 evidence (36d405a9 / a983b5e2 rows). ----
+    // The release row this shared builder emits must be schema-identical to the rows already captured in
+    // docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl, so the historical evidence + any newly
+    // emitted row validate under the SAME ledger schema.
+    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl");
+    let text = std::fs::read_to_string(&evidence_path)
+        .unwrap_or_else(|e| panic!("read committed E2 evidence {}: {e}", evidence_path.display()));
+    let first = text.lines().find(|l| !l.trim().is_empty()).expect("evidence has a row");
+    let evidence_row: pqueue_release::LedgerRow =
+        serde_json::from_str(first).expect("committed E2 evidence row parses under the current schema");
+    let built = build_e2_row(&e2_passing_sweep(), &tuning, &evaluate_e2_bars(&e2_passing_sweep()));
+    assert_eq!(built.suite, evidence_row.suite, "suite must match the committed evidence");
+    assert_eq!(built.backend_profile, evidence_row.backend_profile);
+    assert_eq!(built.pass_bar, evidence_row.pass_bar);
+    assert_eq!(
+        built.measurements.tp002_evidence_ids, evidence_row.measurements.tp002_evidence_ids,
+        "evidence ids must match"
+    );
+    let built_keys: std::collections::BTreeSet<&String> = built.measurements.values.keys().collect();
+    let evidence_keys: std::collections::BTreeSet<&String> =
+        evidence_row.measurements.values.keys().collect();
+    assert_eq!(
+        built_keys, evidence_keys,
+        "the measured-value key set must match the committed E2 evidence rows exactly (schema-compatible)"
+    );
+
+    println!(
+        "TP-002 E2 release-gate judgment verified: all-bars-pass -> release; each single-bar violation -> smoke; schema matches committed live evidence"
+    );
+}
+
 /// Write `row` to its `<suite>.jsonl` ledger (one row per run) and assert it is WELL-FORMED — round-trips
 /// strict validation and carries `evidence_id`. (This checks the row's structure, not the measured values;
 /// the measurements are verified by the suite's own assertions above, which run before this emission.)

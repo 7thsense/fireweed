@@ -21,7 +21,6 @@
 //! The RESP client is a raw `std::net::TcpStream` client (no new dependency) — the same wire the
 //! off-the-shelf-client e2e exercises. Every number is MEASURED, never hard-coded.
 
-use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::exit;
@@ -32,10 +31,11 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
-const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
+/// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s. Single-
+/// sourced from the shared judgment module so the printed verdict and the actual bar can never drift.
+const FLOOR_ITEMS_PER_SEC: f64 = pqueue_release::e2::FLOOR_ITEMS_PER_SEC;
 /// The E2 headline cross-node multiple: 8-owner aggregate must be at least this times the 2-owner aggregate.
-const SCALE_MULTIPLE_BAR: f64 = 3.5;
+const SCALE_MULTIPLE_BAR: f64 = pqueue_release::e2::SCALE_MULTIPLE_BAR;
 
 // ----------------------------------------------------------------------------------------------------
 // Spec + result wire types (JSON between the orchestrator and this generator).
@@ -56,33 +56,14 @@ struct RunSpec {
     nodes: Vec<NodeSpec>,
 }
 
-/// One measured scale point (printed by `run`, consumed by `emit-row`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RunResult {
-    owners: usize,
-    ingest_aggregate: f64,
-    ingest_min_per_queue: f64,
-    drain_aggregate: f64,
-    drain_min_per_queue: f64,
-    one_owner_confirmations: usize,
-    queues_per_owner: usize,
-    items_per_queue: u64,
-    conns_per_queue: usize,
-}
+/// One measured scale point (printed by `run`, consumed by `emit-row`). This IS the shared
+/// `pqueue_release::e2::E2ScalePoint` (identical field names + serde shape) so the four-bar judgment is the
+/// SAME pure, unit-tested function the gate uses — never a fork.
+type RunResult = pqueue_release::e2::E2ScalePoint;
 
-/// Per-node tuning recorded into the evidence row (passed by the orchestrator to `emit-row`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TuningMeta {
-    segment_max_latency_ms: u64,
-    segment_target_bytes: usize,
-    worker_threads_per_node: usize,
-    server_cpu_limit: String,
-    server_cpu_request: String,
-    loadgen_cpu_limit: String,
-    cores: usize,
-    kind_node_image: String,
-    sweep: u64,
-}
+/// Per-node tuning recorded into the evidence row (passed by the orchestrator to `emit-row`). This IS the
+/// shared `pqueue_release::e2::E2Tuning`.
+type TuningMeta = pqueue_release::e2::E2Tuning;
 
 // ----------------------------------------------------------------------------------------------------
 // Raw RESP2 client over std::net::TcpStream (no new dependency).
@@ -631,182 +612,44 @@ fn cmd_emit_row(args: &[String]) -> ! {
     let tuning: TuningMeta = serde_json::from_str(&tuning_json).expect("parse --tuning JSON");
     let out = arg_value(args, "--out").expect("emit-row needs --out <path>");
 
-    // ---- Evaluate the four E2 bars (every value measured). ----
-    let nondecreasing = at(4).ingest_aggregate >= at(2).ingest_aggregate
-        && at(8).ingest_aggregate >= at(4).ingest_aggregate;
-    let ratio_8_2 = at(8).ingest_aggregate / at(2).ingest_aggregate;
-    let scale_pass = ratio_8_2 >= SCALE_MULTIPLE_BAR;
-    let worst_ingest_per_queue = results
-        .iter()
-        .map(|r| r.ingest_min_per_queue)
-        .fold(f64::INFINITY, f64::min);
-    let worst_drain_per_queue = results
-        .iter()
-        .map(|r| r.drain_min_per_queue)
-        .fold(f64::INFINITY, f64::min);
-    let worst_per_queue = worst_ingest_per_queue.min(worst_drain_per_queue);
-    let floor_pass = worst_per_queue >= FLOOR_ITEMS_PER_SEC;
-    let confirmations_at_8 = at(8).one_owner_confirmations;
-    let disjoint_pass = confirmations_at_8 > 0 && at(8).queues_per_owner > 0;
-    let all_pass = nondecreasing && scale_pass && floor_pass && disjoint_pass;
+    // ---- Judge the four E2 bars + build the row via the SHARED, pure, unit-tested judgment ----
+    // (`pqueue_release::e2`). This is the SAME function the `pqueue-bench` acceptance test exercises, so the
+    // gate and this binary can never disagree on what "release" means.
+    let verdict = pqueue_release::e2::evaluate_e2_bars(&results);
+    let all_pass = verdict.bars_met;
+    let tier = if all_pass { "release" } else { "smoke" };
 
     eprintln!("\n--- TP-002 E2 sweep {} verdict (kind) ---", tuning.sweep);
     eprintln!(
         "  (1) non-decreasing ingest 2->4->8 : {} ({:.0} -> {:.0} -> {:.0})",
-        yn(nondecreasing),
+        yn(verdict.nondecreasing),
         at(2).ingest_aggregate,
         at(4).ingest_aggregate,
         at(8).ingest_aggregate
     );
     eprintln!(
-        "  (2) 8/2 ingest aggregate multiple : {ratio_8_2:.2}x (bar >= {SCALE_MULTIPLE_BAR}x) -> {}",
-        yn(scale_pass)
+        "  (2) 8/2 ingest aggregate multiple : {:.2}x (bar >= {SCALE_MULTIPLE_BAR}x) -> {}",
+        verdict.ratio_8_2,
+        yn(verdict.scale_pass)
     );
     eprintln!(
-        "  (3) worst per-queue (floor {FLOOR_ITEMS_PER_SEC:.0}/s) : ingest {worst_ingest_per_queue:.0}/s, claim+finalize {worst_drain_per_queue:.0}/s -> {}",
-        yn(floor_pass)
+        "  (3) worst per-queue (floor {FLOOR_ITEMS_PER_SEC:.0}/s) : ingest {:.0}/s, claim+finalize {:.0}/s -> {}",
+        verdict.worst_ingest_per_queue,
+        verdict.worst_drain_per_queue,
+        yn(verdict.floor_pass)
     );
     eprintln!(
-        "  (4) one-owner-per-queue : {confirmations_at_8} cross-node 'no such queue' confirmations at 8 owners -> {}",
-        yn(disjoint_pass)
+        "  (4) one-owner-per-queue : {} of {} expected cross-node 'no such queue' confirmations at 8 owners -> {}",
+        verdict.one_owner_confirmations,
+        verdict.expected_confirmations,
+        yn(verdict.disjoint_pass)
     );
     eprintln!(
         "  ==> headline bars {}",
         if all_pass { "PASS" } else { "NOT MET" }
     );
 
-    let tier = if all_pass { "release" } else { "smoke" };
-    let scale = if all_pass { "release" } else { "smoke" };
-    let values = BTreeMap::from([
-        (
-            "owners_2_ingest_aggregate_per_s".to_string(),
-            serde_json::json!(at(2).ingest_aggregate.round()),
-        ),
-        (
-            "owners_4_ingest_aggregate_per_s".to_string(),
-            serde_json::json!(at(4).ingest_aggregate.round()),
-        ),
-        (
-            "owners_8_ingest_aggregate_per_s".to_string(),
-            serde_json::json!(at(8).ingest_aggregate.round()),
-        ),
-        (
-            "owners_2_claim_finalize_aggregate_per_s".to_string(),
-            serde_json::json!(at(2).drain_aggregate.round()),
-        ),
-        (
-            "owners_4_claim_finalize_aggregate_per_s".to_string(),
-            serde_json::json!(at(4).drain_aggregate.round()),
-        ),
-        (
-            "owners_8_claim_finalize_aggregate_per_s".to_string(),
-            serde_json::json!(at(8).drain_aggregate.round()),
-        ),
-        (
-            "scale_out_8_vs_2_ingest_multiple".to_string(),
-            serde_json::json!((ratio_8_2 * 100.0).round() / 100.0),
-        ),
-        (
-            "scale_multiple_bar".to_string(),
-            serde_json::json!(SCALE_MULTIPLE_BAR),
-        ),
-        (
-            "ingest_aggregate_non_decreasing".to_string(),
-            serde_json::json!(nondecreasing),
-        ),
-        (
-            "worst_ingest_per_queue_per_s".to_string(),
-            serde_json::json!(worst_ingest_per_queue.round()),
-        ),
-        (
-            "worst_claim_finalize_per_queue_per_s".to_string(),
-            serde_json::json!(worst_drain_per_queue.round()),
-        ),
-        (
-            "e0_floor_per_s".to_string(),
-            serde_json::json!(FLOOR_ITEMS_PER_SEC.round()),
-        ),
-        (
-            "one_owner_per_queue_confirmations".to_string(),
-            serde_json::json!(confirmations_at_8),
-        ),
-        (
-            "queues_per_owner".to_string(),
-            serde_json::json!(at(8).queues_per_owner),
-        ),
-        (
-            "items_per_queue".to_string(),
-            serde_json::json!(at(8).items_per_queue),
-        ),
-        (
-            "conns_per_queue".to_string(),
-            serde_json::json!(at(8).conns_per_queue),
-        ),
-        (
-            "segment_max_latency_ms".to_string(),
-            serde_json::json!(tuning.segment_max_latency_ms),
-        ),
-        (
-            "segment_target_bytes".to_string(),
-            serde_json::json!(tuning.segment_target_bytes),
-        ),
-        (
-            "worker_threads_per_node".to_string(),
-            serde_json::json!(tuning.worker_threads_per_node),
-        ),
-        (
-            "server_cpu_limit".to_string(),
-            serde_json::json!(tuning.server_cpu_limit),
-        ),
-        (
-            "server_cpu_request".to_string(),
-            serde_json::json!(tuning.server_cpu_request),
-        ),
-        (
-            "loadgen_cpu_limit".to_string(),
-            serde_json::json!(tuning.loadgen_cpu_limit),
-        ),
-        (
-            "kind_node_image".to_string(),
-            serde_json::json!(tuning.kind_node_image),
-        ),
-        ("sweep".to_string(), serde_json::json!(tuning.sweep)),
-        ("cores".to_string(), serde_json::json!(tuning.cores)),
-        ("bars_met".to_string(), serde_json::json!(all_pass)),
-    ]);
-    let row = pqueue_release::LedgerRow {
-        suite: "performance_multi_node_object_log_e2_kind".into(),
-        command: "scripts/perf/tp002-e2-kind.sh (pqueue-loadgen run -> emit-row; kind: CPU-limited server pods + lean in-cluster load Job)".into(),
-        backend_profile: "object_log_sqlite_projection".into(),
-        scale: scale.into(),
-        seed: 0,
-        environment: format!(
-            "live multi-node ADR-008 owner cluster on a kind (Kubernetes-in-docker) cluster; \
-             {cores} cores; node image {node_image}; owner counts 2/4/8; each owner an independent \
-             pqueue-service Deployment(replicas=1)+Service on object_log_sqlite_projection in SEGMENTED \
-             group-commit mode (TD-004) with its own object-log root + sqlite projection on an emptyDir \
-             medium=Memory tmpfs, distinct PQUEUE_NODE_ID, disjoint PQUEUE_BOOTSTRAP_QUEUES, CPU \
-             request={req}/limit={lim}, {worker} worker threads; load driven by a LEAN, SEPARATED \
-             in-cluster Job (CPU limit {load}) speaking raw RESP pod->pod over Service ClusterIP to each \
-             owner; each queue driven by {conns} concurrent connections",
-            cores = tuning.cores,
-            node_image = tuning.kind_node_image,
-            req = tuning.server_cpu_request,
-            lim = tuning.server_cpu_limit,
-            worker = tuning.worker_threads_per_node,
-            load = tuning.loadgen_cpu_limit,
-            conns = at(8).conns_per_queue,
-        ),
-        exit_status: 0,
-        ac_ids: vec![],
-        inv_ids: vec![],
-        pass_bar: "E2: ingest aggregate strictly non-decreasing 2->4->8; 8-owner ingest aggregate >= 3.5x 2-owner; worst per-queue ingest AND claim+finalize each >= E0 floor (2777.78/s); no queue served by more than one owner".into(),
-        evidence_tier: tier.into(),
-        measurements: pqueue_release::Measurements {
-            tp002_evidence_ids: vec!["E2".into()],
-            values,
-        },
-    };
+    let row = pqueue_release::e2::build_e2_row(&results, &tuning, &verdict);
 
     let path = std::path::PathBuf::from(&out);
     pqueue_release::append_row(&path, &row).expect("emit ledger row");
