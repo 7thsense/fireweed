@@ -560,13 +560,13 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
 async fn start_provisions_queues_and_serves_end_to_end() {
     // `start()` constructs the backend internally, so the ONLY way it can serve a request is if it
     // provisions the config's queues. Boot it, then drive it with a stock client (no out-of-band setup).
-    let server = start(Config {
-        backend: Backend::Memory,
-        node_id: 0,
-        listen: "127.0.0.1:0".to_string(),
-        reclaim_interval: Duration::from_secs(60),
-        queues: vec![qdef()],
-    })
+    let server = start(Config::new(
+        Backend::Memory,
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
     .await
     .unwrap();
 
@@ -602,16 +602,16 @@ async fn start_provisions_queues_and_serves_end_to_end() {
 async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing() {
     let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
     let first_id = {
-        let server = start(Config {
-            backend: Backend::ObjectLogSqlite {
+        let server = start(Config::new(
+            Backend::ObjectLogSqlite {
                 object_root: object_root.clone(),
                 projection_path: projection_path.clone(),
             },
-            node_id: 0,
-            listen: "127.0.0.1:0".to_string(),
-            reclaim_interval: Duration::from_secs(60),
-            queues: vec![qdef()],
-        })
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        ))
         .await
         .unwrap();
         let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
@@ -648,16 +648,16 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
     };
 
     let _ = std::fs::remove_file(&projection_path);
-    let server = start(Config {
-        backend: Backend::ObjectLogSqlite {
+    let server = start(Config::new(
+        Backend::ObjectLogSqlite {
             object_root: object_root.clone(),
             projection_path: projection_path.clone(),
         },
-        node_id: 0,
-        listen: "127.0.0.1:0".to_string(),
-        reclaim_interval: Duration::from_secs(60),
-        queues: vec![qdef()],
-    })
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
     .await
     .unwrap();
     let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
@@ -700,17 +700,17 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
     let config = SegmentConfig::new(262_144, 5).unwrap();
     let (object_root, projection_path) = tmp_runtime_paths("segolsqlite");
     let first_id = {
-        let server = start(Config {
-            backend: Backend::SegmentedObjectLogSqlite {
+        let server = start(Config::new(
+            Backend::SegmentedObjectLogSqlite {
                 object_root: object_root.clone(),
                 projection_path: projection_path.clone(),
                 config,
             },
-            node_id: 0,
-            listen: "127.0.0.1:0".to_string(),
-            reclaim_interval: Duration::from_secs(60),
-            queues: vec![qdef()],
-        })
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        ))
         .await
         .unwrap();
         let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
@@ -750,17 +750,17 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
     // Reopen against the SAME durable segment log but a FRESH projection db: recovery must replay the
     // committed segments (via `read_all`) so the acked item is NOT redelivered and ids keep advancing.
     let _ = std::fs::remove_file(&projection_path);
-    let server = start(Config {
-        backend: Backend::SegmentedObjectLogSqlite {
+    let server = start(Config::new(
+        Backend::SegmentedObjectLogSqlite {
             object_root: object_root.clone(),
             projection_path: projection_path.clone(),
             config,
         },
-        node_id: 0,
-        listen: "127.0.0.1:0".to_string(),
-        reclaim_interval: Duration::from_secs(60),
-        queues: vec![qdef()],
-    })
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
     .await
     .unwrap();
     let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();

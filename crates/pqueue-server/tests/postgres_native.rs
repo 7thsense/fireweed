@@ -50,16 +50,16 @@ fn qdef() -> QueueDefinition {
 /// any database — backend selection happens before any connection.
 #[test]
 fn postgres_native_backend_variant_is_selectable() {
-    let config = Config {
-        backend: Backend::PostgresNative {
+    let config = Config::new(
+        Backend::PostgresNative {
             url: "postgres://postgres@127.0.0.1:1/postgres".to_string(),
             credentials: None,
         },
-        node_id: 7,
-        listen: "127.0.0.1:0".to_string(),
-        reclaim_interval: Duration::from_secs(60),
-        queues: vec![qdef()],
-    };
+        7,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    );
     assert!(matches!(config.backend, Backend::PostgresNative { .. }));
 }
 
@@ -177,16 +177,16 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
     // `Err` here proves it ran on the blocking pool via the wrapper's `spawn_blocking` boundary.
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        start(Config {
-            backend: Backend::PostgresNative {
+        start(Config::new(
+            Backend::PostgresNative {
                 url: "postgres://postgres@127.0.0.1:1/postgres".to_string(),
                 credentials: None,
             },
-            node_id: 0,
-            listen: "127.0.0.1:0".to_string(),
-            reclaim_interval: Duration::from_secs(60),
-            queues: vec![qdef()],
-        }),
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        )),
     )
     .await
     .expect("start() must not hang on a refused postgres connection");
@@ -232,16 +232,16 @@ async fn postgres_native_live_push_claim_ack_over_resp() {
         .unwrap();
     }
 
-    let server = start(Config {
-        backend: Backend::PostgresNative {
+    let server = start(Config::new(
+        Backend::PostgresNative {
             url: url.clone(),
             credentials: None,
         },
-        node_id: 0,
-        listen: "127.0.0.1:0".to_string(),
-        reclaim_interval: Duration::from_secs(60),
-        queues: vec![qdef()],
-    })
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
     .await
     .expect("postgres_native server starts against a live DB");
 

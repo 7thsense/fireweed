@@ -83,6 +83,11 @@ impl LedgerRow {
 /// `$PQUEUE_LEDGER_DIR` if set (the CI gate points every suite at one collection dir), else
 /// `<repo>/target/pqueue-ledger` derived from the caller's `manifest_dir` (pass `env!("CARGO_MANIFEST_DIR")`
 /// so this resolves to the repo-root `target/` regardless of which workspace the suite runs in).
+///
+/// NOTE: this `PQUEUE_LEDGER_DIR` read is the ONE intentional library `std::env` access in the workspace. It
+/// is CI / test-evidence tooling (where validation suites drop their JSONL ledger rows), NOT server runtime
+/// configuration — so it is exempt from the "no env reads in library runtime code" rule. The runtime
+/// `Config` populator (`pqueue_server::Config::from_env`) is the only env→config path for the server itself.
 pub fn ledger_path(manifest_dir: &str, suite: &str) -> std::path::PathBuf {
     let dir = match std::env::var("PQUEUE_LEDGER_DIR") {
         Ok(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),

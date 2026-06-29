@@ -1,203 +1,16 @@
-use std::env;
-use std::path::PathBuf;
-use std::time::Duration;
+//! The `pqueue-service` binary: the composition root's executable entry point.
+//!
+//! This is the ONLY place that reads the live process environment. `main` does exactly one env thing —
+//! collect `std::env::vars()` into a map — then hands it to the single optional populator
+//! [`Config::from_env`], builds the tokio runtime from the resulting typed [`Config`], and runs the server
+//! via [`start`]. All env-NAME knowledge lives in `Config::from_env` (the `env-config` feature of the
+//! library); the library's `Config` + `start`/`start_with_ownership` carry no environment dependency.
 
-use pqueue_core::{
-    EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
-};
-use pqueue_server::{Backend, Config, SegmentConfig, start};
+use std::collections::BTreeMap;
 
-fn env_or(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
-}
+use pqueue_server::{Config, start};
 
-fn parse_usize(key: &str, default: usize) -> usize {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
-fn parse_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(default)
-}
-
-fn parse_duration_ms(key: &str, default_ms: u64) -> Duration {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or_else(|| Duration::from_millis(default_ms))
-}
-
-fn unsupported_storage(log: &str, projection: &str, reason: &str) -> ! {
-    eprintln!(
-        "unsupported storage configuration PQUEUE_LOG_BACKEND={log} PQUEUE_PROJECTION_BACKEND={projection}: {reason}"
-    );
-    std::process::exit(2);
-}
-
-fn parse_backend() -> Backend {
-    let log = env_or("PQUEUE_LOG_BACKEND", "objectlog");
-    let projection = env_or("PQUEUE_PROJECTION_BACKEND", "inmemory");
-
-    match (log.as_str(), projection.as_str()) {
-        ("memory", "inmemory") => Backend::Memory,
-        ("sqlite", "inmemory") => Backend::Sqlite(PathBuf::from(env_or(
-            "PQUEUE_SQLITE_LOG_PATH",
-            "/var/lib/pqueue/pqueue-log.db",
-        ))),
-        ("objectlog", "inmemory") => {
-            let object_root = PathBuf::from(env_or(
-                "PQUEUE_OBJECT_LOG_ROOT",
-                "/var/lib/pqueue/object-log",
-            ));
-            // `file` (default) = the per-command file `ObjectLogBackend`; `segmented` = the group-commit
-            // substrate over an IN-MEMORY projection (Fix B): durable via the sealed log, fast apply.
-            match env_or("PQUEUE_OBJECT_LOG_MODE", "file").as_str() {
-                "file" => Backend::ObjectLog(object_root),
-                "segmented" => {
-                    let target_bytes = parse_usize("PQUEUE_SEGMENT_TARGET_BYTES", 262_144);
-                    let max_latency_ms = parse_u64("PQUEUE_SEGMENT_MAX_LATENCY_MS", 20);
-                    let config =
-                        SegmentConfig::new(target_bytes, max_latency_ms).unwrap_or_else(|e| {
-                            eprintln!("invalid segment configuration: {e}");
-                            std::process::exit(2);
-                        });
-                    Backend::SegmentedObjectLogInMemory {
-                        object_root,
-                        config,
-                    }
-                }
-                other => unsupported_storage(
-                    &log,
-                    &projection,
-                    &format!("unknown PQUEUE_OBJECT_LOG_MODE={other:?}; expected file|segmented"),
-                ),
-            }
-        }
-        ("objectlog", "sqlite") => {
-            let object_root = PathBuf::from(env_or(
-                "PQUEUE_OBJECT_LOG_ROOT",
-                "/var/lib/pqueue/object-log",
-            ));
-            let projection_path = PathBuf::from(env_or(
-                "PQUEUE_SQLITE_PROJECTION_PATH",
-                "/var/lib/pqueue/pqueue-projection.db",
-            ));
-            // `file` (default) preserves the per-command object-log path; `segmented` selects the
-            // group-commit substrate (one sealed segment object + one batched SQLite apply per batch).
-            match env_or("PQUEUE_OBJECT_LOG_MODE", "file").as_str() {
-                "file" => Backend::ObjectLogSqlite {
-                    object_root,
-                    projection_path,
-                },
-                "segmented" => {
-                    let target_bytes = parse_usize("PQUEUE_SEGMENT_TARGET_BYTES", 262_144);
-                    let max_latency_ms = parse_u64("PQUEUE_SEGMENT_MAX_LATENCY_MS", 20);
-                    let config =
-                        SegmentConfig::new(target_bytes, max_latency_ms).unwrap_or_else(|e| {
-                            eprintln!("invalid segment configuration: {e}");
-                            std::process::exit(2);
-                        });
-                    Backend::SegmentedObjectLogSqlite {
-                        object_root,
-                        projection_path,
-                        config,
-                    }
-                }
-                other => unsupported_storage(
-                    &log,
-                    &projection,
-                    &format!("unknown PQUEUE_OBJECT_LOG_MODE={other:?}; expected file|segmented"),
-                ),
-            }
-        }
-        #[cfg(feature = "postgres")]
-        ("postgres", "inmemory") => {
-            // Resolve the DSN + optional Databricks credentials from the env names the Helm Lakebase
-            // profile renders (the DSN secret is `PQUEUE_POSTGRES_LOG_DATABASE_URL`; `PQUEUE_PG_URL` is the
-            // local/dev fallback). Fails closed if an sslmode=require DSN meets a non-tls build.
-            let env: std::collections::BTreeMap<String, String> = env::vars().collect();
-            pqueue_server::resolve_postgres_backend(&env)
-                .unwrap_or_else(|reason| unsupported_storage(&log, &projection, &reason))
-        }
-        #[cfg(not(feature = "postgres"))]
-        ("postgres", "inmemory") => unsupported_storage(
-            &log,
-            &projection,
-            "postgres adapter is wired through the blocking-safe PostgresNativeBackend, but this binary \
-             was built without the `postgres` cargo feature; rebuild with `--features postgres` (or \
-             `--features postgres,tls` for native-tls)",
-        ),
-        (_, "sqlite" | "postgres") => unsupported_storage(
-            &log,
-            &projection,
-            "the requested projection backend is not wired by pqueue-server yet",
-        ),
-        _ => unsupported_storage(
-            &log,
-            &projection,
-            "supported wired combinations are memory/inmemory, sqlite/inmemory, and objectlog/inmemory",
-        ),
-    }
-}
-
-fn queue_definition(tenant: &str, queue: &str) -> QueueDefinition {
-    QueueDefinition {
-        tenant_id: TenantId::new(tenant).unwrap_or_else(|e| {
-            eprintln!("invalid tenant id in PQUEUE_BOOTSTRAP_QUEUES: {e}");
-            std::process::exit(2);
-        }),
-        queue_id: QueueId::new(queue).unwrap_or_else(|e| {
-            eprintln!("invalid queue id in PQUEUE_BOOTSTRAP_QUEUES: {e}");
-            std::process::exit(2);
-        }),
-        priority_model: PriorityModel {
-            kind: PriorityModelKind::Int64,
-            direction: PriorityDirection::Ascending,
-            tie_breaker: PriorityTieBreaker::CreatedSequence,
-        },
-        ordering_mode: OrderingMode::Strict,
-        max_rank_error: 0,
-        progress_bound_ms: 60_000,
-        eligibility_policy: EligibilityPolicy::default(),
-        cohort_policy: None,
-        recurrence: RecurrencePolicy::default(),
-        request_id_retention_ms: 60_000,
-        client_item_key_retention_ms: 60_000,
-        terminal_retention_ms: 60_000,
-        max_lease_duration_ms: 60_000,
-        retry_policy: RetryPolicy { max_attempts: 3 },
-        max_push_batch_size: 100,
-        max_claim_batch_size: 100,
-        max_eligible_group_size: None,
-        secondary_indexes: vec![],
-    }
-}
-
-fn parse_bootstrap_queues() -> Vec<QueueDefinition> {
-    env_or("PQUEUE_BOOTSTRAP_QUEUES", "t1:q1")
-        .split(',')
-        .filter_map(|entry| {
-            let trimmed = entry.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let (tenant, queue) = trimmed.split_once(':').unwrap_or_else(|| {
-                eprintln!(
-                    "invalid PQUEUE_BOOTSTRAP_QUEUES entry {trimmed:?}; expected tenant:queue"
-                );
-                std::process::exit(2);
-            });
-            Some(queue_definition(tenant, queue))
-        })
-        .collect()
-}
+const HELP: &str = "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_PG_URL=postgres://user:pass@host:5432/db   (postgres backend; build --features postgres[,tls])\n  PQUEUE_POSTGRES_LOG_DATABASE_URL=...   (Helm/Lakebase DSN secret; preferred over PQUEUE_PG_URL; sslmode=require needs --features tls)\n  DATABRICKS_HOST/...=...   (optional Databricks service-principal|PAT credential injection for the postgres backend)\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_OBJECT_LOG_MODE=file|segmented   (objectlog+sqlite or objectlog+inmemory; file=per-command, segmented=group-commit)\n  PQUEUE_SEGMENT_TARGET_BYTES=262144      (segmented: byte-size seal trigger)\n  PQUEUE_SEGMENT_MAX_LATENCY_MS=20        (segmented: latency seal trigger)\n  PQUEUE_RECOVERY_MAX_TAIL_COMMANDS=1000000  (object_log_sqlite: recovery-window budget; reopen replays only the object-log tail beyond the projection snapshot high-water, warning if it exceeds this)\n  PQUEUE_DEBUG_SEGMENTS=1                  (segmented: log group-commit segment counters ~1x/s)\n  PQUEUE_WORKER_THREADS=N                  (cap the tokio worker-thread pool; default one per core)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000";
 
 // Multi-threaded runtime: blocking durable work (segment seal I/O + the batched SQLite apply) runs on a
 // worker thread without stalling the network accept/read path on the others, so concurrent pushes from many
@@ -208,52 +21,46 @@ fn parse_bootstrap_queues() -> Vec<QueueDefinition> {
 // many nodes are CO-LOCATED on one host (e.g. a dense multi-owner box), where the default per-process
 // `num_cpus` pool would oversubscribe the shared cores and degrade every node's throughput.
 fn main() {
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("pqueue-service {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{HELP}");
+        return;
+    }
+
+    // The ONE process-environment read in the whole codebase's runtime path: collect the live env into a
+    // plain map, then let the single optional populator map the documented names onto the typed Config.
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let config = match Config::from_env(&env) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
-    if let Some(n) = env::var("PQUEUE_WORKER_THREADS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-    {
+    if let Some(n) = config.worker_threads {
         builder.worker_threads(n);
     }
     builder
         .build()
         .expect("build tokio runtime")
-        .block_on(async_main());
+        .block_on(run(config));
 }
 
-async fn async_main() {
-    if env::args().any(|arg| arg == "--version" || arg == "-V") {
-        println!("pqueue-service {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
-    if env::args().any(|arg| arg == "--help" || arg == "-h") {
-        println!(
-            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_PG_URL=postgres://user:pass@host:5432/db   (postgres backend; build --features postgres[,tls])\n  PQUEUE_POSTGRES_LOG_DATABASE_URL=...   (Helm/Lakebase DSN secret; preferred over PQUEUE_PG_URL; sslmode=require needs --features tls)\n  DATABRICKS_HOST/...=...   (optional Databricks service-principal|PAT credential injection for the postgres backend)\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_OBJECT_LOG_MODE=file|segmented   (objectlog+sqlite or objectlog+inmemory; file=per-command, segmented=group-commit)\n  PQUEUE_SEGMENT_TARGET_BYTES=262144      (segmented: byte-size seal trigger)\n  PQUEUE_SEGMENT_MAX_LATENCY_MS=20        (segmented: latency seal trigger)\n  PQUEUE_RECOVERY_MAX_TAIL_COMMANDS=1000000  (object_log_sqlite: recovery-window budget; reopen replays only the object-log tail beyond the projection snapshot high-water, warning if it exceeds this)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
-        );
-        return;
-    }
-
-    let listen = env_or("PQUEUE_LISTEN_ADDR", "0.0.0.0:8080");
-    let log_backend = env_or("PQUEUE_LOG_BACKEND", "objectlog");
-    let projection_backend = env_or("PQUEUE_PROJECTION_BACKEND", "inmemory");
-    let config = Config {
-        backend: parse_backend(),
-        node_id: pqueue_server::resolve_node_id(&env_or("PQUEUE_NODE_ID", "0")),
-        listen,
-        reclaim_interval: parse_duration_ms("PQUEUE_RECLAIM_INTERVAL_MS", 1_000),
-        queues: parse_bootstrap_queues(),
-    };
-
+async fn run(config: Config) {
+    let listen = config.listen.clone();
     match start(config).await {
         Ok(server) => {
             eprintln!(
-                "pqueue-service {} listening on {} with log={} projection={}",
+                "pqueue-service {} listening on {} (configured listen={})",
                 env!("CARGO_PKG_VERSION"),
                 server.addr(),
-                log_backend,
-                projection_backend
+                listen,
             );
             std::future::pending::<()>().await;
         }

@@ -51,16 +51,11 @@ pub struct RecoveryStats {
 /// same transaction that applies each sealed batch, so the tail is normally a handful of commands (only what
 /// was durably sealed but not yet projection-applied at crash time). Exceeding this budget is logged as a
 /// recovery-window warning so an operator can investigate a projection that has fallen far behind the log.
-const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
-
-/// Read the recovery-window budget knob `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` (commands), defaulting to
-/// [`DEFAULT_RECOVERY_MAX_TAIL`]. Documented in the `pqueue-service` help text and the operator guide.
-fn env_recovery_max_tail() -> u64 {
-    std::env::var("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_RECOVERY_MAX_TAIL)
-}
+///
+/// This is the in-code default; the composition root may override it from typed [`Config`](crate::Config)
+/// (populated by the bin from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`) via [`Self::with_recovery_max_tail`]. The
+/// backend itself never reads the process environment.
+pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 
 pub struct ObjectLogSqliteBackend {
     log: LocalObjectLog,
@@ -86,7 +81,7 @@ impl ObjectLogSqliteBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             op_lock: tokio::sync::Mutex::new(()),
-            recovery_max_tail: env_recovery_max_tail(),
+            recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             recovery_stats: Mutex::new(HashMap::new()),
         })
     }
@@ -604,6 +599,10 @@ pub struct SegmentedObjectLogSqliteBackend {
     flush_interval: Duration,
     /// Recovery-window budget (max tail commands) before a reopen logs a recovery-window warning.
     recovery_max_tail: u64,
+    /// Opt-in group-commit telemetry: when set, the flusher logs the segment counters ~1x/s. Set by the
+    /// composition root from typed `Config` (populated by the bin from `PQUEUE_DEBUG_SEGMENTS`); the backend
+    /// never reads the process environment.
+    debug_segments: bool,
     /// Last per-queue snapshot-tail recovery telemetry (proof the reopen avoided a full-genesis replay).
     recovery_stats: Mutex<HashMap<QueueKey, RecoveryStats>>,
 }
@@ -658,7 +657,8 @@ impl SegmentedObjectLogSqliteBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             flush_interval: Duration::from_millis(flush_ms),
-            recovery_max_tail: env_recovery_max_tail(),
+            recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
+            debug_segments: false,
             recovery_stats: Mutex::new(HashMap::new()),
         })
     }
@@ -679,6 +679,13 @@ impl SegmentedObjectLogSqliteBackend {
     /// `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
     pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
         self.recovery_max_tail = max_tail;
+        self
+    }
+
+    /// Enable opt-in group-commit telemetry (the explicit form of the `PQUEUE_DEBUG_SEGMENTS` env knob):
+    /// when `true`, the flusher logs segment counters ~1x/s. Set by the composition root from typed `Config`.
+    pub fn with_debug_segments(mut self, debug_segments: bool) -> Self {
+        self.debug_segments = debug_segments;
         self
     }
 
@@ -839,9 +846,10 @@ impl SegmentedObjectLogSqliteBackend {
     async fn flush_loop(self: Arc<Self>) {
         let mut ticker = tokio::time::interval(self.flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Opt-in group-commit telemetry (read once; the hot tick path stays allocation-free). When set, log
-        // the segment counters ~1x/s so seal rate + mean batch size are observable during a load run.
-        let debug_segments = std::env::var("PQUEUE_DEBUG_SEGMENTS").is_ok();
+        // Opt-in group-commit telemetry (the typed `debug_segments` flag, set by the composition root from
+        // `Config`). When set, log the segment counters ~1x/s so seal rate + mean batch size are observable
+        // during a load run. The hot tick path stays allocation-free.
+        let debug_segments = self.debug_segments;
         let mut dbg_last = std::time::Instant::now();
         loop {
             ticker.tick().await;

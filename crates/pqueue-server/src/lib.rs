@@ -33,9 +33,17 @@ use tokio_util::sync::CancellationToken;
 
 mod object_log_sqlite;
 pub use object_log_sqlite::{
-    ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,
+    DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend,
+    SegmentedObjectLogSqliteBackend,
 };
 pub use pqueue_objectlog::segmented::SegmentConfig;
+
+/// The single optional env-var populator for [`Config`] (`Config::from_env`) plus its [`ConfigError`]. Pure
+/// over a caller-supplied env map; the only process-env read lives in the `pqueue-service` bin's `main`.
+#[cfg(feature = "env-config")]
+mod env_config;
+#[cfg(feature = "env-config")]
+pub use env_config::ConfigError;
 
 #[cfg(feature = "postgres")]
 mod postgres_native;
@@ -134,7 +142,11 @@ pub fn resolve_postgres_backend(
     Ok(Backend::PostgresNative { url, credentials })
 }
 
-/// Server configuration.
+/// The single authoritative, fully-typed runtime configuration for a pqueue server. Every knob the server
+/// needs lives here as a typed field; there is exactly ONE optional env populator (`Config::from_env`, in
+/// the `pqueue-service` bin) that maps the documented `PQUEUE_*`/`DATABRICKS_*` env names onto these fields.
+/// A pure-library embedder constructs this struct directly and never touches the process environment — the
+/// library reads no env vars at all.
 pub struct Config {
     pub backend: Backend,
     /// This instance's node id, packed into the disambiguation byte of every minted `ItemId` (ADR-009) so
@@ -151,6 +163,39 @@ pub struct Config {
     /// with no queues here (and no out-of-band creation) would reject every request with `no such
     /// queue` — provision them up front.
     pub queues: Vec<QueueDefinition>,
+    /// Recovery-window budget (max object-log tail commands) before a segmented/object-log+SQLite reopen
+    /// logs a recovery-window warning. Applied to the constructed backend by [`start`]. The env populator
+    /// sources it from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`; default [`DEFAULT_RECOVERY_MAX_TAIL`].
+    pub recovery_max_tail: u64,
+    /// Opt-in group-commit telemetry for the segmented+SQLite backend (the typed form of `PQUEUE_DEBUG_SEGMENTS`).
+    pub debug_segments: bool,
+    /// Tokio worker-thread cap (the typed form of `PQUEUE_WORKER_THREADS`). `None` = one worker per core.
+    /// Consumed by the bin when building the runtime, not by [`start`].
+    pub worker_threads: Option<usize>,
+}
+
+impl Config {
+    /// Construct a config with the in-code defaults for the env-only knobs (recovery budget, debug-segments,
+    /// worker-threads). The composition root / embedder supplies the core fields; the optional knobs default
+    /// to their library defaults. Keeps call sites that don't care about the env knobs concise.
+    pub fn new(
+        backend: Backend,
+        node_id: u8,
+        listen: String,
+        reclaim_interval: Duration,
+        queues: Vec<QueueDefinition>,
+    ) -> Self {
+        Self {
+            backend,
+            node_id,
+            listen,
+            reclaim_interval,
+            queues,
+            recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
+            debug_segments: false,
+            worker_threads: None,
+        }
+    }
 }
 
 pub struct OwnershipRuntime<B, CP> {
@@ -789,8 +834,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let p = projection_path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let backend =
-                Arc::new(ObjectLogSqliteBackend::open(object_root, p)?.with_node_id(node_id));
+            let backend = Arc::new(
+                ObjectLogSqliteBackend::open(object_root, p)?
+                    .with_node_id(node_id)
+                    .with_recovery_max_tail(config.recovery_max_tail),
+            );
             let cp = Arc::new(InMemoryControlPlane::default());
             let owner = OwnerId::new(format!("node-{node_id}"))
                 .map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -815,7 +863,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
             let backend = Arc::new(
                 SegmentedObjectLogSqliteBackend::open(object_root, p, segment_config)?
-                    .with_node_id(node_id),
+                    .with_node_id(node_id)
+                    .with_recovery_max_tail(config.recovery_max_tail)
+                    .with_debug_segments(config.debug_segments),
             );
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
             backend.spawn_flusher();

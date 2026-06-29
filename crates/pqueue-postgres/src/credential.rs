@@ -83,10 +83,9 @@ pub struct DatabricksCredentialConfig {
 }
 
 impl DatabricksCredentialConfig {
-    pub fn from_env() -> EngineResult<Self> {
-        Self::from_env_map(std::env::vars())
-    }
-
+    /// Build the config from a caller-provided iterator of `(key, value)` env-style pairs. This is a PURE
+    /// mapping over the supplied vars — it does NOT touch the process environment, so it is library-safe.
+    /// The composition root (the bin) collects `std::env::vars()` and passes them in; tests pass a fixture.
     pub fn from_env_map<I, K, V>(vars: I) -> EngineResult<Self>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -198,10 +197,6 @@ pub struct DatabricksCredentialProvider {
 }
 
 impl DatabricksCredentialProvider {
-    pub fn from_env() -> EngineResult<Self> {
-        Self::from_config(DatabricksCredentialConfig::from_env()?)
-    }
-
     pub fn from_config(config: DatabricksCredentialConfig) -> EngineResult<Self> {
         let fetcher = databricks_fetcher_with_runner(config.clone(), run_databricks_cli);
         Ok(Self {
