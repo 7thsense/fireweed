@@ -50,7 +50,7 @@ use bytes::Bytes;
 use postgres::Client;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
-    QueueDefinition, QueueId, TenantId, UtcTimestamp,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
@@ -66,6 +66,7 @@ use pqueue_engine::{
     validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
+use sha2::{Digest, Sha256};
 
 mod connect;
 mod control_plane;
@@ -103,7 +104,16 @@ CREATE TABLE IF NOT EXISTS snapshots (
     ord BIGSERIAL, epoch BIGINT NOT NULL, seq BIGINT NOT NULL, payload BYTEA NOT NULL,
     PRIMARY KEY (tenant, queue, ref_id)
 );
+CREATE TABLE IF NOT EXISTS request_idempotency (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, operation TEXT NOT NULL, request_id TEXT NOT NULL,
+    request_fingerprint BYTEA NOT NULL, response_payload TEXT NOT NULL, expires_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (tenant, queue, operation, request_id)
+);
+CREATE INDEX IF NOT EXISTS request_idempotency_expiry_idx ON request_idempotency (expires_at);
 "#;
+
+const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
 
 /// Map a postgres error to the engine's adapter-level storage error.
 fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
@@ -114,6 +124,35 @@ fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
 /// storage error rather than panicking inside the durable write path.
 fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+fn push_request_fingerprint(items: &[PushSpec]) -> EngineResult<Vec<u8>> {
+    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+fn ts_nanos(ts: UtcTimestamp) -> i64 {
+    ts.seconds
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.nanoseconds as i64)
+}
+
+fn request_expires_at(def: &QueueDefinition, now: UtcTimestamp) -> i64 {
+    ts_nanos(now).saturating_add((def.request_id_retention_ms as i64).saturating_mul(1_000_000))
+}
+
+fn item_ids_to_json(ids: &[ItemId]) -> EngineResult<String> {
+    let raw: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    to_json(&raw)
+}
+
+fn item_ids_from_json(raw: String) -> EngineResult<Vec<ItemId>> {
+    let decoded: Vec<String> =
+        serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    decoded
+        .into_iter()
+        .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+        .collect()
 }
 
 fn parts(shard: &QueueKey) -> (String, String) {
@@ -225,6 +264,91 @@ impl Inner {
                  a failure here means the durable log advanced past the in-memory projection",
             );
         Ok(())
+    }
+
+    fn commit_request_id_push_locked(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: &[u8],
+        expires_at: i64,
+        env: CommandEnvelope,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<Vec<ItemId>> {
+        validate_gate_command(false, &env.command)?;
+        let (t, q) = parts(shard);
+        let now_n = ts_nanos(env.created_at);
+        let mut tx = st(self.client.transaction())?;
+        let epoch: i64 = st(tx.query_opt(
+            "SELECT assignment_epoch FROM queues WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?
+        .ok_or(EngineError::NotFound)?
+        .get(0);
+        if expected_epoch.is_some_and(|e| e != epoch as u64) {
+            return Err(EngineError::EpochFenced);
+        }
+        let prior = st(tx.query_opt(
+            "SELECT request_fingerprint, response_payload, expires_at FROM request_idempotency \
+             WHERE tenant=$1 AND queue=$2 AND operation=$3 AND request_id=$4",
+            &[&t, &q, &IDEMPOTENCY_OPERATION_PUSH, &request_id.as_str()],
+        ))?;
+        if let Some(row) = prior {
+            let prior_fingerprint: Vec<u8> = row.get(0);
+            let response_payload: String = row.get(1);
+            let prior_expires_at: i64 = row.get(2);
+            if prior_expires_at > now_n {
+                if prior_fingerprint == fingerprint {
+                    return item_ids_from_json(response_payload);
+                }
+                return Err(EngineError::RequestIdConflict);
+            }
+            st(tx.execute(
+                "DELETE FROM request_idempotency \
+                 WHERE tenant=$1 AND queue=$2 AND operation=$3 AND request_id=$4",
+                &[&t, &q, &IDEMPOTENCY_OPERATION_PUSH, &request_id.as_str()],
+            ))?;
+        }
+        let json = to_json(&env)?;
+        let seq: i64 = st(tx.query_one(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?
+        .get(0);
+        st(tx.execute(
+            "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES($1,$2,$3,$4,$5)",
+            &[&t, &q, &epoch, &seq, &json],
+        ))?;
+        st(tx.execute(
+            "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+            &[&t, &q, &epoch, &seq],
+        ))?;
+        st(tx.execute(
+            "INSERT INTO request_idempotency \
+             (tenant,queue,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+            &[
+                &t,
+                &q,
+                &IDEMPOTENCY_OPERATION_PUSH,
+                &request_id.as_str(),
+                &fingerprint,
+                &item_ids_to_json(&env.item_ids)?,
+                &expires_at,
+                &now_n,
+            ],
+        ))?;
+        st(tx.commit())?;
+        self.projections
+            .get_mut(shard)
+            .expect("projection exists for a shard that just accepted a durable commit")
+            .apply_command(&env.command)
+            .expect(
+                "post-commit apply must be infallible after a durable append (caller pre-validates); \
+                 a failure here means the durable log advanced past the in-memory projection",
+            );
+        Ok(env.item_ids)
     }
 
     /// Reconstruct every queue's projection from durable state (queues + their replayed logs). Proves the
@@ -652,6 +776,51 @@ impl PushPort for PostgresBackend {
             };
             g.commit_locked(shard, env, expected_epoch)?;
             Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_request_fingerprint(&items)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let def = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let max_attempts = def.retry_policy.max_attempts;
+            let expires_at = request_expires_at(&def, now);
+            let n = g.cmd_seq;
+            g.cmd_seq += 1;
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            {
+                let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+                proj.index_validate_push(&push_items)?;
+            }
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("pg-{}-{n}", self.node_id)),
+                request_id: Some(request_id.clone()),
+                item_ids: ids,
+                command: QueueCommand::Push(PushCommand { items: push_items }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            };
+            g.commit_request_id_push_locked(
+                shard,
+                &request_id,
+                &fingerprint,
+                expires_at,
+                env,
+                expected_epoch,
+            )
         })();
         std::future::ready(result)
     }

@@ -53,7 +53,7 @@ use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel,
-    PriorityValue, QueueDefinition, QueueId, TenantId, UtcTimestamp, is_retry_exhausted,
+    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, is_retry_exhausted,
     priority_sort,
 };
 use pqueue_engine::{
@@ -178,9 +178,23 @@ CREATE TABLE IF NOT EXISTS pqueue_gate_state (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, gate_key TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, gate_key)
 );
+CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
+    tenant_id TEXT NOT NULL,
+    queue_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_fingerprint BYTEA NOT NULL,
+    response_payload TEXT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, operation, request_id)
+);
+CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
+    ON pqueue_request_idempotency (expires_at);
 "#;
 
 const COHORT_EXPIRY_SWEEP_LIMIT: i64 = 128;
+const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
 
 /// The serialized claim CTE (TD-002 `BatchClaim`): select the eligible candidates under a real
 /// `FOR UPDATE SKIP LOCKED` row lock and lease them in ONE statement, RETURNING the rich claimed rows.
@@ -222,6 +236,107 @@ fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
 
 fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+fn push_request_fingerprint(items: &[PushSpec]) -> EngineResult<Vec<u8>> {
+    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+fn request_expires_at(
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> EngineResult<i64> {
+    let retention_ms = queues
+        .get(shard)
+        .map(|d| d.request_id_retention_ms)
+        .ok_or(EngineError::NotFound)?;
+    Ok(ts_nanos(now).saturating_add((retention_ms as i64).saturating_mul(1_000_000)))
+}
+
+fn item_ids_to_json(ids: &[ItemId]) -> EngineResult<String> {
+    let raw: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    to_json(&raw)
+}
+
+fn item_ids_from_json(raw: String) -> EngineResult<Vec<ItemId>> {
+    let decoded: Vec<String> =
+        serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    decoded
+        .into_iter()
+        .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+        .collect()
+}
+
+fn check_request_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    operation: &str,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    now_n: i64,
+) -> EngineResult<Option<Vec<ItemId>>> {
+    let (t, q) = parts(shard);
+    let prior = st(tx.query_opt(
+        "SELECT request_fingerprint, response_payload, expires_at \
+         FROM pqueue_request_idempotency \
+         WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+        &[&t, &q, &operation, &request_id.as_str()],
+    ))?;
+    let Some(row) = prior else {
+        return Ok(None);
+    };
+    let prior_fingerprint: Vec<u8> = row.get(0);
+    let response_payload: String = row.get(1);
+    let expires_at: i64 = row.get(2);
+    if expires_at <= now_n {
+        st(tx.execute(
+            "DELETE FROM pqueue_request_idempotency \
+             WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+            &[&t, &q, &operation, &request_id.as_str()],
+        ))?;
+        return Ok(None);
+    }
+    if prior_fingerprint == fingerprint {
+        return Ok(Some(item_ids_from_json(response_payload)?));
+    }
+    Err(EngineError::RequestIdConflict)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_request_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    operation: &str,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    response_ids: &[ItemId],
+    now: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let response_payload = item_ids_to_json(response_ids)?;
+    st(tx.execute(
+        "INSERT INTO pqueue_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
+         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+          request_fingerprint=EXCLUDED.request_fingerprint, \
+          response_payload=EXCLUDED.response_payload, \
+          expires_at=EXCLUDED.expires_at",
+        &[
+            &t,
+            &q,
+            &operation,
+            &request_id.as_str(),
+            &fingerprint,
+            &response_payload,
+            &expires_at,
+            &ts_nanos(now),
+        ],
+    ))?;
+    Ok(())
 }
 
 fn fields_to_json(fields: &BTreeMap<String, Bytes>) -> EngineResult<String> {
@@ -2542,6 +2657,83 @@ impl PushPort for PostgresRelationalBackend {
                 now,
                 expected_epoch,
             )?;
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_request_fingerprint(&items)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let max_attempts = g
+                .queues
+                .get(shard)
+                .map(|d| d.retry_policy.max_attempts)
+                .ok_or(EngineError::NotFound)?;
+            let expires_at = request_expires_at(&g.queues, shard, now)?;
+            let Inner {
+                client,
+                queues,
+                live_tokens,
+                ..
+            } = &mut *g;
+            let (t, q) = parts(shard);
+            let mut tx = st(client.transaction())?;
+            let cursor_epoch: i64 = st(tx.query_opt(
+                "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?
+            .ok_or(EngineError::NotFound)?
+            .get(0);
+            if expected_epoch.is_some_and(|e| e != cursor_epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
+            if let Some(ids) = check_request_idempotency(
+                &mut tx,
+                shard,
+                IDEMPOTENCY_OPERATION_PUSH,
+                &request_id,
+                &fingerprint,
+                ts_nanos(now),
+            )? {
+                return Ok(ids);
+            }
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            let seq = alloc_seq(&mut tx, &t, &q)?;
+            let mut token_ops = Vec::new();
+            apply_command_sql(
+                &mut tx,
+                queues,
+                &mut token_ops,
+                shard,
+                seq,
+                now,
+                &QueueCommand::Push(PushCommand { items: push_items }),
+            )?;
+            record_request_idempotency(
+                &mut tx,
+                shard,
+                IDEMPOTENCY_OPERATION_PUSH,
+                &request_id,
+                &fingerprint,
+                &ids,
+                now,
+                expires_at,
+            )?;
+            st(tx.commit())?;
+            apply_token_ops(live_tokens, token_ops);
             Ok(ids)
         })();
         std::future::ready(result)

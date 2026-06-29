@@ -26,7 +26,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueueDefinition, QueueId,
-    TenantId, UtcTimestamp,
+    RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, ControlPlaneStore, CreateQueueOutcome,
@@ -143,6 +143,27 @@ impl PushPort for PostgresNativeBackend {
         let shard = shard.clone();
         blocking(move || {
             futures::executor::block_on(inner.push(&shard, items, now, expected_epoch))
+        })
+    }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let inner = self.arc();
+        let shard = shard.clone();
+        blocking(move || {
+            futures::executor::block_on(inner.push_with_request_id(
+                &shard,
+                request_id,
+                items,
+                now,
+                expected_epoch,
+            ))
         })
     }
 }

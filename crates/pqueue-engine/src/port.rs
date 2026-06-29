@@ -384,19 +384,17 @@ pub trait PushPort: Send + Sync {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
 
-    /// Same append operation, but carrying API-001's envelope-level `request_id`. Backends that have not
-    /// implemented durable request replay return `Unavailable` rather than silently accepting a request id
-    /// without idempotency semantics.
+    /// Same append operation, but carrying API-001's envelope-level `request_id`. This is part of the
+    /// external pqueue contract, so every `PushPort` implementation must provide retained replay/conflict
+    /// semantics rather than silently degrading to a request-id-less push.
     fn push_with_request_id(
         &self,
-        _shard: &QueueKey,
-        _request_id: RequestId,
-        _items: Vec<PushSpec>,
-        _now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        std::future::ready(Err(EngineError::Unavailable))
-    }
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
 }
 
 /// Operator gate-state mutation. Gate support is backend-capability-specific: relational backends

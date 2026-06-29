@@ -3,6 +3,7 @@
 #![allow(clippy::manual_async_fn)]
 
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -11,18 +12,18 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueueDefinition, QueueId,
-    TenantId, UtcTimestamp,
+    BodyHash, ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
     CommandEnvelope, CommandId, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort,
-    ItemView, LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionWriter,
-    PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand,
-    RenewLeasePort, TickReport, UpsertOutcome, UpsertPort, build_push_items,
-    require_item_level_claim, validate_gate_command, validate_gate_push,
+    IdempotencyDecision, ItemView, LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead,
+    ProjectionWriter, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters,
+    QueueIdempotencyCache, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, TickReport, UpsertOutcome, UpsertPort,
+    build_push_items, require_item_level_claim, validate_gate_command, validate_gate_push,
 };
 use pqueue_objectlog::LocalObjectLog;
 use pqueue_objectlog::segmented::{
@@ -57,10 +58,29 @@ pub struct RecoveryStats {
 /// backend itself never reads the process environment.
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 
+fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
+    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(BodyHash(h.finish()))
+}
+
+fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp {
+    let total = now.seconds as i128 * 1_000_000_000
+        + now.nanoseconds as i128
+        + retention_ms as i128 * 1_000_000;
+    UtcTimestamp::new(
+        total.div_euclid(1_000_000_000) as i64,
+        total.rem_euclid(1_000_000_000) as u32,
+    )
+    .expect("valid ts")
+}
+
 pub struct ObjectLogSqliteBackend {
     log: LocalObjectLog,
     projection: SqliteProjectionStore,
     queues: Mutex<HashMap<QueueKey, QueueDefinition>>,
+    idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
     counters: QueueCounters,
     command_seq: AtomicU64,
     node_id: u8,
@@ -77,6 +97,7 @@ impl ObjectLogSqliteBackend {
             log: LocalObjectLog::open(object_root)?,
             projection: SqliteProjectionStore::open(projection_path)?,
             queues: Mutex::new(HashMap::new()),
+            idempotency: Mutex::new(HashMap::new()),
             counters: QueueCounters::default(),
             command_seq: AtomicU64::new(0),
             node_id: 0,
@@ -117,6 +138,24 @@ impl ObjectLogSqliteBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("olsqlite-{}-{n}", self.node_id)),
             request_id: None,
+            item_ids,
+            command,
+            checksum: CommandChecksum(0),
+            created_at: now,
+        }
+    }
+
+    fn next_request_envelope(
+        &self,
+        request_id: RequestId,
+        command: QueueCommand,
+        item_ids: Vec<ItemId>,
+        now: UtcTimestamp,
+    ) -> CommandEnvelope {
+        let n = self.command_seq.fetch_add(1, Ordering::SeqCst);
+        CommandEnvelope {
+            command_id: CommandId::new(format!("olsqlite-{}-{n}", self.node_id)),
+            request_id: Some(request_id),
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -315,6 +354,58 @@ impl PushPort for ObjectLogSqliteBackend {
                 now,
             );
             self.append_apply(shard, envelope, Some(epoch)).await?;
+            Ok(ids)
+        }
+    }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        async move {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
+            let _guard = self.op_lock.lock().await;
+            let definition = self.queue_definition(shard).await?;
+            let expires_at = request_expires_at(now, definition.request_id_retention_ms);
+            {
+                let mut idempotency = self.idempotency.lock().expect("idempotency poisoned");
+                match idempotency.entry(shard.clone()).or_default().check(
+                    &request_id,
+                    fingerprint,
+                    now,
+                ) {
+                    IdempotencyDecision::Replay(ids) => return Ok(ids),
+                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                    IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                }
+            }
+            let epoch = expected_epoch.unwrap_or(self.log.current_epoch(shard)?);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) = build_push_items(
+                items,
+                epoch,
+                self.node_id,
+                counter_base,
+                definition.retry_policy.max_attempts,
+            );
+            let envelope = self.next_request_envelope(
+                request_id.clone(),
+                QueueCommand::Push(PushCommand { items: push_items }),
+                ids.clone(),
+                now,
+            );
+            self.append_apply(shard, envelope, Some(epoch)).await?;
+            self.idempotency
+                .lock()
+                .expect("idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .record(request_id, fingerprint, ids.clone(), expires_at);
             Ok(ids)
         }
     }
@@ -605,6 +696,9 @@ pub struct SegmentedObjectLogSqliteBackend {
     debug_segments: bool,
     /// Last per-queue snapshot-tail recovery telemetry (proof the reopen avoided a full-genesis replay).
     recovery_stats: Mutex<HashMap<QueueKey, RecoveryStats>>,
+    /// Per-queue request-id replay/conflict cache (API-001 / TD-007 §4): a retried `request_id` with the
+    /// same body replays the committed ids without a second append; a different body is `RequestIdConflict`.
+    idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
 }
 
 fn ts_to_ms(now: UtcTimestamp) -> i64 {
@@ -660,6 +754,7 @@ impl SegmentedObjectLogSqliteBackend {
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             debug_segments: false,
             recovery_stats: Mutex::new(HashMap::new()),
+            idempotency: Mutex::new(HashMap::new()),
         })
     }
 
@@ -755,6 +850,26 @@ impl SegmentedObjectLogSqliteBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("segolsqlite-{}-{n}", self.node_id)),
             request_id: None,
+            item_ids,
+            command,
+            checksum: CommandChecksum(0),
+            created_at: now,
+        }
+    }
+
+    /// Same as [`Self::next_envelope`] but carries API-001's envelope-level `request_id` into the durable
+    /// command (the request-id'd push path), so the committed log records the caller's request id.
+    fn next_request_envelope(
+        &self,
+        request_id: RequestId,
+        command: QueueCommand,
+        item_ids: Vec<ItemId>,
+        now: UtcTimestamp,
+    ) -> CommandEnvelope {
+        let n = self.command_seq.fetch_add(1, Ordering::SeqCst);
+        CommandEnvelope {
+            command_id: CommandId::new(format!("segolsqlite-{}-{n}", self.node_id)),
+            request_id: Some(request_id),
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -1081,6 +1196,64 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
             Ok(ids)
         }
     }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        async move {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
+            // Serialize the request-id'd push with claims/commits on this queue so the cache
+            // check + segment commit + record is atomic (the request-id path is not the hot path).
+            let mutate = self.mutate_lock_for(shard);
+            let _guard = mutate.lock().await;
+            let (max_attempts, retention_ms) = {
+                let g = self.queues.lock().expect("segmented queues poisoned");
+                let d = g.get(shard).ok_or(EngineError::NotFound)?;
+                (d.retry_policy.max_attempts, d.request_id_retention_ms)
+            };
+            let expires_at = request_expires_at(now, retention_ms);
+            {
+                let mut idem = self
+                    .idempotency
+                    .lock()
+                    .expect("segmented idempotency poisoned");
+                match idem
+                    .entry(shard.clone())
+                    .or_default()
+                    .check(&request_id, fingerprint, now)
+                {
+                    IdempotencyDecision::Replay(ids) => return Ok(ids),
+                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                    IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                }
+            }
+            let epoch = expected_epoch.unwrap_or_else(|| self.cached_epoch(shard));
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            let envelope = self.next_request_envelope(
+                request_id.clone(),
+                QueueCommand::Push(PushCommand { items: push_items }),
+                ids.clone(),
+                now,
+            );
+            self.commit(shard, envelope, epoch, now, false).await?;
+            // Record only AFTER a successful commit, so a rejected append leaves no replay entry.
+            self.idempotency
+                .lock()
+                .expect("segmented idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .record(request_id, fingerprint, ids.clone(), expires_at);
+            Ok(ids)
+        }
+    }
 }
 
 impl ClaimPort for SegmentedObjectLogSqliteBackend {
@@ -1329,6 +1502,9 @@ pub struct SegmentedObjectLogInMemoryBackend {
     command_seq: AtomicU64,
     node_id: u8,
     flush_interval: Duration,
+    /// Per-queue request-id replay/conflict cache (API-001 / TD-007 §4): a retried `request_id` with the
+    /// same body replays the committed ids without a second append; a different body is `RequestIdConflict`.
+    idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
 }
 
 impl SegmentedObjectLogInMemoryBackend {
@@ -1349,6 +1525,7 @@ impl SegmentedObjectLogInMemoryBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             flush_interval: Duration::from_millis(flush_ms),
+            idempotency: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1422,6 +1599,26 @@ impl SegmentedObjectLogInMemoryBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("seginmem-{}-{n}", self.node_id)),
             request_id: None,
+            item_ids,
+            command,
+            checksum: CommandChecksum(0),
+            created_at: now,
+        }
+    }
+
+    /// Same as [`Self::next_envelope`] but carries API-001's envelope-level `request_id` into the durable
+    /// command (the request-id'd push path), so the committed log records the caller's request id.
+    fn next_request_envelope(
+        &self,
+        request_id: RequestId,
+        command: QueueCommand,
+        item_ids: Vec<ItemId>,
+        now: UtcTimestamp,
+    ) -> CommandEnvelope {
+        let n = self.command_seq.fetch_add(1, Ordering::SeqCst);
+        CommandEnvelope {
+            command_id: CommandId::new(format!("seginmem-{}-{n}", self.node_id)),
+            request_id: Some(request_id),
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -1701,6 +1898,64 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
                 now,
             );
             self.commit(shard, envelope, epoch, now, false).await?;
+            Ok(ids)
+        }
+    }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        async move {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
+            // Serialize the request-id'd push with claims/commits on this queue so the cache
+            // check + segment commit + record is atomic (the request-id path is not the hot path).
+            let mutate = self.mutate_lock_for(shard);
+            let _guard = mutate.lock().await;
+            let (max_attempts, retention_ms) = {
+                let g = self.queues.lock().expect("segmented queues poisoned");
+                let d = g.get(shard).ok_or(EngineError::NotFound)?;
+                (d.retry_policy.max_attempts, d.request_id_retention_ms)
+            };
+            let expires_at = request_expires_at(now, retention_ms);
+            {
+                let mut idem = self
+                    .idempotency
+                    .lock()
+                    .expect("segmented idempotency poisoned");
+                match idem
+                    .entry(shard.clone())
+                    .or_default()
+                    .check(&request_id, fingerprint, now)
+                {
+                    IdempotencyDecision::Replay(ids) => return Ok(ids),
+                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                    IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                }
+            }
+            let epoch = expected_epoch.unwrap_or_else(|| self.cached_epoch(shard));
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            let envelope = self.next_request_envelope(
+                request_id.clone(),
+                QueueCommand::Push(PushCommand { items: push_items }),
+                ids.clone(),
+                now,
+            );
+            self.commit(shard, envelope, epoch, now, false).await?;
+            // Record only AFTER a successful commit, so a rejected append leaves no replay entry.
+            self.idempotency
+                .lock()
+                .expect("segmented idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .record(request_id, fingerprint, ids.clone(), expires_at);
             Ok(ids)
         }
     }
