@@ -41,9 +41,11 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "pqueue.fullname" . }}-config
-          {{- if or (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") }}
+          {{- if or (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") .Values.storage.lakebase.enabled }}
           env:
             {{- if eq .Values.storage.log.backend "postgres" }}
+            {{- /* Self-sufficient libpq DSN (host/port/db + sslmode=require). The binary connects from
+                   this DSN alone; it does not read the lakebase.* metadata. Preferred over PQUEUE_PG_URL. */}}
             - name: PQUEUE_POSTGRES_LOG_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -51,11 +53,52 @@ spec:
                   key: {{ .Values.storage.log.postgres.databaseUrlKey | quote }}
             {{- end }}
             {{- if eq .Values.storage.projection.backend "postgres" }}
+            {{- /* Relational-projection DSN: rendered for the design-ahead postgres-projection profile.
+                   NOT consumed by the current binary (only log=postgres + projection=inmemory is wired);
+                   the Lakebase profile uses projection=inmemory, so this never renders there. */}}
             - name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.projection.postgres.existingSecret | quote }}
                   key: {{ .Values.storage.projection.postgres.databaseUrlKey | quote }}
+            {{- end }}
+            {{- if .Values.storage.lakebase.enabled }}
+            {{- if or (eq .Values.storage.lakebase.auth.mode "service-principal-oauth") (eq .Values.storage.lakebase.auth.mode "pat-oauth") }}
+            - name: DATABRICKS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
+                  key: {{ .Values.storage.lakebase.auth.databricksHostKey | quote }}
+            - name: PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
+                  key: {{ .Values.storage.lakebase.auth.databaseInstanceNameKey | quote }}
+            {{- end }}
+            {{- if eq .Values.storage.lakebase.auth.mode "service-principal-oauth" }}
+            - name: DATABRICKS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
+                  key: {{ .Values.storage.lakebase.auth.clientIdKey | quote }}
+            - name: DATABRICKS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
+                  key: {{ .Values.storage.lakebase.auth.clientSecretKey | quote }}
+            {{- end }}
+            {{- if eq .Values.storage.lakebase.auth.mode "pat-oauth" }}
+            - name: DATABRICKS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
+                  key: {{ .Values.storage.lakebase.auth.tokenKey | quote }}
+            - name: PQUEUE_DATABRICKS_POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
+                  key: {{ .Values.storage.lakebase.auth.postgresUserKey | quote }}
+            {{- end }}
             {{- end }}
           {{- end }}
           livenessProbe:

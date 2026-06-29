@@ -156,41 +156,39 @@ fn write_epoch_object(
     })
 }
 
-/// The next durable sequence for a shard: `max(existing object index) + 1` (compaction-safe). Empty
-/// log → 0.
-fn next_seq(log_dir: &Path) -> EngineResult<u64> {
-    let mut max: Option<u64> = None;
-    if log_dir.exists() {
-        for entry in fs::read_dir(log_dir).map_err(store)? {
-            let entry = entry.map_err(store)?;
-            if let Some(n) = entry
-                .path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                max = Some(max.map_or(n, |m| m.max(n)));
-            }
-        }
-    }
-    Ok(max.map_or(0, |m| m + 1))
+/// The next durable sequence for a shard. A committed high-water object wins; otherwise we start from
+/// 0 so a crash before the manifest commit can be overwritten instead of replayed as committed work.
+fn next_seq(root: &Path, shard: &QueueKey) -> EngineResult<u64> {
+    Ok(read_high_water(root, shard)?.map_or(0, |hw| hw.sequence + 1))
 }
 
-/// Durably write `env` as the next object + advance the persisted high-water object. Returns the
-/// committed sequence. Touches only the filesystem under `root` (not the in-memory projection).
+/// A committed segment: the start sequence plus the batch of envelopes that were durably appended
+/// together before the manifest/high-water boundary advanced.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SegmentRecord {
+    epoch: u64,
+    start_seq: u64,
+    envelopes: Vec<CommandEnvelope>,
+}
+
+/// Durably write a segment + advance the persisted high-water object. Returns the committed positions
+/// for every command in the segment. Touches only the filesystem under `root` (not the in-memory
+/// projection).
 ///
 /// Enforces the eventual-apply class ban on the atomic XDEL+XADD upsert (Invariant 2) at the SINGLE
 /// durable chokepoint both write paths funnel through (`commit_locked` and `Backend::write` →
 /// `ObjLogWriter`): a `ReplacePending` command is refused with `Unavailable` BEFORE any object is
 /// written, so the ban holds at the write path, not just the `replace_if_pending` port.
-fn append_object(
+fn append_segment(
     root: &Path,
     shard: &QueueKey,
-    env: &CommandEnvelope,
+    commands: &[CommandEnvelope],
     expected_epoch: u64,
-) -> EngineResult<(u64, u64)> {
-    validate_gate_command(false, &env.command)?;
-    if matches!(env.command, QueueCommand::ReplacePending(_)) {
+) -> EngineResult<Vec<CommandPosition>> {
+    if commands
+        .iter()
+        .any(|env| matches!(env.command, QueueCommand::ReplacePending(_)))
+    {
         return Err(EngineError::Unavailable);
     }
     with_epoch_lock(root, shard, || {
@@ -201,22 +199,31 @@ fn append_object(
         if epoch != expected_epoch {
             return Err(EngineError::EpochFenced);
         }
-        let seq = next_seq(&log_dir)?;
-        // Object name: zero-padded so lexical order == sequence order.
+        let start_seq = next_seq(root, shard)?;
+        let end_seq = start_seq + commands.len().saturating_sub(1) as u64;
+        // Object name: zero-padded so lexical order == segment order.
         fs::write(
-            log_dir.join(format!("{seq:020}.json")),
-            to_json(&ObjectRecord {
+            log_dir.join(format!("{start_seq:020}.json")),
+            to_json(&SegmentRecord {
                 epoch,
-                envelope: env.clone(),
+                start_seq,
+                envelopes: commands.to_vec(),
             })?,
         )
         .map_err(store)?;
         fs::write(
             dir.join("high_water.json"),
-            to_json(&HighWater { epoch, seq })?,
+            to_json(&HighWater {
+                epoch,
+                seq: end_seq,
+            })?,
         )
         .map_err(store)?;
-        Ok((epoch, seq))
+        Ok(commands
+            .iter()
+            .enumerate()
+            .map(|(i, _)| CommandPosition::new(shard.clone(), epoch, start_seq + i as u64))
+            .collect())
     })
 }
 
@@ -227,6 +234,16 @@ struct HighWater {
     seq: u64,
 }
 
+fn read_high_water(root: &Path, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+    let path = shard_dir(root, shard).join("high_water.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let hw: HighWater =
+        serde_json::from_str(&fs::read_to_string(&path).map_err(store)?).map_err(store)?;
+    Ok(Some(CommandPosition::new(shard.clone(), hw.epoch, hw.seq)))
+}
+
 /// A stored snapshot object: its position + opaque payload.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SnapshotObject {
@@ -235,16 +252,15 @@ struct SnapshotObject {
     payload: Vec<u8>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ObjectRecord {
-    epoch: u64,
-    envelope: CommandEnvelope,
-}
-
+// Transient, short-lived stack value used only during recovery deserialization; the size
+// difference between the variants is irrelevant here (never stored in bulk), so the
+// large_enum_variant lint is silenced rather than boxing (which would force a deref on
+// both match arms for no runtime benefit).
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum StoredObject {
-    Versioned(ObjectRecord),
+    Versioned(SegmentRecord),
     Legacy(CommandEnvelope),
 }
 
@@ -253,6 +269,64 @@ struct Inner {
     projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
     cmd_seq: u64,
+    segment_config: ObjectLogSegmentConfig,
+}
+
+/// Segment sizing controls for the object-log reference backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLogSegmentConfig {
+    pub segment_max_commands: usize,
+    pub segment_max_bytes: usize,
+    pub segment_max_latency_ms: u64,
+}
+
+impl Default for ObjectLogSegmentConfig {
+    fn default() -> Self {
+        Self {
+            segment_max_commands: 1,
+            segment_max_bytes: 0,
+            segment_max_latency_ms: 0,
+        }
+    }
+}
+
+/// A point-in-time view of object-log segmenting for a shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLogStats {
+    pub segment_objects: u64,
+    pub command_objects: u64,
+}
+
+fn segment_batches(
+    commands: &[CommandEnvelope],
+    config: ObjectLogSegmentConfig,
+) -> Vec<&[CommandEnvelope]> {
+    let max_commands = config.segment_max_commands.max(1);
+    let max_bytes = config.segment_max_bytes;
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    while start < commands.len() {
+        let mut end = start;
+        let mut used_bytes = 0usize;
+        while end < commands.len() && end - start < max_commands {
+            let encoded = serde_json::to_vec(&commands[end]).expect("command envelope serializes");
+            let next = encoded.len();
+            if end > start && max_bytes != 0 && used_bytes + next > max_bytes {
+                break;
+            }
+            used_bytes += next;
+            end += 1;
+            if max_bytes != 0 && used_bytes >= max_bytes {
+                break;
+            }
+        }
+        if end == start {
+            end = start + 1;
+        }
+        batches.push(&commands[start..end]);
+        start = end;
+    }
+    batches
 }
 
 /// Local filesystem object-log authority without an in-process projection.
@@ -266,6 +340,7 @@ pub struct LocalObjectLog {
 struct LogOnlyInner {
     root: PathBuf,
     queues: HashMap<QueueKey, QueueDefinition>,
+    segment_config: ObjectLogSegmentConfig,
 }
 
 impl Inner {
@@ -294,7 +369,12 @@ impl Inner {
     /// Durable append + infallible in-memory apply (the orchestration unit). Caller MUST pre-validate.
     fn commit_locked(&mut self, shard: &QueueKey, env: CommandEnvelope) -> EngineResult<()> {
         let expected_epoch = read_epoch(&self.root, shard);
-        append_object(&self.root, shard, &env, expected_epoch)?;
+        append_segment(
+            &self.root,
+            shard,
+            std::slice::from_ref(&env),
+            expected_epoch,
+        )?;
         self.projections
             .get_mut(shard)
             .expect("projection exists for a shard that just accepted a durable commit")
@@ -306,22 +386,16 @@ impl Inner {
         Ok(())
     }
 
-    /// All log envelopes for a shard in sequence order (replay order). Tolerates a torn TRAILING object
-    /// (an append interrupted by a crash): since `next_seq` is `max+1`, only the highest-seq object can
-    /// be a partial write, and it has no successor, so it is treated as uncommitted and skipped. A parse
-    /// failure on any NON-final object is genuine corruption and is propagated.
+    /// All log envelopes for a shard in sequence order (replay order). When a committed high-water exists
+    /// we replay only the segment objects at or before that boundary; a torn trailing segment beyond the
+    /// manifest is ignored. Legacy one-command object files remain readable when the shard has no
+    /// high-water manifest yet.
     fn read_envelopes(&self, shard: &QueueKey) -> EngineResult<Vec<(u64, u64, CommandEnvelope)>> {
         read_envelopes_from_root(&self.root, shard)
     }
 
     fn read_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
-        let path = self.shard_dir(shard).join("high_water.json");
-        if !path.exists() {
-            return Ok(None);
-        }
-        let hw: HighWater =
-            serde_json::from_str(&fs::read_to_string(&path).map_err(store)?).map_err(store)?;
-        Ok(Some(CommandPosition::new(shard.clone(), hw.epoch, hw.seq)))
+        read_high_water(&self.root, shard)
     }
 
     /// Reconstruct every queue's projection from the durable object log on open (TD-007 §4 replay), and
@@ -435,6 +509,7 @@ fn read_envelopes_from_root(
     if !log_dir.exists() {
         return Ok(Vec::new());
     }
+    let high_water = read_high_water(root, shard)?;
     let fallback_epoch = read_epoch(root, shard);
     // Collect (seq, path) first, sorted, so "final object" is well-defined before we parse.
     let mut files: Vec<(u64, PathBuf)> = Vec::new();
@@ -454,8 +529,22 @@ fn read_envelopes_from_root(
     for (i, (seq, path)) in files.iter().enumerate() {
         let json = fs::read_to_string(path).map_err(store)?;
         match serde_json::from_str::<StoredObject>(&json) {
-            Ok(StoredObject::Versioned(record)) => rows.push((*seq, record.epoch, record.envelope)),
-            Ok(StoredObject::Legacy(env)) if fallback_epoch == 0 => rows.push((*seq, 0, env)),
+            Ok(StoredObject::Versioned(record)) => {
+                if let Some(hw) = &high_water {
+                    if record.start_seq > hw.sequence {
+                        continue;
+                    }
+                    for (offset, env) in record.envelopes.into_iter().enumerate() {
+                        let seq = record.start_seq + offset as u64;
+                        if seq <= hw.sequence {
+                            rows.push((seq, record.epoch, env));
+                        }
+                    }
+                }
+            }
+            Ok(StoredObject::Legacy(env)) if high_water.is_none() && fallback_epoch == 0 => {
+                rows.push((*seq, 0, env))
+            }
             Ok(StoredObject::Legacy(_)) => {
                 return Err(EngineError::Invalid(
                     "legacy object format is ambiguous once the manifest epoch has advanced",
@@ -472,10 +561,22 @@ fn read_envelopes_from_root(
 impl LocalObjectLog {
     /// Open (or create) a local filesystem object log rooted at `root`.
     pub fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
+        Self::open_with_config(root, ObjectLogSegmentConfig::default())
+    }
+
+    /// Open (or create) a local filesystem object log rooted at `root` with explicit segment settings.
+    pub fn open_with_config(
+        root: impl Into<PathBuf>,
+        segment_config: ObjectLogSegmentConfig,
+    ) -> EngineResult<Self> {
         let root = root.into();
         let queues = read_queue_definitions(&root)?;
         Ok(Self {
-            inner: Mutex::new(LogOnlyInner { root, queues }),
+            inner: Mutex::new(LogOnlyInner {
+                root,
+                queues,
+                segment_config,
+            }),
         })
     }
 
@@ -523,11 +624,28 @@ impl LocalObjectLog {
             validate_gate_command(false, &env.command)?;
         }
         let mut positions = Vec::with_capacity(commands.len());
-        for env in commands {
-            let (epoch, seq) = append_object(&inner.root, shard, env, expected_epoch)?;
-            positions.push(CommandPosition::new(shard.clone(), epoch, seq));
+        for chunk in segment_batches(commands, inner.segment_config) {
+            positions.extend(append_segment(&inner.root, shard, chunk, expected_epoch)?);
         }
         Ok(positions)
+    }
+
+    pub fn segment_stats(&self, shard: &QueueKey) -> EngineResult<ObjectLogStats> {
+        let inner = self.inner.lock().expect("object log store poisoned");
+        if !inner.queues.contains_key(shard) {
+            return Err(EngineError::NotFound);
+        }
+        let log_dir = shard_dir(&inner.root, shard).join("log");
+        let segment_objects = if log_dir.exists() {
+            fs::read_dir(&log_dir).map_err(store)?.count() as u64
+        } else {
+            0
+        };
+        let command_objects = read_envelopes_from_root(&inner.root, shard)?.len() as u64;
+        Ok(ObjectLogStats {
+            segment_objects,
+            command_objects,
+        })
     }
 }
 
@@ -544,11 +662,20 @@ impl ObjectLogBackend {
     /// Open (or create) an object log rooted at `root`, rebuilding every queue's projection from its
     /// durable objects.
     pub fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
+        Self::open_with_config(root, ObjectLogSegmentConfig::default())
+    }
+
+    /// Open (or create) an object log rooted at `root` with explicit segment settings.
+    pub fn open_with_config(
+        root: impl Into<PathBuf>,
+        segment_config: ObjectLogSegmentConfig,
+    ) -> EngineResult<Self> {
         let mut inner = Inner {
             root: root.into(),
             projections: HashMap::new(),
             queues: HashMap::new(),
             cmd_seq: 0,
+            segment_config,
         };
         let counters = QueueCounters::default();
         inner.rebuild_all(&counters)?;
@@ -565,6 +692,24 @@ impl ObjectLogBackend {
         self.node_id = node_id;
         self
     }
+
+    pub fn segment_stats(&self, shard: &QueueKey) -> EngineResult<ObjectLogStats> {
+        let inner = self.inner.lock().expect("objectlog poisoned");
+        if !inner.queues.contains_key(shard) {
+            return Err(EngineError::NotFound);
+        }
+        let log_dir = shard_dir(&inner.root, shard).join("log");
+        let segment_objects = if log_dir.exists() {
+            fs::read_dir(&log_dir).map_err(store)?.count() as u64
+        } else {
+            0
+        };
+        let command_objects = read_envelopes_from_root(&inner.root, shard)?.len() as u64;
+        Ok(ObjectLogStats {
+            segment_objects,
+            command_objects,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +718,7 @@ impl ObjectLogBackend {
 
 struct ObjLogWriter {
     root: PathBuf,
+    segment_config: ObjectLogSegmentConfig,
 }
 
 impl LogWriter for ObjLogWriter {
@@ -586,9 +732,8 @@ impl LogWriter for ObjLogWriter {
             validate_gate_command(false, &env.command)?;
         }
         let mut positions = Vec::with_capacity(commands.len());
-        for env in commands {
-            let (epoch, seq) = append_object(&self.root, shard, env, expected_epoch)?;
-            positions.push(CommandPosition::new(shard.clone(), epoch, seq));
+        for chunk in segment_batches(commands, self.segment_config) {
+            positions.extend(append_segment(&self.root, shard, chunk, expected_epoch)?);
         }
         Ok(positions)
     }
@@ -634,9 +779,15 @@ impl Backend for ObjectLogBackend {
         let result = {
             let mut guard = self.inner.lock().expect("objectlog poisoned");
             let Inner {
-                root, projections, ..
+                root,
+                projections,
+                segment_config,
+                ..
             } = &mut *guard;
-            let mut lw = ObjLogWriter { root: root.clone() };
+            let mut lw = ObjLogWriter {
+                root: root.clone(),
+                segment_config: *segment_config,
+            };
             let mut pw = ObjProjectionWriter { projections };
             f(&mut lw, &mut pw)
         };
@@ -958,7 +1109,7 @@ impl ReclaimPort for ObjectLogBackend {
                 return Ok(Vec::new());
             }
             // Per-queue and FENCED (unlike the global `ReclaimDriver::tick`, which passes the degenerate
-            // None path). Objectlog's `commit_locked`/`append_object` stamp the queue's current durable
+            // None path). Objectlog's `commit_locked`/`append_segment` stamp the queue's current durable
             // epoch but do NOT validate an `expected_epoch` (the TD-003 reject lives at the
             // `ObjLogWriter::append` seam, not in the data-plane fast path). So replicate that seam's fence
             // rule inline BEFORE the durable object write: `Some(e)` that is not the current durable epoch

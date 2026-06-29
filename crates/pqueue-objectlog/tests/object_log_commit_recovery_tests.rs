@@ -24,8 +24,8 @@
 //!     projection family is not what this reference rebuilds; the SQLite-materialized recovery is the
 //!     production form.
 //!   - GROUP-COMMIT ACK LATENCY ACROSS >=2 SEGMENT SIZES within a `segment_max_latency_ms` window: the
-//!     in-process reference appends ONE object per command (no group-commit batching, no configurable segment
-//!     size) — the production S3 profile, deferred to the live object-log run (bead pqueue-2f9ebac3).
+//!     in-process reference exposes segment sizing and counters, but it does not run a live production S3
+//!     profile or assert the production group-commit latency bar — deferred to the live object-log run.
 //!   - COST ($/billion-commands beats `postgres_native` at high sustained volume): an ADR-001 analytical
 //!     cost-table claim, not a runtime measurement — deferred (pqueue-2f9ebac3 / ADR-001 analysis).
 //!   - MANIFEST-CAS FENCING (stale-epoch writer's manifest CAS rejected; Postgres-pointer fallback): its own
@@ -45,7 +45,7 @@ use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandEnvelope, ControlPlaneStore,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead, PushCommand, QueueCommand,
 };
-use pqueue_objectlog::ObjectLogBackend;
+use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig};
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -305,6 +305,98 @@ async fn object_log_e3_throughput_recovery_and_ack_latency() {
     assert!(
         summary.smoke_evidence_ids.contains("E3"),
         "row carries the E3 evidence id"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn segment_counters_are_reported_for_release_rows() {
+    let root = tmp_root("segment-counters");
+    let _ = std::fs::remove_dir_all(&root);
+    let shard = sk("segment", "counters");
+    let store = LocalObjectLog::open_with_config(
+        &root,
+        ObjectLogSegmentConfig {
+            segment_max_commands: 2,
+            segment_max_bytes: 0,
+            segment_max_latency_ms: 5,
+        },
+    )
+    .expect("open");
+    store.create_queue(big_qdef("segment", "counters")).unwrap();
+    store
+        .append(
+            &shard,
+            &[
+                envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item("1", "k1", 1)],
+                    }),
+                    vec![ItemId::new("1").unwrap()],
+                ),
+                envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item("2", "k2", 1)],
+                    }),
+                    vec![ItemId::new("2").unwrap()],
+                ),
+                envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item("3", "k3", 1)],
+                    }),
+                    vec![ItemId::new("3").unwrap()],
+                ),
+            ],
+            0,
+        )
+        .expect("append");
+
+    let backend = ObjectLogBackend::open(&root).expect("reopen");
+    let stats = backend.segment_stats(&shard).expect("segment stats");
+    assert_eq!(stats.segment_objects, 2);
+    assert_eq!(stats.command_objects, 3);
+
+    let row = pqueue_release::LedgerRow {
+        suite: "object_log_commit_recovery_tests".into(),
+        command: "cargo test -p pqueue-objectlog --test object_log_commit_recovery_tests -- --exact segment_counters_are_reported_for_release_rows".into(),
+        backend_profile: "object_log_file_reference".into(),
+        scale: "smoke".into(),
+        seed: 0,
+        environment: "in-process object-log reference with reported segment counters".into(),
+        exit_status: 0,
+        ac_ids: vec![],
+        inv_ids: vec![],
+        pass_bar: "segment and command counters are observable from the backend".into(),
+        evidence_tier: "release".into(),
+        measurements: pqueue_release::Measurements {
+            tp002_evidence_ids: vec!["E3".into()],
+            values: std::collections::BTreeMap::from([
+                ("segment_objects".into(), serde_json::json!(stats.segment_objects)),
+                ("command_objects".into(), serde_json::json!(stats.command_objects)),
+            ]),
+        },
+    };
+    let path = pqueue_release::ledger_path(
+        env!("CARGO_MANIFEST_DIR"),
+        "segment_counters_are_reported_for_release_rows",
+    );
+    let _ = std::fs::remove_file(&path);
+    pqueue_release::append_row(&path, &row).expect("emit release row");
+    let summary =
+        pqueue_release::verify_ledger(&path, true).expect("emitted release row validates strict");
+    assert!(
+        summary.evidence_ids.contains("E3"),
+        "release-tier row carries the E3 evidence id"
+    );
+    assert_eq!(
+        serde_json::from_str::<pqueue_release::LedgerRow>(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()
+            .measurements
+            .values
+            .get("segment_objects")
+            .and_then(|v| v.as_u64()),
+        Some(2)
     );
 
     let _ = std::fs::remove_dir_all(&root);

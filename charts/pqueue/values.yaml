@@ -63,6 +63,21 @@ config:
   tenants: []
 
 storage:
+  lakebase:
+    enabled: false
+    endpointMode: pooler
+    databaseName: databricks_postgres
+    port: 5432
+    sslMode: require
+    auth:
+      mode: native-password
+      existingSecret: ""
+      databricksHostKey: databricks-host
+      databaseInstanceNameKey: database-instance-name
+      clientIdKey: client-id
+      clientSecretKey: client-secret
+      tokenKey: token
+      postgresUserKey: postgres-user
   shardCount:
     min: 1
     max: 1

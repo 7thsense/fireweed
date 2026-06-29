@@ -1838,6 +1838,55 @@ pub async fn reconnect_preserves_leased_item_state<B: ConformanceCore>(make: imp
     );
 }
 
+/// Reconnect preserves transaction abort semantics: a rejected mutation must not become a durable command
+/// that later replays into visible state. This is the black-box restart form of the log-class
+/// `rejected_mutations_do_not_append_commands` check, and applies to every durable external profile.
+pub async fn reconnect_after_rejected_mutation_has_no_phantom_commit<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let a = make();
+    a.create_queue(qdef()).await.unwrap();
+    commit(
+        &a,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "ka", 5)],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+
+    let id = ItemId::new("1").unwrap();
+    assert_eq!(
+        a.finalize(
+            &shard(),
+            vec![FinalizeOutcome::new(id, FinalizeKind::Complete)],
+            ts(10),
+            None,
+        )
+        .await,
+        Err(EngineError::Invalid("item is not leased")),
+        "finalize of a pending item is rejected"
+    );
+
+    drop(a);
+    let b = make();
+
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!(
+        (m.pending, m.leased, m.complete),
+        (1, 0, 0),
+        "the rejected finalize did not become visible after reconnect"
+    );
+    let claimed = b.claim(claim_req(1, 500, 20)).await.unwrap();
+    assert_eq!(
+        claimed.items.iter().map(|i| i.item_id).collect::<Vec<_>>(),
+        vec![id],
+        "the original pending item remains claimable after reconnect"
+    );
+}
+
 /// **Log-class** durability guarantee (B1, no-divergence): a REJECTED mutation must not append any
 /// command — the durable log length is unchanged. The behavioral rejection itself (the structured
 /// `NotFound`/`Conflict`/`Invalid` error) is asserted in the CORE class (the renew/reassign/purge/

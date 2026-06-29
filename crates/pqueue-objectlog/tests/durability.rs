@@ -8,7 +8,7 @@ use pqueue_engine::{
     ProjectionRead, ProjectionWriter, PushCommand, QueueCommand, ReplacePendingCommand,
     SetGatesCommand,
 };
-use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend};
+use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig};
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("pqueue-objlog-dur-{tag}-{}", std::process::id()))
@@ -29,6 +29,15 @@ fn corrupt_last_log_object(root: &std::path::Path) {
         files.sort();
         std::fs::write(files.last().unwrap(), b"{ truncated not valid json").unwrap();
     }
+}
+
+fn push_env(id: &str) -> pqueue_engine::CommandEnvelope {
+    envelope(
+        QueueCommand::Push(PushCommand {
+            items: vec![item(id, &format!("k{id}"), 1)],
+        }),
+        vec![ItemId::new(id).unwrap()],
+    )
 }
 
 #[tokio::test]
@@ -253,6 +262,36 @@ async fn torn_trailing_object_is_skipped_on_reopen() {
         1,
         "only the intact (seq 0) object replayed; the torn trailing one was skipped"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn objectlog_segment_configuration_is_respected() {
+    let root = tmp_root("segment-config");
+    let _ = std::fs::remove_dir_all(&root);
+    let shard = shard();
+    let store = LocalObjectLog::open_with_config(
+        &root,
+        ObjectLogSegmentConfig {
+            segment_max_commands: 10,
+            segment_max_bytes: 1,
+            segment_max_latency_ms: 5,
+        },
+    )
+    .expect("open");
+    store.create_queue(qdef()).unwrap();
+    store
+        .append(&shard, &[push_env("1"), push_env("2"), push_env("3")], 0)
+        .expect("append");
+
+    let backend = ObjectLogBackend::open(&root).expect("reopen");
+    let stats = backend.segment_stats(&shard).expect("segment stats");
+    assert_eq!(
+        stats.segment_objects, 3,
+        "segment_max_bytes=1 should cap the batch size at one command per segment"
+    );
+    assert_eq!(stats.command_objects, 3);
+
     let _ = std::fs::remove_dir_all(&root);
 }
 

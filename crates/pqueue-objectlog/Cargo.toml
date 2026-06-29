@@ -43,6 +43,10 @@ name = "durability"
 path = "tests/durability.rs"
 
 [[test]]
+name = "reconnect_smoke"
+path = "tests/reconnect_smoke.rs"
+
+[[test]]
 name = "object_log_commit_recovery_tests"
 path = "tests/object_log_commit_recovery_tests.rs"
 

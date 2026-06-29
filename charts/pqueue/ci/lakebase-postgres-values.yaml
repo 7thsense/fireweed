@@ -1,0 +1,29 @@
+# Static render values: Lakebase postgres_native profile.
+#
+# The log DSN lives in a Kubernetes Secret. Its value must be a self-sufficient
+# libpq key=value DSN such as:
+# host=<pooler-or-direct-host> port=5432 user=<user> password=<secret> dbname=databricks_postgres sslmode=require
+#
+# The binary connects from this DSN alone; the lakebase.* metadata below is operator
+# documentation for constructing that DSN, not consumed at runtime. The only wired
+# postgres combination is log=postgres + projection=inmemory (durable via the DSN log;
+# fast in-memory projection apply).
+storage:
+  lakebase:
+    enabled: true
+    endpointMode: pooler
+    databaseName: databricks_postgres
+    port: 5432
+    sslMode: require
+    auth:
+      mode: service-principal-oauth
+      existingSecret: pqueue-lakebase-oauth
+  log:
+    backend: postgres
+    postgres:
+      existingSecret: pqueue-lakebase-dsn
+      databaseUrlKey: database-url
+  projection:
+    backend: inmemory
+image:
+  tag: ci-tls

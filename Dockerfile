@@ -21,7 +21,7 @@ COPY . .
 # The `tls` feature implies `postgres`, so it wires `Backend::PostgresNative` over native-tls.
 ARG CARGO_FEATURES=""
 
-RUN cargo build --release --bin pqueue-verify-ledger \
+RUN cargo build --release -p pqueue-release --bin pqueue-verify-ledger \
  && cargo build --release -p pqueue-server --bin pqueue-service \
         ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
 

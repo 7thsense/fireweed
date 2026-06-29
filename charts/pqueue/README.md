@@ -58,3 +58,44 @@ The chart renders:
   uses `postgres`
 
 The service exposes the RESP port and uses TCP liveness/readiness probes.
+
+## Lakebase Postgres Native Profile
+
+`charts/pqueue/ci/lakebase-postgres-values.yaml` is the static render profile for
+Databricks Lakebase with the postgres log axis selected (`projection.backend:
+inmemory` — the only wired postgres combination: durable via the DSN log with a
+fast in-memory projection apply). It renders Secret references, but it does not
+embed credentials in chart values or manifests.
+
+The binary connects to Lakebase from the log DSN alone. The DSN Secret key
+referenced by `storage.log.postgres.databaseUrlKey` must contain a
+**self-sufficient** libpq key=value DSN — host, port, db, and `sslmode=require`:
+
+```text
+host=<pooler-or-direct-host> port=5432 user=<postgres-user> password=<secret> dbname=databricks_postgres sslmode=require
+```
+
+This DSN is rendered to the container as `PQUEUE_POSTGRES_LOG_DATABASE_URL`.
+Select the Lakebase pooler or direct endpoint by placing that endpoint host in
+the DSN Secret. The `storage.lakebase.endpointMode`, `databaseName`, `port`, and
+`sslMode` values are operator documentation for constructing that DSN; the binary
+does not read `PQUEUE_LAKEBASE_*` metadata, so the chart does not render it.
+
+For native password auth, set `storage.lakebase.auth.mode=native-password` and
+store the password inside the DSN Secret. For service-principal OAuth, set
+`storage.lakebase.auth.mode=service-principal-oauth` and provide
+`storage.lakebase.auth.existingSecret`; the chart renders Secret refs for
+`DATABRICKS_HOST`, `PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME`,
+`DATABRICKS_CLIENT_ID`, and `DATABRICKS_CLIENT_SECRET`. For PAT-backed OAuth set
+`pat-oauth`; the chart renders `DATABRICKS_HOST`,
+`PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME`, `DATABRICKS_TOKEN`, and
+`PQUEUE_DATABRICKS_POSTGRES_USER`. These names match the binary's
+`DatabricksCredentialConfig` contract; when `DATABRICKS_HOST` is present a
+service-principal/PAT credential provider supplies the postgres user/password at
+connect in place of the DSN password.
+
+When the image is built `--features tls` (`--build-arg CARGO_FEATURES=tls`) this
+is a real runtime path: an `sslmode=require` DSN connects over native-tls. On a
+non-tls build an `sslmode=require` DSN fails closed at startup (no plaintext
+downgrade). `pqueue-ea625701` owns live Lakebase provider certification with real
+credentials.

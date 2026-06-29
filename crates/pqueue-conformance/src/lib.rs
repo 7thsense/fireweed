@@ -394,17 +394,29 @@ macro_rules! log_replay_suite {
     };
 }
 
-/// **Relational-reconnect** scenario class — the relational substitute for log-replay (ADR-008 §2): a
-/// DB-authoritative projection that survives a process restart via reopen-the-store, no log replay.
+/// Durable reconnect scenario class: the external transaction-integrity contract every durable profile
+/// must present after reopen. Accepted mutations survive restart; rejected mutations do not become phantom
+/// durable commits; lifecycle state remains observable through the same ports.
+///
 /// Bounded by [`ConformanceCore`]; invoked only by a durable backend whose `make` reopens shared state.
 #[macro_export]
-macro_rules! relational_reconnect_suite {
+macro_rules! durable_reconnect_suite {
     ($make:expr) => {
         $crate::conformance_suite!(@scenarios $make,
             reconnect_after_crash_preserves_committed_state,
             reconnect_preserves_terminal_and_pending_state,
             reconnect_preserves_leased_item_state,
+            reconnect_after_rejected_mutation_has_no_phantom_commit,
         );
+    };
+}
+
+/// Backward-compatible name for DB-authoritative relational backends. New durable backends should prefer
+/// [`durable_reconnect_suite`].
+#[macro_export]
+macro_rules! relational_reconnect_suite {
+    ($make:expr) => {
+        $crate::durable_reconnect_suite!($make);
     };
 }
 
