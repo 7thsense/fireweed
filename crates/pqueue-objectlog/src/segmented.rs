@@ -257,8 +257,17 @@ impl BlobStore for LocalFsBlobStore {
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         let mut out = Vec::new();
-        walk_keys(&self.root, &self.root, &mut out)?;
-        out.retain(|k| k.starts_with(prefix));
+        // Scope the directory walk to the prefix's subtree when the prefix names a directory boundary
+        // (ends in `/`, e.g. `…/manifest/`): walking only that subtree keeps a per-seal manifest list O(its
+        // own entries) instead of O(every object under root) — a sustained push writes one seg object per
+        // seal, so a whole-root walk per seal would itself be O(n^2). Every key under `root/prefix` starts
+        // with `prefix` by construction, so the result is identical to a full walk + `starts_with` filter.
+        if let Some(dir) = prefix.strip_suffix('/') {
+            walk_keys(&self.root, &self.root.join(dir), &mut out)?;
+        } else {
+            walk_keys(&self.root, &self.root, &mut out)?;
+            out.retain(|k| k.starts_with(prefix));
+        }
         Ok(out)
     }
 }
@@ -467,17 +476,31 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     /// Read the manifest from the store and derive `(next_seq, next_manifest_index, current_epoch)`.
+    ///
+    /// HOT PATH: every seal (and epoch fence) calls this to read the authoritative tail. Manifest objects
+    /// are an append-only, contiguous series keyed `manifest/{index:020}.json`, so the zero-padded name sorts
+    /// lexicographically by index — the LAST key is the tail. Deriving the tuple from only that one entry is
+    /// exact (indices are contiguous so `tail.index + 1` is the next index; epoch is monotonically
+    /// non-decreasing so the tail carries the max; `next_seq` is the tail's `last_seq + 1`, or for a fence
+    /// entry — which names no segment — its `first_seq`, which already records the live next seq). This makes
+    /// a seal O(1) manifest reads instead of re-reading + re-parsing the whole O(n) manifest each time
+    /// (the previous full scan made a sustained push O(n^2)). `read_all` still does a full scan for recovery.
     fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64)> {
-        let entries = self.read_manifest(shard)?;
-        let next_index = entries.iter().map(|e| e.index + 1).max().unwrap_or(0);
-        let next_seq = entries
-            .iter()
-            .filter(|e| !e.fence)
-            .map(|e| e.last_seq + 1)
-            .max()
-            .unwrap_or(0);
-        let epoch = entries.iter().map(|e| e.epoch).max().unwrap_or(0);
-        Ok((next_seq, next_index, epoch))
+        let prefix = format!("{}manifest/", shard_prefix(shard));
+        let Some(tail_key) = self.store.list(&prefix)?.into_iter().max() else {
+            return Ok((0, 0, 0));
+        };
+        let Some(bytes) = self.store.get(&tail_key)? else {
+            return Ok((0, 0, 0));
+        };
+        let tail: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+        let next_index = tail.index + 1;
+        let next_seq = if tail.fence {
+            tail.first_seq
+        } else {
+            tail.last_seq + 1
+        };
+        Ok((next_seq, next_index, tail.epoch))
     }
 
     /// All manifest entries for `shard`, sorted by index.

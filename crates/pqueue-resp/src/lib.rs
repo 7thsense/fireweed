@@ -325,6 +325,10 @@ pub async fn serve_with_shutdown_and_hooks<B: RespBackend, H: RespHooks>(
                 let Ok((stream, _)) = accepted else {
                     break;
                 };
+                // RESP is a small-message request/reply protocol: leaving Nagle on coalesces each tiny
+                // reply and, paired with the peer's delayed-ACK, stalls a pipelined connection ~40ms per
+                // command over a real (non-loopback) link. Disable it so replies flush immediately.
+                let _ = stream.set_nodelay(true);
                 let backend = backend.clone();
                 let hooks = hooks.clone();
                 let state = state.clone();

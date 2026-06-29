@@ -2994,6 +2994,17 @@ impl SqliteProjectionStore {
 }
 
 fn open_inner(conn: Connection) -> EngineResult<Inner> {
+    // WAL + synchronous=NORMAL: the group-commit projection seals one batched transaction per segment and
+    // wants commits cheap. Default DELETE journaling pays a rollback-journal create/delete (and an extra
+    // directory fsync) per COMMIT; WAL appends and checkpoints lazily, and NORMAL drops the per-commit
+    // fsync (durable at checkpoint). The projection is rebuildable from the durable object log, so this
+    // trades nothing the object-log authority does not already guarantee. `busy_timeout` keeps a
+    // concurrent checkpoint/reader from turning into a spurious SQLITE_BUSY. (No-ops on `:memory:`.)
+    st(conn.execute_batch(
+        "PRAGMA journal_mode=WAL;\
+         PRAGMA synchronous=NORMAL;\
+         PRAGMA busy_timeout=5000;",
+    ))?;
     st(conn.execute_batch(RELATIONAL_SCHEMA))?;
     ensure_item_fields_column(&conn)?;
     ensure_item_metadata_column(&conn)?;

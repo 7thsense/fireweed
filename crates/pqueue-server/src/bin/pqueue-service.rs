@@ -164,8 +164,28 @@ fn parse_bootstrap_queues() -> Vec<QueueDefinition> {
 // Multi-threaded runtime: blocking durable work (segment seal I/O + the batched SQLite apply) runs on a
 // worker thread without stalling the network accept/read path on the others, so concurrent pushes from many
 // RESP connections keep co-buffering into the next segment while one is sealing (the group-commit win).
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
+//
+// `PQUEUE_WORKER_THREADS` caps the tokio worker-thread pool (default: one per available core). A node owns
+// only its own queues and is single-writer per queue, so a small pool suffices; capping it is important when
+// many nodes are CO-LOCATED on one host (e.g. a dense multi-owner box), where the default per-process
+// `num_cpus` pool would oversubscribe the shared cores and degrade every node's throughput.
+fn main() {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(n) = env::var("PQUEUE_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        builder.worker_threads(n);
+    }
+    builder
+        .build()
+        .expect("build tokio runtime")
+        .block_on(async_main());
+}
+
+async fn async_main() {
     if env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!("pqueue-service {}", env!("CARGO_PKG_VERSION"));
         return;
