@@ -929,13 +929,42 @@ impl<B: LibBackend> Pqueue<B> {
     }
 
     /// Re-arm a recurring item: complete this delivery and re-arm it for its next occurrence, RESETTING
-    /// `attempt_count` to 0. Maps to `Finalize{Rearm}`.
+    /// `attempt_count` to 0. Maps to `Finalize{Rearm}` with no new `not_before` (re-eligible immediately).
+    /// For a recurring item with an idle interval between occurrences use [`Pqueue::rearm_at`].
     pub async fn rearm(
         &self,
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
     ) -> EngineResult<()> {
         self.finalize(queue, ids, FinalizeKind::Rearm, None).await
+    }
+
+    /// Re-arm a recurring item for its NEXT occurrence at `not_before` (the recurrence interval): completes
+    /// this delivery, resets `attempt_count` to 0, and defers re-eligibility until `not_before` — so an idle
+    /// recurring item is ineligible (and excluded from oldest-eligible selection) between occurrences. If the
+    /// queue's [`RecurrencePolicy::until`] is set and `not_before` falls strictly past it, the series has
+    /// ended: the item is driven **terminal** (Complete) instead of re-arming. Maps to `Finalize{Rearm}`
+    /// carrying the next-occurrence `not_before`.
+    pub async fn rearm_at(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        not_before: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.finalize(queue, ids, FinalizeKind::Rearm, Some(not_before))
+            .await
+    }
+
+    /// [`Pqueue::rearm_at`] with a **relative** interval: re-arm for `delay_ms` from now (the recurrence
+    /// period, computed off this handle's clock).
+    pub async fn rearm_after(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        delay_ms: u64,
+    ) -> EngineResult<()> {
+        let not_before = add_millis(self.clock.now(), delay_ms);
+        self.rearm_at(queue, ids, not_before).await
     }
 
     /// Hard-delete the given items (operator purge / dead-letter cleanup). A **leased** item requires

@@ -1004,7 +1004,11 @@ impl ControlPlaneStore for MemoryBackend {
             let shard = key.clone();
             g.logs.entry(shard.clone()).or_default();
             g.projections.entry(shard).or_insert_with(|| {
-                ProjectionData::new(definition.priority_model, &definition.secondary_indexes)
+                ProjectionData::new(
+                    definition.priority_model,
+                    definition.recurrence,
+                    &definition.secondary_indexes,
+                )
             });
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {

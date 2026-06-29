@@ -29,7 +29,7 @@ use pqueue::{
 use pqueue_core::{
     CohortPolicy, EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
-    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, MemoryBackend};
@@ -893,12 +893,13 @@ async fn assert_upsert_unavailable<B: LibBackend>(pq: &Pqueue<B>, tenant: &str) 
 ///     count). COUNTERFACTUAL with the SAME `max_attempts`: a `Retry`-nacked item terminalizes at the bound;
 ///   - PurgeItems is idempotent (a second purge of the same id is a no-op) and a late finalize after purge
 ///     returns `not_found`.
-/// DEFERRED (tracked on pqueue-8cbae731 — FinalizeRearm sets no new not_before, RecurrencePolicy.until is not
-/// enforced): rearm idle-period (new not_before each cycle), recurrence.until terminal cutoff, and the
-/// idle-recurring-doesn't-inflate-oldest-eligible-age check. NOT asserted, NOT claimed in the row.
+/// ASSERTED (BQ pqueue-8cbae731): rearm idle-period — `rearm_at` sets a new not_before so a recurring item
+/// is INELIGIBLE between occurrences (excluded from eligible/oldest-eligible selection) until its cycle time,
+/// then the SAME id returns; and RecurrencePolicy.until — a rearm whose next occurrence falls past `until`
+/// drives the item terminal (Complete) instead of re-arming.
 #[tokio::test]
 async fn jobs_connectors_recurring_e2e() {
-    let (pq, _clock) = deployment();
+    let (pq, clock) = deployment();
 
     // max_attempts = 2 so the retry-exhaustion counterfactual bites in two cycles.
     let rec_q = qk("jobs", "connectors");
@@ -955,6 +956,110 @@ async fn jobs_connectors_recurring_e2e() {
         (m.pending, m.failed),
         (1, 0),
         "the recurring singleton survives many cycles, never terminal"
+    );
+
+    // --- recurring IDLE interval (BQ pqueue-8cbae731): rearm_at defers the NEXT occurrence ---
+    // A recurring poll-cursor rearmed for a future occurrence is INELIGIBLE between occurrences: the new
+    // not_before gates it out of claim/oldest-eligible selection until its cycle time, then the SAME id
+    // returns. (Proves rearm sets a new not_before AND that not_before-gated items are excluded from the
+    // eligible/oldest-eligible computation.)
+    let idle_q = qk("jobs", "recurring-idle");
+    let mut idle_def = qdef(
+        "jobs",
+        "recurring-idle",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    idle_def.recurrence = RecurrencePolicy {
+        mode: RecurrenceMode::Recurring,
+        until: Some(ts(10_000)),
+    };
+    pq.create_queue(idle_def).await.unwrap();
+    clock.set(0);
+    let idle = pq
+        .push(
+            &idle_q,
+            NewItem {
+                payload: Some(Bytes::from_static(b"poll-cursor")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // occurrence 1 at t=0
+    let occ1 = pq.claim(&idle_q, 10, 60_000).await.unwrap();
+    assert_eq!(occ1.len(), 1);
+    assert_eq!(occ1[0].item_id, idle);
+    // rearm for the NEXT occurrence at t=100 (the idle recurrence interval)
+    pq.rearm_at(&idle_q, [idle], ts(100)).await.unwrap();
+    // IDLE: still at t=0, the item is ineligible — excluded from the eligible/oldest-eligible selection.
+    let idle_now = pq.claim(&idle_q, 10, 60_000).await.unwrap();
+    assert!(
+        idle_now.is_empty(),
+        "an idle recurring item is ineligible until its next occurrence (rearm set a future not_before, and not_before-gated items are excluded from eligible selection)"
+    );
+    // It is parked on not_before (alive/pending), NOT terminal — the rearm did not fail or drop it.
+    let im = pq.metrics(&idle_q).await.unwrap();
+    assert_eq!(
+        (im.pending, im.leased, im.failed, im.complete),
+        (1, 0, 0, 0),
+        "the idle recurring singleton is pending-but-ineligible between occurrences, never terminal"
+    );
+    // advance to the next occurrence: the SAME id becomes eligible again.
+    clock.set(100);
+    let occ2 = pq.claim(&idle_q, 10, 60_000).await.unwrap();
+    assert_eq!(
+        occ2.len(),
+        1,
+        "the recurring item returns at its cycle time"
+    );
+    assert_eq!(
+        occ2[0].item_id, idle,
+        "the same recurring singleton returns at its next occurrence (no duplicate row)"
+    );
+    let idle_recurs = occ2[0].item_id == idle;
+
+    // --- recurrence.until cutoff (BQ pqueue-8cbae731): a rearm PAST `until` ends the series (terminal) ---
+    let until_q = qk("jobs", "recurring-until");
+    let mut until_def = qdef(
+        "jobs",
+        "recurring-until",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+    );
+    until_def.recurrence = RecurrencePolicy {
+        mode: RecurrenceMode::Recurring,
+        until: Some(ts(100)),
+    };
+    pq.create_queue(until_def).await.unwrap();
+    clock.set(0);
+    let bounded = pq.push(&until_q, NewItem::default()).await.unwrap();
+    let bg = pq.claim(&until_q, 1, 60_000).await.unwrap();
+    assert_eq!(bg.len(), 1);
+    // A rearm for an occurrence AT `until` (t=100, not strictly past) keeps the series alive.
+    pq.rearm_at(&until_q, [bounded], ts(100)).await.unwrap();
+    clock.set(100);
+    let still = pq.claim(&until_q, 1, 60_000).await.unwrap();
+    assert_eq!(
+        still.len(),
+        1,
+        "a rearm whose next occurrence is AT `until` keeps the series alive"
+    );
+    assert_eq!(still[0].item_id, bounded);
+    // A rearm for an occurrence PAST `until` (t=101) drives the item terminal — the series has ended.
+    pq.rearm_at(&until_q, [bounded], ts(101)).await.unwrap();
+    let um = pq.metrics(&until_q).await.unwrap();
+    assert_eq!(
+        (um.pending, um.leased, um.complete),
+        (0, 0, 1),
+        "a rearm past recurrence.until ends the series: the item is terminal (Complete), not re-armed"
+    );
+    let until_terminalizes = um.complete == 1 && um.pending == 0;
+    // and it never recurs again, no matter how far the clock advances.
+    clock.set(1_000_000);
+    assert!(
+        pq.claim(&until_q, 10, 60_000).await.unwrap().is_empty(),
+        "a past-until recurring item does not recur"
     );
 
     // --- retry COUNTERFACTUAL (same max_attempts=2): nack(Retry) DOES consume the budget → terminal ---
@@ -1020,10 +1125,18 @@ async fn jobs_connectors_recurring_e2e() {
     emit_ac(
         "AC-E2E-4",
         &[],
-        "recurring singleton cycles as one row with monotonic item_version; rearm resets the delivery count (does NOT consume retry budget — counterfactual: a Retry-nack terminalizes at max_attempts); PurgeItems idempotent + late finalize -> not_found [DEFERRED -> pqueue-8cbae731: rearm idle-period, recurrence.until; approx-counter convergence is a durable-backend concern (exact here)]",
+        "recurring singleton cycles as one row with monotonic item_version; rearm resets the delivery count (does NOT consume retry budget — counterfactual: a Retry-nack terminalizes at max_attempts); rearm_at sets a new not_before so an idle recurring item is ineligible (excluded from eligible/oldest-eligible selection) between occurrences then the same id returns; a rearm past recurrence.until drives the item terminal; PurgeItems idempotent + late finalize -> not_found [approx-counter convergence is a durable-backend concern (exact here)]",
         BTreeMap::from([
             ("rearm_cycles".into(), serde_json::json!(cycles)),
             ("item_versions".into(), serde_json::json!(versions)),
+            (
+                "idle_recurring_excluded_then_returns".into(),
+                serde_json::json!(idle_recurs),
+            ),
+            (
+                "recurrence_until_terminalizes".into(),
+                serde_json::json!(until_terminalizes),
+            ),
             (
                 "attempt_count_per_cycle".into(),
                 serde_json::json!(attempts_per_cycle),

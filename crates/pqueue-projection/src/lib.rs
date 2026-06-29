@@ -24,7 +24,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, IndexSpec, ItemEvent, ItemId, ItemState, LeaseToken, Metadata,
-    PriorityModel, PriorityValue, UtcTimestamp, apply_transition, failure_event, priority_sort,
+    PriorityModel, PriorityValue, RecurrenceMode, RecurrencePolicy, UtcTimestamp, apply_transition,
+    failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
@@ -326,6 +327,10 @@ pub struct ProjectionData {
     eligible: BTreeSet<EligKey>,
     next_seq: u64,
     priority_model: PriorityModel,
+    /// The queue's recurrence policy (BQ pqueue-8cbae731). Read by the `Finalize{Rearm}` apply arm to
+    /// enforce `RecurrencePolicy.until`: a rearm whose next occurrence (`not_before`) falls past `until`
+    /// ends the series (the item goes terminal) instead of re-arming. Defaults to `Oneshot`/no-`until`.
+    recurrence: RecurrencePolicy,
     paused: bool,
     /// Per-queue secondary indexes (ADR-010), keyed by `IndexSpec.name`. Built once from the queue's
     /// specs and maintained in the same `apply_command` arms that maintain `eligible`.
@@ -344,7 +349,11 @@ pub struct ProjectionData {
 }
 
 impl ProjectionData {
-    pub fn new(priority_model: PriorityModel, specs: &[IndexSpec]) -> Self {
+    pub fn new(
+        priority_model: PriorityModel,
+        recurrence: RecurrencePolicy,
+        specs: &[IndexSpec],
+    ) -> Self {
         let mut indexes = BTreeMap::new();
         for spec in specs {
             let index = if spec.unique {
@@ -360,6 +369,7 @@ impl ProjectionData {
             eligible: BTreeSet::new(),
             next_seq: 0,
             priority_model,
+            recurrence,
             paused: false,
             indexes,
             index_specs: specs.to_vec(),
@@ -605,7 +615,23 @@ impl ProjectionData {
                             failure_event(rec.attempt_count, rec.max_attempts)
                         }
                         FinalizeKind::Release => ItemEvent::FinalizeRelease,
-                        FinalizeKind::Rearm => ItemEvent::FinalizeRearm,
+                        FinalizeKind::Rearm => {
+                            // recurrence.until cutoff (BQ pqueue-8cbae731): a rearm whose next occurrence
+                            // (`not_before`) falls strictly PAST `until` ends the series — the item goes
+                            // terminal (Complete) instead of re-arming. `until` only bites on a recurring
+                            // queue with an explicit next-occurrence; an immediate rearm (no `not_before`)
+                            // or a non-recurring queue re-arms as before. Deterministic from the replayed
+                            // command, so apply stays infallible.
+                            if matches!(self.recurrence.mode, RecurrenceMode::Recurring)
+                                && let (Some(nb), Some(until)) =
+                                    (o.not_before, self.recurrence.until)
+                                && nb > until
+                            {
+                                ItemEvent::FinalizeComplete
+                            } else {
+                                ItemEvent::FinalizeRearm
+                            }
+                        }
                     };
                     self.transition(&o.item_id, ev)?;
                     let rec = self
@@ -615,8 +641,15 @@ impl ProjectionData {
                     rec.lease_token = None;
                     rec.lease_expires_at = None;
                     rec.fenced = false;
-                    if matches!(o.kind, FinalizeKind::Rearm) {
+                    // A rearm that returned to Pending (within `until`) resets the delivery count and, when
+                    // the caller supplied the next-occurrence time, defers re-eligibility to that new
+                    // `not_before` (the idle interval). `eligible_candidates` filters `not_before <= now`
+                    // and `elig_key` is not_before-independent, so no eligibility-index update is needed.
+                    if matches!(o.kind, FinalizeKind::Rearm) && rec.state == ItemState::Pending {
                         rec.attempt_count = 0;
+                        if let Some(nb) = o.not_before {
+                            rec.not_before = Some(nb);
+                        }
                     }
                     // Queue-native retry backoff: a Retry that returned the item to Pending (still under the
                     // attempt bound) defers its re-eligibility to `not_before`. `eligible_candidates` filters
@@ -1255,7 +1288,7 @@ mod tests {
     fn item_version_is_monotonic_per_item() {
         let sk = shard();
         let mut log = LogData::default();
-        let mut proj = ProjectionData::new(model(), &[]);
+        let mut proj = ProjectionData::new(model(), RecurrencePolicy::default(), &[]);
 
         commit(
             &mut log,
@@ -1319,7 +1352,7 @@ mod tests {
     fn high_water_survives_log_compaction() {
         let sk = shard();
         let mut log = LogData::default();
-        let mut proj = ProjectionData::new(model(), &[]);
+        let mut proj = ProjectionData::new(model(), RecurrencePolicy::default(), &[]);
         for p in [10_i64, 20, 30] {
             commit(
                 &mut log,

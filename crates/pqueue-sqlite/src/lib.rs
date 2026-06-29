@@ -233,8 +233,11 @@ impl Inner {
                 serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             let shard = key.clone();
-            let mut proj =
-                ProjectionData::new(definition.priority_model, &definition.secondary_indexes);
+            let mut proj = ProjectionData::new(
+                definition.priority_model,
+                definition.recurrence,
+                &definition.secondary_indexes,
+            );
             for env in self.read_log_envelopes(&t, &q)? {
                 // Command-id is `sql-{node}-{n}` (or legacy `sql-{n}`); the trailing component is the seq.
                 if let Some(n) = env
@@ -872,7 +875,11 @@ impl ControlPlaneStore for SqliteBackend {
             let shard = key.clone();
             g.projections.insert(
                 shard,
-                ProjectionData::new(definition.priority_model, &definition.secondary_indexes),
+                ProjectionData::new(
+                    definition.priority_model,
+                    definition.recurrence,
+                    &definition.secondary_indexes,
+                ),
             );
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
