@@ -25,7 +25,9 @@ use pqueue_engine::{
     require_item_level_claim, validate_gate_command, validate_gate_push,
 };
 use pqueue_objectlog::LocalObjectLog;
-use pqueue_objectlog::segmented::{LocalFsBlobStore, SegmentConfig, SegmentedObjectLog};
+use pqueue_objectlog::segmented::{
+    BlobStore, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
+};
 use pqueue_projection::ProjectionData;
 use pqueue_sqlite::SqliteProjectionStore;
 use tokio::sync::oneshot;
@@ -564,8 +566,12 @@ impl ProjectionRead for ObjectLogSqliteBackend {
 //   and then completes every waiting op's `oneshot`. An epoch-fenced/failed seal fails all current waiters
 //   (the substrate discarded the buffer), keeping `pending` consistent with the substrate buffer.
 
-/// The concrete segmented log this backend drives (group-commit over a durable local-fs object store).
-type FsSegmentedLog = SegmentedObjectLog<LocalFsBlobStore>;
+/// The segmented log this backend drives (group-commit over a pluggable [`BlobStore`]). Production wires the
+/// durable local-filesystem store via [`SegmentedObjectLogSqliteBackend::open`]; the live S3/MinIO TP-002 E3
+/// harness injects an [`pqueue_objectlog::segmented::S3BlobStore`] via
+/// [`SegmentedObjectLogSqliteBackend::open_with_blob_store`]. `Arc<dyn BlobStore>` already implements
+/// `BlobStore` (the substrate's `Arc` blanket impl), so the substrate stays generic with no boxing churn.
+type FsSegmentedLog = SegmentedObjectLog<Arc<dyn BlobStore>>;
 
 /// Per-queue group-commit coordination state (guarded by an async mutex so the buffer/waiter registry is
 /// mutated atomically with the substrate's `enqueue`/`seal`).
@@ -624,7 +630,19 @@ impl SegmentedObjectLogSqliteBackend {
         projection_path: &str,
         config: SegmentConfig,
     ) -> EngineResult<Self> {
-        let store = LocalFsBlobStore::open(object_root)?;
+        let store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::open(object_root)?);
+        Self::open_with_blob_store(store, projection_path, config)
+    }
+
+    /// Open (or recover) over an arbitrary [`BlobStore`] (the production [`LocalFsBlobStore`] is just one
+    /// such store). The live S3/MinIO TP-002 E3 evidence harness passes an
+    /// [`pqueue_objectlog::segmented::S3BlobStore`] here to exercise the SAME group-commit ack-after-seal +
+    /// snapshot-tail recovery pipeline against a real S3-compatible endpoint.
+    pub fn open_with_blob_store(
+        store: Arc<dyn BlobStore>,
+        projection_path: &str,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
         let log = Arc::new(SegmentedObjectLog::open(store, config));
         let projection = Arc::new(SqliteProjectionStore::open(projection_path)?);
         // Poll near the latency cap so a buffered-but-quiet segment seals within ~max_latency_ms.
@@ -643,6 +661,13 @@ impl SegmentedObjectLogSqliteBackend {
             recovery_max_tail: env_recovery_max_tail(),
             recovery_stats: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// A snapshot of the measured group-commit segment/object counters (segments sealed, objects PUT,
+    /// commands committed, per-segment batch sizes) — the release-ledger object-log cost surface the
+    /// TP-002 E3 harness reports per segment-size configuration.
+    pub fn segment_counters(&self) -> SegmentCounters {
+        self.log.counters()
     }
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
@@ -1302,7 +1327,7 @@ impl SegmentedObjectLogInMemoryBackend {
     /// Open (or recover) a segmented object log rooted at `object_root` with `config`, paired with in-memory
     /// projections. Recovery replays committed segments into each queue's `ProjectionData` in `create_queue`.
     pub fn open(object_root: impl Into<PathBuf>, config: SegmentConfig) -> EngineResult<Self> {
-        let store = LocalFsBlobStore::open(object_root)?;
+        let store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::open(object_root)?);
         let log = Arc::new(SegmentedObjectLog::open(store, config));
         let flush_ms = (config.max_latency_ms / 4).max(1);
         Ok(Self {

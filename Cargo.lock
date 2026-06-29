@@ -1173,9 +1173,11 @@ dependencies = [
  "pqueue-objectlog",
  "pqueue-postgres",
  "pqueue-projection",
+ "pqueue-release",
  "pqueue-resp",
  "pqueue-sqlite",
  "redis",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]
