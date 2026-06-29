@@ -345,6 +345,221 @@ fn performance_cross_queue_scale_out_tests() {
     emit_and_verify("performance_cross_queue_scale_out_tests", &row, "E2");
 }
 
+// ----------------------------------------------------------------------------------------------------
+// LIVE multi-node HEADLINE (TP-002 §E2) — the cargo-test entry point that runs the REAL object_log_sqlite_
+// projection cross-queue scale-out against a PROVISIONED kind cluster (bead pqueue-36d405a9, acceptance #1).
+//
+// This is NOT the in-process smoke test above (`performance_cross_queue_scale_out_tests`, which substantiates
+// only the ADR-008 owner-independence PROPERTY on one in-memory node and must NOT be cited as the headline).
+// This entry point drives the SAME provisioned-cluster path that captured the closed-bead release evidence
+// (`scripts/perf/tp002-e2-kind.sh` + the in-cluster `pqueue-loadgen` measurement; docs/perf/
+// tp002-e2-multinode-kind-release.md): build the harness image, create+load a kind cluster, deploy K owner
+// pods (CPU-limited, one owner per queue, disjoint bootstrap queues, segmented object_log_sqlite_projection)
+// at K in {2,4,8}, drive a LEAN in-cluster load Job pod->pod over Service ClusterIP, fold each 2/4/8 sweep
+// into one E2 ledger row, and judge the four release bars. Driving the load IN-CLUSTER (pod->pod) is what
+// makes this immune to the sandbox's host->published-port signal-16 kill — the host never carries the
+// sustained load; the orchestrator only repoints kubeconfig at the control-plane BRIDGE IP for the control
+// plane traffic, exactly as documented.
+//
+// ENV-GATED. Without `PQUEUE_E2_LIVE=1` it LOUD-skips and returns green (so `cargo test --workspace` and a
+// default `pqueue-bench` run never spin up an 8-pod cluster) — mirroring the loud-skip pattern of the sibling
+// live suite `performance_multi_node_object_log_e2_tests`. With the flag set it provisions a UNIQUELY-named
+// kind cluster (never the pre-existing fjord-e2e/heimq-e2e/kind clusters), runs the sweep, ASSERTS the four
+// E2 bars from the emitted ledger (teeth: it re-checks the measured values, it does not merely trust the
+// orchestrator's exit code), and TEARS THE CLUSTER + IMAGE DOWN via a Drop guard even if an assertion panics.
+//
+// Tunables (env, all optional): PQUEUE_E2_SWEEPS (default 1 — one full 2/4/8 sweep is enough for the entry
+// point to be green; the closed-bead evidence ran 3), PQUEUE_E2_CLUSTER, PQUEUE_E2_IMAGE.
+
+/// The E2 headline cross-node multiple: the 8-owner ingest aggregate must be at least this times the 2-owner.
+const SCALE_MULTIPLE_BAR: f64 = 3.5;
+
+/// Tear down the kind cluster + harness image THIS test created, even if an assertion panics. Only the
+/// uniquely-named cluster/image we made are removed — the pre-existing fjord-e2e/heimq-e2e/kind clusters are
+/// NEVER named here, so they are never touched.
+struct LiveClusterGuard {
+    cluster: String,
+    image: String,
+}
+
+impl Drop for LiveClusterGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kind")
+            .args(["delete", "cluster", "--name", &self.cluster])
+            .output();
+        let _ = std::process::Command::new("docker")
+            .args(["rmi", "-f", &self.image])
+            .output();
+    }
+}
+
+fn tool_present(tool: &str, probe: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg(probe)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn live_multi_node_object_log_sqlite_projection_e2() {
+    if std::env::var("PQUEUE_E2_LIVE").is_err() {
+        eprintln!(
+            "TP-002 E2 LIVE multi-node object_log_sqlite_projection headline SKIPPED — set PQUEUE_E2_LIVE=1 \
+             to provision a kind cluster (scripts/perf/tp002-e2-kind.sh: CPU-limited owner pods at 2/4/8 + a \
+             lean in-cluster load Job) and assert the four E2 release bars (ingest non-decreasing 2->4->8; \
+             8-owner ingest >= 3.5x 2-owner; worst per-queue ingest AND claim+finalize >= 2777.78/s; \
+             one-owner-per-queue). The headline is DEFERRED here (not measured), never a hidden pass."
+        );
+        return;
+    }
+
+    // Locate the orchestrator + repo root (crates/pqueue-bench/../.. == repo root).
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let script = repo_root.join("scripts/perf/tp002-e2-kind.sh");
+    assert!(
+        script.exists(),
+        "kind orchestrator not found at {} — cannot provision the live cluster",
+        script.display()
+    );
+
+    // Fail LOUDLY (not as a benchmark miss) if the provisioning toolchain is missing.
+    for (tool, probe) in [
+        ("kind", "version"),
+        ("kubectl", "--help"),
+        ("docker", "version"),
+        ("cargo", "--version"),
+    ] {
+        assert!(
+            tool_present(tool, probe),
+            "`{tool} {probe}` failed — {tool} is required to provision the live E2 kind cluster"
+        );
+    }
+
+    // UNIQUE names so we provision (and later delete) our OWN cluster/image and never collide with the
+    // pre-existing fjord-e2e/heimq-e2e/kind clusters that must stay untouched.
+    let tag = std::process::id();
+    let cluster =
+        std::env::var("PQUEUE_E2_CLUSTER").unwrap_or_else(|_| format!("pq-e2-live-{tag}"));
+    let image = std::env::var("PQUEUE_E2_IMAGE").unwrap_or_else(|_| format!("pqueue-e2-live:{tag}"));
+    let sweeps = std::env::var("PQUEUE_E2_SWEEPS").unwrap_or_else(|_| "1".to_string());
+    let ledger_out = std::env::temp_dir().join(format!("tp002-e2-live-{tag}.jsonl"));
+
+    // Arm teardown BEFORE provisioning so a panic anywhere below still deletes the cluster + image.
+    let _guard = LiveClusterGuard {
+        cluster: cluster.clone(),
+        image: image.clone(),
+    };
+
+    println!(
+        "\nTP-002 E2 LIVE headline: provisioning kind cluster '{cluster}' (image '{image}', {sweeps} sweep(s) of 2/4/8) via {}",
+        script.display()
+    );
+
+    // Drive the orchestrator. stdio is INHERITED so `--nocapture` streams the live 2/4/8 sweep + per-sweep
+    // verdict. The script builds the image, creates+loads the cluster, deploys the CPU-limited owner pods +
+    // in-cluster load Job, collects each sweep, and exits 0 ONLY when every sweep met all four release bars.
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .current_dir(&repo_root)
+        .env("CLUSTER", &cluster)
+        .env("IMAGE", &image)
+        .env("SWEEPS", &sweeps)
+        .env("LEDGER_OUT", &ledger_out)
+        .status()
+        .expect("spawn tp002-e2-kind.sh orchestrator");
+    assert!(
+        status.success(),
+        "the kind orchestrator did not meet all four E2 release bars across {sweeps} sweep(s) (exit {:?}); \
+         see the streamed sweep output above",
+        status.code()
+    );
+
+    // TEETH: re-assert the four bars from the emitted ledger ourselves — do not merely trust the exit code.
+    let text = std::fs::read_to_string(&ledger_out).unwrap_or_else(|e| {
+        panic!(
+            "orchestrator produced no ledger at {}: {e}",
+            ledger_out.display()
+        )
+    });
+    let rows: Vec<pqueue_release::LedgerRow> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("parse emitted E2 ledger row"))
+        .collect();
+    assert!(
+        !rows.is_empty(),
+        "orchestrator emitted no E2 ledger rows at {}",
+        ledger_out.display()
+    );
+    let _ = std::fs::remove_file(&ledger_out);
+
+    println!(
+        "\n  owners 2->4->8 ingest agg | 8/2 ingest | worst ingest/q | worst claim+final/q  ({} sweep row(s))",
+        rows.len()
+    );
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(
+            row.backend_profile, "object_log_sqlite_projection",
+            "sweep {i}: live headline must be the object_log_sqlite_projection backend"
+        );
+        let v = &row.measurements.values;
+        let num = |k: &str| -> f64 {
+            v.get(k)
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_else(|| panic!("sweep {i}: ledger row missing numeric {k}"))
+        };
+        let flag = |k: &str| -> bool {
+            v.get(k)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| panic!("sweep {i}: ledger row missing bool {k}"))
+        };
+
+        let (i2, i4, i8) = (
+            num("owners_2_ingest_aggregate_per_s"),
+            num("owners_4_ingest_aggregate_per_s"),
+            num("owners_8_ingest_aggregate_per_s"),
+        );
+        let ratio = num("scale_out_8_vs_2_ingest_multiple");
+        let worst_ingest = num("worst_ingest_per_queue_per_s");
+        let worst_drain = num("worst_claim_finalize_per_queue_per_s");
+        let confirmations = num("one_owner_per_queue_confirmations");
+        println!(
+            "  {i2:>7.0} {i4:>7.0} {i8:>7.0} | {ratio:>9.2}x | {worst_ingest:>13.0} | {worst_drain:>18.0}"
+        );
+
+        // (1) ingest aggregate non-decreasing 2->4->8.
+        assert!(
+            flag("ingest_aggregate_non_decreasing"),
+            "sweep {i}: E2 bar (1) ingest aggregate must be non-decreasing 2->4->8: {i2:.0} -> {i4:.0} -> {i8:.0}"
+        );
+        // (2) 8-owner ingest aggregate >= 3.5x the 2-owner.
+        assert!(
+            ratio >= SCALE_MULTIPLE_BAR,
+            "sweep {i}: E2 bar (2) 8-owner ingest must be >= {SCALE_MULTIPLE_BAR}x the 2-owner, measured {ratio:.2}x"
+        );
+        // (3) worst per-queue ingest AND claim+finalize each >= the E0 floor.
+        assert!(
+            worst_ingest >= FLOOR_ITEMS_PER_SEC && worst_drain >= FLOOR_ITEMS_PER_SEC,
+            "sweep {i}: E2 bar (3) worst per-queue must be >= {FLOOR_ITEMS_PER_SEC:.0}/s for ingest (got {worst_ingest:.0}) AND claim+finalize (got {worst_drain:.0})"
+        );
+        // (4) one-owner-per-queue, live-proven (cross-node 'no such queue' confirmations).
+        assert!(
+            confirmations > 0.0,
+            "sweep {i}: E2 bar (4) one-owner-per-queue must be live-proven (confirmations > 0)"
+        );
+        // The orchestrator emits release-tier ONLY when all four bars hold; assert that too (belt-and-braces).
+        assert_eq!(
+            row.evidence_tier, "release",
+            "sweep {i}: a passing E2 sweep must be release-tier (all four bars met)"
+        );
+    }
+    println!(
+        "\n  ==> TP-002 E2 LIVE headline PASS across {} sweep(s) on provisioned kind cluster '{cluster}'",
+        rows.len()
+    );
+}
+
 /// Write `row` to its `<suite>.jsonl` ledger (one row per run) and assert it is WELL-FORMED — round-trips
 /// strict validation and carries `evidence_id`. (This checks the row's structure, not the measured values;
 /// the measurements are verified by the suite's own assertions above, which run before this emission.)
