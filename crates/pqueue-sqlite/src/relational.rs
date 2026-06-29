@@ -2991,6 +2991,54 @@ impl SqliteProjectionStore {
         let mut g = self.inner.lock().expect("projection store poisoned");
         apply_committed_batch_sql(&mut g, positions, envelopes)
     }
+
+    /// Snapshot recovery seam (bead pqueue-8a76daad): the per-queue **high-water** durably recorded by the
+    /// materialized projection — the next command sequence the projection expects (`relational_cursor.
+    /// next_seq`). The last sequence already absorbed is therefore `high_water - 1`, so a reopen need only
+    /// replay the object-log tail at `>= high_water` rather than from genesis. `None` if the queue has no
+    /// projection row yet (a never-created queue → caller falls back to a full replay).
+    ///
+    /// Because every committed batch advances this cursor INSIDE the same SQLite transaction that applies
+    /// the batch, the persisted high-water can never be ahead of what is durably materialized: a crash
+    /// between the object-log commit and the projection apply leaves the cursor behind the log head, so the
+    /// uncommitted tail is replayed (never skipped) on recovery.
+    pub fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+        let g = self.inner.lock().expect("projection store poisoned");
+        let (t, q) = parts(shard);
+        let next_seq: Option<i64> = st(g
+            .conn
+            .query_row(
+                "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get(0),
+            )
+            .optional())?;
+        Ok(next_seq.map(|n| n as u64))
+    }
+
+    /// Restart recovery for the object-log backends' item-id mint counter: seed `counters` past every item
+    /// id already materialized in the snapshot (`pqueue_items`), so a push after a snapshot-tail reopen never
+    /// re-mints an id that the full-genesis replay would have observed. Safe because the object_log_sqlite
+    /// backends never delete item rows (purge / replace-pending are `Unavailable` on the eventual-apply
+    /// class), so the persisted items are the complete minted set up to the high-water; the bounded tail
+    /// then observes any ids minted beyond it.
+    pub fn observe_item_counters(
+        &self,
+        shard: &QueueKey,
+        counters: &QueueCounters,
+    ) -> EngineResult<()> {
+        let g = self.inner.lock().expect("projection store poisoned");
+        let (t, q) = parts(shard);
+        let mut stmt = st(g
+            .conn
+            .prepare("SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2"))?;
+        let rows = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
+        for r in rows {
+            let id = ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?;
+            counters.observe(shard, id);
+        }
+        Ok(())
+    }
 }
 
 fn open_inner(conn: Connection) -> EngineResult<Inner> {

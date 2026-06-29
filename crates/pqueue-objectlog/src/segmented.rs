@@ -871,6 +871,47 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(out)
     }
 
+    /// Bounded-tail recovery read (bead pqueue-8a76daad): replay only the **manifest-committed** commands at
+    /// sequence `>= from_seq`, the snapshot-tail counterpart to [`read_all`]. A segment whose `last_seq <
+    /// from_seq` lies entirely in the snapshot the projection has already materialized, so its object is
+    /// NEVER fetched or decoded — only the manifest (already an O(entries) list) is scanned and the tail
+    /// segments are GET + checksum-verified + decoded. A segment straddling the boundary is fetched once and
+    /// its already-applied prefix records are filtered out, so the returned positions are contiguous from
+    /// `from_seq`. With `from_seq == 0` this is exactly [`read_all`] (full-genesis replay fallback).
+    pub fn read_from(
+        &self,
+        shard: &QueueKey,
+        from_seq: u64,
+    ) -> EngineResult<Vec<(CommandPosition, CommandEnvelope)>> {
+        let mut out = Vec::new();
+        for entry in self.read_manifest(shard)? {
+            if entry.fence {
+                continue;
+            }
+            // The bounded-tail saving: a fully-applied segment is skipped without a GET/parse of its object.
+            if entry.last_seq < from_seq {
+                continue;
+            }
+            let Some(seg_key) = entry.segment_key.as_ref() else {
+                continue;
+            };
+            let bytes = self
+                .store
+                .get(seg_key)?
+                .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
+            let (epoch, first_seq, commands) =
+                parse_segment_object(&bytes, seg_key, entry.checksum)?;
+            for (i, env) in commands.into_iter().enumerate() {
+                let seq = first_seq + i as u64;
+                if seq < from_seq {
+                    continue;
+                }
+                out.push((CommandPosition::new(shard.clone(), epoch, seq), env));
+            }
+        }
+        Ok(out)
+    }
+
     /// A snapshot of the measured segment/object counters (release-ledger harness surface).
     pub fn counters(&self) -> SegmentCounters {
         self.inner

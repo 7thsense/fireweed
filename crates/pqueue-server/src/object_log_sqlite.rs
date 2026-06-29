@@ -30,6 +30,36 @@ use pqueue_projection::ProjectionData;
 use pqueue_sqlite::SqliteProjectionStore;
 use tokio::sync::oneshot;
 
+/// Per-queue recovery telemetry recorded by the snapshot-tail reopen path (bead pqueue-8a76daad). Exposed so
+/// a test (and an operator-facing log line) can prove recovery resumed from the persisted high-water rather
+/// than replaying the full genesis log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecoveryStats {
+    /// The object-log sequence recovery began replaying at — the projection's persisted high-water
+    /// (`relational_cursor.next_seq`). `0` means a full-genesis replay (no valid snapshot).
+    pub start_seq: u64,
+    /// Number of object-log tail entries replayed beyond the snapshot (`<<` total when a snapshot exists).
+    pub tail_replayed: u64,
+    /// Whether a durable snapshot/high-water short-circuited the genesis replay (`start_seq > 0`).
+    pub snapshot_used: bool,
+}
+
+/// Default recovery-window budget: the max object-log tail (commands) a normal reopen is expected to replay
+/// beyond the durable projection snapshot. The materialized projection advances its high-water inside the
+/// same transaction that applies each sealed batch, so the tail is normally a handful of commands (only what
+/// was durably sealed but not yet projection-applied at crash time). Exceeding this budget is logged as a
+/// recovery-window warning so an operator can investigate a projection that has fallen far behind the log.
+const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
+
+/// Read the recovery-window budget knob `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` (commands), defaulting to
+/// [`DEFAULT_RECOVERY_MAX_TAIL`]. Documented in the `pqueue-service` help text and the operator guide.
+fn env_recovery_max_tail() -> u64 {
+    std::env::var("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RECOVERY_MAX_TAIL)
+}
+
 pub struct ObjectLogSqliteBackend {
     log: LocalObjectLog,
     projection: SqliteProjectionStore,
@@ -38,6 +68,10 @@ pub struct ObjectLogSqliteBackend {
     command_seq: AtomicU64,
     node_id: u8,
     op_lock: tokio::sync::Mutex<()>,
+    /// Recovery-window budget (max tail commands) before a reopen logs a recovery-window warning.
+    recovery_max_tail: u64,
+    /// Last per-queue snapshot-tail recovery telemetry (proof the reopen avoided a full-genesis replay).
+    recovery_stats: Mutex<HashMap<QueueKey, RecoveryStats>>,
 }
 
 impl ObjectLogSqliteBackend {
@@ -50,12 +84,30 @@ impl ObjectLogSqliteBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             op_lock: tokio::sync::Mutex::new(()),
+            recovery_max_tail: env_recovery_max_tail(),
+            recovery_stats: Mutex::new(HashMap::new()),
         })
     }
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
         self
+    }
+
+    /// Override the recovery-window budget (max tail commands) — the explicit form of the
+    /// `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
+    pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
+        self.recovery_max_tail = max_tail;
+        self
+    }
+
+    /// The last snapshot-tail recovery telemetry for `shard` (bead pqueue-8a76daad proof seam).
+    pub fn recovery_stats(&self, shard: &QueueKey) -> Option<RecoveryStats> {
+        self.recovery_stats
+            .lock()
+            .expect("recovery stats poisoned")
+            .get(shard)
+            .copied()
     }
 
     fn next_envelope(
@@ -75,21 +127,61 @@ impl ObjectLogSqliteBackend {
         }
     }
 
+    /// Snapshot-tail recovery (bead pqueue-8a76daad). Resume from the projection's durable high-water
+    /// (`relational_cursor.next_seq`) instead of replaying from genesis: the persisted SQLite projection IS
+    /// the snapshot, so only the object-log tail at `>= high_water` is re-applied. Counters are re-seeded
+    /// from the materialized items (the snapshot prefix) plus each tail entry, so post-reopen id minting
+    /// never collides. A `None` high-water (queue never projected) falls back to a full replay.
     async fn replay_queue(&self, shard: &QueueKey) -> EngineResult<()> {
-        let mut from = None;
+        let high_water = self.projection.recovery_high_water(shard)?;
+        // Seed the mint counter from the snapshot's materialized items (full-genesis observe replacement).
+        self.projection
+            .observe_item_counters(shard, &self.counters)?;
+        let snapshot_used = matches!(high_water, Some(n) if n > 0);
+        // `read_from` is exclusive (starts at `from.sequence + 1`), so resume at `high_water - 1` to make the
+        // first replayed entry exactly `high_water`. No snapshot → genesis.
+        let mut from = match high_water {
+            Some(n) if n > 0 => Some(CommandPosition::new(shard.clone(), 0, n - 1)),
+            _ => None,
+        };
+        let start_seq = high_water.unwrap_or(0);
+        let mut tail_replayed: u64 = 0;
         loop {
             let page = self.log.read_from(shard, from.clone(), 256).await?;
             for (position, envelope) in &page.entries {
                 for id in &envelope.item_ids {
                     self.counters.observe(shard, *id);
                 }
+                // Idempotent: `apply_committed` skips any position the persisted cursor already absorbed.
                 self.projection.apply_committed(position, envelope)?;
+                tail_replayed += 1;
             }
             match page.next {
                 Some(next) => from = Some(next),
-                None => return Ok(()),
+                None => break,
             }
         }
+        if tail_replayed > self.recovery_max_tail {
+            eprintln!(
+                "[recovery] object-log-sqlite tail for {}:{} replayed {tail_replayed} commands beyond \
+                 snapshot high-water {start_seq} (budget {}); projection may have fallen behind the log",
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                self.recovery_max_tail,
+            );
+        }
+        self.recovery_stats
+            .lock()
+            .expect("recovery stats poisoned")
+            .insert(
+                shard.clone(),
+                RecoveryStats {
+                    start_seq,
+                    tail_replayed,
+                    snapshot_used,
+                },
+            );
+        Ok(())
     }
 
     async fn append_apply(
@@ -504,6 +596,10 @@ pub struct SegmentedObjectLogSqliteBackend {
     node_id: u8,
     /// How often the flusher polls each queue for a latency-due seal (a fraction of `max_latency_ms`).
     flush_interval: Duration,
+    /// Recovery-window budget (max tail commands) before a reopen logs a recovery-window warning.
+    recovery_max_tail: u64,
+    /// Last per-queue snapshot-tail recovery telemetry (proof the reopen avoided a full-genesis replay).
+    recovery_stats: Mutex<HashMap<QueueKey, RecoveryStats>>,
 }
 
 fn ts_to_ms(now: UtcTimestamp) -> i64 {
@@ -544,12 +640,30 @@ impl SegmentedObjectLogSqliteBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             flush_interval: Duration::from_millis(flush_ms),
+            recovery_max_tail: env_recovery_max_tail(),
+            recovery_stats: Mutex::new(HashMap::new()),
         })
     }
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
         self
+    }
+
+    /// Override the recovery-window budget (max tail commands) — the explicit form of the
+    /// `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
+    pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
+        self.recovery_max_tail = max_tail;
+        self
+    }
+
+    /// The last snapshot-tail recovery telemetry for `shard` (bead pqueue-8a76daad proof seam).
+    pub fn recovery_stats(&self, shard: &QueueKey) -> Option<RecoveryStats> {
+        self.recovery_stats
+            .lock()
+            .expect("recovery stats poisoned")
+            .get(shard)
+            .copied()
     }
 
     /// Spawn the background flusher that seals each queue's latency-due segment (the latency seal trigger).
@@ -744,22 +858,60 @@ impl SegmentedObjectLogSqliteBackend {
         }
     }
 
-    /// Replay every committed segment for `shard` into the projection (recovery / open). Idempotent: the
-    /// batch apply skips positions already absorbed by the projection cursor.
+    /// Snapshot-tail recovery (bead pqueue-8a76daad) — the production `object_log_sqlite_projection` path.
+    ///
+    /// The SQLite projection persists, per queue, both the materialized state AND its high-water
+    /// (`relational_cursor.next_seq`, advanced inside the same transaction that applies each sealed batch).
+    /// So the projection IS the snapshot: on reopen we read the high-water and replay ONLY the manifest-
+    /// committed object-log tail at `>= high_water` ([`SegmentedObjectLog::read_from`]), which never fetches
+    /// or decodes a segment object that lies entirely in the snapshot. A `None`/`0` high-water (fresh queue,
+    /// or the E3 smoke rebuild with no persisted projection) falls back to a full-genesis replay.
+    ///
+    /// Crash-consistency: because the high-water is only advanced by the projection apply, it can never be
+    /// ahead of what is durably materialized — a crash between a segment's manifest commit and its projection
+    /// apply leaves the tail at `>= high_water`, which this path re-applies (the batch apply is idempotent,
+    /// so an overlapping prefix is skipped, never double-applied).
     fn replay_queue(&self, shard: &QueueKey) -> EngineResult<()> {
-        let entries = self.log.read_all(shard)?;
-        if entries.is_empty() {
-            return Ok(());
-        }
-        for (_pos, env) in &entries {
-            for id in &env.item_ids {
-                self.counters.observe(shard, *id);
-            }
-        }
-        let positions: Vec<CommandPosition> = entries.iter().map(|(p, _)| p.clone()).collect();
-        let envelopes: Vec<CommandEnvelope> = entries.iter().map(|(_, e)| e.clone()).collect();
+        let high_water = self.projection.recovery_high_water(shard)?;
+        // Seed the mint counter from the snapshot's materialized items (full-genesis observe replacement).
         self.projection
-            .apply_committed_batch(&positions, &envelopes)
+            .observe_item_counters(shard, &self.counters)?;
+        let snapshot_used = matches!(high_water, Some(n) if n > 0);
+        let start_seq = high_water.unwrap_or(0);
+        let entries = self.log.read_from(shard, start_seq)?;
+        let tail_replayed = entries.len() as u64;
+        if !entries.is_empty() {
+            for (_pos, env) in &entries {
+                for id in &env.item_ids {
+                    self.counters.observe(shard, *id);
+                }
+            }
+            let positions: Vec<CommandPosition> = entries.iter().map(|(p, _)| p.clone()).collect();
+            let envelopes: Vec<CommandEnvelope> = entries.iter().map(|(_, e)| e.clone()).collect();
+            self.projection
+                .apply_committed_batch(&positions, &envelopes)?;
+        }
+        if tail_replayed > self.recovery_max_tail {
+            eprintln!(
+                "[recovery] segmented object-log-sqlite tail for {}:{} replayed {tail_replayed} commands \
+                 beyond snapshot high-water {start_seq} (budget {}); projection may have fallen behind",
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                self.recovery_max_tail,
+            );
+        }
+        self.recovery_stats
+            .lock()
+            .expect("recovery stats poisoned")
+            .insert(
+                shard.clone(),
+                RecoveryStats {
+                    start_seq,
+                    tail_replayed,
+                    snapshot_used,
+                },
+            );
+        Ok(())
     }
 
     async fn require_leased(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
@@ -1766,5 +1918,282 @@ impl ProjectionRead for SegmentedObjectLogInMemoryBackend {
             Ok(p.metrics())
         })();
         std::future::ready(result)
+    }
+}
+
+// ===========================================================================
+// Snapshot-tail recovery tests (bead pqueue-8a76daad)
+// ===========================================================================
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use pqueue_core::{
+        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+        PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
+    };
+    use pqueue_engine::{ControlPlaneStore, ProjectionRead, PushPort};
+
+    /// A unique scratch directory under the system temp dir, removed on drop.
+    struct TmpDir {
+        path: PathBuf,
+    }
+    impl TmpDir {
+        fn new(label: &str) -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "pqueue-recovery-{label}-{}-{n}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+        fn object_root(&self) -> PathBuf {
+            self.path.join("object-log")
+        }
+        fn projection(&self) -> String {
+            self.path
+                .join("projection.db")
+                .to_str()
+                .expect("utf8 temp path")
+                .to_string()
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn queue_def(tenant: &str, queue: &str) -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            queue_id: QueueId::new(queue).unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 1000,
+            max_claim_batch_size: 1000,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+        }
+    }
+
+    fn spec(payload: &str) -> PushSpec {
+        PushSpec {
+            client_item_key: None,
+            priority: None,
+            not_before: None,
+            group_key: None,
+            payload: Some(Bytes::from(payload.to_string())),
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            cohort_size: None,
+            gate_keys: Vec::new(),
+        }
+    }
+
+    fn ts() -> UtcTimestamp {
+        UtcTimestamp::new(1_700_000_000, 0).unwrap()
+    }
+
+    /// Force every push to seal its own segment synchronously (no flusher needed): a 1-byte target trips the
+    /// size seal inside `enqueue`, so the projection is applied before `push` returns.
+    fn seal_each_config() -> SegmentConfig {
+        SegmentConfig::new(1, 1_000).unwrap()
+    }
+
+    /// AC: a clean restart of the production segmented `object_log_sqlite_projection` recovers from the
+    /// persisted projection snapshot + high-water, NOT a full-genesis replay. Proven via the recovery seam:
+    /// replay resumed at the recorded high-water (not 0) and replayed zero tail entries (`<<` total objects).
+    #[tokio::test]
+    async fn segmented_clean_restart_recovers_from_snapshot_not_genesis() {
+        let tmp = TmpDir::new("seg-clean");
+        let def = queue_def("t", "q");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        const N: usize = 50;
+
+        let (total, pending_before) = {
+            let b = SegmentedObjectLogSqliteBackend::open(
+                tmp.object_root(),
+                &tmp.projection(),
+                seal_each_config(),
+            )
+            .unwrap();
+            b.create_queue(def.clone()).await.unwrap();
+            for i in 0..N {
+                b.push(&shard, vec![spec(&format!("p{i}"))], ts(), None)
+                    .await
+                    .unwrap();
+            }
+            let total = b.log.read_all(&shard).unwrap().len();
+            let pending = b.metrics(&shard).await.unwrap().pending;
+            (total, pending)
+        };
+        assert_eq!(total, N, "every push committed one segment command");
+        assert_eq!(pending_before, N as u64);
+
+        // Reopen on the same paths: create_queue triggers snapshot-tail recovery.
+        let b2 = SegmentedObjectLogSqliteBackend::open(
+            tmp.object_root(),
+            &tmp.projection(),
+            seal_each_config(),
+        )
+        .unwrap();
+        b2.create_queue(def.clone()).await.unwrap();
+
+        let stats = b2.recovery_stats(&shard).expect("recovery ran");
+        assert!(stats.snapshot_used, "a durable snapshot existed");
+        assert_eq!(
+            stats.start_seq, N as u64,
+            "replay resumed at the recorded high-water, not genesis (0)"
+        );
+        assert_eq!(
+            stats.tail_replayed, 0,
+            "a clean restart's projection was fully caught up; no tail to replay"
+        );
+        assert!(
+            (stats.tail_replayed as usize) < total,
+            "recovery did not replay the full genesis log"
+        );
+        // Committed state preserved across the restart.
+        assert_eq!(b2.metrics(&shard).await.unwrap().pending, N as u64);
+    }
+
+    /// AC (crash-consistency): a reopen where the projection high-water LAGS the durable object-log head
+    /// re-applies exactly the missing tail — no skip, no double-apply. We durably seal extra commands on the
+    /// log only (bypassing the projection apply, simulating a crash between manifest commit and apply), then
+    /// reopen and assert the tail is replayed exactly once; a second reopen replays nothing.
+    #[tokio::test]
+    async fn segmented_lagging_tail_replayed_exactly_once() {
+        let tmp = TmpDir::new("seg-lag");
+        let def = queue_def("t", "q");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        const COMMITTED: usize = 30;
+        const EXTRA: usize = 5;
+
+        {
+            let b = SegmentedObjectLogSqliteBackend::open(
+                tmp.object_root(),
+                &tmp.projection(),
+                seal_each_config(),
+            )
+            .unwrap();
+            b.create_queue(def.clone()).await.unwrap();
+            for i in 0..COMMITTED {
+                b.push(&shard, vec![spec(&format!("c{i}"))], ts(), None)
+                    .await
+                    .unwrap();
+            }
+            // Durably seal EXTRA commands on the LOG ONLY — the projection never sees them (crash window).
+            let epoch = b.cached_epoch(&shard);
+            for i in 0..EXTRA {
+                let (items, ids) = build_push_items(
+                    vec![spec(&format!("x{i}"))],
+                    epoch,
+                    0,
+                    1_000 + i as u32,
+                    def.retry_policy.max_attempts,
+                );
+                let env = b.next_envelope(QueueCommand::Push(PushCommand { items }), ids, ts());
+                let outcome = b
+                    .log
+                    .enqueue(&shard, std::slice::from_ref(&env), epoch, system_now_ms())
+                    .unwrap();
+                assert!(
+                    !outcome.committed.is_empty(),
+                    "1-byte target seals each extra command durably"
+                );
+            }
+            assert_eq!(b.log.read_all(&shard).unwrap().len(), COMMITTED + EXTRA);
+            // The projection still only knows the first COMMITTED commands.
+            assert_eq!(b.metrics(&shard).await.unwrap().pending, COMMITTED as u64);
+        }
+
+        // First reopen: the tail (EXTRA) must be replayed exactly.
+        {
+            let b2 = SegmentedObjectLogSqliteBackend::open(
+                tmp.object_root(),
+                &tmp.projection(),
+                seal_each_config(),
+            )
+            .unwrap();
+            b2.create_queue(def.clone()).await.unwrap();
+            let stats = b2.recovery_stats(&shard).expect("recovery ran");
+            assert_eq!(stats.start_seq, COMMITTED as u64);
+            assert_eq!(
+                stats.tail_replayed, EXTRA as u64,
+                "exactly the missing tail beyond the lagging high-water is replayed"
+            );
+            assert_eq!(
+                b2.metrics(&shard).await.unwrap().pending,
+                (COMMITTED + EXTRA) as u64
+            );
+        }
+
+        // Second reopen: the projection is now caught up — no double-apply, nothing replayed.
+        let b3 = SegmentedObjectLogSqliteBackend::open(
+            tmp.object_root(),
+            &tmp.projection(),
+            seal_each_config(),
+        )
+        .unwrap();
+        b3.create_queue(def.clone()).await.unwrap();
+        let stats = b3.recovery_stats(&shard).expect("recovery ran");
+        assert_eq!(stats.start_seq, (COMMITTED + EXTRA) as u64);
+        assert_eq!(stats.tail_replayed, 0, "no tail left; no double-apply");
+        assert_eq!(
+            b3.metrics(&shard).await.unwrap().pending,
+            (COMMITTED + EXTRA) as u64,
+            "state unchanged by the idempotent second recovery"
+        );
+    }
+
+    /// AC: the file `ObjectLogSqliteBackend` reopen also resumes at the persisted high-water rather than
+    /// re-applying the genesis log to the SQLite projection.
+    #[tokio::test]
+    async fn file_clean_restart_resumes_at_high_water() {
+        let tmp = TmpDir::new("file-clean");
+        let def = queue_def("t", "q");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        const N: usize = 20;
+
+        {
+            let b = ObjectLogSqliteBackend::open(tmp.object_root(), &tmp.projection()).unwrap();
+            b.create_queue(def.clone()).await.unwrap();
+            for i in 0..N {
+                b.push(&shard, vec![spec(&format!("f{i}"))], ts(), None)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(b.metrics(&shard).await.unwrap().pending, N as u64);
+        }
+
+        let b2 = ObjectLogSqliteBackend::open(tmp.object_root(), &tmp.projection()).unwrap();
+        b2.create_queue(def.clone()).await.unwrap();
+        let stats = b2.recovery_stats(&shard).expect("recovery ran");
+        assert!(stats.snapshot_used);
+        assert_eq!(
+            stats.start_seq, N as u64,
+            "file reopen resumed at the high-water, not genesis"
+        );
+        assert_eq!(stats.tail_replayed, 0);
+        assert_eq!(b2.metrics(&shard).await.unwrap().pending, N as u64);
     }
 }
