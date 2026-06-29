@@ -7,12 +7,12 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, CohortPolicy, GateKeyPolicy, GroupKey, ItemId, ItemState, LeaseToken, Metadata,
-    MetadataValue, PriorityValue,
+    MetadataValue, PriorityValue, RequestId,
 };
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRequest, CommandPosition, EngineError, EngineResult,
     FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
-    PayloadUpdate, ProjectionSnapshot, PushCommand, QueueCommand, ReplacePendingCommand,
+    PayloadUpdate, ProjectionSnapshot, PushCommand, PushSpec, QueueCommand, ReplacePendingCommand,
     UnfenceLeaseCommand, UpsertOutcome,
 };
 
@@ -1961,6 +1961,154 @@ pub async fn rejected_mutations_do_not_append_commands<B: ConformanceBackend>(
     assert_eq!(
         before, after,
         "rejected renew/reassign/purge/finalize must NOT append any command (B1 no-divergence)"
+    );
+}
+
+/// API-001 external transaction contract: once `push` returns success, the accepted item is visible to
+/// reads and claims on the authoritative owner. This catches log-then-apply backends that acknowledge at
+/// durable append time but return before their serving projection / response barrier is satisfied.
+pub async fn successful_push_is_visible_before_response_returns<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let key = ClientItemKey::new("txn-visible").unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                client_item_key: Some(key.clone()),
+                priority: Some(PriorityValue::Int64(7)),
+                payload: Some(Bytes::from_static(b"payload")),
+                fields: BTreeMap::from([("state".to_string(), Bytes::from_static(b"new"))]),
+                ..Default::default()
+            }],
+            ts(10),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "successful push must be visible in queue metrics before response returns"
+    );
+    let live = b
+        .live_items(&shard(), std::slice::from_ref(&key))
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("successful push is live by client_item_key");
+    assert_eq!(live.item_id, ids[0]);
+    assert_eq!(live.payload.as_deref(), Some(&b"payload"[..]));
+    assert_eq!(
+        live.fields.get("state").map(|v| v.as_ref()),
+        Some(&b"new"[..])
+    );
+    let claimed = b.claim(claim_req(1, 500, 20)).await.unwrap();
+    assert_eq!(
+        claimed.items.first().map(|item| item.item_id),
+        Some(ids[0]),
+        "successful push must be claimable immediately when eligible"
+    );
+}
+
+/// API-001 external transaction contract: a structured rejection has no durable or visible effect for
+/// the rejected mutation. The log-class suite separately checks append count; this core check compares
+/// observable state and therefore runs for every projection family.
+pub async fn rejected_finalize_leaves_visible_state_unchanged<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                client_item_key: Some(ClientItemKey::new("pending").unwrap()),
+                priority: Some(PriorityValue::Int64(1)),
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+    let before = b.metrics(&qkey()).await.unwrap();
+    assert!(
+        matches!(
+            b.finalize(
+                &shard(),
+                vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
+                ts(10),
+                None,
+            )
+            .await,
+            Err(EngineError::Invalid(_))
+        ),
+        "finalizing a pending item must be a structured rejection"
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap(),
+        before,
+        "rejected finalize must not change visible queue state"
+    );
+    let claimed = b.claim(claim_req(1, 500, 20)).await.unwrap();
+    assert_eq!(
+        claimed.items.first().map(|item| item.item_id),
+        Some(ids[0]),
+        "the rejected finalize must not consume or terminate the pending item"
+    );
+}
+
+/// API-001 external transaction contract: retrying the same `request_id` and same body replays the
+/// original committed response, while reusing the id with a different body is a structural conflict.
+/// Backends must return `Unavailable` rather than silently accepting a request id without replay
+/// semantics; selectable backends must pass this scenario.
+pub async fn request_id_push_replays_once_and_conflicts_on_body_change<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let request_id = RequestId::new("txn-push-1").unwrap();
+    let body = vec![PushSpec {
+        client_item_key: Some(ClientItemKey::new("request-key").unwrap()),
+        priority: Some(PriorityValue::Int64(11)),
+        ..Default::default()
+    }];
+
+    let first = b
+        .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
+        .await
+        .unwrap();
+    let second = b
+        .push_with_request_id(&shard(), request_id.clone(), body, ts(1), None)
+        .await
+        .unwrap();
+    assert_eq!(second, first, "same request_id/body replays ids");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "request replay must not append a second item"
+    );
+
+    let conflict_body = vec![PushSpec {
+        client_item_key: Some(ClientItemKey::new("request-key-2").unwrap()),
+        priority: Some(PriorityValue::Int64(12)),
+        ..Default::default()
+    }];
+    assert_eq!(
+        b.push_with_request_id(&shard(), request_id, conflict_body, ts(2), None)
+            .await,
+        Err(EngineError::RequestIdConflict)
+    );
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "request-id conflict must not append"
     );
 }
 

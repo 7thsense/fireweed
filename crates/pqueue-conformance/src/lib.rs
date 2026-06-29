@@ -58,8 +58,8 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
     CommandId, ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem,
-    QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    SnapshotStore, UpdateFieldsPort, UpsertPort,
+    PushPort, QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeasePort, SnapshotStore, UpdateFieldsPort, UpsertPort,
 };
 
 pub mod scenarios;
@@ -75,6 +75,7 @@ pub trait ConformanceCore:
     Backend
     + ControlPlaneStore
     + ProjectionRead
+    + PushPort
     + ClaimPort
     + UpsertPort
     + UpdateFieldsPort
@@ -91,6 +92,7 @@ impl<T> ConformanceCore for T where
     T: Backend
         + ControlPlaneStore
         + ProjectionRead
+        + PushPort
         + ClaimPort
         + UpsertPort
         + UpdateFieldsPort
@@ -338,6 +340,9 @@ macro_rules! core_suite {
             update_fields_merges_and_cas,
             reclaim_expired_sweeps_per_queue,
             claim_compatibility_is_resolved_and_gated,
+            successful_push_is_visible_before_response_returns,
+            rejected_finalize_leaves_visible_state_unchanged,
+            request_id_push_replays_once_and_conflicts_on_body_change,
             stale_epoch_append_is_fenced,
             epoch_fence_closes_pre_segment_window,
         );
@@ -367,6 +372,9 @@ macro_rules! core_suite {
             update_fields_is_unavailable,
             reclaim_expired_sweeps_per_queue,
             claim_compatibility_is_resolved_and_gated,
+            successful_push_is_visible_before_response_returns,
+            rejected_finalize_leaves_visible_state_unchanged,
+            request_id_push_replays_once_and_conflicts_on_body_change,
             stale_epoch_append_is_fenced,
             epoch_fence_closes_pre_segment_window,
         );

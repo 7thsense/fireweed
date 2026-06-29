@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -29,20 +30,21 @@ use std::thread;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
-    QueueDefinition, QueueId, TenantId, UtcTimestamp,
+    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand,
-    LeaseView, LiveItemView, LogRead, LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, require_item_level_claim,
-    validate_gate_command, validate_gate_push, validate_purge_force,
+    FinalizeOutcome, FinalizePort, IdempotencyDecision, IndexHit, IndexQueryPort, ItemView,
+    LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, LogWriter, PayloadUpdate,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
+    PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey,
+    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, build_push_items, require_item_level_claim, validate_gate_command,
+    validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -52,6 +54,24 @@ fn store<E: std::fmt::Display>(e: E) -> EngineError {
 
 fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(store)
+}
+
+fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
+    let bytes = serde_json::to_vec(items).map_err(store)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(BodyHash(h.finish()))
+}
+
+fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp {
+    let total = now.seconds as i128 * 1_000_000_000
+        + now.nanoseconds as i128
+        + retention_ms as i128 * 1_000_000;
+    UtcTimestamp::new(
+        total.div_euclid(1_000_000_000) as i64,
+        total.rem_euclid(1_000_000_000) as u32,
+    )
+    .expect("valid ts")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -268,6 +288,7 @@ struct Inner {
     root: PathBuf,
     projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
+    idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
     cmd_seq: u64,
     segment_config: ObjectLogSegmentConfig,
 }
@@ -674,6 +695,7 @@ impl ObjectLogBackend {
             root: root.into(),
             projections: HashMap::new(),
             queues: HashMap::new(),
+            idempotency: HashMap::new(),
             cmd_seq: 0,
             segment_config,
         };
@@ -909,6 +931,67 @@ impl PushPort for ObjectLogBackend {
                 created_at: now,
             };
             g.commit_locked(shard, env)?;
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+
+    fn push_with_request_id(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            validate_gate_push(self.supports_gates(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            if !g.projections.contains_key(shard) {
+                return Err(EngineError::NotFound);
+            }
+            let max_attempts = g
+                .queues
+                .get(&shard.clone())
+                .map(|d| d.retry_policy.max_attempts)
+                .unwrap_or(1);
+            let retention_ms = g
+                .queues
+                .get(&shard.clone())
+                .map(|d| d.request_id_retention_ms)
+                .unwrap_or(60_000);
+            let expires_at = request_expires_at(now, retention_ms);
+            match g.idempotency.entry(shard.clone()).or_default().check(
+                &request_id,
+                fingerprint,
+                now,
+            ) {
+                IdempotencyDecision::Replay(ids) => return Ok(ids),
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+            }
+            let n = g.cmd_seq;
+            g.cmd_seq += 1;
+            let epoch = expected_epoch.unwrap_or(0);
+            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+            let (push_items, ids) =
+                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            let env = CommandEnvelope {
+                command_id: CommandId::new(format!("obj-{}-{n}", self.node_id)),
+                request_id: Some(request_id.clone()),
+                item_ids: ids.clone(),
+                command: QueueCommand::Push(PushCommand { items: push_items }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            };
+            g.commit_locked(shard, env)?;
+            g.idempotency.entry(shard.clone()).or_default().record(
+                request_id,
+                fingerprint,
+                ids.clone(),
+                expires_at,
+            );
             Ok(ids)
         })();
         std::future::ready(result)
