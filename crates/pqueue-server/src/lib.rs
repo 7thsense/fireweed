@@ -9,6 +9,7 @@
 //!
 //! Hexagonal: this is the ONLY crate that names concrete adapters; everything else depends only inward.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +36,7 @@ mod object_log_sqlite;
 pub use object_log_sqlite::ObjectLogSqliteBackend;
 
 /// Which durable backend the server runs over.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
     /// In-memory reference backend (atomic class; non-durable).
     Memory,
@@ -47,6 +49,44 @@ pub enum Backend {
         object_root: PathBuf,
         projection_path: PathBuf,
     },
+    /// Parsed postgres_native runtime config. The blocking-safe runtime wrapper is tracked separately.
+    PostgresNative(PostgresNativeConfig),
+}
+
+/// Databricks Lakebase endpoint metadata emitted by the Helm profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LakebaseRuntimeConfig {
+    pub endpoint_mode: String,
+    pub database_name: String,
+    pub port: u16,
+    pub ssl_mode: String,
+    pub auth: LakebaseAuthConfig,
+}
+
+/// Lakebase credential env shape. Values are sourced from Kubernetes Secrets by the chart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LakebaseAuthConfig {
+    NativePassword,
+    ServicePrincipalOauth {
+        databricks_host: String,
+        database_instance_name: String,
+        client_id: String,
+        client_secret: String,
+    },
+    PatOauth {
+        databricks_host: String,
+        database_instance_name: String,
+        token: String,
+        postgres_user: String,
+    },
+}
+
+/// Parsed postgres_native config. Both URL fields use libpq key=value or URL syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresNativeConfig {
+    pub log_database_url: String,
+    pub projection_database_url: String,
+    pub lakebase: Option<LakebaseRuntimeConfig>,
 }
 
 /// Server configuration.
@@ -66,6 +106,147 @@ pub struct Config {
     /// with no queues here (and no out-of-band creation) would reject every request with `no such
     /// queue` — provision them up front.
     pub queues: Vec<QueueDefinition>,
+}
+
+fn get_env(env: &BTreeMap<String, String>, key: &str, default: &str) -> String {
+    env.get(key)
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn required_env(env: &BTreeMap<String, String>, key: &'static str) -> EngineResult<String> {
+    env.get(key)
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| EngineError::Storage(format!("{key} is required")))
+}
+
+fn parse_lakebase_config(
+    env: &BTreeMap<String, String>,
+) -> EngineResult<Option<LakebaseRuntimeConfig>> {
+    let Some(auth_mode) = env
+        .get("PQUEUE_LAKEBASE_AUTH_MODE")
+        .filter(|value| !value.is_empty())
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let endpoint_mode = get_env(env, "PQUEUE_LAKEBASE_ENDPOINT_MODE", "pooler");
+    let database_name = get_env(env, "PQUEUE_LAKEBASE_DATABASE_NAME", "databricks_postgres");
+    let port = get_env(env, "PQUEUE_LAKEBASE_PORT", "5432")
+        .parse::<u16>()
+        .map_err(|e| EngineError::Storage(format!("PQUEUE_LAKEBASE_PORT is invalid: {e}")))?;
+    let ssl_mode = get_env(env, "PQUEUE_LAKEBASE_SSLMODE", "require");
+    let auth = match auth_mode.as_str() {
+        "native-password" => LakebaseAuthConfig::NativePassword,
+        "service-principal-oauth" => LakebaseAuthConfig::ServicePrincipalOauth {
+            databricks_host: required_env(env, "DATABRICKS_HOST")?,
+            database_instance_name: required_env(env, "PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME")?,
+            client_id: required_env(env, "DATABRICKS_CLIENT_ID")?,
+            client_secret: required_env(env, "DATABRICKS_CLIENT_SECRET")?,
+        },
+        "pat-oauth" => LakebaseAuthConfig::PatOauth {
+            databricks_host: required_env(env, "DATABRICKS_HOST")?,
+            database_instance_name: required_env(env, "PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME")?,
+            token: env
+                .get("DATABRICKS_TOKEN")
+                .filter(|value| !value.is_empty())
+                .or_else(|| env.get("DATABRICKS_PAT").filter(|value| !value.is_empty()))
+                .cloned()
+                .ok_or_else(|| {
+                    EngineError::Storage(
+                        "DATABRICKS_TOKEN or DATABRICKS_PAT is required".to_string(),
+                    )
+                })?,
+            postgres_user: env
+                .get("PQUEUE_DATABRICKS_POSTGRES_USER")
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    env.get("DATABRICKS_POSTGRES_USER")
+                        .filter(|value| !value.is_empty())
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    EngineError::Storage(
+                        "PQUEUE_DATABRICKS_POSTGRES_USER or DATABRICKS_POSTGRES_USER is required"
+                            .to_string(),
+                    )
+                })?,
+        },
+        _ => {
+            return Err(EngineError::Storage(format!(
+                "unsupported PQUEUE_LAKEBASE_AUTH_MODE={auth_mode}"
+            )));
+        }
+    };
+    Ok(Some(LakebaseRuntimeConfig {
+        endpoint_mode,
+        database_name,
+        port,
+        ssl_mode,
+        auth,
+    }))
+}
+
+/// Parse the storage backend shape from environment key/value pairs.
+///
+/// This is pure and intentionally does not open storage. `PostgresNative` is parsed so deployment
+/// config can be validated independently; starting that runtime remains gated on the blocking-safe
+/// postgres wrapper.
+pub fn parse_backend_from_env<I, K, V>(vars: I) -> EngineResult<Backend>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let env: BTreeMap<String, String> = vars
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+    let log = get_env(&env, "PQUEUE_LOG_BACKEND", "objectlog");
+    let projection = get_env(&env, "PQUEUE_PROJECTION_BACKEND", "inmemory");
+
+    match (log.as_str(), projection.as_str()) {
+        ("memory", "inmemory") => Ok(Backend::Memory),
+        ("sqlite", "inmemory") => Ok(Backend::Sqlite(PathBuf::from(get_env(
+            &env,
+            "PQUEUE_SQLITE_LOG_PATH",
+            "/var/lib/pqueue/pqueue-log.db",
+        )))),
+        ("objectlog", "inmemory") => Ok(Backend::ObjectLog(PathBuf::from(get_env(
+            &env,
+            "PQUEUE_OBJECT_LOG_ROOT",
+            "/var/lib/pqueue/object-log",
+        )))),
+        ("objectlog", "sqlite") => Ok(Backend::ObjectLogSqlite {
+            object_root: PathBuf::from(get_env(
+                &env,
+                "PQUEUE_OBJECT_LOG_ROOT",
+                "/var/lib/pqueue/object-log",
+            )),
+            projection_path: PathBuf::from(get_env(
+                &env,
+                "PQUEUE_SQLITE_PROJECTION_PATH",
+                "/var/lib/pqueue/pqueue-projection.db",
+            )),
+        }),
+        ("postgres", "postgres") => Ok(Backend::PostgresNative(PostgresNativeConfig {
+            log_database_url: required_env(&env, "PQUEUE_POSTGRES_LOG_DATABASE_URL")?,
+            projection_database_url: required_env(&env, "PQUEUE_POSTGRES_PROJECTION_DATABASE_URL")?,
+            lakebase: parse_lakebase_config(&env)?,
+        })),
+        ("postgres", "inmemory") => Err(EngineError::Storage(
+            "postgres log exists as an adapter but postgres/inmemory is not wired by pqueue-server"
+                .to_string(),
+        )),
+        (_, "sqlite" | "postgres") => Err(EngineError::Storage(
+            "the requested projection backend is not wired by pqueue-server yet".to_string(),
+        )),
+        _ => Err(EngineError::Storage(
+            "supported wired combinations are memory/inmemory, sqlite/inmemory, objectlog/inmemory, and objectlog/sqlite".to_string(),
+        )),
+    }
 }
 
 pub struct OwnershipRuntime<B, CP> {
@@ -669,6 +850,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
+        Backend::PostgresNative(_) => Err(EngineError::Storage(
+            "postgres_native runtime config parsed but startup requires pqueue-558bf933 blocking-safe wrapper"
+                .to_string(),
+        )),
     }
 }
 
@@ -712,6 +897,132 @@ pub async fn start_with<B: RespBackend>(
         reclaim,
         ownership,
     })
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn parses_postgres_native_database_url_env_names() {
+        let backend = parse_backend_from_env([
+            ("PQUEUE_LOG_BACKEND", "postgres"),
+            ("PQUEUE_PROJECTION_BACKEND", "postgres"),
+            (
+                "PQUEUE_POSTGRES_LOG_DATABASE_URL",
+                "host=log dbname=databricks_postgres sslmode=require",
+            ),
+            (
+                "PQUEUE_POSTGRES_PROJECTION_DATABASE_URL",
+                "host=projection dbname=databricks_postgres sslmode=require",
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            backend,
+            Backend::PostgresNative(PostgresNativeConfig {
+                log_database_url: "host=log dbname=databricks_postgres sslmode=require".to_string(),
+                projection_database_url:
+                    "host=projection dbname=databricks_postgres sslmode=require".to_string(),
+                lakebase: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_lakebase_service_principal_env_shape() {
+        let backend = parse_backend_from_env([
+            ("PQUEUE_LOG_BACKEND", "postgres"),
+            ("PQUEUE_PROJECTION_BACKEND", "postgres"),
+            (
+                "PQUEUE_POSTGRES_LOG_DATABASE_URL",
+                "host=pooler port=5432 sslmode=require",
+            ),
+            (
+                "PQUEUE_POSTGRES_PROJECTION_DATABASE_URL",
+                "host=pooler port=5432 sslmode=require",
+            ),
+            ("PQUEUE_LAKEBASE_ENDPOINT_MODE", "pooler"),
+            ("PQUEUE_LAKEBASE_DATABASE_NAME", "databricks_postgres"),
+            ("PQUEUE_LAKEBASE_PORT", "5432"),
+            ("PQUEUE_LAKEBASE_SSLMODE", "require"),
+            ("PQUEUE_LAKEBASE_AUTH_MODE", "service-principal-oauth"),
+            ("DATABRICKS_HOST", "https://example.cloud.databricks.com"),
+            ("PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME", "lakebase-prod"),
+            ("DATABRICKS_CLIENT_ID", "client-id"),
+            ("DATABRICKS_CLIENT_SECRET", "client-secret"),
+        ])
+        .unwrap();
+
+        let Backend::PostgresNative(config) = backend else {
+            panic!("expected postgres native config");
+        };
+        assert_eq!(
+            config.lakebase.unwrap().auth,
+            LakebaseAuthConfig::ServicePrincipalOauth {
+                databricks_host: "https://example.cloud.databricks.com".to_string(),
+                database_instance_name: "lakebase-prod".to_string(),
+                client_id: "client-id".to_string(),
+                client_secret: "client-secret".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_lakebase_pat_env_shape() {
+        let backend = parse_backend_from_env([
+            ("PQUEUE_LOG_BACKEND", "postgres"),
+            ("PQUEUE_PROJECTION_BACKEND", "postgres"),
+            (
+                "PQUEUE_POSTGRES_LOG_DATABASE_URL",
+                "host=direct sslmode=require",
+            ),
+            (
+                "PQUEUE_POSTGRES_PROJECTION_DATABASE_URL",
+                "host=direct sslmode=require",
+            ),
+            ("PQUEUE_LAKEBASE_AUTH_MODE", "pat-oauth"),
+            ("DATABRICKS_HOST", "https://example.cloud.databricks.com"),
+            ("PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME", "lakebase-prod"),
+            ("DATABRICKS_TOKEN", "token"),
+            ("PQUEUE_DATABRICKS_POSTGRES_USER", "postgres-user"),
+        ])
+        .unwrap();
+
+        let Backend::PostgresNative(config) = backend else {
+            panic!("expected postgres native config");
+        };
+        assert_eq!(
+            config.lakebase.unwrap().auth,
+            LakebaseAuthConfig::PatOauth {
+                databricks_host: "https://example.cloud.databricks.com".to_string(),
+                database_instance_name: "lakebase-prod".to_string(),
+                token: "token".to_string(),
+                postgres_user: "postgres-user".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_runtime_startup_remains_explicitly_gated() {
+        let result = start(Config {
+            backend: Backend::PostgresNative(PostgresNativeConfig {
+                log_database_url: "host=log sslmode=require".to_string(),
+                projection_database_url: "host=projection sslmode=require".to_string(),
+                lakebase: None,
+            }),
+            node_id: 0,
+            listen: "127.0.0.1:0".to_string(),
+            reclaim_interval: Duration::from_millis(10),
+            queues: vec![],
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(EngineError::Storage(msg)) if msg.contains("pqueue-558bf933"))
+        );
+    }
 }
 
 pub async fn start_with_ownership<B, CP>(

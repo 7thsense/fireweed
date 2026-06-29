@@ -1,5 +1,4 @@
 use std::env;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use pqueue_core::{
@@ -31,42 +30,8 @@ fn parse_backend() -> Backend {
     let log = env_or("PQUEUE_LOG_BACKEND", "objectlog");
     let projection = env_or("PQUEUE_PROJECTION_BACKEND", "inmemory");
 
-    match (log.as_str(), projection.as_str()) {
-        ("memory", "inmemory") => Backend::Memory,
-        ("sqlite", "inmemory") => Backend::Sqlite(PathBuf::from(env_or(
-            "PQUEUE_SQLITE_LOG_PATH",
-            "/var/lib/pqueue/pqueue-log.db",
-        ))),
-        ("objectlog", "inmemory") => Backend::ObjectLog(PathBuf::from(env_or(
-            "PQUEUE_OBJECT_LOG_ROOT",
-            "/var/lib/pqueue/object-log",
-        ))),
-        ("objectlog", "sqlite") => Backend::ObjectLogSqlite {
-            object_root: PathBuf::from(env_or(
-                "PQUEUE_OBJECT_LOG_ROOT",
-                "/var/lib/pqueue/object-log",
-            )),
-            projection_path: PathBuf::from(env_or(
-                "PQUEUE_SQLITE_PROJECTION_PATH",
-                "/var/lib/pqueue/pqueue-projection.db",
-            )),
-        },
-        ("postgres", "inmemory") => unsupported_storage(
-            &log,
-            &projection,
-            "postgres log exists as an adapter but is not wired into the tokio RESP server yet",
-        ),
-        (_, "sqlite" | "postgres") => unsupported_storage(
-            &log,
-            &projection,
-            "the requested projection backend is not wired by pqueue-server yet",
-        ),
-        _ => unsupported_storage(
-            &log,
-            &projection,
-            "supported wired combinations are memory/inmemory, sqlite/inmemory, and objectlog/inmemory",
-        ),
-    }
+    pqueue_server::parse_backend_from_env(env::vars())
+        .unwrap_or_else(|e| unsupported_storage(&log, &projection, &e.to_string()))
 }
 
 fn queue_definition(tenant: &str, queue: &str) -> QueueDefinition {

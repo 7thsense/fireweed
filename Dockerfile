@@ -15,7 +15,13 @@ WORKDIR /build
 # target/, VCS, and execution evidence stay out.
 COPY . .
 
-RUN cargo build --release --bin pqueue-service --bin pqueue-verify-ledger
+ARG CARGO_FEATURES=""
+RUN if [ -n "$CARGO_FEATURES" ]; then \
+        cargo build --release -p pqueue-server --features "$CARGO_FEATURES" --bin pqueue-service; \
+    else \
+        cargo build --release -p pqueue-server --bin pqueue-service; \
+    fi
+RUN cargo build --release -p pqueue-release --bin pqueue-verify-ledger
 
 # ---- runtime ----
 FROM debian:bookworm-slim AS runtime
