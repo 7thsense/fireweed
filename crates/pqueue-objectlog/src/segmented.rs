@@ -30,9 +30,13 @@
 //! create-only conditional PUT) that runs the SAME substrate against MinIO / any S3-compatible store.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write as _};
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Read, Write as _};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::QueueDefinition;
 use pqueue_engine::{
@@ -134,6 +138,128 @@ impl BlobStore for InMemoryBlobStore {
             .filter(|k| k.starts_with(prefix))
             .cloned()
             .collect())
+    }
+}
+
+/// Durable local-filesystem [`BlobStore`] over a directory tree (the production-shaped, no-network store
+/// used by the `object_log_sqlite_projection` segmented backend). Each object key maps to a file under
+/// `root` (the key's `/` separators become directory levels). Few large segment objects + an append-only
+/// manifest, so the per-object file overhead is amortized across a whole group-commit batch — unlike the
+/// per-command `LocalObjectLog`, which writes one object file PER command.
+///
+/// - `put` is atomic (write a sibling temp file, then `rename` over the target — a reader never sees a
+///   half-written object).
+/// - `put_if_absent` is the manifest-CAS primitive: `create_new(true)` (`O_EXCL`) — exactly one racing
+///   writer creates the manifest entry, the rest observe `AlreadyExists` and lose the CAS.
+/// - `get` returns `None` for a missing file; `list(prefix)` walks the tree and returns matching keys.
+pub struct LocalFsBlobStore {
+    root: PathBuf,
+}
+
+/// Monotonic suffix source so concurrent `put`s never collide on the same temp filename.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+impl LocalFsBlobStore {
+    /// Open a store rooted at `root` (created on first write).
+    pub fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
+        let root = root.into();
+        fs::create_dir_all(&root).map_err(store_err)?;
+        Ok(Self { root })
+    }
+
+    /// Map an object key (`a/b/c.json`) to its on-disk path under `root`.
+    fn key_path(&self, key: &str) -> PathBuf {
+        let mut p = self.root.clone();
+        for comp in key.split('/') {
+            if !comp.is_empty() {
+                p.push(comp);
+            }
+        }
+        p
+    }
+
+    /// A unique sibling temp path for an atomic `put` (same parent dir → `rename` is atomic).
+    fn tmp_path(target: &Path) -> PathBuf {
+        let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let parent = target.parent().unwrap_or(Path::new("."));
+        parent.join(format!(".tmp-{pid}-{n}"))
+    }
+}
+
+/// Recursively collect file keys (relative to `root`, `/`-joined) under `dir`, skipping temp files.
+fn walk_keys(root: &Path, dir: &Path, out: &mut Vec<String>) -> EngineResult<()> {
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(store_err(e)),
+    };
+    for entry in rd {
+        let entry = entry.map_err(store_err)?;
+        let ft = entry.file_type().map_err(store_err)?;
+        let path = entry.path();
+        if ft.is_dir() {
+            walk_keys(root, &path, out)?;
+        } else if ft.is_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with(".tmp-")
+            {
+                continue;
+            }
+            if let Ok(rel) = path.strip_prefix(root) {
+                let key = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push(key);
+            }
+        }
+    }
+    Ok(())
+}
+
+impl BlobStore for LocalFsBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        let path = self.key_path(key);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(store_err)?;
+        }
+        let tmp = Self::tmp_path(&path);
+        fs::write(&tmp, body).map_err(store_err)?;
+        fs::rename(&tmp, &path).map_err(store_err)?;
+        Ok(())
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        let path = self.key_path(key);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(store_err)?;
+        }
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                f.write_all(body).map_err(store_err)?;
+                f.flush().map_err(store_err)?;
+                Ok(true)
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(store_err(e)),
+        }
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        match fs::read(self.key_path(key)) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(store_err(e)),
+        }
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        let mut out = Vec::new();
+        walk_keys(&self.root, &self.root, &mut out)?;
+        out.retain(|k| k.starts_with(prefix));
+        Ok(out)
     }
 }
 
@@ -988,4 +1114,122 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the local-filesystem BlobStore (mirrors InMemoryBlobStore behavior)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fs_blob_store_tests {
+    use super::*;
+
+    /// A unique scratch directory under the system temp dir, removed on drop.
+    struct TmpDir {
+        path: PathBuf,
+    }
+    impl TmpDir {
+        fn new() -> Self {
+            let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir()
+                .join(format!("pqueue-fsblob-{}-{n}-{nanos}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// The same get/put/list/put_if_absent contract the substrate relies on, asserted identically against
+    /// both stores so the local-filesystem store is a drop-in for the in-memory one.
+    fn assert_blob_store_contract(store: &dyn BlobStore) {
+        // get of a missing key is None.
+        assert_eq!(store.get("t/a/q/b/seg/x").unwrap(), None);
+        // put then get round-trips bytes.
+        store.put("t/a/q/b/seg/00000.seg", b"hello").unwrap();
+        assert_eq!(
+            store.get("t/a/q/b/seg/00000.seg").unwrap().as_deref(),
+            Some(&b"hello"[..])
+        );
+        // put overwrites (idempotent re-put at a stable key).
+        store.put("t/a/q/b/seg/00000.seg", b"world").unwrap();
+        assert_eq!(
+            store.get("t/a/q/b/seg/00000.seg").unwrap().as_deref(),
+            Some(&b"world"[..])
+        );
+        // put_if_absent creates once, then loses the CAS.
+        assert!(
+            store
+                .put_if_absent("t/a/q/b/manifest/0.json", b"first")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_if_absent("t/a/q/b/manifest/0.json", b"second")
+                .unwrap()
+        );
+        assert_eq!(
+            store.get("t/a/q/b/manifest/0.json").unwrap().as_deref(),
+            Some(&b"first"[..]),
+            "the CAS loser does not overwrite the winner's bytes"
+        );
+        // list returns keys under a prefix (and only those).
+        store.put("t/a/q/b/manifest/1.json", b"e1").unwrap();
+        store.put("t/other/q/z/seg/0.seg", b"z").unwrap();
+        let mut manifest = store.list("t/a/q/b/manifest/").unwrap();
+        manifest.sort();
+        assert_eq!(
+            manifest,
+            vec![
+                "t/a/q/b/manifest/0.json".to_string(),
+                "t/a/q/b/manifest/1.json".to_string(),
+            ]
+        );
+        let all_a = store.list("t/a/").unwrap();
+        assert_eq!(
+            all_a.len(),
+            3,
+            "all three keys under t/a/ (one seg + two manifest)"
+        );
+        assert!(store.list("t/nope/").unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_fs_blob_store_mirrors_in_memory() {
+        let tmp = TmpDir::new();
+        let fs_store = LocalFsBlobStore::open(&tmp.path).unwrap();
+        assert_blob_store_contract(&fs_store);
+
+        let mem = InMemoryBlobStore::new();
+        assert_blob_store_contract(&mem);
+    }
+
+    #[test]
+    fn local_fs_blob_store_persists_across_reopen() {
+        let tmp = TmpDir::new();
+        {
+            let s = LocalFsBlobStore::open(&tmp.path).unwrap();
+            s.put("t/a/q/b/seg/0.seg", b"durable").unwrap();
+            assert!(s.put_if_absent("t/a/q/b/manifest/0.json", b"m0").unwrap());
+        }
+        // Reopen: the durable objects survive (the substrate recovers its manifest from these).
+        let s = LocalFsBlobStore::open(&tmp.path).unwrap();
+        assert_eq!(
+            s.get("t/a/q/b/seg/0.seg").unwrap().as_deref(),
+            Some(&b"durable"[..])
+        );
+        assert_eq!(
+            s.list("t/a/q/b/manifest/").unwrap(),
+            vec!["t/a/q/b/manifest/0.json".to_string()]
+        );
+        // A second create-only PUT at the recovered manifest tail still loses the CAS (durable fence).
+        assert!(!s.put_if_absent("t/a/q/b/manifest/0.json", b"dup").unwrap());
+    }
 }

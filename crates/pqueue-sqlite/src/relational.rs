@@ -2967,6 +2967,30 @@ impl SqliteProjectionStore {
         let mut g = self.inner.lock().expect("projection store poisoned");
         apply_committed_sql(&mut g, position, envelope)
     }
+
+    /// Apply a whole sealed segment's worth of already-durable commands in **one** SQLite transaction.
+    ///
+    /// This is the group-commit batch apply for the segmented object-log backend: instead of paying a
+    /// BEGIN/COMMIT (and rollback-journal create/delete) per command, the entire batch commits once. Each
+    /// `positions[i]` is the externally assigned log position of `envelopes[i]`; positions for a given
+    /// queue MUST be contiguous and start at that queue's `next_seq` (already-applied prefixes are skipped
+    /// idempotently, so a recovery replay that overlaps prior state is a no-op). A gap is a hard error.
+    pub fn apply_committed_batch(
+        &self,
+        positions: &[CommandPosition],
+        envelopes: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        if positions.len() != envelopes.len() {
+            return Err(EngineError::Storage(
+                "apply_committed_batch: positions/envelopes length mismatch".into(),
+            ));
+        }
+        if positions.is_empty() {
+            return Ok(());
+        }
+        let mut g = self.inner.lock().expect("projection store poisoned");
+        apply_committed_batch_sql(&mut g, positions, envelopes)
+    }
 }
 
 fn open_inner(conn: Connection) -> EngineResult<Inner> {
@@ -3072,6 +3096,95 @@ fn apply_committed_sql(
          WHERE tenant=?1 AND queue=?2",
         params![t, q, new_next_seq as i64, position.backend_epoch as i64],
     ))?;
+    st(tx.commit())?;
+    apply_token_ops(live_tokens, token_ops);
+    Ok(())
+}
+
+/// Batched analogue of [`apply_committed_sql`]: apply many already-durable commands in ONE transaction,
+/// reading each queue's cursor once and advancing it once at the end (group-commit apply). Already-applied
+/// positions (`sequence < next_seq`) are skipped idempotently; an out-of-order position is a hard gap error.
+fn apply_committed_batch_sql(
+    g: &mut Inner,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+) -> EngineResult<()> {
+    let Inner {
+        conn,
+        queues,
+        live_tokens,
+        ..
+    } = g;
+    for pos in positions {
+        if !queues.contains_key(&pos.queue) {
+            return Err(EngineError::NotFound);
+        }
+    }
+    let tx = st(conn.transaction())?;
+    let mut token_ops = Vec::new();
+    // Per-queue running cursor (next expected sequence) + the highest epoch observed, so the cursor row is
+    // read once and written once per queue across the whole batch.
+    let mut next_seq: HashMap<QueueKey, i64> = HashMap::new();
+    let mut max_epoch: HashMap<QueueKey, i64> = HashMap::new();
+    for (pos, env) in positions.iter().zip(envelopes) {
+        let (t, q) = parts(&pos.queue);
+        let cursor = match next_seq.get(&pos.queue) {
+            Some(&n) => n,
+            None => {
+                let n: i64 = st(tx
+                    .query_row(
+                        "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                        params![t, q],
+                        |row| row.get(0),
+                    )
+                    .optional())?
+                .ok_or(EngineError::NotFound)?;
+                next_seq.insert(pos.queue.clone(), n);
+                n
+            }
+        };
+        let incoming = pos.sequence as i64;
+        if incoming < cursor {
+            // Already applied (idempotent replay of a prefix the projection has already absorbed).
+            continue;
+        }
+        if incoming > cursor {
+            return Err(EngineError::Storage(format!(
+                "sqlite projection replay gap for {}:{}: expected sequence {cursor}, got {incoming}",
+                pos.queue.tenant_id.as_str(),
+                pos.queue.queue_id.as_str()
+            )));
+        }
+        apply_command_sql(
+            &tx,
+            queues,
+            &mut token_ops,
+            &pos.queue,
+            pos.sequence,
+            env.created_at,
+            &env.command,
+        )?;
+        let new_next = incoming
+            .checked_add(1)
+            .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+        next_seq.insert(pos.queue.clone(), new_next);
+        let e = pos.backend_epoch as i64;
+        let slot = max_epoch.entry(pos.queue.clone()).or_insert(e);
+        if e > *slot {
+            *slot = e;
+        }
+    }
+    for (queue, &next) in &next_seq {
+        let (t, q) = parts(queue);
+        let epoch = max_epoch.get(queue).copied().unwrap_or(0);
+        st(tx.execute(
+            "UPDATE relational_cursor SET \
+             next_seq=?3, \
+             assignment_epoch=CASE WHEN assignment_epoch<?4 THEN ?4 ELSE assignment_epoch END \
+             WHERE tenant=?1 AND queue=?2",
+            params![t, q, next, epoch],
+        ))?;
+    }
     st(tx.commit())?;
     apply_token_ops(live_tokens, token_ops);
     Ok(())

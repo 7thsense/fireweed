@@ -32,7 +32,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 mod object_log_sqlite;
-pub use object_log_sqlite::ObjectLogSqliteBackend;
+pub use object_log_sqlite::{ObjectLogSqliteBackend, SegmentedObjectLogSqliteBackend};
+pub use pqueue_objectlog::segmented::SegmentConfig;
 
 /// Which durable backend the server runs over.
 pub enum Backend {
@@ -42,10 +43,19 @@ pub enum Backend {
     Sqlite(PathBuf),
     /// Object-log durable store rooted at `path` (eventual-apply class).
     ObjectLog(PathBuf),
-    /// Local object-log authority plus SQLite materialized projection.
+    /// Local object-log authority plus SQLite materialized projection (per-command file object log).
     ObjectLogSqlite {
         object_root: PathBuf,
         projection_path: PathBuf,
+    },
+    /// Segmented group-commit object log (`SegmentedObjectLog<LocalFsBlobStore>`) plus SQLite projection.
+    /// The high-throughput `object_log_sqlite_projection` variant: concurrent pushes co-buffer into one
+    /// sealed segment (one durable object + one manifest-CAS + one batched SQLite apply) instead of paying
+    /// a per-command object write + per-command SQLite transaction.
+    SegmentedObjectLogSqlite {
+        object_root: PathBuf,
+        projection_path: PathBuf,
+        config: SegmentConfig,
     },
 }
 
@@ -655,6 +665,34 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
             let backend =
                 Arc::new(ObjectLogSqliteBackend::open(object_root, p)?.with_node_id(node_id));
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{node_id}"))
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            start_with_ownership(
+                backend,
+                cp,
+                owner,
+                clock,
+                &config.listen,
+                config.reclaim_interval,
+                &config.queues,
+            )
+            .await
+        }
+        Backend::SegmentedObjectLogSqlite {
+            object_root,
+            projection_path,
+            config: segment_config,
+        } => {
+            let p = projection_path
+                .to_str()
+                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+            let backend = Arc::new(
+                SegmentedObjectLogSqliteBackend::open(object_root, p, segment_config)?
+                    .with_node_id(node_id),
+            );
+            // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
+            backend.spawn_flusher();
             let cp = Arc::new(InMemoryControlPlane::default());
             let owner = OwnerId::new(format!("node-{node_id}"))
                 .map_err(|e| EngineError::Storage(e.to_string()))?;

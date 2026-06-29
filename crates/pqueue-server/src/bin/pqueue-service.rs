@@ -6,10 +6,24 @@ use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use pqueue_server::{Backend, Config, start};
+use pqueue_server::{Backend, Config, SegmentConfig, start};
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn parse_usize(key: &str, default: usize) -> usize {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 fn parse_duration_ms(key: &str, default_ms: u64) -> Duration {
@@ -41,16 +55,43 @@ fn parse_backend() -> Backend {
             "PQUEUE_OBJECT_LOG_ROOT",
             "/var/lib/pqueue/object-log",
         ))),
-        ("objectlog", "sqlite") => Backend::ObjectLogSqlite {
-            object_root: PathBuf::from(env_or(
+        ("objectlog", "sqlite") => {
+            let object_root = PathBuf::from(env_or(
                 "PQUEUE_OBJECT_LOG_ROOT",
                 "/var/lib/pqueue/object-log",
-            )),
-            projection_path: PathBuf::from(env_or(
+            ));
+            let projection_path = PathBuf::from(env_or(
                 "PQUEUE_SQLITE_PROJECTION_PATH",
                 "/var/lib/pqueue/pqueue-projection.db",
-            )),
-        },
+            ));
+            // `file` (default) preserves the per-command object-log path; `segmented` selects the
+            // group-commit substrate (one sealed segment object + one batched SQLite apply per batch).
+            match env_or("PQUEUE_OBJECT_LOG_MODE", "file").as_str() {
+                "file" => Backend::ObjectLogSqlite {
+                    object_root,
+                    projection_path,
+                },
+                "segmented" => {
+                    let target_bytes = parse_usize("PQUEUE_SEGMENT_TARGET_BYTES", 262_144);
+                    let max_latency_ms = parse_u64("PQUEUE_SEGMENT_MAX_LATENCY_MS", 20);
+                    let config =
+                        SegmentConfig::new(target_bytes, max_latency_ms).unwrap_or_else(|e| {
+                            eprintln!("invalid segment configuration: {e}");
+                            std::process::exit(2);
+                        });
+                    Backend::SegmentedObjectLogSqlite {
+                        object_root,
+                        projection_path,
+                        config,
+                    }
+                }
+                other => unsupported_storage(
+                    &log,
+                    &projection,
+                    &format!("unknown PQUEUE_OBJECT_LOG_MODE={other:?}; expected file|segmented"),
+                ),
+            }
+        }
         ("postgres", "inmemory") => unsupported_storage(
             &log,
             &projection,
@@ -120,7 +161,10 @@ fn parse_bootstrap_queues() -> Vec<QueueDefinition> {
         .collect()
 }
 
-#[tokio::main(flavor = "current_thread")]
+// Multi-threaded runtime: blocking durable work (segment seal I/O + the batched SQLite apply) runs on a
+// worker thread without stalling the network accept/read path on the others, so concurrent pushes from many
+// RESP connections keep co-buffering into the next segment while one is sealing (the group-commit win).
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
     if env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!("pqueue-service {}", env!("CARGO_PKG_VERSION"));
@@ -128,7 +172,7 @@ async fn main() {
     }
     if env::args().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
+            "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|postgres\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db\n  PQUEUE_OBJECT_LOG_MODE=file|segmented   (objectlog+sqlite only; file=per-command, segmented=group-commit)\n  PQUEUE_SEGMENT_TARGET_BYTES=262144      (segmented: byte-size seal trigger)\n  PQUEUE_SEGMENT_MAX_LATENCY_MS=20        (segmented: latency seal trigger)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_RECLAIM_INTERVAL_MS=1000"
         );
         return;
     }

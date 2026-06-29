@@ -692,6 +692,109 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
     let _ = std::fs::remove_file(&projection_path);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen() {
+    use pqueue_server::SegmentConfig;
+    // Small latency cap so the group-commit flusher seals a quiet single-push segment promptly.
+    let config = SegmentConfig::new(262_144, 5).unwrap();
+    let (object_root, projection_path) = tmp_runtime_paths("segolsqlite");
+    let first_id = {
+        let server = start(Config {
+            backend: Backend::SegmentedObjectLogSqlite {
+                object_root: object_root.clone(),
+                projection_path: projection_path.clone(),
+                config,
+            },
+            node_id: 0,
+            listen: "127.0.0.1:0".to_string(),
+            reclaim_interval: Duration::from_secs(60),
+            queues: vec![qdef()],
+        })
+        .await
+        .unwrap();
+        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        // Push acks only after its segment seals (durable) AND applies to the projection.
+        let produced: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(7)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let reply: StreamReadReply = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg("g")
+            .arg("c")
+            .arg("STREAMS")
+            .arg("t1:q1")
+            .arg(">")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(reply.keys[0].ids[0].id, produced);
+        let acked: i64 = redis::cmd("XACK")
+            .arg("t1:q1")
+            .arg("g")
+            .arg(&produced)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(acked, 1);
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+        produced
+    };
+
+    // Reopen against the SAME durable segment log but a FRESH projection db: recovery must replay the
+    // committed segments (via `read_all`) so the acked item is NOT redelivered and ids keep advancing.
+    let _ = std::fs::remove_file(&projection_path);
+    let server = start(Config {
+        backend: Backend::SegmentedObjectLogSqlite {
+            object_root: object_root.clone(),
+            projection_path: projection_path.clone(),
+            config,
+        },
+        node_id: 0,
+        listen: "127.0.0.1:0".to_string(),
+        reclaim_interval: Duration::from_secs(60),
+        queues: vec![qdef()],
+    })
+    .await
+    .unwrap();
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        empty.is_none(),
+        "acked item was redelivered after segmented recovery replay"
+    );
+    let next_id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(9)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_ne!(
+        next_id, first_id,
+        "post-reopen push must not remint an existing item id"
+    );
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn boots_and_is_drivable_by_offtheshelf_redis_client() {
     let backend = Arc::new(MemoryBackend::new());
