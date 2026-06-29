@@ -233,3 +233,39 @@ that make the durable single-node path materially faster and add the fast in-mem
   Finding 4; it has been measured-and-rejected.
 
 No release row was emitted and no evidence was faked. The smoke row records the honest measured ceiling.
+
+---
+
+## Finding 6 — RESOLVED: the real root cause was ownership SELF-FENCING, not a CPU ceiling (supersedes Findings 3–5's conclusion)
+
+Findings 3–5 concluded the 8-owner wall was "total CPU/scheduler contention on a co-located box" and that the
+only path was separate physical hosts. **That conclusion was wrong.** The dominant cause was a correctness
+bug, now fixed (`pqueue-79178303`):
+
+- Each node is the SOLE owner of its disjoint queues (its own `InMemoryControlPlane`). Under load the
+  background `renew_sessions` task ran late → the 15s lease lapsed → the node re-acquired its OWN lease →
+  `lease_decide_acquire` UNCONDITIONALLY bumped `assignment_epoch` → that fenced the node's OWN in-flight
+  writes (`EpochFenced` / `-ERR pqueue epoch_stale`) → client retry storm → repeat → ~36× collapse. A
+  *slow-but-alive* sole owner fenced *itself*. The pre-fix "coin-flip" was simply whether a lease happened
+  to lapse during the timed window.
+- **Fix:** same-owner re-affirmation of an uncontested lease PRESERVES the fence epoch (refresh the deadline
+  only); the epoch advances only on a genuine takeover by a DIFFERENT owner (where the fence is actually
+  needed). A slow node keeps serving at its epoch — graceful degradation, no storm.
+
+**Post-fix live evidence (same co-located kind box, host load ~10 — i.e. the regime that previously
+collapsed to 87/q):**
+
+| owners | ingest agg /s | worst ingest/q | claim+final agg /s | worst claim+final/q |
+|---|---|---|---|---|
+| 2 | 6,413 | 3,207 | 67,316 | 33,663 |
+| 4 | 13,012 | 3,257 | 123,308 | 30,843 |
+| 8 | **26,222** | **3,278** | 236,856 | 29,450 |
+
+All four bars PASS: ingest non-decreasing 2→4→8; **8/2 ingest 4.09×** (≥3.5×); worst per-queue ingest
+**3,278/q** (≥2,778 floor) — vs **87/q pre-fix**; one-owner-per-queue (56 confirmations). Release-tier E2
+row emitted; `live_multi_node_object_log_sqlite_projection_e2` cargo test exits 0.
+
+**Conclusion:** the co-located 12-core box was never the wall — the system was starving itself. With the
+self-fence removed, the E2 headline holds robustly under load on a single kind host. Separate physical hosts
+are NOT required to substantiate it. Findings 3–5's CPU-ceiling framing is retained above for the record but
+is superseded by this.
