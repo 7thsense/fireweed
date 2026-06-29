@@ -81,6 +81,7 @@ async fn segmented_commands_wait_for_manifest_commit() {
         &root,
         ObjectLogSegmentConfig {
             segment_max_commands: 2,
+            segment_max_bytes: 0,
             segment_max_latency_ms: 10,
         },
     )

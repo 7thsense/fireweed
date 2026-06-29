@@ -269,6 +269,7 @@ struct Inner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectLogSegmentConfig {
     pub segment_max_commands: usize,
+    pub segment_max_bytes: usize,
     pub segment_max_latency_ms: u64,
 }
 
@@ -276,9 +277,49 @@ impl Default for ObjectLogSegmentConfig {
     fn default() -> Self {
         Self {
             segment_max_commands: 1,
+            segment_max_bytes: 0,
             segment_max_latency_ms: 0,
         }
     }
+}
+
+/// A point-in-time view of object-log segmenting for a shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLogStats {
+    pub segment_objects: u64,
+    pub command_objects: u64,
+}
+
+fn segment_batches<'a>(
+    commands: &'a [CommandEnvelope],
+    config: ObjectLogSegmentConfig,
+) -> Vec<&'a [CommandEnvelope]> {
+    let max_commands = config.segment_max_commands.max(1);
+    let max_bytes = config.segment_max_bytes;
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    while start < commands.len() {
+        let mut end = start;
+        let mut used_bytes = 0usize;
+        while end < commands.len() && end - start < max_commands {
+            let encoded = serde_json::to_vec(&commands[end]).expect("command envelope serializes");
+            let next = encoded.len();
+            if end > start && max_bytes != 0 && used_bytes + next > max_bytes {
+                break;
+            }
+            used_bytes += next;
+            end += 1;
+            if max_bytes != 0 && used_bytes >= max_bytes {
+                break;
+            }
+        }
+        if end == start {
+            end = start + 1;
+        }
+        batches.push(&commands[start..end]);
+        start = end;
+    }
+    batches
 }
 
 /// Local filesystem object-log authority without an in-process projection.
@@ -574,11 +615,28 @@ impl LocalObjectLog {
             validate_gate_command(false, &env.command)?;
         }
         let mut positions = Vec::with_capacity(commands.len());
-        let max_commands = inner.segment_config.segment_max_commands.max(1);
-        for chunk in commands.chunks(max_commands) {
+        for chunk in segment_batches(commands, inner.segment_config) {
             positions.extend(append_segment(&inner.root, shard, chunk, expected_epoch)?);
         }
         Ok(positions)
+    }
+
+    pub fn segment_stats(&self, shard: &QueueKey) -> EngineResult<ObjectLogStats> {
+        let inner = self.inner.lock().expect("object log store poisoned");
+        if !inner.queues.contains_key(shard) {
+            return Err(EngineError::NotFound);
+        }
+        let log_dir = shard_dir(&inner.root, shard).join("log");
+        let segment_objects = if log_dir.exists() {
+            fs::read_dir(&log_dir).map_err(store)?.count() as u64
+        } else {
+            0
+        };
+        let command_objects = read_envelopes_from_root(&inner.root, shard)?.len() as u64;
+        Ok(ObjectLogStats {
+            segment_objects,
+            command_objects,
+        })
     }
 }
 
@@ -625,6 +683,24 @@ impl ObjectLogBackend {
         self.node_id = node_id;
         self
     }
+
+    pub fn segment_stats(&self, shard: &QueueKey) -> EngineResult<ObjectLogStats> {
+        let inner = self.inner.lock().expect("objectlog poisoned");
+        if !inner.queues.contains_key(shard) {
+            return Err(EngineError::NotFound);
+        }
+        let log_dir = shard_dir(&inner.root, shard).join("log");
+        let segment_objects = if log_dir.exists() {
+            fs::read_dir(&log_dir).map_err(store)?.count() as u64
+        } else {
+            0
+        };
+        let command_objects = read_envelopes_from_root(&inner.root, shard)?.len() as u64;
+        Ok(ObjectLogStats {
+            segment_objects,
+            command_objects,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -647,8 +723,7 @@ impl LogWriter for ObjLogWriter {
             validate_gate_command(false, &env.command)?;
         }
         let mut positions = Vec::with_capacity(commands.len());
-        let max_commands = self.segment_config.segment_max_commands.max(1);
-        for chunk in commands.chunks(max_commands) {
+        for chunk in segment_batches(commands, self.segment_config) {
             positions.extend(append_segment(&self.root, shard, chunk, expected_epoch)?);
         }
         Ok(positions)
