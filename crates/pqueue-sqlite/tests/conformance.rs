@@ -1,19 +1,12 @@
-//! The shared backend-conformance suite (the 16 port-level no-stub scenarios) run against the sqlite
-//! backend. Each scenario gets a fresh `:memory:` database.
+//! The shared backend-conformance suite (the 16 port-level no-stub scenarios) run against the COMPOSED
+//! sqlite backend (`ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>`). Each scenario
+//! gets a fresh `:memory:` durable log.
 
-use pqueue_sqlite::SqliteBackend;
+use pqueue_sqlite::composed_sqlite_backend_in_memory;
 
-pqueue_conformance::conformance_suite!(|| SqliteBackend::in_memory().expect("open :memory:"));
-
-/// ADR-012 Phase 1: the SAME shared conformance suite against the COMPOSED sqlite backend
-/// (`ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>`). Passing identically to the
-/// monolith above proves the orthogonal composition is faithful before the monolith is removed (Phase 2).
-mod composed {
-    use pqueue_sqlite::composed_sqlite_backend_in_memory;
-    pqueue_conformance::conformance_suite!(
-        || composed_sqlite_backend_in_memory().expect("compose :memory:")
-    );
-}
+pqueue_conformance::conformance_suite!(
+    || composed_sqlite_backend_in_memory().expect("open :memory:")
+);
 
 /// B1a (ADR-009 / TD-003): a claim stamped with the owner's *cached* acquire-time epoch is fenced at the
 /// durable append once a newer epoch is acquired (the owner was superseded), and leases nothing; the
@@ -26,7 +19,7 @@ async fn claim_fences_superseded_owner_epoch() {
         QueueCommand,
     };
 
-    let b = SqliteBackend::in_memory().expect("open :memory:");
+    let b = composed_sqlite_backend_in_memory().expect("open :memory:");
     b.create_queue(qdef()).await.unwrap();
     commit(
         &b,
@@ -74,7 +67,7 @@ async fn push_fences_superseded_owner_epoch() {
     use pqueue_conformance::{qdef, qkey, shard, ts};
     use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec};
 
-    let b = SqliteBackend::in_memory().expect("open :memory:");
+    let b = composed_sqlite_backend_in_memory().expect("open :memory:");
     b.create_queue(qdef()).await.unwrap();
     let e1 = b.acquire_epoch(&shard()).await.unwrap();
     assert!(e1 >= 1);

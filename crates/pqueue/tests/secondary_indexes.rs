@@ -13,7 +13,7 @@ use pqueue_core::{
     TenantId,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -76,8 +76,8 @@ fn key(parts: &[&str]) -> Vec<Vec<u8>> {
     parts.iter().map(|p| p.as_bytes().to_vec()).collect()
 }
 
-async fn new_pq() -> Pqueue<MemoryBackend> {
-    let backend = Arc::new(MemoryBackend::new());
+async fn new_pq() -> Pqueue<ComposedMemoryBackend> {
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     pq.create_queue(index_bearing_qdef()).await.unwrap();

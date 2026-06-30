@@ -15,7 +15,7 @@ use pqueue_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ManualClock, composed_memory_backend};
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -57,7 +57,10 @@ fn item(priority: i64) -> NewItem {
 
 #[tokio::test]
 async fn same_request_id_same_body_replays_without_a_second_append() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-1").unwrap();
@@ -80,7 +83,10 @@ async fn same_request_id_same_body_replays_without_a_second_append() {
 
 #[tokio::test]
 async fn same_request_id_different_body_conflicts() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-2").unwrap();
@@ -105,7 +111,7 @@ async fn same_request_id_different_body_conflicts() {
 #[tokio::test]
 async fn retry_after_retention_window_is_a_fresh_push() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), clock.clone());
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     // Short retention so a clock advance crosses the expiry boundary.
     pq.create_queue(qdef(1_000)).await.unwrap();
@@ -135,7 +141,10 @@ async fn retry_after_retention_window_is_a_fresh_push() {
 
 #[tokio::test]
 async fn distinct_request_ids_each_append() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
 

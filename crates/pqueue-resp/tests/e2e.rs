@@ -15,15 +15,18 @@ use pqueue_engine::{
     Backend, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore, FenceLeaseCommand,
     LogWriter, ProjectionWriter, QueueCommand, QueueKey,
 };
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 use pqueue_resp::{RespBackend, SystemClock, serve};
 use redis::Value;
 use redis::streams::StreamReadReply;
 
 /// Boot the RESP front over a real ephemeral TCP port with a fresh memory backend + created queue, and
 /// return an off-the-shelf async Redis connection plus the backend handle (for operator-side setup).
-async fn setup() -> (redis::aio::MultiplexedConnection, Arc<MemoryBackend>) {
-    let backend = Arc::new(MemoryBackend::new());
+async fn setup() -> (
+    redis::aio::MultiplexedConnection,
+    Arc<ComposedMemoryBackend>,
+) {
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (con, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
     (con, backend)
@@ -48,7 +51,7 @@ fn shard() -> QueueKey {
 
 /// Operator-fence a leased item directly on the backend (no RESP operator surface yet), so the e2e can
 /// prove a fenced holder's XACK is refused with `-ERR pqueue stale_lease`.
-async fn fence(backend: &MemoryBackend, id: &str) {
+async fn fence(backend: &ComposedMemoryBackend, id: &str) {
     let item = ItemId::new(id).unwrap();
     let env = CommandEnvelope {
         command_id: CommandId::new("fence"),
@@ -103,7 +106,7 @@ fn qdef() -> QueueDefinition {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drain_and_reconcile_with_offtheshelf_client() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
 
@@ -240,7 +243,7 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xreadgroup_returns_api001_claimed_item_shape() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con, _) = serve_backend(backend, Arc::new(ManualClock::at(1_000))).await;
     let id: String = redis::cmd("XADD")
@@ -622,7 +625,7 @@ type AutoClaim = (String, Vec<(String, Vec<(String, String)>)>, Vec<String>);
 async fn xautoclaim_redelivers_expired_leases() {
     // Real lease TTL + reclaim: claim an item, advance the (manual) clock past its lease, then
     // XAUTOCLAIM reclaims the expired lease and re-delivers it with a bumped attempt_count.
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap(); // max_lease_duration_ms = 60_000 (60s)
     let clock = Arc::new(ManualClock::at(1_000)); // t = 1000s
     let (mut con, _) = serve_backend(backend.clone(), clock.clone()).await;
@@ -715,14 +718,14 @@ async fn xautoclaim_redelivers_expired_leases() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crash_recovery_rebuilds_durable_state_over_the_wire() {
-    use pqueue_sqlite::SqliteBackend;
+    use pqueue_sqlite::composed_sqlite_backend;
     let path = std::env::temp_dir().join(format!("pqueue-resp-crash-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let p = path.to_str().unwrap().to_string();
 
     // Session 1: produce 3, claim 1 (leave it leased + un-acked), then "crash".
     let leased_id = {
-        let b = Arc::new(SqliteBackend::open(&p).unwrap());
+        let b = Arc::new(composed_sqlite_backend(&p).unwrap());
         b.create_queue(qdef()).await.unwrap();
         let handle = {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -760,7 +763,7 @@ async fn crash_recovery_rebuilds_durable_state_over_the_wire() {
     }; // backend dropped → sqlite file closed
 
     // Session 2: reopen the SAME database — projection rebuilt from the durable log.
-    let b = Arc::new(SqliteBackend::open(&p).unwrap());
+    let b = Arc::new(composed_sqlite_backend(&p).unwrap());
     let (mut con, _) = serve_backend(b.clone(), Arc::new(SystemClock)).await;
     // The leased item survived as pending-in-flight.
     let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
@@ -864,7 +867,7 @@ async fn xadd_collision_with_leased_then_terminal_is_an_error() {
 async fn two_servers_on_one_backend_assign_distinct_xadd_ids() {
     // C: XADD ids are BACKEND-assigned, so two RESP servers sharing one backend mint DISTINCT ids and
     // both items coexist (a per-server counter would collide).
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con_a, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
     let (mut con_b, _) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
@@ -1191,7 +1194,7 @@ async fn xlen_xdel_xinfo_over_offtheshelf_client() {
 /// loops `0-0`→…→`0-0` and reclaims every in-flight entry EXACTLY once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xautoclaim_paginates_the_pel_cursor() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let clock = Arc::new(ManualClock::at(1_000));
     let (mut con, _) = serve_backend(backend.clone(), clock.clone()).await;
@@ -1298,7 +1301,7 @@ async fn xautoclaim_paginates_the_pel_cursor() {
 /// produced item is delivered to exactly one consumer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_consumers_in_a_group_never_get_the_same_item() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con1, addr) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
     let client = redis::Client::open(format!("redis://{addr}")).unwrap();
@@ -1367,7 +1370,7 @@ async fn two_consumers_in_a_group_never_get_the_same_item() {
 /// no double-insert, no loss — whichever order the single-writer engine serializes them in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upsert_and_claim_race_stays_consistent() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con1, addr) = serve_backend(backend.clone(), Arc::new(SystemClock)).await;
     let client = redis::Client::open(format!("redis://{addr}")).unwrap();
@@ -1427,7 +1430,7 @@ async fn upsert_and_claim_race_stays_consistent() {
 /// advertises this single node owning the whole 0..=16383 slot space so a cluster-aware client can route.
 #[tokio::test]
 async fn cluster_bootstrap_over_the_wire() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con, addr) = serve_backend(backend, Arc::new(SystemClock)).await;
 
@@ -1499,7 +1502,7 @@ async fn cluster_bootstrap_over_the_wire() {
 /// proves the reply shapes + slot constants).
 #[tokio::test]
 async fn real_cluster_client_bootstraps_and_routes() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -13,7 +13,7 @@ use pqueue_engine::{
     Backend, ControlPlaneStore, EngineError, EngineResult, InMemoryControlPlane, LogWriter,
     OwnershipOutcome, ProjectionWriter, QueueCommand, QueueControlPlane, acquire_and_fence,
 };
-use pqueue_memory::MemoryBackend;
+use pqueue_memory::{ComposedMemoryBackend, composed_memory_backend};
 
 fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()
@@ -23,7 +23,7 @@ fn owner(s: &str) -> OwnerId {
 }
 
 /// Append `PauseQueue` under `expected_epoch` through the atomic write UoW; returns the fence outcome.
-async fn append_at(b: &MemoryBackend, epoch: u64) -> EngineResult<()> {
+async fn append_at(b: &ComposedMemoryBackend, epoch: u64) -> EngineResult<()> {
     let env = envelope(QueueCommand::PauseQueue, vec![]);
     b.write(
         move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
@@ -40,7 +40,7 @@ async fn append_at(b: &MemoryBackend, epoch: u64) -> EngineResult<()> {
 /// rejected. (Seam-level only — the real claim path is not yet owner-fenced; see the module SCOPE.)
 #[tokio::test]
 async fn a_superseded_owner_is_fenced_at_the_append_seam() {
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
     let cp = InMemoryControlPlane::default(); // heartbeat 5s, lease 15s
     let (a, c) = (owner("a"), owner("c"));
@@ -82,7 +82,7 @@ async fn a_superseded_owner_is_fenced_at_the_append_seam() {
 /// MUST NOT advance the storage fence (no spurious epoch bump that would fence the live owner).
 #[tokio::test]
 async fn a_live_lease_rejects_a_second_acquire_without_touching_the_fence() {
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
     let cp = InMemoryControlPlane::default();
     let (a, c) = (owner("a"), owner("c"));
@@ -124,7 +124,7 @@ async fn a_live_lease_rejects_a_second_acquire_without_touching_the_fence() {
 /// same-owner-preserve branch. This branch is the in-process lease-lapse case (the self-fencing-collapse bug).
 #[tokio::test]
 async fn a_same_owner_reaffirm_preserves_its_fence_and_does_not_self_fence() {
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
     let cp = InMemoryControlPlane::default();
     let a = owner("a");

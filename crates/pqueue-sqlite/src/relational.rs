@@ -1,7 +1,7 @@
 //! # Relational projection family (sqlite) — BQ-11a
 //!
 //! A SECOND, **DB-authoritative** projection family for sqlite (ADR-008 / TD-001 relational class),
-//! distinct from the log-replay [`crate::SqliteBackend`]. Here the `pqueue_items` SQL table **is** the
+//! distinct from the log-replay [`crate::ComposedSqliteBackend`]. Here the `pqueue_items` SQL table **is** the
 //! projection (TD-002 columns): every lifecycle command is applied as SQL INSERT/UPDATE/DELETE against
 //! `pqueue_items` inside the unit of work, and reads (eligibility, peek, pending, metrics) are SQL
 //! queries over it. There is **no** shared in-memory [`pqueue_projection::ProjectionData`] and **no**

@@ -13,7 +13,7 @@ use pqueue_engine::{
     ClaimPort, ClaimRequest, Clock, ControlPlaneStore, EngineError, InMemoryControlPlane,
     ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
 };
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
 use pqueue_server::{
     BackendSpec, Config, ControlPlaneSpec, LogSpec, OwnershipRuntime, ProjectionSpec, start,
@@ -105,7 +105,7 @@ async fn raw_resp(addr: std::net::SocketAddr, parts: &[&str]) -> String {
 
 #[tokio::test]
 async fn ownership_runtime_routes_wrong_node_to_moved() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let a = Arc::new(OwnershipRuntime::new(
@@ -138,7 +138,7 @@ async fn ownership_runtime_routes_wrong_node_to_moved() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resp_misrouted_write_emits_moved_to_active_owner() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let a = OwnershipRuntime::new(
@@ -184,7 +184,7 @@ async fn resp_misrouted_write_emits_moved_to_active_owner() {
 
 #[tokio::test]
 async fn cached_owner_epoch_fences_real_push_path_after_reassignment() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let a = OwnershipRuntime::new(
@@ -226,7 +226,7 @@ async fn cached_owner_epoch_fences_real_push_path_after_reassignment() {
 
 #[tokio::test]
 async fn cached_owner_epoch_fences_real_claim_path_after_reassignment() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let a = OwnershipRuntime::new(
@@ -281,7 +281,7 @@ async fn cached_owner_epoch_fences_real_claim_path_after_reassignment() {
 
 #[tokio::test]
 async fn standby_owner_acquires_managed_queue_after_expiry() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let a = OwnershipRuntime::new(
@@ -312,7 +312,7 @@ async fn standby_owner_acquires_managed_queue_after_expiry() {
 
 #[tokio::test]
 async fn draining_owner_releases_managed_queue_after_inflight_clears() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let a = OwnershipRuntime::new(
@@ -350,7 +350,7 @@ async fn draining_owner_releases_managed_queue_after_inflight_clears() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resp_xclaim_drain_split_renews_inflight_and_refuses_reassign() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let clock = Arc::new(ManualClock::at(0));
@@ -475,7 +475,7 @@ async fn resp_xclaim_drain_split_renews_inflight_and_refuses_reassign() {
 
 #[tokio::test]
 async fn draining_owner_refuses_new_claim_but_serves_inflight_epoch() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let cp = Arc::new(InMemoryControlPlane::default());
     let a = OwnershipRuntime::new(
@@ -500,7 +500,7 @@ async fn draining_owner_refuses_new_claim_but_serves_inflight_epoch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(1_000)); // t = 1000s
 
     // Start the server (provisions the queue) with a fast reclaim ticker + the injected manual clock.
@@ -796,7 +796,7 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn boots_and_is_drivable_by_offtheshelf_redis_client() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let server = start_with(
         backend.clone(),
         Arc::new(SystemClock),
@@ -846,7 +846,7 @@ async fn shutdown_and_drain_drains_in_flight_then_stops_accepting() {
     // Graceful drain (owed-item D): with a client connection still OPEN, `shutdown_and_drain` signals the
     // serve loop, the idle handler exits on the cancel between commands (it is NOT abort-forced), the
     // JoinSet drains, and the call returns FAR under its bound. Afterwards the listener is closed.
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let server = start_with(
         backend.clone(),
         Arc::new(SystemClock),

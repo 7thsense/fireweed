@@ -3,7 +3,7 @@
 //! Runs ONE arbitrary command sequence against a representative of EACH projection family and asserts
 //! their observable read-state (metrics, eligibility order, peek, the token-bearing pending set) is
 //! identical at every step:
-//!   - in-memory log-replay family  → `pqueue_memory::MemoryBackend` (shared `ProjectionData`)
+//!   - in-memory log-replay family  → `pqueue_memory::composed_memory_backend` (shared `ProjectionData`)
 //!   - relational DB-authoritative  → `pqueue_sqlite::SqliteRelationalBackend` (`pqueue_items` SQL)
 //!
 //! This is a stronger guarantee than each family independently passing the same fixed `core_suite!`
@@ -12,12 +12,12 @@
 //! (env-gated, deferred-with-reason here — no live DB); a postgres-vs-in-memory differential is the live-DB
 //! extension of this test (convergence-review I3).
 
-use pqueue_memory::MemoryBackend;
+use pqueue_memory::composed_memory_backend;
 use pqueue_sqlite::SqliteRelationalBackend;
 
 #[tokio::test]
 async fn in_memory_and_relational_families_are_core_identical() {
-    pqueue_conformance::scenarios::cross_family_core_parity(MemoryBackend::new, || {
+    pqueue_conformance::scenarios::cross_family_core_parity(composed_memory_backend, || {
         SqliteRelationalBackend::in_memory().expect("open :memory: relational backend")
     })
     .await;

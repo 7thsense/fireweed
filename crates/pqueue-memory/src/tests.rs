@@ -9,16 +9,9 @@
 use super::*;
 use pqueue_conformance::ts;
 
-// The full shared backend-conformance suite (16 port-level scenarios) against MemoryBackend.
-pqueue_conformance::conformance_suite!(MemoryBackend::new);
-
-/// ADR-012 Phase 1: the SAME shared conformance suite against the COMPOSED memory backend
-/// (`ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`). Passing identically to the
-/// monolith above proves the orthogonal composition is faithful before the monolith is removed (Phase 2).
-mod composed {
-    use crate::composed_memory_backend;
-    pqueue_conformance::conformance_suite!(composed_memory_backend);
-}
+// The full shared backend-conformance suite (16 port-level scenarios) against the composed memory backend
+// (`ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`).
+pqueue_conformance::conformance_suite!(composed_memory_backend);
 
 /// ADR-012 Phase 1b-i: CAPABILITY PARITY between the composed memory backend and the monolithic
 /// `MemoryBackend`. The shared conformance suite above already covers the data-plane ports; these
@@ -31,7 +24,7 @@ mod composed_capability_parity {
     use crate::composed_memory_backend;
     use bytes::Bytes;
     use pqueue_conformance::{claim_req, qdef, qkey, shard};
-    use pqueue_core::RequestId;
+    use pqueue_core::{PriorityValue, RequestId};
     use pqueue_engine::{
         Backend, ClaimPort, ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
         CommitTransitionPort, ControlPlaneStore, DiscoveryGranularity, DiscoveryPort, EngineError,
@@ -45,7 +38,7 @@ mod composed_capability_parity {
     #[tokio::test]
     async fn commit_capabilities_reach_memory_parity() {
         let composed = composed_memory_backend().commit_capabilities();
-        let mono = MemoryBackend::new().commit_capabilities();
+        let mono = composed_memory_backend().commit_capabilities();
         // Every guarantee field must match the monolith (the `consistency` note is an intentionally
         // substrate-descriptive string, not a capability).
         assert_eq!(
@@ -364,10 +357,10 @@ async fn manual_clock_and_idgen_are_real() {
 #[tokio::test]
 async fn distinct_node_ids_never_collide_on_concurrent_push() {
     use pqueue_conformance::{qdef, shard};
-    use pqueue_engine::{PushPort, PushSpec};
+    use pqueue_engine::{ControlPlaneStore, PushPort, PushSpec};
 
-    let a = MemoryBackend::new().with_node_id(1);
-    let b = MemoryBackend::new().with_node_id(7);
+    let a = composed_memory_backend().with_node_id(1);
+    let b = composed_memory_backend().with_node_id(7);
     a.create_queue(qdef()).await.unwrap();
     b.create_queue(qdef()).await.unwrap();
 
@@ -391,9 +384,12 @@ async fn distinct_node_ids_never_collide_on_concurrent_push() {
 #[tokio::test]
 async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
     use pqueue_conformance::{envelope, qdef, qkey, shard, ts};
-    use pqueue_engine::{EngineError, LogWriter, ProjectionWriter, QueueCommand, SetGatesCommand};
+    use pqueue_engine::{
+        Backend, ControlPlaneStore, EngineError, LogWriter, ProjectionRead, ProjectionWriter,
+        PushPort, PushSpec, QueueCommand, SetGatesCommand,
+    };
 
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
 
     let err = b
@@ -443,7 +439,7 @@ async fn claim_fences_superseded_owner_epoch() {
         QueueCommand,
     };
 
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
     // Push one item at the current (genesis) epoch via the shared commit helper (degenerate owner).
     commit(
@@ -496,7 +492,7 @@ async fn push_fences_superseded_owner_epoch() {
     use pqueue_conformance::{qdef, qkey, shard};
     use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec};
 
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
     let e1 = b.acquire_epoch(&shard()).await.unwrap(); // advance genesis 0 -> 1
     assert!(e1 >= 1);
@@ -540,7 +536,7 @@ async fn lapsed_same_owner_reacquire_does_not_self_fence_inflight_writes() {
         ProjectionRead, PushPort, PushSpec, QueueControlPlane, acquire_and_fence,
     };
 
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
 
     // Reference control plane: heartbeat TTL 5s, lease TTL 15s (the defaults that expose the bug).
@@ -620,7 +616,7 @@ async fn finalize_fences_superseded_owner_epoch() {
         FinalizePort, ProjectionRead, PushCommand, QueueCommand,
     };
 
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
     commit(
         &b,
@@ -675,14 +671,16 @@ async fn finalize_fences_superseded_owner_epoch() {
 /// log as negative controls, proving the assertion actually discriminates `Some` from `None`.
 #[tokio::test]
 async fn commit_path_propagates_request_id_into_every_command_envelope() {
+    use bytes::Bytes;
     use pqueue_conformance::{claim_req, qdef, shard, ts};
+    use pqueue_core::RequestId;
     use pqueue_engine::{
         ClaimPort, ClaimRef, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
         ControlPlaneStore, FinalizeKind, InstanceFence, LogRead, PushPort, PushSpec, QueueCommand,
         SideRecord,
     };
 
-    let b = MemoryBackend::new();
+    let b = composed_memory_backend();
     b.create_queue(qdef()).await.unwrap();
 
     // Push one input item WITHOUT a request id: this envelope MUST carry `request_id: None`. It is the

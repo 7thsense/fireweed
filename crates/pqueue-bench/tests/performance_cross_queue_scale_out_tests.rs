@@ -34,7 +34,7 @@ use pqueue_core::{
     TenantId, UtcTimestamp,
 };
 use pqueue_engine::{Clock, QueueKey};
-use pqueue_memory::MemoryBackend;
+use pqueue_memory::composed_memory_backend;
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -88,7 +88,7 @@ fn run_owner(
     items_per_queue: u64,
     batch: usize,
 ) -> Vec<f64> {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(SysClock));
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SysClock));
     futures::executor::block_on(async {
         let mut per_queue_rates = Vec::with_capacity(queues_per_owner);
         for qi in 0..queues_per_owner {
@@ -446,7 +446,8 @@ fn live_multi_node_object_log_sqlite_projection_e2() {
     let tag = std::process::id();
     let cluster =
         std::env::var("PQUEUE_E2_CLUSTER").unwrap_or_else(|_| format!("pq-e2-live-{tag}"));
-    let image = std::env::var("PQUEUE_E2_IMAGE").unwrap_or_else(|_| format!("pqueue-e2-live:{tag}"));
+    let image =
+        std::env::var("PQUEUE_E2_IMAGE").unwrap_or_else(|_| format!("pqueue-e2-live:{tag}"));
     let sweeps = std::env::var("PQUEUE_E2_SWEEPS").unwrap_or_else(|_| "1".to_string());
     let ledger_out = std::env::temp_dir().join(format!("tp002-e2-live-{tag}.jsonl"));
 
@@ -639,7 +640,9 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
         verdict.bars_met,
         "all-bars-pass sweep must meet the bars: {verdict:?}"
     );
-    assert!(verdict.nondecreasing && verdict.scale_pass && verdict.floor_pass && verdict.disjoint_pass);
+    assert!(
+        verdict.nondecreasing && verdict.scale_pass && verdict.floor_pass && verdict.disjoint_pass
+    );
     let row = build_e2_row(&pass, &tuning, &verdict);
     assert_eq!(
         row.evidence_tier, "release",
@@ -672,7 +675,10 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
     a[1].ingest_aggregate = 30_000.0; // 4-owner spikes above the 8-owner (25000)
     let va = evaluate_e2_bars(&a);
     assert!(!va.nondecreasing, "(a) bar 1 (monotonicity) must fail");
-    assert!(va.scale_pass, "(a) only monotonicity should fail, not the ratio");
+    assert!(
+        va.scale_pass,
+        "(a) only monotonicity should fail, not the ratio"
+    );
     assert!(!va.bars_met);
     assert_eq!(build_e2_row(&a, &tuning, &va).evidence_tier, "smoke");
 
@@ -692,7 +698,10 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
     let mut c = e2_passing_sweep();
     c[2].drain_min_per_queue = 2_000.0; // < 2777.78/s
     let vc = evaluate_e2_bars(&c);
-    assert!(!vc.floor_pass, "(c) bar 3 (worst per-queue >= floor) must fail");
+    assert!(
+        !vc.floor_pass,
+        "(c) bar 3 (worst per-queue >= floor) must fail"
+    );
     assert!(vc.worst_drain_per_queue < FLOOR_ITEMS_PER_SEC);
     assert!(!vc.bars_met);
     assert_eq!(build_e2_row(&c, &tuning, &vc).evidence_tier, "smoke");
@@ -700,7 +709,10 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
     let mut c2 = e2_passing_sweep();
     c2[0].ingest_min_per_queue = 1_500.0;
     let vc2 = evaluate_e2_bars(&c2);
-    assert!(!vc2.floor_pass && !vc2.bars_met, "(c') ingest floor is load-bearing too");
+    assert!(
+        !vc2.floor_pass && !vc2.bars_met,
+        "(c') ingest floor is load-bearing too"
+    );
     assert_eq!(build_e2_row(&c2, &tuning, &vc2).evidence_tier, "smoke");
 
     // (d) A QUEUE SERVED BY MORE THAN ONE OWNER: the 8-owner cross-node confirmation count comes up SHORT of
@@ -708,7 +720,10 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
     let mut d = e2_passing_sweep();
     d[2].one_owner_confirmations = 55; // expected 56
     let vd = evaluate_e2_bars(&d);
-    assert!(!vd.disjoint_pass, "(d) bar 4 (one-owner-per-queue) must fail");
+    assert!(
+        !vd.disjoint_pass,
+        "(d) bar 4 (one-owner-per-queue) must fail"
+    );
     assert_eq!(vd.expected_confirmations, 56);
     assert!(!vd.bars_met);
     assert_eq!(build_e2_row(&d, &tuning, &vd).evidence_tier, "smoke");
@@ -723,7 +738,10 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
         e2_point(8, 7_000.0, 3_000.0, 60_000.0, 30_000.0, 56), // 7000/5000 = 1.4x < 3.5x
     ];
     let vs = evaluate_e2_bars(&smoke);
-    assert!(!vs.bars_met, "an in-process-style sweep cannot clear the cross-node bars");
+    assert!(
+        !vs.bars_met,
+        "an in-process-style sweep cannot clear the cross-node bars"
+    );
     let smoke_row = build_e2_row(&smoke, &tuning, &vs);
     assert_eq!(
         smoke_row.evidence_tier, "smoke",
@@ -736,20 +754,35 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
     // emitted row validate under the SAME ledger schema.
     let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl");
-    let text = std::fs::read_to_string(&evidence_path)
-        .unwrap_or_else(|e| panic!("read committed E2 evidence {}: {e}", evidence_path.display()));
-    let first = text.lines().find(|l| !l.trim().is_empty()).expect("evidence has a row");
-    let evidence_row: pqueue_release::LedgerRow =
-        serde_json::from_str(first).expect("committed E2 evidence row parses under the current schema");
-    let built = build_e2_row(&e2_passing_sweep(), &tuning, &evaluate_e2_bars(&e2_passing_sweep()));
-    assert_eq!(built.suite, evidence_row.suite, "suite must match the committed evidence");
+    let text = std::fs::read_to_string(&evidence_path).unwrap_or_else(|e| {
+        panic!(
+            "read committed E2 evidence {}: {e}",
+            evidence_path.display()
+        )
+    });
+    let first = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("evidence has a row");
+    let evidence_row: pqueue_release::LedgerRow = serde_json::from_str(first)
+        .expect("committed E2 evidence row parses under the current schema");
+    let built = build_e2_row(
+        &e2_passing_sweep(),
+        &tuning,
+        &evaluate_e2_bars(&e2_passing_sweep()),
+    );
+    assert_eq!(
+        built.suite, evidence_row.suite,
+        "suite must match the committed evidence"
+    );
     assert_eq!(built.backend_profile, evidence_row.backend_profile);
     assert_eq!(built.pass_bar, evidence_row.pass_bar);
     assert_eq!(
         built.measurements.tp002_evidence_ids, evidence_row.measurements.tp002_evidence_ids,
         "evidence ids must match"
     );
-    let built_keys: std::collections::BTreeSet<&String> = built.measurements.values.keys().collect();
+    let built_keys: std::collections::BTreeSet<&String> =
+        built.measurements.values.keys().collect();
     let evidence_keys: std::collections::BTreeSet<&String> =
         evidence_row.measurements.values.keys().collect();
     assert_eq!(

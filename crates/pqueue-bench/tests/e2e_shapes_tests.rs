@@ -14,10 +14,10 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use pqueue::Pqueue;
 use pqueue_bench::{Shape, SystemClock, all_shapes, bench_qdef, lifecycle, qkey};
-use pqueue_memory::MemoryBackend;
+use pqueue_memory::composed_memory_backend;
 use pqueue_objectlog::ObjectLogBackend;
 use pqueue_postgres::{PostgresBackend, PostgresRelationalBackend};
-use pqueue_sqlite::{SqliteBackend, SqliteRelationalBackend};
+use pqueue_sqlite::{SqliteRelationalBackend, composed_sqlite_backend};
 
 /// Small but non-trivial: exercises batching + the 10%/10%/80% lifecycle partition with whole groups.
 const ITEMS: u64 = 2_000;
@@ -62,7 +62,7 @@ fn run_one<B: pqueue::LibBackend>(
 #[test]
 fn lifecycle_over_shapes_memory() {
     for shape in all_shapes() {
-        let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(SystemClock));
+        let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SystemClock));
         run_one("memory", &pq, &shape, true);
     }
 }
@@ -73,7 +73,7 @@ fn lifecycle_over_shapes_sqlite_log() {
         let path = tmp(&format!("sqlite-{}", shape.name));
         let _ = std::fs::remove_file(&path);
         let pq = Pqueue::new(
-            Arc::new(SqliteBackend::open(path.to_str().unwrap()).expect("open sqlite")),
+            Arc::new(composed_sqlite_backend(path.to_str().unwrap()).expect("open sqlite")),
             Arc::new(SystemClock),
         );
         run_one("sqlite", &pq, &shape, true);

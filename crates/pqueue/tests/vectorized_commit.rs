@@ -18,7 +18,7 @@ use pqueue_core::{
     UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ManualClock, composed_memory_backend};
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -87,7 +87,7 @@ fn side(key: &str, payload: &str) -> SideRecord {
 /// the lifecycle item is ordinary claimable work.
 #[tokio::test]
 async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
@@ -157,7 +157,10 @@ async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes()
 async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
     // Wrong lease token.
     {
-        let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+        let pq = Pqueue::new(
+            Arc::new(composed_memory_backend()),
+            Arc::new(ManualClock::at(0)),
+        );
         let q = qkey();
         pq.create_queue(qdef(60_000)).await.unwrap();
         let mut claim_ref = push_and_claim(&pq, &q).await;
@@ -193,7 +196,10 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
 
     // Wrong item_version.
     {
-        let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+        let pq = Pqueue::new(
+            Arc::new(composed_memory_backend()),
+            Arc::new(ManualClock::at(0)),
+        );
         let q = qkey();
         pq.create_queue(qdef(60_000)).await.unwrap();
         let mut claim_ref = push_and_claim(&pq, &q).await;
@@ -233,7 +239,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
 #[tokio::test]
 async fn commit_request_id_replays_conflicts_and_expires() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), clock.clone());
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     pq.create_queue(qdef(1_000)).await.unwrap();
 
@@ -367,7 +373,7 @@ async fn commit_is_unavailable_on_a_non_atomic_backend() {
 /// leased, fence unchanged); a NON-MONOTONIC `next <= expected` rejects `Invalid`.
 #[tokio::test]
 async fn commit_advances_validates_and_rejects_instance_fence() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
@@ -480,7 +486,10 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
 /// it before activation.
 #[tokio::test]
 async fn capabilities_advertise_atomic_commit_on_memory_and_reject_objectlog() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
     let caps = pq.commit_capabilities(&q).unwrap();
@@ -515,7 +524,10 @@ async fn capabilities_advertise_atomic_commit_on_memory_and_reject_objectlog() {
 /// finalized + not claimable; the side record is not claimable/peekable.
 #[tokio::test]
 async fn explain_commit_reconstructs_the_transition_and_side_records_are_non_work() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
     let cr = push_and_claim(&pq, &q).await;

@@ -15,7 +15,7 @@ use pqueue_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_sqlite::SqliteRelationalBackend;
 
 fn qkey() -> QueueKey {
@@ -58,7 +58,7 @@ fn at(priority: i64) -> NewItem {
 
 #[tokio::test]
 async fn push_claim_ack_nack_lifecycle_over_memory() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     let q = qkey();
@@ -155,7 +155,7 @@ async fn request_id_push_is_idempotent_on_memory_backend() {
     // foundation for the Snorri authoritative commit boundary): a request-id'd push succeeds and a same-body
     // replay returns the original id without a second append. Full replay/conflict/expired coverage lives in
     // `tests/request_id_idempotency.rs`.
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     let q = qkey();
@@ -178,7 +178,7 @@ async fn request_id_push_is_idempotent_on_memory_backend() {
 
 #[tokio::test]
 async fn claimed_item_exposes_api001_shape_over_facade() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(100));
     let pq = Pqueue::new(backend, clock);
     let q = qkey();
@@ -230,7 +230,7 @@ async fn claimed_item_exposes_api001_shape_over_facade() {
 
 #[tokio::test]
 async fn upsert_dedups_on_client_item_key_over_memory() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     let q = qkey();
@@ -284,7 +284,7 @@ async fn objectlog_push_works_but_upsert_is_unavailable() {
 async fn two_handles_on_one_backend_do_not_collide_ids() {
     // B2 regression: ids are backend-assigned (not a per-handle counter), so two `Pqueue` handles
     // sharing one backend mint DISTINCT item ids and both items coexist.
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let a = Pqueue::new(backend.clone(), clock.clone());
     let b = Pqueue::new(backend.clone(), clock);
@@ -303,7 +303,7 @@ async fn two_handles_on_one_backend_do_not_collide_ids() {
 
 #[tokio::test]
 async fn ack_of_non_leased_id_is_a_structured_error() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
@@ -318,7 +318,7 @@ async fn ack_of_non_leased_id_is_a_structured_error() {
 
 #[tokio::test]
 async fn fail_dead_letters_a_claimed_item() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
@@ -337,7 +337,7 @@ async fn fail_dead_letters_a_claimed_item() {
 
 #[tokio::test]
 async fn renew_extends_lease_without_charging_a_delivery() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     let q = qkey();
@@ -361,7 +361,7 @@ async fn renew_extends_lease_without_charging_a_delivery() {
 
 #[tokio::test]
 async fn reassign_transfers_and_charges_one_delivery() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
@@ -384,7 +384,7 @@ async fn reassign_transfers_and_charges_one_delivery() {
 
 #[tokio::test]
 async fn rearm_resets_attempt_and_requeues_the_item() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
@@ -407,7 +407,7 @@ async fn rearm_resets_attempt_and_requeues_the_item() {
 
 #[tokio::test]
 async fn purge_force_removes_a_leased_item_and_gates_without_force() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
@@ -428,7 +428,7 @@ async fn purge_force_removes_a_leased_item_and_gates_without_force() {
 
 #[tokio::test]
 async fn claimed_renders_only_leased_items() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
@@ -462,7 +462,10 @@ fn with_fields(priority: i64, fields: &[(&str, &[u8])], payload: &[u8]) -> NewIt
 /// bumps `item_version`, and honors the optimistic `expected_item_version` CAS.
 #[tokio::test]
 async fn update_fields_merges_versions_and_cas_over_memory() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     let id = pq
@@ -520,7 +523,10 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
 /// FAC-1: a terminal item rejects `update_fields` with the structured `Terminal` (parity with finalize).
 #[tokio::test]
 async fn update_fields_rejects_terminal_over_memory() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     let id = pq.push(&q, at(5)).await.unwrap();
@@ -557,7 +563,7 @@ async fn update_fields_unavailable_over_objectlog() {
 #[tokio::test]
 async fn reclaim_expired_recovers_leased_over_memory() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), clock.clone());
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     let id = pq.push(&q, at(5)).await.unwrap();

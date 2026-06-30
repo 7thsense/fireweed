@@ -48,7 +48,7 @@ use pqueue_core::{
     TenantId, UtcTimestamp,
 };
 use pqueue_engine::{Clock, QueueKey};
-use pqueue_memory::MemoryBackend;
+use pqueue_memory::composed_memory_backend;
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -161,7 +161,7 @@ fn measure_residency(
     hot_items: u64,
     batch: usize,
 ) -> ResidencyPoint {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(SysClock));
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SysClock));
     futures::executor::block_on(async {
         for i in 0..density {
             let key = qk("density", &format!("cold{i}"));
@@ -208,7 +208,7 @@ fn measure_hot_under_concurrent_load(
     batch: usize,
 ) -> (f64, f64, u64) {
     let pq = Arc::new(Pqueue::new(
-        Arc::new(MemoryBackend::new()),
+        Arc::new(composed_memory_backend()),
         Arc::new(SysClock),
     ));
     futures::executor::block_on(async {

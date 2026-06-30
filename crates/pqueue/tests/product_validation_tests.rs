@@ -33,9 +33,9 @@ use pqueue_core::{
     TenantId, UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 use pqueue_objectlog::ObjectLogBackend;
-use pqueue_sqlite::{SqliteBackend, SqliteRelationalBackend};
+use pqueue_sqlite::{SqliteRelationalBackend, composed_sqlite_backend};
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -43,9 +43,9 @@ use pqueue_sqlite::{SqliteBackend, SqliteRelationalBackend};
 
 /// A fresh in-memory single-node deployment + a manual clock (so a workflow can advance wall-clock time
 /// deterministically). Returns the handle and the clock.
-fn deployment() -> (Pqueue<MemoryBackend>, Arc<ManualClock>) {
+fn deployment() -> (Pqueue<ComposedMemoryBackend>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), clock.clone());
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
     (pq, clock)
 }
 
@@ -315,7 +315,11 @@ async fn downstream_pacing_non_goal_e2e() {
 // ---------------------------------------------------------------------------
 
 /// Drain `q` fully in `batch`-sized claims (ack each), returning the claimed priorities in delivery order.
-async fn drain_priorities(pq: &Pqueue<MemoryBackend>, q: &QueueKey, batch: usize) -> Vec<i64> {
+async fn drain_priorities(
+    pq: &Pqueue<ComposedMemoryBackend>,
+    q: &QueueKey,
+    batch: usize,
+) -> Vec<i64> {
     let mut order = Vec::new();
     loop {
         let got = pq.claim(q, batch, 3_600_000).await.unwrap();
@@ -545,7 +549,7 @@ async fn scheduled_action_delivery_e2e() {
     let _ = std::fs::remove_file(&sqlite_path);
     let sqlite_clock = Arc::new(ManualClock::at(0));
     let sqlite = Pqueue::new(
-        Arc::new(SqliteBackend::open(sqlite_path.to_str().unwrap()).expect("open sqlite")),
+        Arc::new(composed_sqlite_backend(sqlite_path.to_str().unwrap()).expect("open sqlite")),
         sqlite_clock.clone(),
     );
     let sqlite_evidence =

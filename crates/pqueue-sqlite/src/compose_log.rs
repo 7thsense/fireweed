@@ -1,9 +1,9 @@
 //! The durable sqlite command-log axis (ADR-012, Phase 1).
 //!
 //! [`SqliteLog`] is a [`pqueue_engine::LogStore`] whose command log + epoch + high-water + snapshots are
-//! durable rows in sqlite. Extracted from the monolithic [`crate::SqliteBackend`]'s `Inner` so the
-//! composed sqlite backend (`ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>`) is
-//! behaviorally identical to the monolith on the shared TD-001 suite.
+//! durable rows in sqlite. It backs the composed sqlite backend
+//! ([`crate::ComposedSqliteBackend`] = `ComposedBackend<SqliteLog, InMemoryProjection,
+//! InProcessControlPlane>`), which runs the shared TD-001 suite.
 //!
 //! Unlike the monolith, the epoch lives in this LOG axis (a `log_epochs` table), not in a `queues` table —
 //! ADR-012 co-locates the epoch/fence authority with the log and leaves queue DEFINITIONS to the separate

@@ -33,8 +33,8 @@
 //!
 //! | Backend | Projection family | Durability | Class wiring | Where |
 //! |---|---|---|---|---|
-//! | `pqueue_memory::MemoryBackend` | in-memory log-replay | atomic | `conformance_suite!` = core@atomic + log-replay | `pqueue-memory/src/tests.rs` |
-//! | `pqueue_sqlite::SqliteBackend` (log) | in-memory log-replay | atomic | `conformance_suite!` + `relational_reconnect_suite!` | `pqueue-sqlite/tests/{conformance,reconnect_smoke}.rs` |
+//! | `pqueue_memory::composed_memory_backend` | in-memory log-replay | atomic | `conformance_suite!` = core@atomic + log-replay | `pqueue-memory/src/tests.rs` |
+//! | `pqueue_sqlite::composed_sqlite_backend` (log) | in-memory log-replay | atomic | `conformance_suite!` + `relational_reconnect_suite!` | `pqueue-sqlite/tests/{conformance,reconnect_smoke}.rs` |
 //! | `pqueue_postgres::PostgresBackend` (log) | in-memory log-replay | atomic | core@atomic + log (env-gated `pg_conformance!`) | `pqueue-postgres/tests/conformance.rs` |
 //! | `pqueue_objectlog` | log-bearing | eventual-apply | `eventual_apply_suite!` = core@eventual + log-replay | `pqueue-objectlog/tests/conformance.rs` |
 //! | `pqueue_sqlite::SqliteRelationalBackend` | relational (DB-authoritative) | atomic | `core_suite!(@atomic)` + `relational_reconnect_suite!` | `pqueue-sqlite/tests/relational_{conformance,reconnect}.rs` |

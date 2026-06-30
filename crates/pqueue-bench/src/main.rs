@@ -26,10 +26,10 @@ use pqueue_bench::{
     FLOOR_ITEMS_PER_HR, FLOOR_ITEMS_PER_SEC, OpStats, Shape, SystemClock, all_shapes, bench_qdef,
     claim_ack, ingest, lifecycle, qkey, shape_by_name,
 };
-use pqueue_memory::MemoryBackend;
+use pqueue_memory::composed_memory_backend;
 use pqueue_objectlog::ObjectLogBackend;
 use pqueue_postgres::{PostgresBackend, PostgresRelationalBackend};
-use pqueue_sqlite::{SqliteBackend, SqliteRelationalBackend};
+use pqueue_sqlite::{SqliteRelationalBackend, composed_sqlite_backend};
 
 fn main() {
     let cfg = Config::from_args();
@@ -255,7 +255,7 @@ async fn run_shapes<B, F>(
 
 async fn run_memory(cfg: &Config) {
     run_shapes(cfg, "memory", LOG_FAMILY, true, || {
-        Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(SystemClock))
+        Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SystemClock))
     })
     .await;
     if cfg.has("recovery") {
@@ -276,14 +276,14 @@ async fn run_sqlite(cfg: &Config) {
             .into_owned();
         let _ = std::fs::remove_file(&path);
         Pqueue::new(
-            Arc::new(SqliteBackend::open(&path).expect("open sqlite")),
+            Arc::new(composed_sqlite_backend(&path).expect("open sqlite")),
             Arc::new(SystemClock),
         )
     })
     .await;
     if cfg.has("recovery") {
         recovery_durable(cfg, "sqlite", LOG_FAMILY, |path| {
-            Arc::new(SqliteBackend::open(path).expect("sqlite"))
+            Arc::new(composed_sqlite_backend(path).expect("sqlite"))
         })
         .await;
     }
@@ -472,7 +472,7 @@ async fn report_recovery<B: pqueue::LibBackend>(
 async fn density(cfg: &Config) {
     println!("\nqueue density (single node, memory backend, minimal shape):");
     let shape = all_shapes()[0]; // minimal
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(SystemClock));
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SystemClock));
     let cold_each = 100u64;
     let create_start = Instant::now();
     for i in 0..cfg.queues {

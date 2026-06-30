@@ -4,7 +4,7 @@
 
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey};
 use pqueue_engine::{ClaimPort, ControlPlaneStore, ProjectionRead, PushCommand, QueueCommand};
-use pqueue_sqlite::SqliteBackend;
+use pqueue_sqlite::{composed_sqlite_backend, composed_sqlite_backend_in_memory};
 
 fn temp_db(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("pqueue-sqlite-{tag}-{}.db", std::process::id()))
@@ -18,7 +18,7 @@ async fn projection_rebuilds_from_durable_log_on_reopen() {
 
     // Session 1: create the queue, push three items, claim the highest-priority one.
     {
-        let b = SqliteBackend::open(p).expect("open");
+        let b = composed_sqlite_backend(p).expect("open");
         b.create_queue(qdef()).await.unwrap();
         commit(
             &b,
@@ -43,7 +43,7 @@ async fn projection_rebuilds_from_durable_log_on_reopen() {
 
     // Session 2: REOPEN. The in-memory projection is gone; it must be rebuilt from the log.
     {
-        let b = SqliteBackend::open(p).expect("reopen");
+        let b = composed_sqlite_backend(p).expect("reopen");
         let m = b.metrics(&qkey()).await.unwrap();
         assert_eq!(
             (m.pending, m.leased),
@@ -79,7 +79,7 @@ async fn orchestration_writes_after_reopen_do_not_collide() {
     let _ = std::fs::remove_file(&path);
     let p = path.to_str().unwrap();
     {
-        let b = SqliteBackend::open(p).expect("open");
+        let b = composed_sqlite_backend(p).expect("open");
         b.create_queue(qdef()).await.unwrap();
         commit(
             &b,
@@ -95,7 +95,7 @@ async fn orchestration_writes_after_reopen_do_not_collide() {
         b.claim(claim_req(1, 500, 100)).await.unwrap();
     }
     {
-        let b = SqliteBackend::open(p).expect("reopen");
+        let b = composed_sqlite_backend(p).expect("reopen");
         // Claim again post-reopen: must succeed (fresh id, no collision) and lease the remaining item.
         let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
         assert_eq!(claimed.items.len(), 1, "second item claimable after reopen");
@@ -107,7 +107,7 @@ async fn orchestration_writes_after_reopen_do_not_collide() {
         );
         // A third reopen replays the post-reopen claim too (log stayed consistent).
         drop(b);
-        let b = SqliteBackend::open(p).expect("reopen 2");
+        let b = composed_sqlite_backend(p).expect("reopen 2");
         let m = b.metrics(&qkey()).await.unwrap();
         assert_eq!((m.pending, m.leased), (0, 2));
     }
@@ -117,7 +117,7 @@ async fn orchestration_writes_after_reopen_do_not_collide() {
 #[tokio::test]
 async fn snapshots_round_trip_and_latest_is_most_recent() {
     use pqueue_engine::{ProjectionSnapshot, SnapshotStore};
-    let b = SqliteBackend::in_memory().expect("open");
+    let b = composed_sqlite_backend_in_memory().expect("open");
     b.create_queue(qdef()).await.unwrap();
     let sk = pqueue_conformance::shard();
     let pos = pqueue_engine::CommandPosition::new(sk.clone(), 0, 0);
@@ -162,7 +162,7 @@ async fn high_water_persists_across_reopen() {
     let p = path.to_str().unwrap();
 
     let before = {
-        let b = SqliteBackend::open(p).expect("open");
+        let b = composed_sqlite_backend(p).expect("open");
         b.create_queue(qdef()).await.unwrap();
         commit(
             &b,
@@ -181,7 +181,7 @@ async fn high_water_persists_across_reopen() {
     };
 
     {
-        let b = SqliteBackend::open(p).expect("reopen");
+        let b = composed_sqlite_backend(p).expect("reopen");
         let after = b
             .high_water(&pqueue_conformance::shard())
             .await

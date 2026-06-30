@@ -7,7 +7,7 @@
 //! its own never-reused libtest thread) get isolated files — no cross-scenario pollution under the default
 //! parallel test runner.
 
-use pqueue_sqlite::SqliteBackend;
+use pqueue_sqlite::{ComposedSqliteBackend, composed_sqlite_backend};
 use std::cell::Cell;
 
 thread_local! {
@@ -27,7 +27,7 @@ fn db_path() -> String {
 
 /// Reopen the SAME database file across a scenario's calls; clean it once (the first `make()` on this
 /// thread) so the first session starts empty and the second reopens its committed state.
-fn make() -> SqliteBackend {
+fn make() -> ComposedSqliteBackend {
     let p = db_path();
     CLEANED.with(|c| {
         if !c.get() {
@@ -35,7 +35,7 @@ fn make() -> SqliteBackend {
             c.set(true);
         }
     });
-    SqliteBackend::open(&p).expect("open sqlite reconnect db")
+    composed_sqlite_backend(&p).expect("open sqlite reconnect db")
 }
 
 pqueue_conformance::relational_reconnect_suite!(make);

@@ -111,7 +111,10 @@ fn read_line<R: BufRead>(r: &mut R) -> io::Result<Vec<u8>> {
 fn read_val<R: BufRead>(r: &mut R) -> io::Result<Val> {
     let line = read_line(r)?;
     if line.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "empty RESP line"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty RESP line",
+        ));
     }
     let tag = line[0];
     let rest = String::from_utf8_lossy(&line[1..]).into_owned();
@@ -314,9 +317,7 @@ struct Cluster {
 impl Drop for Cluster {
     fn drop(&mut self) {
         for n in &self.nodes {
-            let _ = Command::new("docker")
-                .args(["rm", "-f", &n.name])
-                .output();
+            let _ = Command::new("docker").args(["rm", "-f", &n.name]).output();
         }
     }
 }
@@ -362,13 +363,18 @@ fn spawn_cluster(
             .collect();
         let bootstrap = owned.join(",");
         let status = Command::new("docker")
-            .args(["run", "-d", "--name", &name, "--tmpfs", "/data", "-v", &mount])
+            .args([
+                "run", "-d", "--name", &name, "--tmpfs", "/data", "-v", &mount,
+            ])
             .args(["-e", "PQUEUE_LOG_BACKEND=objectlog"])
             .args(["-e", "PQUEUE_PROJECTION_BACKEND=sqlite"])
             .args(["-e", "PQUEUE_OBJECT_LOG_MODE=segmented"])
             .args([
                 "-e",
-                &format!("PQUEUE_SEGMENT_TARGET_BYTES={}", tuning.segment_target_bytes),
+                &format!(
+                    "PQUEUE_SEGMENT_TARGET_BYTES={}",
+                    tuning.segment_target_bytes
+                ),
             ])
             .args([
                 "-e",
@@ -495,11 +501,7 @@ struct ScalePoint {
 /// run into two SEQUENTIAL spawn→barrier→work→join phases — rather than one batch fenced by a post-work
 /// barrier — is deliberate: the only barrier is BEFORE the work, so a worker that fails mid-`work` propagates
 /// through `join().unwrap()` as a clean test failure instead of deadlocking a post-work rendezvous.
-fn run_phase<F>(
-    queue_keys: &[(&str, &str)],
-    conns_per_queue: usize,
-    work: F,
-) -> (Vec<u64>, f64)
+fn run_phase<F>(queue_keys: &[(&str, &str)], conns_per_queue: usize, work: F) -> (Vec<u64>, f64)
 where
     F: Fn(&mut Conn, &str, usize, &AtomicU64) + Send + Sync + 'static,
 {
@@ -610,11 +612,17 @@ fn locate_binary() -> PathBuf {
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 #[test]
@@ -664,15 +672,17 @@ fn performance_multi_node_object_log_e2_tests() {
         image: env::var("PQUEUE_E2_IMAGE").unwrap_or_else(|_| "ubuntu:25.04".to_string()),
         bin: bin.clone(),
     };
-    let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cores = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     let tag = std::process::id().to_string();
     let counts = [2usize, 4, 8];
 
     println!(
         "\nTP-002 E2 LIVE multi-node object_log_sqlite_projection (segmented) scale-out — bridge containers; \
          {cores} cores; queues/owner={queues_per_owner}, items/queue={items_per_queue}, \
-         conns/queue={conns_per_queue}, seg_target_bytes={}, seg_max_latency_ms={}, worker_threads/node={}"
-        , tuning.segment_target_bytes, tuning.segment_max_latency_ms, tuning.worker_threads
+         conns/queue={conns_per_queue}, seg_target_bytes={}, seg_max_latency_ms={}, worker_threads/node={}",
+        tuning.segment_target_bytes, tuning.segment_max_latency_ms, tuning.worker_threads
     );
     println!(
         "  owners | ingest agg items/s | worst ingest/q | claim+final agg | worst claim+final/q"
@@ -706,9 +716,8 @@ fn performance_multi_node_object_log_e2_tests() {
     // ---- Evaluate the four E2 bars (every value measured). The headline cross-queue scale-out is the
     // INGEST (accept) throughput, exactly the E0 "accepted items/hr" quantity the floor is defined in. ----
     // (1) STRICTLY NON-DECREASING ingest aggregate across 2 → 4 → 8.
-    let nondecreasing =
-        at(4).ingest_aggregate >= at(2).ingest_aggregate
-            && at(8).ingest_aggregate >= at(4).ingest_aggregate;
+    let nondecreasing = at(4).ingest_aggregate >= at(2).ingest_aggregate
+        && at(8).ingest_aggregate >= at(4).ingest_aggregate;
     // (2) 8-owner ingest aggregate >= 3.5x the 2-owner ingest aggregate.
     let ratio_8_2 = at(8).ingest_aggregate / at(2).ingest_aggregate;
     let scale_pass = ratio_8_2 >= SCALE_MULTIPLE_BAR;
