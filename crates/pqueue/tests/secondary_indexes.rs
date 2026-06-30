@@ -55,6 +55,8 @@ fn index_bearing_qdef() -> QueueDefinition {
                 unique: false,
             },
         ],
+        entity_schema: None,
+        typed_indexes: vec![],
     }
 }
 

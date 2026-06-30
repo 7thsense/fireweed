@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use pqueue::{
-    EngineError, GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, PayloadUpdate, Pqueue,
-    RequestId, UtcTimestamp,
+    ClaimRef, CommitEntry, CommitRequest, EngineError, FinalizeKind, GateKeyPolicy, GroupKey,
+    MetadataValue, Nack, NewItem, PayloadUpdate, Pqueue, RequestId, UtcTimestamp,
 };
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
@@ -46,6 +46,8 @@ fn qdef() -> QueueDefinition {
         max_claim_batch_size: 100,
         max_eligible_group_size: None,
         secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
     }
 }
 
@@ -578,4 +580,135 @@ async fn reclaim_expired_recovers_leased_over_memory() {
     assert!(pq.reclaim_expired(&q, None).await.unwrap().is_empty());
     // And the item is claimable again.
     assert_eq!(pq.claim(&q, 1, 30_000).await.unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-011 JSON entity document compatibility (pqueue-1b13d001)
+// ---------------------------------------------------------------------------
+
+/// Legacy (bytes-only) items — opaque bytes payload + BTreeMap<String, Bytes> fields — push and claim with
+/// full fidelity through the current NewItem shape. The existing bytes workflows are UNCHANGED by ADR-011;
+/// this test pins that contract so a future typed-payload refactor cannot silently break them.
+#[tokio::test]
+async fn legacy_bytes_items_push_claim_roundtrip() {
+    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+
+    let opaque_payload = Bytes::from_static(b"\x00\x01\x02\x03opaque-non-utf8");
+    let id = pq
+        .push(
+            &q,
+            NewItem {
+                priority: Some(PriorityValue::Int64(1)),
+                payload: Some(opaque_payload.clone()),
+                fields: BTreeMap::from([
+                    ("k1".to_string(), Bytes::from_static(b"v1")),
+                    ("k2".to_string(), Bytes::from_static(b"\xff\xfe")),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].item_id, id);
+    assert_eq!(claimed[0].payload.as_deref(), Some(opaque_payload.as_ref()));
+    assert_eq!(
+        claimed[0].fields.get("k1").map(|b| b.as_ref()),
+        Some(&b"v1"[..])
+    );
+    assert_eq!(
+        claimed[0].fields.get("k2").map(|b| b.as_ref()),
+        Some(&b"\xff\xfe"[..])
+    );
+}
+
+/// Typed JSON items — payload is a JSON document as UTF-8 bytes — round-trip through push/claim AND through
+/// the vectorized commit lifecycle path (lifecycle_items in CommitEntry). Proves the canonical JSON
+/// representation survives both paths identically: the bytes carrier is agnostic to payload content.
+#[tokio::test]
+async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
+    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+
+    let json_doc = Bytes::from_static(br#"{"status":"pending","count":42,"tags":["a","b"]}"#);
+
+    // --- push/claim path ---
+    let id = pq
+        .push(
+            &q,
+            NewItem {
+                priority: Some(PriorityValue::Int64(1)),
+                payload: Some(json_doc.clone()),
+                fields: BTreeMap::from([
+                    ("entity_type".to_string(), Bytes::from_static(b"job")),
+                    ("tenant".to_string(), Bytes::from_static(b"acme")),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].item_id, id);
+    // JSON payload survives the push/claim round-trip verbatim.
+    assert_eq!(claimed[0].payload.as_deref(), Some(json_doc.as_ref()));
+    // Fields survive alongside the JSON payload.
+    assert_eq!(
+        claimed[0].fields.get("entity_type").map(|b| b.as_ref()),
+        Some(&b"job"[..])
+    );
+
+    let input_ref = ClaimRef {
+        item_id: claimed[0].item_id,
+        lease_token: claimed[0].lease_token.clone().expect("lease token"),
+        lease_expires_at: claimed[0].lease_expires_at,
+        item_version: claimed[0].item_version,
+    };
+
+    // --- vectorized commit lifecycle path ---
+    let lifecycle_json = Bytes::from_static(br#"{"status":"dispatched","parent":"root"}"#);
+    let outcomes = pq
+        .commit(
+            &q,
+            CommitRequest {
+                request_id: None,
+                entries: vec![CommitEntry {
+                    claim_ref: input_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![NewItem {
+                        priority: Some(PriorityValue::Int64(2)),
+                        payload: Some(lifecycle_json.clone()),
+                        ..Default::default()
+                    }],
+                    instance_fence: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcomes.len(), 1);
+    let lifecycle_ids = match &outcomes[0] {
+        pqueue::EntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids.clone(),
+        other => panic!("expected Committed, got {other:?}"),
+    };
+    assert_eq!(lifecycle_ids.len(), 1, "one lifecycle item enqueued");
+
+    // Claim the lifecycle item and verify the JSON payload survived the commit path.
+    let follow_up = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(follow_up.len(), 1);
+    assert_eq!(follow_up[0].item_id, lifecycle_ids[0]);
+    assert_eq!(
+        follow_up[0].payload.as_deref(),
+        Some(lifecycle_json.as_ref()),
+        "JSON payload in lifecycle_item survives commit path verbatim"
+    );
 }
