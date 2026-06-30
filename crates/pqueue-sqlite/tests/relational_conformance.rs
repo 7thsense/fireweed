@@ -1746,3 +1746,338 @@ async fn discover_empty_queue_is_empty() {
         .unwrap();
     assert!(scopes.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// 9. ADR-011 typed secondary index conformance (pqueue_item_index, pqueue-f4ffd679)
+// ---------------------------------------------------------------------------
+
+use pqueue_core::{IndexDeclaration, IndexType, QueueIndex};
+use pqueue_engine::{IndexQueryPort, EngineError};
+
+fn qdef_unique_str_index(index_name: &str, field: &str) -> QueueDefinition {
+    use axon_esf::{IndexDef};
+    QueueDefinition {
+        typed_indexes: vec![QueueIndex {
+            name: index_name.to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: field.to_string(),
+                index_type: IndexType::String,
+                unique: true,
+            }),
+        }],
+        ..qdef()
+    }
+}
+
+fn qdef_nonunique_str_index(index_name: &str, field: &str) -> QueueDefinition {
+    use axon_esf::{IndexDef};
+    QueueDefinition {
+        typed_indexes: vec![QueueIndex {
+            name: index_name.to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: field.to_string(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        }],
+        ..qdef()
+    }
+}
+
+fn entity(field: &str, value: &str) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert(field.to_string(), serde_json::Value::String(value.to_string()));
+    serde_json::Value::Object(m)
+}
+
+/// Push with an entity document then look up via unique index → item found.
+#[tokio::test]
+async fn typed_index_push_then_get_unique() {
+    let b = make();
+    b.create_queue(qdef_unique_str_index("by_email", "email"))
+        .await
+        .unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                entity: Some(entity("email", "alice@example.com")),
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let hit = b
+        .index_get_unique(&shard(), "by_email", &[b"alice@example.com".to_vec()])
+        .await
+        .unwrap();
+    assert!(hit.is_some(), "indexed item must be findable");
+    assert_eq!(hit.unwrap().item_id, ids[0]);
+}
+
+/// Push multiple items then look up via non-unique index → all items found.
+#[tokio::test]
+async fn typed_index_push_then_lookup_nonunique() {
+    let b = make();
+    b.create_queue(qdef_nonunique_str_index("by_tag", "tag"))
+        .await
+        .unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![
+                PushSpec {
+                    entity: Some(entity("tag", "red")),
+                    ..Default::default()
+                },
+                PushSpec {
+                    entity: Some(entity("tag", "red")),
+                    ..Default::default()
+                },
+            ],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let hits = b
+        .index_lookup(&shard(), "by_tag", &[b"red".to_vec()])
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    let mut found: Vec<_> = hits.iter().map(|h| h.item_id).collect();
+    found.sort();
+    let mut expected = ids.to_vec();
+    expected.sort();
+    assert_eq!(found, expected);
+}
+
+/// Pushing a second item with the same unique-indexed key returns Conflict.
+#[tokio::test]
+async fn typed_unique_index_conflict_is_rejected() {
+    let b = make();
+    b.create_queue(qdef_unique_str_index("by_email", "email"))
+        .await
+        .unwrap();
+    b.push(
+        &shard(),
+        vec![PushSpec {
+            entity: Some(entity("email", "alice@example.com")),
+            ..Default::default()
+        }],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let result = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                entity: Some(entity("email", "alice@example.com")),
+                ..Default::default()
+            }],
+            ts(1),
+            None,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(EngineError::Conflict)),
+        "duplicate unique key must be rejected: {:?}",
+        result
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+}
+
+/// A batch push where two items share the same unique key → Conflict, nothing inserted.
+#[tokio::test]
+async fn typed_unique_index_within_batch_conflict_rejected() {
+    let b = make();
+    b.create_queue(qdef_unique_str_index("by_email", "email"))
+        .await
+        .unwrap();
+    let result = b
+        .push(
+            &shard(),
+            vec![
+                PushSpec {
+                    entity: Some(entity("email", "shared@example.com")),
+                    ..Default::default()
+                },
+                PushSpec {
+                    entity: Some(entity("email", "shared@example.com")),
+                    ..Default::default()
+                },
+            ],
+            ts(0),
+            None,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(EngineError::Conflict)),
+        "within-batch duplicate must be rejected"
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0, "nothing inserted");
+}
+
+/// Purging an item removes its index row; the same unique key can then be pushed again.
+#[tokio::test]
+async fn typed_index_purge_frees_unique_key() {
+    let b = make();
+    b.create_queue(qdef_unique_str_index("by_email", "email"))
+        .await
+        .unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                entity: Some(entity("email", "purge_me@example.com")),
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+    b.purge(&shard(), vec![ids[0]], false, ts(1), None)
+        .await
+        .unwrap();
+
+    let hit = b
+        .index_get_unique(&shard(), "by_email", &[b"purge_me@example.com".to_vec()])
+        .await
+        .unwrap();
+    assert!(hit.is_none(), "purged item must not appear in index");
+
+    // Re-push with the same unique key succeeds.
+    let new_ids = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                entity: Some(entity("email", "purge_me@example.com")),
+                ..Default::default()
+            }],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(new_ids.len(), 1);
+}
+
+/// replace_if_pending (ReplacePending) frees the superseded item's unique key so the replacement
+/// can claim it — even when the entity value is identical.
+#[tokio::test]
+async fn typed_index_replace_pending_updates_index() {
+    let b = make();
+    b.create_queue(qdef_unique_str_index("by_email", "email"))
+        .await
+        .unwrap();
+    let key = ClientItemKey::new("ck1").unwrap();
+
+    // First insert via upsert.
+    b.replace_if_pending(
+        &shard(),
+        &key,
+        None,
+        None,
+        None,
+        None,
+        BTreeMap::new(),
+        Default::default(),
+        Some(entity("email", "orig@example.com")),
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Replace with the same entity value — the superseded item's slot must be freed first.
+    let result = b
+        .replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            Default::default(),
+            Some(entity("email", "orig@example.com")),
+            ts(1),
+            None,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "replacing with same unique key must not conflict: {:?}",
+        result
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+
+    // The index still points to the replacement (only one hit).
+    let hit = b
+        .index_get_unique(&shard(), "by_email", &[b"orig@example.com".to_vec()])
+        .await
+        .unwrap();
+    assert!(hit.is_some(), "replacement must be in the index");
+}
+
+/// Index rows survive a DB reopen (they are durable, not rebuilt from a log).
+#[tokio::test]
+async fn typed_index_reopen_preserves_rows() {
+    let path = std::env::temp_dir()
+        .join(format!("pqueue-idx-reopen-{}.db", std::process::id()))
+        .to_string_lossy()
+        .to_string();
+    let _ = std::fs::remove_file(&path);
+
+    {
+        let a = SqliteRelationalBackend::open(&path).unwrap();
+        a.create_queue(qdef_unique_str_index("by_email", "email"))
+            .await
+            .unwrap();
+        a.push(
+            &shard(),
+            vec![PushSpec {
+                entity: Some(entity("email", "persist@example.com")),
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    let hit = b
+        .index_get_unique(&shard(), "by_email", &[b"persist@example.com".to_vec()])
+        .await
+        .unwrap();
+    assert!(hit.is_some(), "index row must survive DB reopen");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A queue with no typed_indexes is unaffected — schema-less queues work unchanged.
+#[tokio::test]
+async fn typed_index_schema_less_queue_unaffected() {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let ids = b
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+    // Index ports return Invalid (unknown index) rather than panicking.
+    let res = b
+        .index_get_unique(&shard(), "nonexistent", &[b"x".to_vec()])
+        .await;
+    assert!(res.is_err(), "unknown index name must error");
+}
