@@ -2,11 +2,15 @@
   "bead_id": "pqueue-4872154a",
   "attempt_id": "20260630T085132-69b068df",
   "base_rev": "a8dcee1fb17fee056d01a3333e8236383505eede",
-  "result_rev": "c9fb56d9c45794317edce8cde881b47f93f352d4",
+  "result_rev": "af72182f2325ff57faaf166a4ef153070d34a5a2",
   "implementation_rev": "c9fb56d9c45794317edce8cde881b47f93f352d4",
-  "outcome": "task_succeeded",
+  "landed_rev": "af72182f2325ff57faaf166a4ef153070d34a5a2",
+  "landed_branch": "build/queue-as-unit-of-sharding",
+  "evidence_rev": "af72182f2325ff57faaf166a4ef153070d34a5a2",
+  "outcome": "merged",
   "status": "success",
   "detail": "success",
+  "orchestrator_status": "success",
   "candidate_ref": "refs/ddx/iterations/20260630T085132-69b068df/0",
   "cycle_trace": [
     {
