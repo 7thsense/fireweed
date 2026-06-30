@@ -13,6 +13,8 @@ CLUSTER_NAME=""
 RELEASE_NAME="pqueue"
 NAMESPACE="pqueue"
 IMAGE="pqueue:ci"
+IMAGE_CONTEXT="${PQUEUE_KIND_IMAGE_CONTEXT:-${REPO_ROOT}}"
+IMAGE_DOCKERFILE="${PQUEUE_KIND_IMAGE_DOCKERFILE:-}"
 TIMEOUT="180s"
 SMOKE_PORT="18080"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-}"
@@ -52,6 +54,9 @@ OPTIONS:
   --release-name <name>    Helm release name. Default: pqueue.
   --namespace <name>       Kubernetes namespace. Default: pqueue.
   --image <repo:tag>       Image to build, load, and install. Default: pqueue:ci.
+  --image-context <path>   Docker build context. Default: repository root.
+  --image-dockerfile <path>
+                           Optional Dockerfile path for docker build -f.
   --timeout <duration>     Helm/kubectl readiness timeout. Default: 180s.
   --smoke-port <port>      Local port used for kubectl port-forward. Default: 18080.
   --kind-node-image <img>  Optional kind node image. Can also be set with
@@ -146,6 +151,16 @@ parse_args() {
                 IMAGE="$2"
                 shift 2
                 ;;
+            --image-context)
+                [[ $# -ge 2 ]] || die "--image-context requires a value"
+                IMAGE_CONTEXT="$2"
+                shift 2
+                ;;
+            --image-dockerfile)
+                [[ $# -ge 2 ]] || die "--image-dockerfile requires a value"
+                IMAGE_DOCKERFILE="$2"
+                shift 2
+                ;;
             --timeout)
                 [[ $# -ge 2 ]] || die "--timeout requires a value"
                 TIMEOUT="$2"
@@ -184,6 +199,10 @@ validate_config() {
         *) die "runtime smoke currently supports only log=objectlog projection=inmemory; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example pqueue:ci"
+    [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"
+    if [[ -n "${IMAGE_DOCKERFILE}" && ! -f "${IMAGE_DOCKERFILE}" ]]; then
+        die "--image-dockerfile must be an existing file: ${IMAGE_DOCKERFILE}"
+    fi
     [[ "${SMOKE_PORT}" =~ ^[0-9]+$ ]] || die "--smoke-port must be a TCP port number"
     [[ -f "$(values_file_for "${LOG_BACKEND}" "${PROJECTION_BACKEND}")" ]] || die "missing values file for log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}"
 
@@ -205,11 +224,19 @@ dry_run_plan() {
     echo "namespace:     ${NAMESPACE}"
     echo "release:       ${RELEASE_NAME}"
     echo "image:         ${IMAGE}"
+    echo "context:       ${IMAGE_CONTEXT}"
+    if [[ -n "${IMAGE_DOCKERFILE}" ]]; then
+        echo "dockerfile:    ${IMAGE_DOCKERFILE}"
+    fi
     echo "values:        ${values}"
     echo "required tools for real runs: docker kind kubectl helm"
     echo
     echo "--- planned commands ---"
-    print_cmd docker build -t "${IMAGE}" "${REPO_ROOT}"
+    if [[ -n "${IMAGE_DOCKERFILE}" ]]; then
+        print_cmd docker build -f "${IMAGE_DOCKERFILE}" -t "${IMAGE}" "${IMAGE_CONTEXT}"
+    else
+        print_cmd docker build -t "${IMAGE}" "${IMAGE_CONTEXT}"
+    fi
     if [[ -n "${KIND_NODE_IMAGE}" ]]; then
         print_cmd kind create cluster --name "${CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
     else
@@ -464,8 +491,16 @@ main() {
     echo "namespace: ${NAMESPACE}"
     echo "release:   ${RELEASE_NAME}"
     echo "image:     ${IMAGE}"
+    echo "context:   ${IMAGE_CONTEXT}"
+    if [[ -n "${IMAGE_DOCKERFILE}" ]]; then
+        echo "dockerfile:${IMAGE_DOCKERFILE}"
+    fi
 
-    run docker build -t "${IMAGE}" "${REPO_ROOT}"
+    if [[ -n "${IMAGE_DOCKERFILE}" ]]; then
+        run docker build -f "${IMAGE_DOCKERFILE}" -t "${IMAGE}" "${IMAGE_CONTEXT}"
+    else
+        run docker build -t "${IMAGE}" "${IMAGE_CONTEXT}"
+    fi
     if [[ -n "${KIND_NODE_IMAGE}" ]]; then
         run kind create cluster --name "${CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
     else

@@ -17,6 +17,8 @@ COMMAND_LOG="${PROOF_DIR}/commands.tsv"
 STORAGE_LOG="${PROOF_DIR}/storage-combinations.tsv"
 SKIP_LOG="${PROOF_DIR}/local-skips.txt"
 SUPPORT_LOG="${PROOF_DIR}/supporting-artifacts.tsv"
+KIND_IMAGE_CONTEXT="${PROOF_DIR}/kind-image"
+KIND_IMAGE_DOCKERFILE="${KIND_IMAGE_CONTEXT}/Dockerfile"
 
 STORAGE_COMBINATIONS=("objectlog:inmemory")
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
@@ -451,6 +453,23 @@ run_non_cluster_gates() {
     run_step "validate docs/microsite" validate_docs_microsite
 }
 
+prepare_kind_image_context() {
+    echo "=== deployment release gate: prepare kind image context ==="
+    run_cmd cargo +1.92.0 build --release --bin pqueue-verify-ledger
+    run_cmd cargo +1.92.0 build --release --bin pqueue-service
+
+    rm -rf "${KIND_IMAGE_CONTEXT}"
+    mkdir -p "${KIND_IMAGE_CONTEXT}"
+    cp "${REPO_ROOT}/target/release/pqueue-service" "${KIND_IMAGE_CONTEXT}/"
+    cp "${REPO_ROOT}/target/release/pqueue-verify-ledger" "${KIND_IMAGE_CONTEXT}/"
+    cp "${REPO_ROOT}/Dockerfile.prebuilt" "${KIND_IMAGE_DOCKERFILE}"
+    chmod 0755 "${KIND_IMAGE_CONTEXT}/pqueue-service" "${KIND_IMAGE_CONTEXT}/pqueue-verify-ledger"
+
+    record_supporting_artifact "${KIND_IMAGE_CONTEXT}/pqueue-service" "kind smoke prebuilt pqueue-service binary"
+    record_supporting_artifact "${KIND_IMAGE_CONTEXT}/pqueue-verify-ledger" "kind smoke prebuilt pqueue-verify-ledger binary"
+    record_supporting_artifact "${KIND_IMAGE_DOCKERFILE}" "kind smoke prebuilt Dockerfile"
+}
+
 run_kind_matrix() {
     echo "=== deployment release gate: kind storage matrix ==="
     local reasons
@@ -473,13 +492,19 @@ run_kind_matrix() {
         return 0
     fi
 
+    prepare_kind_image_context
+
     local combination
     for combination in "${STORAGE_COMBINATIONS[@]}"; do
         local log_backend="${combination%%:*}"
         local projection_backend="${combination##*:}"
         local backend_output="${PROOF_DIR}/kind-${log_backend}-${projection_backend}.out"
         record_supporting_artifact "${backend_output}" "kind Helm test output for ${combination}"
-        if run_cmd_capture "${backend_output}" bash scripts/ci/kind-helm-test.sh --log-backend "${log_backend}" --projection-backend "${projection_backend}"; then
+        if run_cmd_capture "${backend_output}" bash scripts/ci/kind-helm-test.sh \
+            --log-backend "${log_backend}" \
+            --projection-backend "${projection_backend}" \
+            --image-context "${KIND_IMAGE_CONTEXT}" \
+            --image-dockerfile "${KIND_IMAGE_DOCKERFILE}"; then
             record_storage_combination "${combination}" "tested" ""
         else
             local status=$?
