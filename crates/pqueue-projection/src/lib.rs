@@ -201,7 +201,8 @@ impl<'a> IndexLookupSpec<'a> {
                         for (i, value) in values_as_json.into_iter().enumerate() {
                             record.insert(i.to_string(), value);
                         }
-                        let key: Result<Option<Vec<u8>>, _> = decl.index_key(&Value::Object(record));
+                        let key: Result<Option<Vec<u8>>, _> =
+                            decl.index_key(&Value::Object(record));
                         key.map_err(|err| EngineError::Storage(err.to_string()))?
                             .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
                     }
@@ -1365,7 +1366,9 @@ impl ProjectionData {
                 item.entity_document.as_ref(),
                 None,
             )?;
-            for (name, key) in self.record_index_keys(&item.fields, item.entity_document.as_ref())? {
+            for (name, key) in
+                self.record_index_keys(&item.fields, item.entity_document.as_ref())?
+            {
                 if matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_)))
                     && let Some(prev) = batch.insert((name, key), item.item_id)
                     && prev != item.item_id
@@ -1406,7 +1409,12 @@ impl ProjectionData {
                 }
             }
         }
-        self.index_validate_with_entity(item_id, &merged, entity.or(rec.entity_document.as_ref()), None)
+        self.index_validate_with_entity(
+            item_id,
+            &merged,
+            entity.or(rec.entity_document.as_ref()),
+            None,
+        )
     }
 
     /// Pre-commit unique-index validation for an upsert replacement: the replacement's keys are checked

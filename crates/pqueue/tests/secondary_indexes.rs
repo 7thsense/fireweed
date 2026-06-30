@@ -8,9 +8,9 @@ use std::sync::Arc;
 use pqueue::{NewItem, PayloadUpdate, Pqueue};
 use pqueue_core::{
     ClientItemKey, CompoundIndexDef, CompoundIndexField, EligibilityPolicy, IndexDeclaration,
-    IndexDef, IndexType, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
-    RetryPolicy, TenantId,
+    IndexDef, IndexType, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy, RetryPolicy,
+    TenantId,
 };
 use pqueue_memory::{ManualClock, MemoryBackend};
 use serde_json::{Value, json};
@@ -302,7 +302,10 @@ async fn secondary_indexes_missing_fields_remain_sparse() {
         .await
         .unwrap()
         .expect("external_id is indexed");
-    assert_ne!(hit.item_id, sparse, "missing external_id stays out of the index");
+    assert_ne!(
+        hit.item_id, sparse,
+        "missing external_id stays out of the index"
+    );
     assert!(
         pq.query_index_unique(&q, "by_external_id", key(&["missing"]))
             .await
