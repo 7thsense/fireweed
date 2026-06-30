@@ -1,0 +1,37 @@
+{
+  "attempt_id": "20260630T090228-666480ba",
+  "bead_id": "pqueue-9a733f91",
+  "base_rev": "90be5e45c7ee4a96a5bb2bd411e9356508f84821",
+  "created_at": "2026-06-30T09:02:29.063262474Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-9a733f91",
+    "title": "Expose typed pqueue index query API",
+    "description": "Update pqueue's query surface so callers query typed ESF indexes without raw Vec\u003cVec\u003cu8\u003e\u003e escape hatches. Keep pqueue name-based query identity from QueueIndex.name. In-scope files: crates/pqueue/src/lib.rs, crates/pqueue-engine/src/port.rs, crates/pqueue-projection/src/lib.rs, tests. Add typed query methods accepting serde_json::Value values or a small typed key wrapper; deprecate or internally adapt old raw byte query methods only for legacy indexes if necessary. Ensure unique/non-unique query APIs use axon_esf encoding and validate arity/type errors. Out-of-scope: SQL implementation for relational backends.",
+    "acceptance": "cargo test -p pqueue secondary_indexes -- --nocapture passes; cargo test -p pqueue encapsulation -- --nocapture passes; tests prove raw byte lookup cannot bypass typed index validation for typed queues and name-based queries still resolve the configured QueueIndex.name.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "area:pqueue",
+      "area:pqueue-engine",
+      "area:indexes",
+      "kind:implementation",
+      "adr-011",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "spec-id": "ADR-011"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T090228-666480ba",
+    "prompt": ".ddx/executions/20260630T090228-666480ba/prompt.md",
+    "manifest": ".ddx/executions/20260630T090228-666480ba/manifest.json",
+    "result": ".ddx/executions/20260630T090228-666480ba/result.json",
+    "checks": ".ddx/executions/20260630T090228-666480ba/checks.json",
+    "usage": ".ddx/executions/20260630T090228-666480ba/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-9a733f91-20260630T090228-666480ba"
+  },
+  "prompt_sha": "8ecf0308cdf65485059152357146e9c57b4a0d2f6bbae0c9e6ff6b376f40aad8"
+}
