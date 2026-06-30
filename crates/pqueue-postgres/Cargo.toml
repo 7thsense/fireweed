@@ -60,3 +60,8 @@ path = "tests/durability.rs"
 [[test]]
 name = "relational_conformance"
 path = "tests/relational_conformance.rs"
+
+# ADR-012 P1b-ii: the UNIFIED postgres-relational COMPOSITION's core class (env-gated on PQUEUE_PG_TEST_URL).
+[[test]]
+name = "composed_relational_conformance"
+path = "tests/composed_relational_conformance.rs"

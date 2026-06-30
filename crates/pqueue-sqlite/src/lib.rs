@@ -43,7 +43,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 mod compose_log;
 mod relational;
 pub use compose_log::SqliteLog;
-pub use relational::{SqliteProjectionStore, SqliteRelationalBackend};
+pub use relational::{
+    ComposedSqliteRelationalBackend, SqliteProjectionStore, SqliteRelational,
+    SqliteRelationalBackend, composed_sqlite_relational_in_memory,
+};
 
 use pqueue_engine::{ComposedBackend, InProcessControlPlane};
 use pqueue_projection::InMemoryProjection;
@@ -62,6 +65,23 @@ pub fn composed_sqlite_backend_in_memory() -> EngineResult<ComposedSqliteBackend
     Ok(ComposedBackend::new(
         SqliteLog::in_memory()?,
         InMemoryProjection::new(),
+        InProcessControlPlane::new(),
+    ))
+}
+
+/// The composed sqlite-LOG + sqlite-PROJECTION backend (ADR-012 P1b-ii, Part B): a durable sqlite command
+/// LOG ([`SqliteLog`]) paired with the DERIVED relational SQL projection ([`SqliteProjectionStore`]) instead
+/// of the in-memory projection. Atomic durability class (the log axis), so it runs the full
+/// `core_suite!(@atomic)` — the projection family that stubs secondary indexes.
+pub type ComposedSqliteLogSqliteProjectionBackend =
+    ComposedBackend<SqliteLog, SqliteProjectionStore, InProcessControlPlane>;
+
+/// Assemble a composed sqlite-LOG + sqlite-PROJECTION backend over ephemeral `:memory:` stores.
+pub fn composed_sqlite_log_sqlite_projection_in_memory()
+-> EngineResult<ComposedSqliteLogSqliteProjectionBackend> {
+    Ok(ComposedBackend::new(
+        SqliteLog::in_memory()?,
+        SqliteProjectionStore::in_memory()?,
         InProcessControlPlane::new(),
     ))
 }

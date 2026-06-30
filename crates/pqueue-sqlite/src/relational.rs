@@ -46,7 +46,7 @@
 //! must keep its reconnect assertions within this contract (no post-reopen token claims).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -71,6 +71,10 @@ use pqueue_engine::{
     TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
     WriteSideRecordsCommand, build_push_items, project_scopes, validate_claim_compatibility,
     validate_gate_push, validate_instance_fence, validate_purge_force,
+};
+use pqueue_engine::{
+    CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
+    ProjectionStore, SnapshotRef,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -4720,6 +4724,787 @@ impl ReclaimDriver for SqliteRelationalBackend {
         })();
         std::future::ready(result)
     }
+}
+
+// ===========================================================================
+// ADR-012 P1b-ii: the UNIFIED relational store as `LogStore + ProjectionStore`
+// ===========================================================================
+//
+// The keystone "same robustness as flat postgres" composition: ONE store value implements BOTH the log
+// axis and the projection axis, so the generic [`ComposedBackend::commit_locked`] drives append+apply into
+// ONE durable relational transaction with NO phantom log row. The mechanism (ADR-012 §"The atomic write
+// seam", unified-transactional path):
+//
+//   * [`LogStore::append`] STAGES — it reads the durable `relational_cursor` (next_seq + assignment_epoch),
+//     applies the TD-003 fence (`expected_epoch` must equal the recorded epoch), and MINTS the
+//     `CommandPosition`s in memory. It performs NO durable write and does NOT advance the cursor. There is
+//     therefore no log row that can exist without its projection apply.
+//   * [`ProjectionStore::apply`] COMMITS — it runs the single durable relational transaction (the projection
+//     rows via the 14-arm `apply_command_sql`, the request-id/idempotency rows where applicable, and the
+//     cursor `next_seq` advance), exactly what the monolith's `commit_command` / `apply_committed_batch_sql`
+//     do. The cursor advance lands in the SAME transaction as the projection write, so a crash leaves the
+//     cursor behind the (un-applied) work — never ahead of it.
+//
+// Because `commit_locked` holds the composed unit-of-work lock across append→apply and the two axes share
+// ONE `Inner` (one connection) behind an `Arc<Mutex<_>>`, the mint and the durable apply are consistent:
+// `append` mints at the cursor, `apply` applies at that position and advances the cursor by one.
+//
+// This reaches capability parity with the monolithic [`SqliteRelationalBackend`] for the CORE conformance
+// class: the orthogonal orchestration (already proven against `InMemoryProjection`) gets correct answers
+// from the relational SQL projection, so the composition passes `core_suite!(@atomic)` identically.
+
+/// Active (non-superseded) item id under `client_item_key`, or `None`. The generic upsert's look-then-replace
+/// read; the partial unique index keeps this single-valued.
+fn lookup_active_by_key(
+    conn: &Connection,
+    shard: &QueueKey,
+    client_item_key: &ClientItemKey,
+) -> EngineResult<Option<ItemId>> {
+    let (t, q) = parts(shard);
+    let id: Option<String> = st(conn
+        .query_row(
+            "SELECT item_id FROM pqueue_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND superseded=0",
+            params![t, q, client_item_key.as_str()],
+            |row| row.get(0),
+        )
+        .optional())?;
+    id.map(|s| ItemId::new(s).map_err(|e| EngineError::Storage(e.to_string())))
+        .transpose()
+}
+
+/// Lifecycle state of `id` (any superseded/terminal flavor), or `None` if absent.
+fn item_state_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    id: &ItemId,
+) -> EngineResult<Option<ItemState>> {
+    Ok(item_flags_map(conn, shard, std::slice::from_ref(id))?
+        .get(&id.to_string())
+        .map(|(s, _, _, _)| *s))
+}
+
+/// Committed `item_version` of `id`, or `None` if absent.
+fn item_version_sql(conn: &Connection, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
+    let (t, q) = parts(shard);
+    let v: Option<i64> = st(conn
+        .query_row(
+            "SELECT item_version FROM pqueue_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+            params![t, q, id.to_string()],
+            |row| row.get(0),
+        )
+        .optional())?;
+    Ok(v.map(|v| v as u64))
+}
+
+/// This queue's leases expired strictly before `now` (half-open), ordered by item id (the generic
+/// `reclaim_expired` truncates to its `limit`). Mirrors the monolith's per-queue reclaim selection.
+fn expired_leases_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let mut stmt = st(conn.prepare(
+        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+         AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
+         AND lease_expires_at<?3 ORDER BY item_id",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q, now_n], |row| row.get::<_, String>(0)))?;
+    let mut ids = Vec::new();
+    for r in rows {
+        ids.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    Ok(ids)
+}
+
+/// Every queue's expired leases at `now` (the global tick sweep), grouped per queue. Mirrors the monolith's
+/// `ReclaimDriver::tick` selection (queues with none are omitted).
+fn all_expired_leases_sql(
+    conn: &Connection,
+    now: UtcTimestamp,
+) -> EngineResult<Vec<(QueueKey, Vec<ItemId>)>> {
+    let now_n = ts_nanos(now);
+    let mut stmt = st(conn.prepare(
+        "SELECT tenant_id, queue_id, item_id FROM pqueue_items \
+         WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
+         AND lease_expires_at<?1 ORDER BY tenant_id, queue_id",
+    ))?;
+    let rows = st(stmt.query_map(params![now_n], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }))?;
+    let mut by_queue: Vec<(QueueKey, Vec<ItemId>)> = Vec::new();
+    for r in rows {
+        let (t, q, id) = st(r)?;
+        let key = QueueKey::new(
+            TenantId::new(t).map_err(|e| EngineError::Storage(e.to_string()))?,
+            QueueId::new(q).map_err(|e| EngineError::Storage(e.to_string()))?,
+        );
+        let id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+        match by_queue.last_mut() {
+            Some((k, ids)) if *k == key => ids.push(id),
+            _ => by_queue.push((key, vec![id])),
+        }
+    }
+    Ok(by_queue)
+}
+
+/// In-place field/payload update pre-commit validation, with the exact error precedence the monolith's
+/// `UpdateFieldsPort` enforces: absent → `NotFound`, fenced → `StaleLease`, terminal → `Terminal`,
+/// superseded → `Superseded`, version mismatch → `Conflict`. Mutates nothing.
+fn update_fields_validate_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    id: &ItemId,
+    expected_item_version: Option<u64>,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let row: Option<(String, i64, i64, i64)> = st(conn
+        .query_row(
+            "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+            params![t, q, id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional())?;
+    let (state, superseded, fenced, version) = row.ok_or(EngineError::NotFound)?;
+    if fenced != 0 {
+        return Err(EngineError::StaleLease);
+    }
+    if parse_state(&state)?.is_terminal() {
+        return Err(EngineError::Terminal);
+    }
+    if superseded != 0 {
+        return Err(EngineError::Superseded);
+    }
+    if expected_item_version.is_some_and(|v| v != version as u64) {
+        return Err(EngineError::Conflict);
+    }
+    Ok(())
+}
+
+/// Durable instance/state fence for `key` (absent → `None`, read by the caller as the unset value `0`).
+fn instance_fence_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    key: &[u8],
+) -> EngineResult<Option<u64>> {
+    let (t, q) = parts(shard);
+    let v: Option<i64> = st(conn
+        .query_row(
+            "SELECT fence FROM pqueue_instance_fences \
+             WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
+            params![t, q, key],
+            |row| row.get(0),
+        )
+        .optional())?;
+    Ok(v.map(|v| v as u64))
+}
+
+/// Opaque non-work side record by key, or `None`.
+fn side_record_sql(conn: &Connection, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
+    let (t, q) = parts(shard);
+    let payload: Option<Vec<u8>> = st(conn
+        .query_row(
+            "SELECT payload FROM pqueue_side_records \
+             WHERE tenant_id=?1 AND queue_id=?2 AND key=?3",
+            params![t, q, key],
+            |row| row.get(0),
+        )
+        .optional())?;
+    Ok(payload.map(Bytes::from))
+}
+
+/// The unified sqlite-relational store: ONE value, shared behind `Arc<Mutex<Inner>>`, that implements BOTH
+/// the [`LogStore`] (epoch/fence + position mint) and [`ProjectionStore`] (durable apply + the full read /
+/// validate / commit-class surface) axes of [`ComposedBackend`]. Two clones (one per axis field) point at
+/// the same `Inner`, so `commit_locked`'s append→apply is one transactional unit (ADR-012 P1b-ii).
+#[derive(Clone)]
+pub struct SqliteRelational {
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl SqliteRelational {
+    /// Open (or create) the unified relational store at `path`.
+    pub fn open(path: &str) -> EngineResult<Self> {
+        Self::from_conn(st(Connection::open(path))?)
+    }
+
+    /// An ephemeral `:memory:` unified relational store.
+    pub fn in_memory() -> EngineResult<Self> {
+        Self::from_conn(st(Connection::open_in_memory())?)
+    }
+
+    fn from_conn(conn: Connection) -> EngineResult<Self> {
+        Ok(Self {
+            inner: Arc::new(Mutex::new(open_inner(conn)?)),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().expect("sqlite relational store poisoned")
+    }
+}
+
+impl LogStore for SqliteRelational {
+    fn durability_class(&self) -> DurabilityClass {
+        // append+apply land in ONE relational transaction (apply commits both projection + cursor advance).
+        DurabilityClass::Atomic
+    }
+
+    fn ensure_shard(&mut self, _shard: &QueueKey) -> EngineResult<()> {
+        // The durable cursor/queue rows are created by the projection axis' `ensure_shard` (which has the
+        // full `QueueDefinition`); the log axis shares the same `Inner`, so there is nothing extra to do.
+        Ok(())
+    }
+
+    fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
+        let g = self.lock();
+        let (t, q) = parts(shard);
+        st(g.conn
+            .query_row(
+                "SELECT assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional())?
+        .ok_or(EngineError::NotFound)
+        .map(|e| e as u64)
+    }
+
+    fn acquire_epoch(&mut self, shard: &QueueKey) -> EngineResult<u64> {
+        let g = self.lock();
+        let (t, q) = parts(shard);
+        // TD-003 acquire: strictly-greater epoch, durably recorded (the fence authority advances).
+        let new_epoch: Option<i64> = st(g
+            .conn
+            .query_row(
+                "UPDATE relational_cursor SET assignment_epoch = assignment_epoch + 1 \
+                 WHERE tenant=?1 AND queue=?2 RETURNING assignment_epoch",
+                params![t, q],
+                |row| row.get(0),
+            )
+            .optional())?;
+        new_epoch.ok_or(EngineError::NotFound).map(|e| e as u64)
+    }
+
+    fn append(
+        &mut self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        // STAGE only: read the cursor, fence, and MINT positions. No durable write — the apply axis advances
+        // the cursor inside its own transaction, so no log row can outlive a failed projection apply.
+        let g = self.lock();
+        let (t, q) = parts(shard);
+        let (next, epoch): (i64, i64) = st(g
+            .conn
+            .query_row(
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional())?
+        .ok_or(EngineError::NotFound)?;
+        if expected_epoch != epoch as u64 {
+            return Err(EngineError::EpochFenced);
+        }
+        let mut positions = Vec::with_capacity(commands.len());
+        for (i, _) in commands.iter().enumerate() {
+            positions.push(CommandPosition::new(
+                shard.clone(),
+                epoch as u64,
+                (next as u64) + i as u64,
+            ));
+        }
+        Ok(positions)
+    }
+
+    fn read_from(
+        &self,
+        _shard: &QueueKey,
+        _from: Option<CommandPosition>,
+        _limit: usize,
+    ) -> EngineResult<CommandPage> {
+        // The relational family is DB-authoritative: there is no replayable command log (the projection is
+        // the source of truth). The conformance CORE class never reads the log; surface an empty page.
+        Ok(CommandPage {
+            entries: Vec::new(),
+            next: None,
+        })
+    }
+
+    fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        // The durable projection cursor is the high-water analogue: the next sequence is `next_seq`, so the
+        // last absorbed position is `next_seq - 1`. `None` before any command is applied.
+        let g = self.lock();
+        let (t, q) = parts(shard);
+        let (next, epoch): (i64, i64) = match st(g
+            .conn
+            .query_row(
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional())?
+        {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        Ok(
+            (next > 0)
+                .then(|| CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1)),
+        )
+    }
+
+    fn set_high_water(
+        &mut self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+    ) -> EngineResult<()> {
+        // The cursor advances transactionally inside `apply`; an external high-water set is a no-op for the
+        // DB-authoritative family (there is no detached log tail to acknowledge).
+        Ok(())
+    }
+
+    fn write_snapshot(
+        &mut self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+        _snapshot: ProjectionSnapshot,
+    ) -> EngineResult<SnapshotRef> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn latest_snapshot(&self, _shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
+        Ok(None)
+    }
+
+    fn read_snapshot(&self, _snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
+        Err(EngineError::Unavailable)
+    }
+}
+
+impl ProjectionStore for SqliteRelational {
+    fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
+        let mut g = self.lock();
+        create_queue_sql(&mut g, definition.clone())?;
+        Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        // COMMIT: the single durable relational transaction (projection rows + cursor advance), at the
+        // positions the log axis just minted. Reuses the group-commit apply verbatim.
+        let mut g = self.lock();
+        apply_committed_batch_sql(&mut g, positions, commands)
+    }
+
+    fn eligible_candidates(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        select_eligible_sql(&self.lock().conn, shard, now, max)
+    }
+
+    fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
+        let g = self.lock();
+        render_claimed(&g.conn, shard, ids, |id| g.live_tokens.get(id).cloned())
+    }
+
+    fn lookup_by_key(
+        &self,
+        shard: &QueueKey,
+        client_item_key: &ClientItemKey,
+    ) -> EngineResult<Option<ItemId>> {
+        lookup_active_by_key(&self.lock().conn, shard, client_item_key)
+    }
+
+    fn item_state(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<ItemState>> {
+        item_state_sql(&self.lock().conn, shard, id)
+    }
+
+    fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
+        item_version_sql(&self.lock().conn, shard, id)
+    }
+
+    fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
+        expired_leases_sql(&self.lock().conn, shard, now)
+    }
+
+    fn all_expired_leases(&self, now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)> {
+        all_expired_leases_sql(&self.lock().conn, now).unwrap_or_default()
+    }
+
+    fn finalize_validate(
+        &self,
+        shard: &QueueKey,
+        outcomes: &[FinalizeOutcome],
+    ) -> EngineResult<()> {
+        let ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
+        validate_leased(&self.lock().conn, shard, &ids)
+    }
+
+    fn renew_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
+        validate_leased(&self.lock().conn, shard, ids)
+    }
+
+    fn reassign_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
+        validate_leased(&self.lock().conn, shard, ids)
+    }
+
+    fn update_fields_validate(
+        &self,
+        shard: &QueueKey,
+        id: &ItemId,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<()> {
+        update_fields_validate_sql(&self.lock().conn, shard, id, expected_item_version)
+    }
+
+    // Secondary indexes are a deferred relational feature (the family stubs them) — validation is a no-op
+    // and queries report `Unavailable`, exactly like the monolithic `SqliteRelationalBackend`.
+    fn index_validate(
+        &self,
+        _shard: &QueueKey,
+        _item_id: &ItemId,
+        _fields: &BTreeMap<String, Bytes>,
+        _exclude: Option<&ItemId>,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn index_validate_push(&self, _shard: &QueueKey, _items: &[PushItem]) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn index_validate_replace(
+        &self,
+        _shard: &QueueKey,
+        _existing_id: &ItemId,
+        _item: &PushItem,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn index_validate_update(
+        &self,
+        _shard: &QueueKey,
+        _id: &ItemId,
+        _field_ops: &BTreeMap<String, Option<Bytes>>,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    // -- commit-class (Snorri vectorized commit boundary): the relational projection materializes the full
+    //    read model, so it opts in and answers the pre-commit reads from its own SQL.
+    fn supports_commit_transition(&self) -> bool {
+        true
+    }
+
+    fn commit_validate(
+        &self,
+        shard: &QueueKey,
+        refs: &[ClaimRef],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let g = self.lock();
+        let tx = st(g.conn.unchecked_transaction())?;
+        for claim_ref in refs {
+            commit_validate_sql(&tx, shard, claim_ref, now)?;
+        }
+        Ok(())
+    }
+
+    fn instance_fence(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<u64>> {
+        instance_fence_sql(&self.lock().conn, shard, key)
+    }
+
+    fn side_record(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
+        side_record_sql(&self.lock().conn, shard, key)
+    }
+
+    fn select_eligible(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        limit: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        select_eligible_sql(&self.lock().conn, shard, now, limit)
+    }
+
+    fn peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
+        peek_sql(&self.lock().conn, shard, limit)
+    }
+
+    fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+        let g = self.lock();
+        pending_sql(&g.conn, &g.live_tokens, shard)
+    }
+
+    fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        metrics_sql(&self.lock().conn, shard)
+    }
+
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        live_items_sql(&self.lock().conn, shard, keys)
+    }
+
+    fn index_get_unique(
+        &self,
+        _shard: &QueueKey,
+        _index: &str,
+        _key: &[Vec<u8>],
+    ) -> EngineResult<Option<IndexHit>> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn index_lookup(
+        &self,
+        _shard: &QueueKey,
+        _index: &str,
+        _key: &[Vec<u8>],
+    ) -> EngineResult<Vec<IndexHit>> {
+        Err(EngineError::Unavailable)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-012 P1b-ii (Part B): the DERIVED sqlite projection as a `ProjectionStore`
+// ---------------------------------------------------------------------------
+//
+// `SqliteProjectionStore` is the relational SQL projection fed by an EXTERNAL command-log authority (the
+// object log, or a sqlite/postgres LOG axis). Wrapping it as a [`ProjectionStore`] lets the generic
+// [`ComposedBackend`] pair it with any [`LogStore`] — `ComposedBackend<SqliteLog, SqliteProjectionStore>`
+// (atomic) and `ComposedBackend<ObjectLog, SqliteProjectionStore>` (eventual-apply) — instead of the
+// hand-written `ObjectLogSqliteBackend` monolith. `apply` is the same group-commit `apply_committed_batch`
+// the monolith uses (idempotent prefix-skip, gap error), so a committed log position is materialized once.
+
+impl SqliteProjectionStore {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().expect("projection store poisoned")
+    }
+}
+
+impl ProjectionStore for SqliteProjectionStore {
+    fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
+        let mut g = self.lock();
+        create_queue_sql(&mut g, definition.clone())?;
+        Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        // Idempotent group-commit apply at the externally assigned log positions (one sqlite transaction).
+        self.apply_committed_batch(positions, commands)
+    }
+
+    fn eligible_candidates(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        select_eligible_sql(&self.lock().conn, shard, now, max)
+    }
+
+    fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
+        let g = self.lock();
+        render_claimed(&g.conn, shard, ids, |id| g.live_tokens.get(id).cloned())
+    }
+
+    fn lookup_by_key(
+        &self,
+        shard: &QueueKey,
+        client_item_key: &ClientItemKey,
+    ) -> EngineResult<Option<ItemId>> {
+        lookup_active_by_key(&self.lock().conn, shard, client_item_key)
+    }
+
+    fn item_state(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<ItemState>> {
+        item_state_sql(&self.lock().conn, shard, id)
+    }
+
+    fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
+        item_version_sql(&self.lock().conn, shard, id)
+    }
+
+    fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
+        expired_leases_sql(&self.lock().conn, shard, now)
+    }
+
+    fn all_expired_leases(&self, now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)> {
+        all_expired_leases_sql(&self.lock().conn, now).unwrap_or_default()
+    }
+
+    fn finalize_validate(
+        &self,
+        shard: &QueueKey,
+        outcomes: &[FinalizeOutcome],
+    ) -> EngineResult<()> {
+        let ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
+        validate_leased(&self.lock().conn, shard, &ids)
+    }
+
+    fn renew_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
+        validate_leased(&self.lock().conn, shard, ids)
+    }
+
+    fn reassign_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
+        validate_leased(&self.lock().conn, shard, ids)
+    }
+
+    fn update_fields_validate(
+        &self,
+        shard: &QueueKey,
+        id: &ItemId,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<()> {
+        update_fields_validate_sql(&self.lock().conn, shard, id, expected_item_version)
+    }
+
+    fn index_validate(
+        &self,
+        _shard: &QueueKey,
+        _item_id: &ItemId,
+        _fields: &BTreeMap<String, Bytes>,
+        _exclude: Option<&ItemId>,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn index_validate_push(&self, _shard: &QueueKey, _items: &[PushItem]) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn index_validate_replace(
+        &self,
+        _shard: &QueueKey,
+        _existing_id: &ItemId,
+        _item: &PushItem,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn index_validate_update(
+        &self,
+        _shard: &QueueKey,
+        _id: &ItemId,
+        _field_ops: &BTreeMap<String, Option<Bytes>>,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn supports_commit_transition(&self) -> bool {
+        true
+    }
+
+    fn commit_validate(
+        &self,
+        shard: &QueueKey,
+        refs: &[ClaimRef],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let g = self.lock();
+        let tx = st(g.conn.unchecked_transaction())?;
+        for claim_ref in refs {
+            commit_validate_sql(&tx, shard, claim_ref, now)?;
+        }
+        Ok(())
+    }
+
+    fn instance_fence(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<u64>> {
+        instance_fence_sql(&self.lock().conn, shard, key)
+    }
+
+    fn side_record(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
+        side_record_sql(&self.lock().conn, shard, key)
+    }
+
+    fn select_eligible(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        limit: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        select_eligible_sql(&self.lock().conn, shard, now, limit)
+    }
+
+    fn peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
+        peek_sql(&self.lock().conn, shard, limit)
+    }
+
+    fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+        let g = self.lock();
+        pending_sql(&g.conn, &g.live_tokens, shard)
+    }
+
+    fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        metrics_sql(&self.lock().conn, shard)
+    }
+
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        live_items_sql(&self.lock().conn, shard, keys)
+    }
+
+    fn index_get_unique(
+        &self,
+        _shard: &QueueKey,
+        _index: &str,
+        _key: &[Vec<u8>],
+    ) -> EngineResult<Option<IndexHit>> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn index_lookup(
+        &self,
+        _shard: &QueueKey,
+        _index: &str,
+        _key: &[Vec<u8>],
+    ) -> EngineResult<Vec<IndexHit>> {
+        Err(EngineError::Unavailable)
+    }
+}
+
+/// The composed unified sqlite-relational backend (ADR-012 P1b-ii):
+/// `ComposedBackend<SqliteRelational, SqliteRelational, InProcessControlPlane>` — one relational store on
+/// both the log and projection axes, so append+apply commit as one transaction. Capability-equivalent to
+/// the monolithic [`SqliteRelationalBackend`] on the CORE conformance class.
+pub type ComposedSqliteRelationalBackend =
+    ComposedBackend<SqliteRelational, SqliteRelational, InProcessControlPlane>;
+
+/// Assemble a unified sqlite-relational composition over an ephemeral `:memory:` store. Both axes are clones
+/// of the SAME store (shared connection), so the orthogonal `commit_locked` drives one durable transaction.
+pub fn composed_sqlite_relational_in_memory() -> EngineResult<ComposedSqliteRelationalBackend> {
+    let store = SqliteRelational::in_memory()?;
+    Ok(ComposedBackend::new(
+        store.clone(),
+        store,
+        InProcessControlPlane::new(),
+    ))
 }
 
 #[cfg(test)]

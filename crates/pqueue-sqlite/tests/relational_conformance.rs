@@ -116,6 +116,28 @@ fn spec(priority: i64) -> PushSpec {
 pqueue_conformance::core_suite!(@atomic make);
 pqueue_conformance::claimed_item_shape_conformance_tests!(@whole_cohort make);
 
+/// ADR-012 P1b-ii: the SAME core conformance class against the UNIFIED relational COMPOSITION
+/// (`ComposedBackend<SqliteRelational, SqliteRelational, InProcessControlPlane>` — one relational store on
+/// both the log and projection axes, so the generic `commit_locked` drives append+apply into ONE durable
+/// transaction). Passing identically to the monolith above proves the orthogonal composition is faithful
+/// (no phantom log row) before the monolith is removed (Phase 2). The composition's generic claim is
+/// item-level, so the whole-cohort claim-shape arm is monolith-only.
+mod composed {
+    use pqueue_sqlite::composed_sqlite_relational_in_memory;
+    pqueue_conformance::core_suite!(@atomic || composed_sqlite_relational_in_memory()
+        .expect("compose in-memory unified sqlite-relational backend"));
+}
+
+/// ADR-012 P1b-ii Part B: the core conformance class against the DERIVED sqlite projection driven by a
+/// durable sqlite LOG axis (`ComposedBackend<SqliteLog, SqliteProjectionStore, InProcessControlPlane>`).
+/// The relational SQL projection materialized by an external log authority, proven at parity with the
+/// in-memory reference. Atomic durability class (the sqlite log), so it runs the full `@atomic` core class.
+mod composed_log_projection {
+    use pqueue_sqlite::composed_sqlite_log_sqlite_projection_in_memory;
+    pqueue_conformance::core_suite!(@atomic || composed_sqlite_log_sqlite_projection_in_memory()
+        .expect("compose in-memory sqlite-log + sqlite-projection backend"));
+}
+
 // ---------------------------------------------------------------------------
 // 2. Lifecycle round-trip — every apply arm observed back through the read ports
 // ---------------------------------------------------------------------------
