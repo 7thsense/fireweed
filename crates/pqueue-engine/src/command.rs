@@ -123,6 +123,7 @@ pub fn build_push_items(
             metadata: s.metadata,
             cohort_size: s.cohort_size,
             gate_keys: s.gate_keys,
+            entity_document: s.entity,
         });
     }
     (items, ids)
@@ -231,6 +232,12 @@ pub struct PushItem {
     /// the BQ-14d fresh-eyes review.
     #[serde(default)]
     pub gate_keys: Vec<String>,
+    /// Typed JSON entity document (ADR-011). The canonical typed representation for schema-validated typed
+    /// queues — used by schema validation and axon_esf index-key computation at push time.
+    /// `#[serde(default)]` preserves replay compatibility for log entries written before this field existed.
+    /// `None` for schema-less queues (which use the opaque `payload` bytes carrier).
+    #[serde(default)]
+    pub entity_document: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -349,6 +356,11 @@ pub struct UpdateFieldsCommand {
     /// `Keep`.
     #[serde(default)]
     pub set_not_before: ScheduleUpdate<UtcTimestamp>,
+    /// Replace the item's entity document (ADR-011). `None` leaves it unchanged; `Some(doc)` replaces
+    /// it and triggers schema validation if the queue has a compiled schema. `#[serde(default)]` keeps
+    /// log-replay compatible with pre-ADR-011 commands (absent field → `None`).
+    #[serde(default)]
+    pub set_entity_document: Option<serde_json::Value>,
 }
 
 /// A field-reschedule disposition under [`UpdateFieldsCommand`] (BQ pqueue-7a96f929): leave the value as-is,
@@ -472,6 +484,7 @@ mod serde_tests {
             metadata: Metadata::default(),
             cohort_size: Some(4),
             gate_keys: Vec::new(),
+            entity_document: None,
         }
     }
 
@@ -521,6 +534,7 @@ mod serde_tests {
                 payload: PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
                 set_priority: ScheduleUpdate::Keep,
                 set_not_before: ScheduleUpdate::Keep,
+                set_entity_document: None,
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
                 item_ids: vec![iid("a")],

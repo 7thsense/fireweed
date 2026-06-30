@@ -18,6 +18,7 @@ mod idempotency;
 mod operator;
 mod ownership;
 mod port;
+pub mod schema_validation;
 mod types;
 
 pub use active_scope::{
@@ -43,6 +44,7 @@ pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
+pub use axon_esf::CompiledSchema;
 pub use command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
@@ -68,6 +70,7 @@ pub use port::{
     RecoveryReadPort, RenewLeasePort, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
     TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
 };
+pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
 
 #[cfg(test)]

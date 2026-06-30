@@ -12,13 +12,14 @@ pub mod scaffold {
 
 pub use domain::{
     ApiError, ApiErrorCode, ApiResult, BodyHash, ClientItemKey, CohortId, CohortOnIncomplete,
-    CohortPolicy, CreateQueue, CreateQueueError, CreateQueueErrorKind, CreateQueueResponse,
-    DecimalValue, EligibilityPolicy, EligibilitySnapshot, GateKeyPolicy, GroupKey,
-    IdempotencyOutcome, IdentifierError, IndexSpec, IneligibilityReason, ItemEvent, ItemId,
-    ItemResult, ItemResultStatus, ItemState, LeaseToken, Metadata, MetadataValue, OrderingMode,
-    OwnerId, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    PriorityValue, QueueCreationPolicy, QueueDefinition, QueueEligibilityRules, QueueId,
-    RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, TenantId, TimestampError,
-    TransitionError, UtcTimestamp, WorkerId, apply_transition, check_idempotency,
+    CohortPolicy, CompoundIndexDef, CompoundIndexField, CreateQueue, CreateQueueError,
+    CreateQueueErrorKind, CreateQueueResponse, DecimalValue, EligibilityPolicy,
+    EligibilitySnapshot, EntitySchemaDocument, GateKeyPolicy, GroupKey, IdempotencyOutcome,
+    IdentifierError, IndexDeclaration, IndexDef, IndexSpec, IndexType, IneligibilityReason,
+    ItemEvent, ItemId, ItemResult, ItemResultStatus, ItemState, LeaseToken, Metadata,
+    MetadataValue, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, QueueCreationPolicy, QueueDefinition, QueueEligibilityRules,
+    QueueId, QueueIndex, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, TenantId,
+    TimestampError, TransitionError, UtcTimestamp, WorkerId, apply_transition, check_idempotency,
     evaluate_eligibility, failure_event, is_retry_exhausted, priority_sort,
 };

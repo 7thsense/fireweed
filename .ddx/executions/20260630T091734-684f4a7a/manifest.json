@@ -1,0 +1,31 @@
+{
+  "attempt_id": "20260630T091734-684f4a7a",
+  "bead_id": "pqueue-624f4195",
+  "base_rev": "2559371881671c848764b7c37987d457e04681e6",
+  "created_at": "2026-06-30T09:17:34.76264735Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-624f4195",
+    "title": "Repair typed query API value validation",
+    "description": "Focused review of pqueue-9a733f91 found that typed query helpers encode serde_json::Value before resolving QueueIndex declarations. As a result json!(\"99\") can query an Integer index as numeric 99 because both become raw bytes accepted by the projection. The typed query API must validate caller values against the configured QueueIndex type before lookup.",
+    "acceptance": "Typed query APIs reject wrong JSON value kinds for Integer/Float/Boolean/String/Datetime before or during typed lookup; json!(\"99\") does not match Integer 99; raw legacy query behavior remains unchanged; cargo fmt --check and focused secondary index tests pass.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "axon-esf",
+      "adr-011",
+      "bug"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T091734-684f4a7a",
+    "prompt": ".ddx/executions/20260630T091734-684f4a7a/prompt.md",
+    "manifest": ".ddx/executions/20260630T091734-684f4a7a/manifest.json",
+    "result": ".ddx/executions/20260630T091734-684f4a7a/result.json",
+    "checks": ".ddx/executions/20260630T091734-684f4a7a/checks.json",
+    "usage": ".ddx/executions/20260630T091734-684f4a7a/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-624f4195-20260630T091734-684f4a7a"
+  },
+  "prompt_sha": "666631c2a94a59cbc49b71e5ef253cede94a6cfe84e3dc4999d0cfdc1786fd3d"
+}

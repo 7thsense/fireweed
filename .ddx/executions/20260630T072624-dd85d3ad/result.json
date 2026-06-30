@@ -1,0 +1,60 @@
+{
+  "bead_id": "pqueue-103570d4",
+  "attempt_id": "20260630T072624-dd85d3ad",
+  "base_rev": "87b33f171a9261a03281a9fac5b6bf3604247b20",
+  "result_rev": "aa51d88f98e0bd2c109c78985cc7a36c77af533e",
+  "implementation_rev": "12d796bf351f7b2cc982cad7dc349f9069364993",
+  "landed_rev": "aa51d88f98e0bd2c109c78985cc7a36c77af533e",
+  "landed_branch": "build/queue-as-unit-of-sharding",
+  "evidence_rev": "aa51d88f98e0bd2c109c78985cc7a36c77af533e",
+  "outcome": "merged",
+  "status": "success",
+  "detail": "success",
+  "orchestrator_status": "success",
+  "candidate_ref": "refs/ddx/iterations/20260630T072624-dd85d3ad/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260630T072624-dd85d3ad",
+      "result_rev": "12d796bf351f7b2cc982cad7dc349f9069364993",
+      "implementer_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "requested_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "actual_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "claude-tui",
+  "model": "sonnet-4.6",
+  "predicted_power": 8,
+  "predicted_cost_usd_per_1k_tokens": 0.009,
+  "predicted_cost_source": "subscription",
+  "session_id": "eb-8edec31b",
+  "duration_ms": 883561,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260630T072624-dd85d3ad",
+  "prompt_file": ".ddx/executions/20260630T072624-dd85d3ad/prompt.md",
+  "manifest_file": ".ddx/executions/20260630T072624-dd85d3ad/manifest.json",
+  "result_file": ".ddx/executions/20260630T072624-dd85d3ad/result.json",
+  "usage_file": ".ddx/executions/20260630T072624-dd85d3ad/usage.json",
+  "started_at": "2026-06-30T07:26:25.072060593Z",
+  "finished_at": "2026-06-30T07:41:08.633637683Z"
+}

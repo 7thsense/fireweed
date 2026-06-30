@@ -1,0 +1,36 @@
+{
+  "attempt_id": "20260630T100246-c32e91f7",
+  "bead_id": "pqueue-5d6ec00b",
+  "base_rev": "e045008e6bc10425e7ece6b5146f866fbc74f46a",
+  "created_at": "2026-06-30T10:02:46.541674863Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-5d6ec00b",
+    "title": "Implement postgres relational typed secondary indexes",
+    "description": "Implement ADR-011 typed secondary index parity for postgres relational storage, which currently returns EngineError::Unavailable for index reads. In-scope files: crates/pqueue-postgres/src/relational.rs, postgres schema/migrations, postgres tests/conformance. Add pqueue_item_indexes or equivalent table storing canonical axon_esf index_key bytes plus metadata for unique/non-unique lookup. Maintain rows on push, replace_pending, update_fields, purge, and reopen. Enforce unique conflicts before durable mutation. Use env-gated postgres tests consistently with existing project pattern. Out-of-scope: sqlite implementation already handled by dependency.",
+    "acceptance": "cargo test -p pqueue-postgres --tests -- --nocapture passes in no-DB skip mode; with PQUEUE_PG_TEST_URL set, postgres typed index conformance passes; tests prove postgres no longer returns Unavailable for typed index query and unique conflicts are atomic.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "area:pqueue-postgres",
+      "area:indexes",
+      "kind:implementation",
+      "adr-011",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "spec-id": "ADR-011"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T100246-c32e91f7",
+    "prompt": ".ddx/executions/20260630T100246-c32e91f7/prompt.md",
+    "manifest": ".ddx/executions/20260630T100246-c32e91f7/manifest.json",
+    "result": ".ddx/executions/20260630T100246-c32e91f7/result.json",
+    "checks": ".ddx/executions/20260630T100246-c32e91f7/checks.json",
+    "usage": ".ddx/executions/20260630T100246-c32e91f7/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-5d6ec00b-20260630T100246-c32e91f7"
+  },
+  "prompt_sha": "f5a1959023b2d1fdc5a03e17906d88f9a48a27cc53686d6aa11b734b813c46dd"
+}

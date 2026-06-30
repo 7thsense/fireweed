@@ -2,13 +2,14 @@
 //! projection), and the backend declares the eventual-apply class (so upsert is refused).
 
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
-use pqueue_core::{ClientItemKey, ItemId};
+use pqueue_core::{ClientItemKey, EntitySchemaDocument, ItemId, RequestId};
 use pqueue_engine::{
     Backend, ClaimPort, ControlPlaneStore, DurabilityClass, EngineError, LogRead, LogWriter,
-    ProjectionRead, ProjectionWriter, PushCommand, QueueCommand, ReplacePendingCommand,
+    ProjectionRead, ProjectionWriter, PushCommand, PushPort, QueueCommand, ReplacePendingCommand,
     SetGatesCommand,
 };
 use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig};
+use serde_json::json;
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("pqueue-objlog-dur-{tag}-{}", std::process::id()))
@@ -38,6 +39,37 @@ fn push_env(id: &str) -> pqueue_engine::CommandEnvelope {
         }),
         vec![ItemId::new(id).unwrap()],
     )
+}
+
+fn typed_qdef() -> pqueue_core::QueueDefinition {
+    let mut def = qdef();
+    def.entity_schema = Some(
+        serde_json::from_value::<EntitySchemaDocument>(json!({
+            "entity_schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }
+        }))
+        .unwrap(),
+    );
+    def
+}
+
+fn typed_valid_item(id: &str) -> pqueue_engine::PushSpec {
+    pqueue_engine::PushSpec {
+        entity: Some(json!({"name": id})),
+        ..Default::default()
+    }
+}
+
+fn typed_invalid_item(id: &str) -> pqueue_engine::PushSpec {
+    pqueue_engine::PushSpec {
+        entity: Some(json!({"count": id.len()})),
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
@@ -348,5 +380,71 @@ async fn projection_rebuilds_from_object_log_on_reopen() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn schema_validation_backend<B>(backend: &B)
+where
+    B: ControlPlaneStore + PushPort + ProjectionRead,
+{
+    let q = shard();
+    backend.create_queue(typed_qdef()).await.unwrap();
+
+    let err = backend
+        .push(
+            &q,
+            vec![typed_invalid_item("bad")],
+            pqueue_conformance::ts(0),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(backend.metrics(&q).await.unwrap().pending, 0);
+
+    let rid = RequestId::new("req-1").unwrap();
+    let err = backend
+        .push_with_request_id(
+            &q,
+            rid.clone(),
+            vec![typed_invalid_item("bad")],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(backend.metrics(&q).await.unwrap().pending, 0);
+
+    let first = backend
+        .push_with_request_id(
+            &q,
+            rid.clone(),
+            vec![typed_valid_item("ok")],
+            pqueue_conformance::ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+    let replay = backend
+        .push_with_request_id(
+            &q,
+            rid,
+            vec![typed_valid_item("ok")],
+            pqueue_conformance::ts(3),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first, replay, "valid replay must reuse the committed ids");
+    assert_eq!(backend.metrics(&q).await.unwrap().pending, 1);
+}
+
+#[tokio::test]
+async fn object_log_backend_schema_validation_rejects_before_append_and_idempotency() {
+    let root = tmp_root("schema-object-log");
+    let _ = std::fs::remove_dir_all(&root);
+    let backend = ObjectLogBackend::open(&root).expect("open");
+    schema_validation_backend(&backend).await;
     let _ = std::fs::remove_dir_all(&root);
 }

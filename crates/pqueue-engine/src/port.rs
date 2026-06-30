@@ -340,6 +340,7 @@ pub trait UpsertPort: Send + Sync {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
@@ -365,6 +366,9 @@ pub struct PushSpec {
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d) — see [`crate::PushItem::gate_keys`]. Empty for un-gated items.
     pub gate_keys: Vec<String>,
+    /// Typed JSON entity document (ADR-011). The canonical typed representation for schema-validated
+    /// typed queues. `None` for schema-less queues that use the opaque `payload` bytes carrier.
+    pub entity: Option<serde_json::Value>,
 }
 
 /// Appends new items (server-assigned ids). The backend builds the envelope from its own command
@@ -739,6 +743,7 @@ pub trait UpdateFieldsPort: Send + Sync {
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: crate::PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,

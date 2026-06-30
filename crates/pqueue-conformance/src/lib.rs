@@ -57,8 +57,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
-    CommandId, ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem,
-    PushPort, QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    CommandId, ControlPlaneStore, FinalizePort, IndexQueryPort, LogRead, ProjectionRead, PurgePort,
+    PushItem, PushPort, QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort,
     RenewLeasePort, SnapshotStore, UpdateFieldsPort, UpsertPort,
 };
 
@@ -113,6 +113,12 @@ pub trait ConformanceBackend: ConformanceCore + SnapshotStore + LogRead {}
 
 impl<T> ConformanceBackend for T where T: ConformanceCore + SnapshotStore + LogRead {}
 
+/// ADR-011 typed-schema/index conformance backend. This is separate from [`ConformanceCore`] so
+/// ADR-010-only backends can still satisfy the core queue contract without typed index lookup.
+pub trait Adr011ConformanceBackend: ConformanceCore + IndexQueryPort {}
+
+impl<T> Adr011ConformanceBackend for T where T: ConformanceCore + IndexQueryPort {}
+
 // ---------------------------------------------------------------------------
 // Shared fixtures (public so adapters' own white-box tests can reuse them too)
 // ---------------------------------------------------------------------------
@@ -157,6 +163,8 @@ pub fn qdef() -> QueueDefinition {
         max_claim_batch_size: 100,
         max_eligible_group_size: None,
         secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
     }
 }
 
@@ -178,6 +186,7 @@ pub fn item_max(id: &str, key: &str, priority: i64, max_attempts: u32) -> PushIt
         metadata: Metadata::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
+        entity_document: None,
     }
 }
 
@@ -428,6 +437,39 @@ macro_rules! relational_reconnect_suite {
     };
 }
 
+/// ADR-011 typed entity-schema and typed secondary-index scenario class. Backends that persist typed
+/// entity documents and implement `IndexQueryPort` should run this alongside their core suite. Durable
+/// reopen/replay mechanics remain backend-specific because each adapter owns how its factory reopens
+/// shared state.
+#[macro_export]
+macro_rules! adr011_typed_conformance_suite {
+    ($make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            adr011_schema_validation_rejects_before_visible_state,
+            adr011_typed_scalar_and_compound_indexes_work,
+            adr011_typed_missing_fields_remain_sparse,
+            adr011_typed_unique_conflicts_are_atomic,
+            adr011_typed_update_fields_unique_conflict_is_atomic,
+            adr011_typed_update_fields_and_replace_rekey,
+            adr011_typed_purge_frees_unique_key,
+            adr011_typed_upsert_insert_unique_conflict_is_atomic,
+            adr011_typed_schema_less_queue_unaffected,
+        );
+    };
+}
+
+/// ADR-011 log-replay scenario class. Log-bearing typed-index backends run this to prove typed index
+/// rows are reconstructed from committed commands, while DB-authoritative relational reconnect remains
+/// covered by adapter-specific durable-reopen tests.
+#[macro_export]
+macro_rules! adr011_typed_log_replay_suite {
+    ($make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            adr011_typed_log_replay_reconstructs_index_rows,
+        );
+    };
+}
+
 /// Generate one `#[tokio::test]` per conformance scenario for the backend built by `$make`. The atomic
 /// log-bearing suite = `core_suite!(@atomic)` + `log_replay_suite!`; this composes them so existing
 /// adapters invoke the same one-liner unchanged. Invoke at module scope:
@@ -457,4 +499,56 @@ macro_rules! eventual_apply_suite {
         $crate::core_suite!(@eventual $make);
         $crate::log_replay_suite!($make);
     };
+}
+
+#[cfg(test)]
+mod storage_conformance {
+    use pqueue_engine::{EngineError, compile_entity_schema, validate_entity};
+    use serde_json::json;
+
+    #[test]
+    fn storage_conformance_entity_schema_rejects_missing_required() {
+        let schema = json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}});
+        let cs = compile_entity_schema(&schema).expect("compiles");
+        let doc = json!({"age": 42});
+        let err = validate_entity(Some(&cs), Some(&doc)).unwrap_err();
+        assert!(
+            matches!(err, EngineError::EntitySchemaViolation(_)),
+            "expected EntitySchemaViolation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn storage_conformance_entity_schema_accepts_valid_document() {
+        let schema = json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}});
+        let cs = compile_entity_schema(&schema).expect("compiles");
+        let doc = json!({"name": "alice"});
+        validate_entity(Some(&cs), Some(&doc)).expect("valid document should pass");
+    }
+
+    #[test]
+    fn storage_conformance_no_schema_accepts_anything() {
+        let doc = json!({"whatever": true});
+        validate_entity(None, Some(&doc)).expect("no schema — always ok");
+        validate_entity(None, None).expect("no schema, no doc — always ok");
+    }
+
+    #[test]
+    fn storage_conformance_entity_schema_error_has_resp_token() {
+        let schema = json!({"type": "object", "required": ["x"]});
+        let cs = compile_entity_schema(&schema).expect("compiles");
+        let err = validate_entity(Some(&cs), Some(&json!({}))).unwrap_err();
+        assert_eq!(
+            err.resp_token(),
+            Some("-ERR pqueue entity_schema_violation"),
+            "RESP token must match ADR-011"
+        );
+    }
+
+    #[test]
+    fn storage_conformance_schema_compile_error_on_invalid_schema() {
+        let bad = json!({"type": "not-a-valid-type"});
+        let result = compile_entity_schema(&bad);
+        assert!(result.is_err(), "invalid schema must fail compilation");
+    }
 }

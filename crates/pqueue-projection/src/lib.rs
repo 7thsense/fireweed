@@ -26,9 +26,9 @@ pub use compose_impls::{InMemoryProjection, MemoryLog};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, IndexSpec, ItemEvent, ItemId, ItemState, LeaseToken, Metadata,
-    OrderingMode, PriorityModel, PriorityValue, RecurrenceMode, RecurrencePolicy, UtcTimestamp,
-    apply_transition, failure_event, priority_sort,
+    ClientItemKey, GroupKey, IndexDeclaration, IndexSpec, IndexType, ItemEvent, ItemId, ItemState,
+    LeaseToken, Metadata, OrderingMode, PriorityModel, PriorityValue, QueueIndex, RecurrenceMode,
+    RecurrencePolicy, UtcTimestamp, apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
@@ -36,6 +36,7 @@ use pqueue_engine::{
     ProjectionSnapshot, PushItem, QueueCommand, QueueKey, QueueMetrics, ScheduleUpdate,
     SnapshotRef,
 };
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // Projection record + eligibility key
@@ -52,6 +53,10 @@ struct ItemRecord {
     fields: BTreeMap<String, Bytes>,
     metadata: Metadata,
     gate_keys: Vec<String>,
+    /// Typed JSON entity document (ADR-011). Carries the canonical typed representation through the
+    /// projection so schema validation and axon_esf index-key computation can address it.
+    /// `None` for schema-less queues that use the opaque `payload` bytes carrier.
+    entity_document: Option<serde_json::Value>,
     state: ItemState,
     item_version: u64,
     attempt_count: u32,
@@ -135,7 +140,7 @@ fn locality_key(rec: &ItemRecord) -> (bool, Option<&GroupKey>) {
 }
 
 // ---------------------------------------------------------------------------
-// Secondary indexes (ADR-010): per-queue, name-keyed composite-key maps over configured item fields
+// Secondary indexes: per-queue, name-keyed maps over configured item fields and typed entity indexes.
 // ---------------------------------------------------------------------------
 
 /// One per-queue secondary index. Unique maps a composite key to exactly one item; non-unique maps a
@@ -145,42 +150,150 @@ enum SecondaryIndex {
     NonUnique(BTreeMap<Vec<u8>, BTreeSet<ItemId>>),
 }
 
-/// Composite-key encoding (ADR-010 §4.1): the length-prefixed concatenation of each field value, in the
-/// spec's field order — `be_u32(len) || value_bytes` per field. Unambiguous (no separator can collide
-/// with arbitrary content), order-sensitive, and total/`Ord` as a `Vec<u8>`. Raw bytes; no normalization.
-fn encode_index_key(spec: &IndexSpec, fields: &BTreeMap<String, Bytes>) -> Option<Vec<u8>> {
-    let mut key = Vec::new();
-    for field in &spec.fields {
-        // Sparse rule: a configured field missing from the item leaves the item out of THIS index.
-        let value = fields.get(field)?;
-        key.extend_from_slice(&(value.len() as u32).to_be_bytes());
-        key.extend_from_slice(value);
-    }
-    Some(key)
+enum IndexLookupSpec<'a> {
+    Legacy(&'a IndexSpec),
+    Typed(&'a QueueIndex),
 }
 
-/// Encode the lookup-side key values (already in field order) with the §4.1 rule — byte-identical to
-/// [`encode_index_key`] for the same ordered values.
-fn encode_index_lookup_key(values: &[Vec<u8>]) -> Vec<u8> {
-    let mut key = Vec::new();
-    for value in values {
-        key.extend_from_slice(&(value.len() as u32).to_be_bytes());
-        key.extend_from_slice(value);
+impl<'a> IndexLookupSpec<'a> {
+    fn unique(&self) -> bool {
+        match self {
+            Self::Legacy(spec) => spec.unique,
+            Self::Typed(spec) => match &spec.declaration {
+                IndexDeclaration::Single(def) => def.unique,
+                IndexDeclaration::Compound(def) => def.unique,
+            },
+        }
     }
-    key
+
+    fn lookup_key(&self, key_values: &[Vec<u8>]) -> EngineResult<Vec<u8>> {
+        match self {
+            Self::Legacy(_) => {
+                let slices: Vec<&[u8]> = key_values.iter().map(|v| v.as_slice()).collect();
+                Ok(legacy_raw_key(&slices))
+            }
+            Self::Typed(spec) => match &spec.declaration {
+                IndexDeclaration::Single(def) => {
+                    let value = decode_typed_lookup_value(&def.index_type, &key_values[0])?;
+                    let mut record = serde_json::Map::new();
+                    record.insert(def.field.clone(), value);
+                    let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
+                    key.map_err(|err| EngineError::Storage(err.to_string()))?
+                        .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
+                }
+                IndexDeclaration::Compound(def) => {
+                    let mut record = serde_json::Map::new();
+                    for (field, value_bytes) in def.fields.iter().zip(key_values.iter()) {
+                        let value = decode_typed_lookup_value(&field.index_type, value_bytes)?;
+                        record.insert(field.field.clone(), value);
+                    }
+                    let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
+                    key.map_err(|err| EngineError::Storage(err.to_string()))?
+                        .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
+                }
+            },
+        }
+    }
 }
 
-/// Every `(index_name, composite_key)` this record's fields currently belong to (sparse skip — an index
-/// missing any of its fields is omitted). A free function over `specs` so callers can compute keys while
-/// holding other shared borrows of `self`.
-fn index_keys(specs: &[IndexSpec], fields: &BTreeMap<String, Bytes>) -> Vec<(String, Vec<u8>)> {
+/// Length-prefix raw byte encoding for legacy index keys. Each field is prefixed with its 4-byte
+/// big-endian length so concatenated multi-field keys round-trip losslessly regardless of byte
+/// content (no UTF-8 assumption, no JSON quoting).
+fn legacy_raw_key(field_bytes: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for bytes in field_bytes {
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+fn legacy_index_key(
+    spec: &IndexSpec,
+    fields: &BTreeMap<String, Bytes>,
+) -> EngineResult<Option<Vec<u8>>> {
+    let mut field_bytes: Vec<&[u8]> = Vec::new();
+    for field_name in &spec.fields {
+        match fields.get(field_name) {
+            Some(v) => field_bytes.push(v.as_ref()),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(legacy_raw_key(&field_bytes)))
+}
+
+/// Decode a raw lookup byte slice into a JSON `Value` appropriate for `index_type`. String fields
+/// are treated as strict UTF-8 (not JSON-parsed), so `b"123"` stays `"123"` rather than the number
+/// 123. Datetime fields accept either RFC 3339 UTF-8 or JSON numeric epoch-nanos because axon-esf
+/// treats both as valid representations of the same instant.
+fn decode_typed_lookup_value(index_type: &IndexType, bytes: &[u8]) -> EngineResult<Value> {
+    match index_type {
+        IndexType::String => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            Ok(Value::String(s.to_owned()))
+        }
+        IndexType::Datetime => {
+            if let Ok(value @ Value::Number(_)) = serde_json::from_slice::<Value>(bytes) {
+                return Ok(value);
+            }
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            Ok(Value::String(s.to_owned()))
+        }
+        IndexType::Integer | IndexType::Float => serde_json::from_slice::<Value>(bytes)
+            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number")),
+        IndexType::Boolean => serde_json::from_slice::<Value>(bytes)
+            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON boolean")),
+    }
+}
+
+fn typed_index_key(spec: &QueueIndex, entity: Option<&Value>) -> EngineResult<Option<Vec<u8>>> {
+    let Some(entity) = entity else {
+        return Ok(None);
+    };
+    match &spec.declaration {
+        IndexDeclaration::Single(def) => {
+            let key: Result<Option<Vec<u8>>, _> = def.index_key(entity);
+            key.map_err(|err| EngineError::Storage(err.to_string()))
+        }
+        IndexDeclaration::Compound(def) => {
+            let key: Result<Option<Vec<u8>>, _> = def.index_key(entity);
+            key.map_err(|err| EngineError::Storage(err.to_string()))
+        }
+    }
+}
+
+fn typed_index_key_err(spec: &QueueIndex, entity: Option<&Value>) -> EngineResult<Option<Vec<u8>>> {
+    typed_index_key(spec, entity)
+}
+
+/// Every `(index_name, composite_key)` this record currently belongs to. A free function over `specs`
+/// so callers can compute keys while holding other shared borrows of `self`.
+fn legacy_index_keys(
+    specs: &[IndexSpec],
+    fields: &BTreeMap<String, Bytes>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
     for spec in specs {
-        if let Some(key) = encode_index_key(spec, fields) {
+        if let Some(key) = legacy_index_key(spec, fields)? {
             out.push((spec.name.clone(), key));
         }
     }
-    out
+    Ok(out)
+}
+
+fn typed_index_keys(
+    specs: &[QueueIndex],
+    entity: Option<&Value>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::new();
+    for spec in specs {
+        if let Some(key) = typed_index_key_err(spec, entity)? {
+            out.push((spec.name.clone(), key));
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -348,11 +461,13 @@ pub struct ProjectionData {
     /// ends the series (the item goes terminal) instead of re-arming. Defaults to `Oneshot`/no-`until`.
     recurrence: RecurrencePolicy,
     paused: bool,
-    /// Per-queue secondary indexes (ADR-010), keyed by `IndexSpec.name`. Built once from the queue's
-    /// specs and maintained in the same `apply_command` arms that maintain `eligible`.
+    /// Per-queue secondary indexes, keyed by declaration name. Built once from the queue's specs and
+    /// maintained in the same `apply_command` arms that maintain `eligible`.
     indexes: BTreeMap<String, SecondaryIndex>,
-    /// The index declarations (field lists), needed to recompute keys from a record's fields.
+    /// Legacy secondary-index declarations (field lists), needed to recompute keys from a record's fields.
     index_specs: Vec<IndexSpec>,
+    /// Typed secondary-index declarations, keyed by `QueueIndex.name`.
+    typed_index_specs: Vec<QueueIndex>,
     /// Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37). Wholly
     /// SEPARATE from `items`/`eligible`/`by_key`: these are NOT claimable work — they never enter the
     /// eligibility index, do not appear in claim/peek/metrics-as-work, and survive input finalization. Both
@@ -393,9 +508,27 @@ impl ProjectionData {
             paused: false,
             indexes,
             index_specs: specs.to_vec(),
+            typed_index_specs: Vec::new(),
             side_records: BTreeMap::new(),
             instance_fences: BTreeMap::new(),
         }
+    }
+
+    /// Attach typed indexes to the projection. Intended for tests and typed queue projections.
+    pub fn with_typed_indexes(mut self, specs: &[QueueIndex]) -> Self {
+        for spec in specs {
+            let index = if match &spec.declaration {
+                IndexDeclaration::Single(def) => def.unique,
+                IndexDeclaration::Compound(def) => def.unique,
+            } {
+                SecondaryIndex::Unique(BTreeMap::new())
+            } else {
+                SecondaryIndex::NonUnique(BTreeMap::new())
+            };
+            self.indexes.insert(spec.name.clone(), index);
+        }
+        self.typed_index_specs = specs.to_vec();
+        self
     }
 
     /// Add `(item_id, keys)` to every covering index (Unique: set/replace the holder; NonUnique: add to
@@ -437,7 +570,17 @@ impl ProjectionData {
         }
     }
 
-    fn insert_pending(&mut self, item: PushItem) {
+    fn record_index_keys(
+        &self,
+        fields: &BTreeMap<String, Bytes>,
+        entity: Option<&Value>,
+    ) -> EngineResult<Vec<(String, Vec<u8>)>> {
+        let mut keys = legacy_index_keys(&self.index_specs, fields)?;
+        keys.extend(typed_index_keys(&self.typed_index_specs, entity)?);
+        Ok(keys)
+    }
+
+    fn insert_pending(&mut self, item: PushItem) -> EngineResult<()> {
         let seq = self.next_seq;
         self.next_seq += 1;
         let rec = ItemRecord {
@@ -450,6 +593,7 @@ impl ProjectionData {
             fields: item.fields,
             metadata: item.metadata,
             gate_keys: item.gate_keys,
+            entity_document: item.entity_document,
             state: ItemState::Pending,
             item_version: 1,
             attempt_count: 0,
@@ -462,9 +606,10 @@ impl ProjectionData {
         };
         self.eligible.insert(elig_key(&rec, &self.priority_model));
         self.by_key.insert(rec.client_item_key.clone(), rec.item_id);
-        let keys = index_keys(&self.index_specs, &rec.fields);
+        let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
         self.index_insert_keys(rec.item_id, &keys);
         self.items.insert(rec.item_id, rec);
+        Ok(())
     }
 
     /// Drive the lifecycle state machine for one item, keeping the eligibility index in sync and
@@ -501,7 +646,7 @@ impl ProjectionData {
             QueueCommand::CreateQueue(_) => Ok(()),
             QueueCommand::Push(c) => {
                 for it in &c.items {
-                    self.insert_pending(it.clone());
+                    self.insert_pending(it.clone())?;
                 }
                 Ok(())
             }
@@ -567,21 +712,59 @@ impl ProjectionData {
             }
             QueueCommand::UpdateFields(c) => {
                 let model = self.priority_model;
+                let (old_keys, old_elig, new_keys, new_elig) = {
+                    let rec = self.items.get(&c.item_id).ok_or(EngineError::NotFound)?;
+                    // A field/payload merge and/or a priority/not_before reschedule (no lifecycle change),
+                    // so it relies on `update_fields_validate` having run pre-commit.
+                    debug_assert!(
+                        !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
+                        "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
+                    );
+                    let old_keys =
+                        self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+                    let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_));
+                    let was_pending = rec.state == ItemState::Pending;
+                    let old_elig = (repricing && was_pending).then(|| elig_key(rec, &model));
+
+                    let mut next_fields = rec.fields.clone();
+                    for (k, op) in &c.field_ops {
+                        match op {
+                            Some(v) => {
+                                next_fields.insert(k.clone(), v.clone());
+                            }
+                            None => {
+                                next_fields.remove(k);
+                            }
+                        }
+                    }
+                    let next_entity = c
+                        .set_entity_document
+                        .as_ref()
+                        .or(rec.entity_document.as_ref());
+                    let new_keys = self.record_index_keys(&next_fields, next_entity)?;
+
+                    let mut next_rec = rec.clone();
+                    next_rec.fields = next_fields;
+                    if c.set_entity_document.is_some() {
+                        next_rec.entity_document = c.set_entity_document.clone();
+                    }
+                    if let PayloadUpdate::Set(p) = &c.payload {
+                        next_rec.payload = p.clone();
+                    }
+                    if let ScheduleUpdate::Set(p) = &c.set_priority {
+                        next_rec.priority = p.clone();
+                    }
+                    if let ScheduleUpdate::Set(nb) = &c.set_not_before {
+                        next_rec.not_before = *nb;
+                    }
+                    next_rec.item_version += 1;
+                    let new_elig = (repricing && was_pending).then(|| elig_key(&next_rec, &model));
+                    (old_keys, old_elig, new_keys, new_elig)
+                };
                 let rec = self
                     .items
                     .get_mut(&c.item_id)
                     .ok_or(EngineError::NotFound)?;
-                // A field/payload merge and/or a priority/not_before reschedule (no lifecycle change), so it
-                // relies on `update_fields_validate` having run pre-commit. Assert the pre-condition so a
-                // divergent replay is LOUD in debug/test (apply stays infallible in release).
-                debug_assert!(
-                    !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
-                    "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
-                );
-                // Secondary-index delta (ADR-010 §5): capture the keys this record holds BEFORE the field
-                // ops, apply the ops, then recompute AFTER; keys that left are removed, keys that arrived
-                // are inserted (unchanged keys are untouched). Read-after-write for the index.
-                let old_keys = index_keys(&self.index_specs, &rec.fields);
                 for (k, op) in &c.field_ops {
                     match op {
                         Some(v) => {
@@ -596,23 +779,16 @@ impl ProjectionData {
                     PayloadUpdate::Keep => {}
                     PayloadUpdate::Set(p) => rec.payload = p.clone(),
                 }
-                // Reschedule (BQ pqueue-7a96f929): a priority change re-keys the item in the eligibility
-                // order (the `EligKey` is priced on `priority`); `not_before` is not_before-independent in
-                // `EligKey`, so it only re-gates `eligible_candidates` (which filters `not_before <= now`).
-                // Capture the OLD eligibility key (while still Pending and pre-reprice), then re-insert the
-                // NEW key after — outside the `rec` borrow, since `self.eligible` is a disjoint field.
-                let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_));
-                let was_pending = rec.state == ItemState::Pending;
-                let old_elig = (repricing && was_pending).then(|| elig_key(rec, &model));
+                if c.set_entity_document.is_some() {
+                    rec.entity_document = c.set_entity_document.clone();
+                }
                 if let ScheduleUpdate::Set(p) = &c.set_priority {
                     rec.priority = p.clone();
                 }
                 if let ScheduleUpdate::Set(nb) = &c.set_not_before {
                     rec.not_before = *nb;
                 }
-                let new_elig = (repricing && was_pending).then(|| elig_key(rec, &model));
                 rec.item_version += 1;
-                let new_keys = index_keys(&self.index_specs, &rec.fields);
                 let item_id = c.item_id;
                 let removed: Vec<(String, Vec<u8>)> = old_keys
                     .iter()
@@ -716,7 +892,8 @@ impl ProjectionData {
                 let superseded_keys = self
                     .items
                     .get(&c.superseded_item_id)
-                    .map(|rec| index_keys(&self.index_specs, &rec.fields));
+                    .map(|rec| self.record_index_keys(&rec.fields, rec.entity_document.as_ref()))
+                    .transpose()?;
                 if let Some(rec) = self.items.get_mut(&c.superseded_item_id) {
                     let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
                     rec.superseded = true;
@@ -728,7 +905,7 @@ impl ProjectionData {
                     self.index_remove_keys(c.superseded_item_id, &keys);
                 }
                 self.by_key.remove(&c.client_item_key);
-                self.insert_pending(c.replacement.clone());
+                self.insert_pending(c.replacement.clone())?;
                 Ok(())
             }
             QueueCommand::LeaseExpired(c) => {
@@ -820,7 +997,8 @@ impl ProjectionData {
                         if rec.state == ItemState::Pending {
                             self.eligible.remove(&elig_key(&rec, &model));
                         }
-                        let keys = index_keys(&self.index_specs, &rec.fields);
+                        let keys =
+                            self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
                         self.index_remove_keys(rec.item_id, &keys);
                     }
                 }
@@ -1119,7 +1297,17 @@ impl ProjectionData {
         fields: &BTreeMap<String, Bytes>,
         exclude: Option<&ItemId>,
     ) -> EngineResult<()> {
-        for (name, key) in index_keys(&self.index_specs, fields) {
+        self.index_validate_with_entity(item_id, fields, None, exclude)
+    }
+
+    fn index_validate_with_entity(
+        &self,
+        item_id: &ItemId,
+        fields: &BTreeMap<String, Bytes>,
+        entity: Option<&Value>,
+        exclude: Option<&ItemId>,
+    ) -> EngineResult<()> {
+        for (name, key) in self.record_index_keys(fields, entity)? {
             if let Some(SecondaryIndex::Unique(map)) = self.indexes.get(&name)
                 && let Some(holder) = map.get(&key)
                 && holder != item_id
@@ -1136,8 +1324,15 @@ impl ProjectionData {
     pub fn index_validate_push(&self, items: &[PushItem]) -> EngineResult<()> {
         let mut batch: BTreeMap<(String, Vec<u8>), ItemId> = BTreeMap::new();
         for item in items {
-            self.index_validate(&item.item_id, &item.fields, None)?;
-            for (name, key) in index_keys(&self.index_specs, &item.fields) {
+            self.index_validate_with_entity(
+                &item.item_id,
+                &item.fields,
+                item.entity_document.as_ref(),
+                None,
+            )?;
+            for (name, key) in
+                self.record_index_keys(&item.fields, item.entity_document.as_ref())?
+            {
                 if matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_)))
                     && let Some(prev) = batch.insert((name, key), item.item_id)
                     && prev != item.item_id
@@ -1157,6 +1352,15 @@ impl ProjectionData {
         item_id: &ItemId,
         field_ops: &BTreeMap<String, Option<Bytes>>,
     ) -> EngineResult<()> {
+        self.index_validate_update_with_entity(item_id, field_ops, None)
+    }
+
+    pub fn index_validate_update_with_entity(
+        &self,
+        item_id: &ItemId,
+        field_ops: &BTreeMap<String, Option<Bytes>>,
+        entity: Option<&Value>,
+    ) -> EngineResult<()> {
         let rec = self.items.get(item_id).ok_or(EngineError::NotFound)?;
         let mut merged = rec.fields.clone();
         for (k, op) in field_ops {
@@ -1169,7 +1373,12 @@ impl ProjectionData {
                 }
             }
         }
-        self.index_validate(item_id, &merged, None)
+        self.index_validate_with_entity(
+            item_id,
+            &merged,
+            entity.or(rec.entity_document.as_ref()),
+            None,
+        )
     }
 
     /// Pre-commit unique-index validation for an upsert replacement: the replacement's keys are checked
@@ -1179,9 +1388,10 @@ impl ProjectionData {
         superseded_item_id: &ItemId,
         replacement: &PushItem,
     ) -> EngineResult<()> {
-        self.index_validate(
+        self.index_validate_with_entity(
             &replacement.item_id,
             &replacement.fields,
+            replacement.entity_document.as_ref(),
             Some(superseded_item_id),
         )
     }
@@ -1197,16 +1407,24 @@ impl ProjectionData {
 
     /// Resolve and validate a lookup against `index_name`: the index must exist and the supplied key value
     /// count must equal the spec's field count.
-    fn index_spec(&self, index_name: &str, key_arity: usize) -> EngineResult<&IndexSpec> {
-        let spec = self
-            .index_specs
-            .iter()
-            .find(|s| s.name == index_name)
-            .ok_or(EngineError::Invalid("unknown secondary index"))?;
-        if key_arity != spec.fields.len() {
-            return Err(EngineError::Invalid("secondary index key arity mismatch"));
+    fn index_spec(&self, index_name: &str, key_arity: usize) -> EngineResult<IndexLookupSpec<'_>> {
+        if let Some(spec) = self.index_specs.iter().find(|s| s.name == index_name) {
+            if key_arity != spec.fields.len() {
+                return Err(EngineError::Invalid("secondary index key arity mismatch"));
+            }
+            return Ok(IndexLookupSpec::Legacy(spec));
         }
-        Ok(spec)
+        if let Some(spec) = self.typed_index_specs.iter().find(|s| s.name == index_name) {
+            let arity = match &spec.declaration {
+                IndexDeclaration::Single(_) => 1,
+                IndexDeclaration::Compound(def) => def.fields.len(),
+            };
+            if key_arity != arity {
+                return Err(EngineError::Invalid("secondary index key arity mismatch"));
+            }
+            return Ok(IndexLookupSpec::Typed(spec));
+        }
+        Err(EngineError::Invalid("unknown secondary index"))
     }
 
     /// Exact composite-key get on a UNIQUE index (ADR-010 §6). `Ok(None)` if no item holds the key;
@@ -1216,10 +1434,13 @@ impl ProjectionData {
         index_name: &str,
         key_values: &[Vec<u8>],
     ) -> EngineResult<Option<IndexHit>> {
-        self.index_spec(index_name, key_values.len())?;
+        let info = self.index_spec(index_name, key_values.len())?;
+        if !info.unique() {
+            return Err(EngineError::Invalid("secondary index is not unique"));
+        }
         match self.indexes.get(index_name) {
             Some(SecondaryIndex::Unique(map)) => {
-                let key = encode_index_lookup_key(key_values);
+                let key = info.lookup_key(key_values)?;
                 Ok(map.get(&key).and_then(|id| self.index_hit(id)))
             }
             _ => Err(EngineError::Invalid("secondary index is not unique")),
@@ -1233,8 +1454,8 @@ impl ProjectionData {
         index_name: &str,
         key_values: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
-        self.index_spec(index_name, key_values.len())?;
-        let key = encode_index_lookup_key(key_values);
+        let info = self.index_spec(index_name, key_values.len())?;
+        let key = info.lookup_key(key_values)?;
         let ids: Vec<ItemId> = match self.indexes.get(index_name) {
             Some(SecondaryIndex::Unique(map)) => map.get(&key).copied().into_iter().collect(),
             Some(SecondaryIndex::NonUnique(map)) => map
@@ -1321,6 +1542,7 @@ mod tests {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            entity_document: None,
         }
     }
     fn env(command: QueueCommand) -> CommandEnvelope {

@@ -38,6 +38,10 @@ pub enum EngineError {
     /// The principal is not authorized (cross-tenant or missing operator privilege). The RESP
     /// adapter maps this to `-NOPERM` (TD-006 section 2); not an `-ERR pqueue ...` reply.
     Forbidden(&'static str),
+    /// The item's entity document violates the queue's compiled entity schema (ADR-011). Rejection
+    /// happens before log append, idempotency recording, SQL mutation, or projection apply.
+    /// Maps to `-ERR pqueue entity_schema_violation`.
+    EntitySchemaViolation(String),
     /// Underlying storage failure (adapter-level).
     Storage(String),
 }
@@ -57,6 +61,7 @@ impl EngineError {
             EngineError::RequestIdConflict => Some("-ERR pqueue request_id_conflict"),
             EngineError::RequestExpired => Some("-ERR pqueue request_expired"),
             EngineError::EpochFenced => Some("-ERR pqueue epoch_stale"),
+            EngineError::EntitySchemaViolation(_) => Some("-ERR pqueue entity_schema_violation"),
             // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR pqueue` mappings handled by the adapter.
             EngineError::NotFound
             | EngineError::QueueDefinitionConflict
@@ -81,6 +86,9 @@ impl std::fmt::Display for EngineError {
             EngineError::RequestIdConflict => write!(f, "request-id conflict"),
             EngineError::RequestExpired => write!(f, "request expired"),
             EngineError::EpochFenced => write!(f, "epoch fenced (stale owner)"),
+            EngineError::EntitySchemaViolation(msg) => {
+                write!(f, "entity schema violation: {msg}")
+            }
             EngineError::Forbidden(why) => write!(f, "forbidden: {why}"),
             EngineError::Storage(msg) => write!(f, "storage: {msg}"),
         }

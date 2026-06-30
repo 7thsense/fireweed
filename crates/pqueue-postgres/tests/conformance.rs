@@ -10,7 +10,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use pqueue_core::{EntitySchemaDocument, RequestId};
+use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
 use pqueue_postgres::PostgresBackend;
+use serde_json::json;
 
 /// A process-unique schema name per backend instance (pid + monotonic counter), so concurrent scenarios
 /// and repeated `make()` calls within a scenario never collide.
@@ -88,3 +91,108 @@ pg_conformance!(
     stale_epoch_append_is_fenced,
     epoch_fence_closes_pre_segment_window,
 );
+
+fn typed_qdef() -> pqueue_core::QueueDefinition {
+    let mut def = pqueue_conformance::qdef();
+    def.entity_schema = Some(
+        serde_json::from_value::<EntitySchemaDocument>(json!({
+            "entity_schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }
+        }))
+        .unwrap(),
+    );
+    def
+}
+
+fn typed_item(valid: bool) -> pqueue_engine::PushSpec {
+    pqueue_engine::PushSpec {
+        entity: Some(if valid {
+            json!({"name": "ok"})
+        } else {
+            json!({"count": 1})
+        }),
+        ..Default::default()
+    }
+}
+
+async fn schema_validation_backend<B>(backend: &B)
+where
+    B: ControlPlaneStore + PushPort + ProjectionRead,
+{
+    let shard = pqueue_conformance::shard();
+    backend.create_queue(typed_qdef()).await.unwrap();
+
+    let err = backend
+        .push(
+            &shard,
+            vec![typed_item(false)],
+            pqueue_conformance::ts(0),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
+
+    let rid = RequestId::new("req-1").unwrap();
+    let err = backend
+        .push_with_request_id(
+            &shard,
+            rid.clone(),
+            vec![typed_item(false)],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
+
+    let first = backend
+        .push_with_request_id(
+            &shard,
+            rid.clone(),
+            vec![typed_item(true)],
+            pqueue_conformance::ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+    let replay = backend
+        .push_with_request_id(
+            &shard,
+            rid,
+            vec![typed_item(true)],
+            pqueue_conformance::ts(3),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first, replay);
+    assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+}
+
+#[test]
+fn schema_validation_rejects_before_append_and_idempotency_on_postgres_log() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let backend = PostgresBackend::connect_in_schema(&url, &schema)
+                    .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                schema_validation_backend(&backend).await;
+            });
+        }
+        Err(_) => {
+            eprintln!(
+                "POSTGRES CONFORMANCE SKIPPED ({}) — set PQUEUE_PG_TEST_URL to a live DB",
+                "schema_validation_rejects_before_append_and_idempotency_on_postgres_log"
+            );
+        }
+    }
+}

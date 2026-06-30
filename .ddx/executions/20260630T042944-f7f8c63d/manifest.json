@@ -1,0 +1,37 @@
+{
+  "attempt_id": "20260630T042944-f7f8c63d",
+  "bead_id": "pqueue-b97b9b5a",
+  "base_rev": "9f5cf189bbc179654c09a9c1c3102ad3f0cd7658",
+  "created_at": "2026-06-30T04:29:44.911556161Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b97b9b5a",
+    "title": "ADR-011 axon-esf v0.3.2 pin and domain decision",
+    "description": "Adopt axon-esf as a tagged git dependency and settle the pqueue domain/API decision required by ADR-011. In-scope files: Cargo.toml, Cargo.lock, crates/pqueue-core/Cargo.toml, crates/pqueue-core/src/domain.rs, crates/pqueue-core/src/lib.rs, crates/pqueue/src/lib.rs if re-exports need changing. Use axon tag v0.3.2, not v0.3.0/v0.3.1 and not a path dependency. Add pqueue domain types that preserve name-based pqueue query ergonomics while wrapping axon_esf::IndexDeclaration, e.g. QueueIndex { name, declaration }. Add QueueDefinition entity_schema: Option\u003cEntitySchemaDocument\u003e and serde defaults. Keep legacy ADR-010 definitions readable or deliberately map/reject them with tests; do not silently drop existing secondary_indexes. Update create_queue validation for duplicate names, invalid index shapes, caps, and QueueDefinitionConflict when schema/index declarations differ. Out-of-scope: write-path validation and projection key maintenance.",
+    "acceptance": "cargo test -p pqueue-core core_domain_tests -- --nocapture passes; cargo tree -p pqueue-core | rg 'axon-core|axon-schema|axon-cypher-ast|reqwest|hyper|tower' returns no matches; rg 'path = .*axon|../axon|/Users/.*/axon' Cargo.toml crates/*/Cargo.toml returns no matches.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "area:pqueue-core",
+      "area:schemas",
+      "area:indexes",
+      "kind:implementation",
+      "adr-011",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "spec-id": "ADR-011"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T042944-f7f8c63d",
+    "prompt": ".ddx/executions/20260630T042944-f7f8c63d/prompt.md",
+    "manifest": ".ddx/executions/20260630T042944-f7f8c63d/manifest.json",
+    "result": ".ddx/executions/20260630T042944-f7f8c63d/result.json",
+    "checks": ".ddx/executions/20260630T042944-f7f8c63d/checks.json",
+    "usage": ".ddx/executions/20260630T042944-f7f8c63d/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b97b9b5a-20260630T042944-f7f8c63d"
+  },
+  "prompt_sha": "4b38dafd43e3c528d480eca55a9e97a8cb2be4742affaea175b310107d260047"
+}

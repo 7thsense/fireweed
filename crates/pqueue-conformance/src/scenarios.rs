@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortPolicy, GateKeyPolicy, GroupKey, ItemId, ItemState, LeaseToken, Metadata,
-    MetadataValue, PriorityValue, RequestId,
+    ClientItemKey, CohortPolicy, CompoundIndexDef, CompoundIndexField, EntitySchemaDocument,
+    GateKeyPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType, ItemId, ItemState, LeaseToken,
+    Metadata, MetadataValue, PriorityValue, QueueDefinition, QueueIndex, RequestId,
 };
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRequest, CommandPosition, EngineError, EngineResult,
@@ -19,9 +20,787 @@ use pqueue_engine::{
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
 // traits need not be imported here.
 use crate::{
-    ConformanceBackend, ConformanceCore, claim_req, commit, envelope, item, item_max, qdef, qkey,
-    shard, ts,
+    Adr011ConformanceBackend, ConformanceBackend, ConformanceCore, claim_req, commit, envelope,
+    item, item_max, qdef, qkey, shard, ts,
 };
+
+fn adr011_qdef_with_entity_schema() -> QueueDefinition {
+    QueueDefinition {
+        entity_schema: Some(
+            serde_json::from_value::<EntitySchemaDocument>(serde_json::json!({
+                "entity_schema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }
+            }))
+            .unwrap(),
+        ),
+        ..qdef()
+    }
+}
+
+fn adr011_qdef_with_indexes(indexes: Vec<QueueIndex>) -> QueueDefinition {
+    QueueDefinition {
+        typed_indexes: indexes,
+        ..qdef()
+    }
+}
+
+fn adr011_single_index(name: &str, field: &str, index_type: IndexType, unique: bool) -> QueueIndex {
+    QueueIndex {
+        name: name.to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: field.to_string(),
+            index_type,
+            unique,
+        }),
+    }
+}
+
+fn adr011_compound_index(
+    name: &str,
+    fields: impl IntoIterator<Item = (&'static str, IndexType)>,
+    unique: bool,
+) -> QueueIndex {
+    QueueIndex {
+        name: name.to_string(),
+        declaration: IndexDeclaration::Compound(CompoundIndexDef {
+            fields: fields
+                .into_iter()
+                .map(|(field, index_type)| CompoundIndexField {
+                    field: field.to_string(),
+                    index_type,
+                })
+                .collect(),
+            unique,
+        }),
+    }
+}
+
+fn adr011_entity(field: &str, value: &str) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        field.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
+    serde_json::Value::Object(m)
+}
+
+fn adr011_full_entity(
+    score: i64,
+    ratio: f64,
+    active: bool,
+    due_at: &str,
+    region: &str,
+    zone: i64,
+    external_id: Option<&str>,
+) -> serde_json::Value {
+    let mut entity = serde_json::json!({
+        "score": score,
+        "ratio": ratio,
+        "active": active,
+        "due_at": due_at,
+        "region": region,
+        "zone": zone,
+    });
+    if let Some(external_id) = external_id {
+        entity["external_id"] = serde_json::Value::String(external_id.to_string());
+    }
+    entity
+}
+
+fn adr011_key(parts: &[&str]) -> Vec<Vec<u8>> {
+    parts.iter().map(|part| part.as_bytes().to_vec()).collect()
+}
+
+fn adr011_typed_index_qdef() -> QueueDefinition {
+    adr011_qdef_with_indexes(vec![
+        adr011_single_index("by_score", "score", IndexType::Integer, false),
+        adr011_single_index("by_ratio", "ratio", IndexType::Float, false),
+        adr011_single_index("by_active", "active", IndexType::Boolean, true),
+        adr011_single_index("by_due_at", "due_at", IndexType::Datetime, false),
+        adr011_single_index("by_external_id", "external_id", IndexType::String, true),
+        adr011_compound_index(
+            "by_region_zone",
+            [("region", IndexType::String), ("zone", IndexType::Integer)],
+            false,
+        ),
+    ])
+}
+
+fn adr011_typed_push(entity: serde_json::Value) -> PushSpec {
+    PushSpec {
+        entity: Some(entity),
+        ..Default::default()
+    }
+}
+
+/// ADR-011 entity schemas reject invalid documents before visible state or request-id replay records.
+pub async fn adr011_schema_validation_rejects_before_visible_state<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_qdef_with_entity_schema())
+        .await
+        .unwrap();
+    let invalid = || PushSpec {
+        entity: Some(serde_json::json!({"count": 1})),
+        ..Default::default()
+    };
+    let valid = || PushSpec {
+        entity: Some(serde_json::json!({"name": "ok"})),
+        ..Default::default()
+    };
+
+    let err = b
+        .push(&shard(), vec![invalid()], ts(0), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0);
+
+    let rid = RequestId::new("adr011-schema-req").unwrap();
+    let err = b
+        .push_with_request_id(&shard(), rid.clone(), vec![invalid()], ts(1), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0);
+
+    let first = b
+        .push_with_request_id(&shard(), rid.clone(), vec![valid()], ts(2), None)
+        .await
+        .unwrap();
+    let replay = b
+        .push_with_request_id(&shard(), rid, vec![valid()], ts(3), None)
+        .await
+        .unwrap();
+    assert_eq!(first, replay);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+}
+
+/// ADR-011 typed secondary indexes preserve scalar semantics, datetime canonicalization, and compound
+/// name-based lookup through `IndexQueryPort`.
+pub async fn adr011_typed_scalar_and_compound_indexes_work<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let score_2 = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                2,
+                1.5,
+                false,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("A"),
+            ))],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap()[0];
+    let score_10 = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                10,
+                2.5,
+                true,
+                "2026-06-30T08:00:00-04:00",
+                "us-east",
+                7,
+                Some("B"),
+            ))],
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap()[0];
+
+    assert_eq!(
+        b.index_lookup(&shard(), "by_score", &adr011_key(&["2"]))
+            .await
+            .unwrap()[0]
+            .item_id,
+        score_2
+    );
+    assert_eq!(
+        b.index_lookup(&shard(), "by_score", &adr011_key(&["10"]))
+            .await
+            .unwrap()[0]
+            .item_id,
+        score_10
+    );
+    assert_eq!(
+        b.index_lookup(&shard(), "by_ratio", &adr011_key(&["1.5"]))
+            .await
+            .unwrap()[0]
+            .item_id,
+        score_2
+    );
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_active", &adr011_key(&["false"]))
+            .await
+            .unwrap()
+            .expect("false is indexed")
+            .item_id,
+        score_2
+    );
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_active", &adr011_key(&["true"]))
+            .await
+            .unwrap()
+            .expect("true is indexed")
+            .item_id,
+        score_10
+    );
+    let due_ids: Vec<_> = b
+        .index_lookup(
+            &shard(),
+            "by_due_at",
+            &adr011_key(&["2026-06-30T12:00:00Z"]),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.item_id)
+        .collect();
+    assert_eq!(
+        due_ids,
+        vec![score_2, score_10],
+        "equivalent datetimes canonicalize to the same key"
+    );
+    let compound_ids: Vec<_> = b
+        .index_lookup(&shard(), "by_region_zone", &adr011_key(&["us-east", "7"]))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.item_id)
+        .collect();
+    assert_eq!(compound_ids, vec![score_2, score_10]);
+}
+
+pub async fn adr011_typed_missing_fields_remain_sparse<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let with_external = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                1,
+                1.0,
+                false,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("A"),
+            ))],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap()[0];
+    let sparse = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                3,
+                3.0,
+                true,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                None,
+            ))],
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap()[0];
+
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["A"]))
+            .await
+            .unwrap()
+            .expect("external_id is indexed")
+            .item_id,
+        with_external
+    );
+    assert!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["missing"]))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        b.index_lookup(&shard(), "by_score", &adr011_key(&["3"]))
+            .await
+            .unwrap()[0]
+            .item_id,
+        sparse
+    );
+}
+
+pub async fn adr011_typed_unique_conflicts_are_atomic<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let original = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                1,
+                1.0,
+                false,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("DUP"),
+            ))],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap()[0];
+
+    let push_err = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                2,
+                2.0,
+                true,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("DUP"),
+            ))],
+            ts(1),
+            None,
+        )
+        .await;
+    assert!(matches!(push_err, Err(EngineError::Conflict)));
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["DUP"]))
+            .await
+            .unwrap()
+            .expect("original remains indexed")
+            .item_id,
+        original
+    );
+
+    let batch_err = b
+        .push(
+            &shard(),
+            vec![
+                adr011_typed_push(adr011_full_entity(
+                    3,
+                    3.0,
+                    false,
+                    "2026-06-30T12:00:00Z",
+                    "us-east",
+                    7,
+                    Some("BATCH"),
+                )),
+                adr011_typed_push(adr011_full_entity(
+                    4,
+                    4.0,
+                    true,
+                    "2026-06-30T12:00:00Z",
+                    "us-east",
+                    7,
+                    Some("BATCH"),
+                )),
+            ],
+            ts(2),
+            None,
+        )
+        .await;
+    assert!(matches!(batch_err, Err(EngineError::Conflict)));
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["BATCH"]))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+}
+
+pub async fn adr011_typed_update_fields_and_replace_rekey<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let id = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                1,
+                1.0,
+                false,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("OLD"),
+            ))],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap()[0];
+    b.update_fields(
+        &shard(),
+        id,
+        BTreeMap::new(),
+        PayloadUpdate::Keep,
+        Some(adr011_full_entity(
+            1,
+            1.0,
+            false,
+            "2026-06-30T12:00:00Z",
+            "us-west",
+            8,
+            Some("NEW"),
+        )),
+        None,
+        ts(1),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["OLD"]))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["NEW"]))
+            .await
+            .unwrap()
+            .expect("new key indexed")
+            .item_id,
+        id
+    );
+    assert!(
+        b.index_lookup(&shard(), "by_region_zone", &adr011_key(&["us-east", "7"]))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        b.index_lookup(&shard(), "by_region_zone", &adr011_key(&["us-west", "8"]))
+            .await
+            .unwrap()[0]
+            .item_id,
+        id
+    );
+
+    let key = ClientItemKey::new("replace-key").unwrap();
+    b.replace_if_pending(
+        &shard(),
+        &key,
+        None,
+        None,
+        None,
+        None,
+        BTreeMap::new(),
+        Metadata::default(),
+        Some(adr011_entity("external_id", "SAME")),
+        ts(2),
+        None,
+    )
+    .await
+    .unwrap();
+    let result = b
+        .replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            Metadata::default(),
+            Some(adr011_entity("external_id", "SAME")),
+            ts(3),
+            None,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "replacement can reclaim its superseded unique key: {:?}",
+        result
+    );
+}
+
+pub async fn adr011_typed_update_fields_unique_conflict_is_atomic<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![
+                adr011_typed_push(adr011_full_entity(
+                    1,
+                    1.0,
+                    false,
+                    "2026-06-30T12:00:00Z",
+                    "us-east",
+                    7,
+                    Some("A"),
+                )),
+                adr011_typed_push(adr011_full_entity(
+                    2,
+                    2.0,
+                    true,
+                    "2026-06-30T12:00:00Z",
+                    "us-east",
+                    8,
+                    Some("B"),
+                )),
+            ],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let result = b
+        .update_fields(
+            &shard(),
+            ids[1],
+            BTreeMap::new(),
+            PayloadUpdate::Keep,
+            Some(adr011_full_entity(
+                2,
+                2.0,
+                true,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                8,
+                Some("A"),
+            )),
+            None,
+            ts(1),
+            None,
+        )
+        .await;
+    assert!(matches!(result, Err(EngineError::Conflict)));
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 2);
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["A"]))
+            .await
+            .unwrap()
+            .expect("occupied unique key remains indexed")
+            .item_id,
+        ids[0]
+    );
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["B"]))
+            .await
+            .unwrap()
+            .expect("failed update keeps original key")
+            .item_id,
+        ids[1]
+    );
+}
+
+pub async fn adr011_typed_purge_frees_unique_key<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let id = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                1,
+                1.0,
+                false,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("PURGE"),
+            ))],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap()[0];
+    b.purge(&shard(), vec![id], false, ts(1), None)
+        .await
+        .unwrap();
+    assert!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["PURGE"]))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let new_id = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                2,
+                2.0,
+                true,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("PURGE"),
+            ))],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap()[0];
+    assert_ne!(id, new_id);
+}
+
+pub async fn adr011_typed_upsert_insert_unique_conflict_is_atomic<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let existing = b
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                1,
+                1.0,
+                false,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("UPSERT-DUP"),
+            ))],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap()[0];
+    let err = b
+        .replace_if_pending(
+            &shard(),
+            &ClientItemKey::new("fresh-upsert").unwrap(),
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            Metadata::default(),
+            Some(adr011_full_entity(
+                2,
+                2.0,
+                true,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("UPSERT-DUP"),
+            )),
+            ts(1),
+            None,
+        )
+        .await;
+    assert!(matches!(err, Err(EngineError::Conflict)));
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["UPSERT-DUP"]))
+            .await
+            .unwrap()
+            .expect("existing key remains indexed")
+            .item_id,
+        existing
+    );
+}
+
+pub async fn adr011_typed_log_replay_reconstructs_index_rows<
+    B: Adr011ConformanceBackend + ConformanceBackend,
+>(
+    make: impl Fn() -> B,
+) {
+    let a = make();
+    a.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let ids = a
+        .push(
+            &shard(),
+            vec![adr011_typed_push(adr011_full_entity(
+                1,
+                1.0,
+                false,
+                "2026-06-30T12:00:00Z",
+                "us-east",
+                7,
+                Some("REPLAY"),
+            ))],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let page = a.read_from(&shard(), None, 1000).await.unwrap();
+    let b = make();
+    b.create_queue(adr011_typed_index_qdef()).await.unwrap();
+    let b_epoch = b.current_epoch(&shard()).await.unwrap();
+    for (_pos, env) in &page.entries {
+        let env = env.clone();
+        b.write(move |lw, pw| {
+            let pos = lw.append(&shard(), std::slice::from_ref(&env), b_epoch)?;
+            pw.apply(&pos, std::slice::from_ref(&env))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        b.index_get_unique(&shard(), "by_external_id", &adr011_key(&["REPLAY"]))
+            .await
+            .unwrap()
+            .expect("typed index row reconstructed from log")
+            .item_id,
+        ids[0]
+    );
+    assert_eq!(
+        b.index_lookup(&shard(), "by_region_zone", &adr011_key(&["us-east", "7"]))
+            .await
+            .unwrap()[0]
+            .item_id,
+        ids[0]
+    );
+}
+
+pub async fn adr011_typed_schema_less_queue_unaffected<B: Adr011ConformanceBackend>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let ids = b
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+    assert!(
+        b.index_get_unique(&shard(), "nonexistent", &adr011_key(&["x"]))
+            .await
+            .is_err()
+    );
+}
 
 /// Eventual-apply backends MUST refuse upsert (Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD
 /// `replace_if_pending` is offered only on the atomic durability class). The refusal is the structured
@@ -40,6 +819,7 @@ pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )
@@ -83,6 +863,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             ]),
             PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
             None,
+            None,
             ts(20),
             None,
         )
@@ -113,6 +894,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
                 ("attempts".to_string(), Some(Bytes::from_static(b"2"))),
             ]),
             PayloadUpdate::Keep,
+            None,
             Some(v),
             ts(21),
             None,
@@ -151,6 +933,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             id,
             BTreeMap::from([("state".to_string(), Some(Bytes::from_static(b"x")))]),
             PayloadUpdate::Keep,
+            None,
             Some(v),
             ts(22),
             None,
@@ -165,6 +948,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             ItemId::new("90").unwrap(),
             BTreeMap::new(),
             PayloadUpdate::Keep,
+            None,
             None,
             ts(23),
             None,
@@ -188,6 +972,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             id,
             BTreeMap::new(),
             PayloadUpdate::Keep,
+            None,
             None,
             ts(31),
             None
@@ -218,6 +1003,7 @@ pub async fn update_fields_is_unavailable<B: ConformanceCore>(make: impl Fn() ->
             ItemId::new("1").unwrap(),
             BTreeMap::new(),
             PayloadUpdate::Keep,
+            None,
             None,
             ts(20),
             None
@@ -801,6 +1587,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )
@@ -822,6 +1609,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(2),
             None,
         )
@@ -860,6 +1648,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )
@@ -882,6 +1671,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(20),
             None,
         )
@@ -910,6 +1700,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(30),
             None,
         )
@@ -936,6 +1727,7 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
             Some(Bytes::from_static(b"payload")),
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )

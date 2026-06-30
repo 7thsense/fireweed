@@ -1,0 +1,187 @@
+{
+  "attempt_id": "20260630T072624-dd85d3ad",
+  "bead_id": "pqueue-103570d4",
+  "base_rev": "87b33f171a9261a03281a9fac5b6bf3604247b20",
+  "created_at": "2026-06-30T07:26:25.065417167Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-103570d4",
+    "title": "Validate ESF entity schemas before every pqueue write",
+    "description": "Compile QueueDefinition.entity_schema once per queue and validate typed item documents pre-commit on every write path. Previous fixes covered most backend paths, but focused review found remaining blockers: SegmentedObjectLogInMemoryBackend lacks a schema cache and accepts invalid entity documents through both push paths; MemoryBackend validates push/push_with_request_id and commit_transition lifecycle_items after cmd_seq/item counter reservation, so rejected writes consume externally visible item-id counter space. Fix these gaps. Rejection must happen before durable append, SQL mutation, projection apply, idempotency recording, command sequence mutation, or item-id counter reservation where validation can be known first. In-scope files: pqueue-memory, pqueue-server object_log_sqlite segmented in-memory backend, and targeted tests. Out-of-scope: secondary index key replacement.",
+    "acceptance": "cargo fmt --check passes; cargo test -p pqueue schema_validation -- --nocapture passes; cargo test -p pqueue-conformance storage_conformance -- --nocapture passes; backend-specific tests prove invalid entity push and push_with_request_id reject before durable mutation/idempotency on memory, sqlite log, sqlite relational, objectlog, object_log_sqlite composite paths, SegmentedObjectLogInMemoryBackend, and env-gated postgres paths where available; memory tests prove invalid push, push_with_request_id, and commit_transition lifecycle_items do not consume the next valid item id/counter-visible sequence; sqlite relational vectorized commit with invalid lifecycle_items rejects the entry without creating lifecycle items; rg -n 'build_push_items|record_push_idempotency|commit_command|append|counters.reserve|cmd_seq|validate_entity' crates/pqueue-memory/src crates/pqueue-sqlite/src crates/pqueue-postgres/src crates/pqueue-objectlog/src crates/pqueue-server/src/object_log_sqlite.rs shows validation immediately before push/request-id durable mutation sites and before counter reservation for invalid documents.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "area:pqueue-engine",
+      "area:pqueue-memory",
+      "area:pqueue-sqlite",
+      "area:pqueue-postgres",
+      "area:schemas",
+      "kind:implementation",
+      "adr-011",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "closing_commit_sha": "fa677c1508a666161e1853273a6bc119891eadd6",
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude-tui\",\"resolved_model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=117.0\",\"fallback_chain\":[]}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude-tui model=sonnet-4.6 reason=policy=default; score=117.0"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260630T053250-cb7b1d4d\",\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=117.0\",\"input_tokens\":1,\"output_tokens\":552,\"total_tokens\":553,\"cost_usd\":0,\"duration_ms\":2374050,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=553 model=sonnet-4.6"
+        },
+        {
+          "actor": "",
+          "body": "{\"candidate_ref\":\"refs/ddx/iterations/20260630T053250-cb7b1d4d/0\",\"cycle_index\":0,\"attempt_id\":\"20260630T053250-cb7b1d4d\",\"base_rev\":\"5b66c1739b52a2637e8dcf4c6a64d3921e54d7cc\",\"result_rev\":\"7a31c92eab45ebac5e9ca184f69b7aeb21b34405\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "candidate_cycle_pinned",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude-tui\",\"actual_model\":\"sonnet-4.6\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260630T053250-cb7b1d4d\",\"bead_id\":\"pqueue-103570d4\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=default powerClass=standard model=sonnet-4.6 harness=claude-tui"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"escalation_count\":0,\"estimated_difficulty\":\"\",\"fallback_chain\":[],\"final_power_class\":\"\",\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"resolved_model\":\"sonnet-4.6\",\"resolved_power_class\":\"\",\"resolved_provider\":\"claude-tui\",\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "ddx work",
+          "summary": "provider=claude-tui model=sonnet-4.6"
+        },
+        {
+          "actor": "erik",
+          "body": "success\npowerClass=standard\ncycle_trace=[{\"cycle_index\":0,\"attempt_id\":\"20260630T053250-cb7b1d4d\",\"result_rev\":\"7a31c92eab45ebac5e9ca184f69b7aeb21b34405\",\"implementer_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"review_result\":{},\"final_decision\":\"success\",\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}]\ndecision_audit={\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"profile\":\"default\",\"routing_intent_source\":\"default\",\"inferred_power_class\":\"standard\",\"requested_power_class\":\"standard\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"default\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=a30d5aa88168f0e48e5345d47665111979c47cf4\nbase_rev=5b66c1739b52a2637e8dcf4c6a64d3921e54d7cc",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "success"
+        },
+        {
+          "actor": "",
+          "body": "",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "reopen",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude-tui\",\"resolved_model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=117.0\",\"fallback_chain\":[]}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude-tui model=sonnet-4.6 reason=policy=default; score=117.0"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260630T061816-68ba5d81\",\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=117.0\",\"input_tokens\":1,\"output_tokens\":125,\"total_tokens\":126,\"cost_usd\":0,\"duration_ms\":1571950,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=126 model=sonnet-4.6"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude-tui\",\"actual_model\":\"sonnet-4.6\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260630T061816-68ba5d81\",\"bead_id\":\"pqueue-103570d4\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=default powerClass=standard model=sonnet-4.6 harness=claude-tui"
+        },
+        {
+          "actor": "erik",
+          "body": "DDx validation: the implementation commit was rewritten after the first commit (2 commit events; first 8c4d453eef2a, final implementation_rev 4d11b12290c9). The execute-bead contract requires exactly one commit with no post-commit amend/rebase. Detected by DDx, not an implementation failure; rerun the bead in a fresh attempt.\npowerClass=standard\ndecision_audit={\"failure_class\":\"attempt_integrity\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"profile\":\"default\",\"routing_intent_source\":\"default\",\"inferred_power_class\":\"standard\",\"requested_power_class\":\"standard\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"default\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=d5e89a65060461edff6fad8e08c7c1288457123f\nbase_rev=af8518033e5c556144e1855e57c207faefa700d2\noutcome_reason=attempt_integrity",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260630T064832-cad961d7\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":29121535,\"output_tokens\":72619,\"total_tokens\":29194154,\"cost_usd\":0,\"duration_ms\":1870276,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=29194154 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "",
+          "body": "{\"candidate_ref\":\"refs/ddx/iterations/20260630T064832-cad961d7/0\",\"cycle_index\":0,\"attempt_id\":\"20260630T064832-cad961d7\",\"base_rev\":\"e37fc5a65c05c20eb0d5029cbd9c7b6bdd04ed3b\",\"result_rev\":\"9cc5b6cabf7c3c5b283816777e822cead7be68cd\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "candidate_cycle_pinned",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260630T064832-cad961d7\",\"bead_id\":\"pqueue-103570d4\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=default powerClass=standard model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"escalation_count\":0,\"estimated_difficulty\":\"\",\"fallback_chain\":[],\"final_power_class\":\"\",\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"resolved_model\":\"gpt-5.4-mini\",\"resolved_power_class\":\"\",\"resolved_provider\":\"codex\",\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "ddx work",
+          "summary": "provider=codex model=gpt-5.4-mini"
+        },
+        {
+          "actor": "erik",
+          "body": "success\npowerClass=standard\ncycle_trace=[{\"cycle_index\":0,\"attempt_id\":\"20260630T064832-cad961d7\",\"result_rev\":\"9cc5b6cabf7c3c5b283816777e822cead7be68cd\",\"implementer_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"review_result\":{},\"final_decision\":\"success\",\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}]\ndecision_audit={\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"default\",\"inferred_power_class\":\"standard\",\"requested_power_class\":\"standard\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"default\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=fa677c1508a666161e1853273a6bc119891eadd6\nbase_rev=e37fc5a65c05c20eb0d5029cbd9c7b6bdd04ed3b",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "success"
+        },
+        {
+          "actor": "",
+          "body": "",
+          "created_at": "2026-06-30T07:23:50.241556829Z",
+          "kind": "reopen",
+          "source": "",
+          "summary": ""
+        }
+      ],
+      "session_id": "eb-41db99f8",
+      "spec-id": "ADR-011"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T072624-dd85d3ad",
+    "prompt": ".ddx/executions/20260630T072624-dd85d3ad/prompt.md",
+    "manifest": ".ddx/executions/20260630T072624-dd85d3ad/manifest.json",
+    "result": ".ddx/executions/20260630T072624-dd85d3ad/result.json",
+    "checks": ".ddx/executions/20260630T072624-dd85d3ad/checks.json",
+    "usage": ".ddx/executions/20260630T072624-dd85d3ad/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-103570d4-20260630T072624-dd85d3ad"
+  },
+  "prompt_sha": "c4413911d1eb2ee5056d55e990b236a59b53f2accbf144450deef3677b9ab9bf"
+}

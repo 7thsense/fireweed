@@ -17,13 +17,14 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort,
-    IdempotencyDecision, ItemView, LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead,
-    ProjectionWriter, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters,
-    QueueIdempotencyCache, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, TickReport, UpsertOutcome, UpsertPort,
-    build_push_items, require_item_level_claim, validate_gate_command, validate_gate_push,
+    CommandEnvelope, CommandId, CommandPosition, CompiledSchema, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
+    FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView, LeaseView, LiveItemView, LogRead,
+    LogWriter, ProjectionRead, ProjectionWriter, PurgePort, PushCommand, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
+    TickReport, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
+    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
 };
 use pqueue_objectlog::LocalObjectLog;
 use pqueue_objectlog::segmented::{
@@ -65,6 +66,25 @@ fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     Ok(BodyHash(h.finish()))
 }
 
+fn compile_queue_schema(definition: &QueueDefinition) -> EngineResult<Option<Arc<CompiledSchema>>> {
+    definition
+        .entity_schema
+        .as_ref()
+        .and_then(|esd| esd.entity_schema.as_ref())
+        .map(|schema_val| compile_entity_schema(schema_val))
+        .transpose()
+}
+
+fn validate_push_items(
+    schema: Option<&Arc<CompiledSchema>>,
+    items: &[PushSpec],
+) -> EngineResult<()> {
+    for item in items {
+        validate_entity(schema, item.entity.as_ref())?;
+    }
+    Ok(())
+}
+
 fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp {
     let total = now.seconds as i128 * 1_000_000_000
         + now.nanoseconds as i128
@@ -80,6 +100,7 @@ pub struct ObjectLogSqliteBackend {
     log: LocalObjectLog,
     projection: SqliteProjectionStore,
     queues: Mutex<HashMap<QueueKey, QueueDefinition>>,
+    schemas: Mutex<HashMap<QueueKey, Arc<CompiledSchema>>>,
     idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
     counters: QueueCounters,
     command_seq: AtomicU64,
@@ -97,6 +118,7 @@ impl ObjectLogSqliteBackend {
             log: LocalObjectLog::open(object_root)?,
             projection: SqliteProjectionStore::open(projection_path)?,
             queues: Mutex::new(HashMap::new()),
+            schemas: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(HashMap::new()),
             counters: QueueCounters::default(),
             command_seq: AtomicU64::new(0),
@@ -278,6 +300,13 @@ impl ControlPlaneStore for ObjectLogSqliteBackend {
                 .lock()
                 .expect("object-log sqlite queues poisoned")
                 .insert(key.clone(), definition);
+            let compiled_schema = compile_queue_schema(&outcome.definition)?;
+            if let Some(cs) = compiled_schema {
+                self.schemas
+                    .lock()
+                    .expect("object-log sqlite schemas poisoned")
+                    .insert(key.clone(), cs);
+            }
             self.replay_queue(&key).await?;
             Ok(outcome)
         }
@@ -339,6 +368,13 @@ impl PushPort for ObjectLogSqliteBackend {
             validate_gate_push(self.supports_gates(), &items)?;
             let _guard = self.op_lock.lock().await;
             let definition = self.queue_definition(shard).await?;
+            let schema = self
+                .schemas
+                .lock()
+                .expect("object-log sqlite schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
             let epoch = expected_epoch.unwrap_or(self.log.current_epoch(shard)?);
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) = build_push_items(
@@ -368,9 +404,16 @@ impl PushPort for ObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         async move {
             validate_gate_push(self.supports_gates(), &items)?;
-            let fingerprint = push_body_hash(&items)?;
             let _guard = self.op_lock.lock().await;
             let definition = self.queue_definition(shard).await?;
+            let schema = self
+                .schemas
+                .lock()
+                .expect("object-log sqlite schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
             let expires_at = request_expires_at(now, definition.request_id_retention_ms);
             {
                 let mut idempotency = self.idempotency.lock().expect("idempotency poisoned");
@@ -492,6 +535,7 @@ impl UpsertPort for ObjectLogSqliteBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _metadata: Metadata,
+        _entity: Option<serde_json::Value>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -678,6 +722,7 @@ pub struct SegmentedObjectLogSqliteBackend {
     log: Arc<FsSegmentedLog>,
     projection: Arc<SqliteProjectionStore>,
     queues: Mutex<HashMap<QueueKey, QueueDefinition>>,
+    schemas: Mutex<HashMap<QueueKey, Arc<CompiledSchema>>>,
     /// Cached current `assignment_epoch` per queue (avoids a manifest read on the hot push path and feeds
     /// the flusher's seal). Authoritative epoch still lives in the manifest; this only mirrors it.
     epochs: Mutex<HashMap<QueueKey, u64>>,
@@ -744,6 +789,7 @@ impl SegmentedObjectLogSqliteBackend {
             log,
             projection,
             queues: Mutex::new(HashMap::new()),
+            schemas: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
             coords: Mutex::new(HashMap::new()),
             mutate_locks: Mutex::new(HashMap::new()),
@@ -1104,6 +1150,13 @@ impl ControlPlaneStore for SegmentedObjectLogSqliteBackend {
                 .lock()
                 .expect("segmented queues poisoned")
                 .insert(key.clone(), definition);
+            let compiled_schema = compile_queue_schema(&outcome.definition)?;
+            if let Some(cs) = compiled_schema {
+                self.schemas
+                    .lock()
+                    .expect("segmented schemas poisoned")
+                    .insert(key.clone(), cs);
+            }
             let epoch = self.log.current_epoch(&key).unwrap_or(0);
             self.set_epoch(&key, epoch);
             let _ = self.coord_for(&key);
@@ -1182,6 +1235,13 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
                     .map(|d| d.retry_policy.max_attempts)
                     .ok_or(EngineError::NotFound)?
             };
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
             let epoch = expected_epoch.unwrap_or_else(|| self.cached_epoch(shard));
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
@@ -1207,7 +1267,6 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         async move {
             validate_gate_push(self.supports_gates(), &items)?;
-            let fingerprint = push_body_hash(&items)?;
             // Serialize the request-id'd push with claims/commits on this queue so the cache
             // check + segment commit + record is atomic (the request-id path is not the hot path).
             let mutate = self.mutate_lock_for(shard);
@@ -1217,6 +1276,14 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
                 let d = g.get(shard).ok_or(EngineError::NotFound)?;
                 (d.retry_policy.max_attempts, d.request_id_retention_ms)
             };
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
+            let fingerprint = push_body_hash(&items)?;
             let expires_at = request_expires_at(now, retention_ms);
             {
                 let mut idem = self
@@ -1340,6 +1407,7 @@ impl UpsertPort for SegmentedObjectLogSqliteBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _metadata: Metadata,
+        _entity: Option<serde_json::Value>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -1495,6 +1563,9 @@ pub struct SegmentedObjectLogInMemoryBackend {
     /// query ports). A derived, rebuildable view — `read_all` replay reconstructs it on open.
     projections: Mutex<HashMap<QueueKey, Arc<Mutex<ProjectionData>>>>,
     queues: Mutex<HashMap<QueueKey, QueueDefinition>>,
+    /// Compiled entity schema per queue (ADR-011). Populated at `create_queue` time; consulted on every
+    /// push path to reject invalid entity documents before counter reservation or durable append.
+    schemas: Mutex<HashMap<QueueKey, Arc<CompiledSchema>>>,
     epochs: Mutex<HashMap<QueueKey, u64>>,
     coords: Mutex<HashMap<QueueKey, Arc<ShardCoord>>>,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
@@ -1518,6 +1589,7 @@ impl SegmentedObjectLogInMemoryBackend {
             log,
             projections: Mutex::new(HashMap::new()),
             queues: Mutex::new(HashMap::new()),
+            schemas: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
             coords: Mutex::new(HashMap::new()),
             mutate_locks: Mutex::new(HashMap::new()),
@@ -1794,13 +1866,16 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
         async move {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             self.log.create_queue(&definition)?;
-            let proj = Arc::new(Mutex::new(ProjectionData::new(
-                definition.priority_model,
-                definition.ordering_mode,
-                definition.max_rank_error,
-                definition.recurrence,
-                &definition.secondary_indexes,
-            )));
+            let proj = Arc::new(Mutex::new(
+                ProjectionData::new(
+                    definition.priority_model,
+                    definition.ordering_mode,
+                    definition.max_rank_error,
+                    definition.recurrence,
+                    &definition.secondary_indexes,
+                )
+                .with_typed_indexes(&definition.typed_indexes),
+            ));
             self.projections
                 .lock()
                 .expect("segmented inmemory projections poisoned")
@@ -1809,6 +1884,13 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
                 .lock()
                 .expect("segmented queues poisoned")
                 .insert(key.clone(), definition.clone());
+            let compiled_schema = compile_queue_schema(&definition)?;
+            if let Some(cs) = compiled_schema {
+                self.schemas
+                    .lock()
+                    .expect("segmented inmemory schemas poisoned")
+                    .insert(key.clone(), cs);
+            }
             let epoch = self.log.current_epoch(&key).unwrap_or(0);
             self.set_epoch(&key, epoch);
             let _ = self.coord_for(&key);
@@ -1888,6 +1970,14 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
                     .map(|d| d.retry_policy.max_attempts)
                     .ok_or(EngineError::NotFound)?
             };
+            // Pre-commit entity schema validation (ADR-011): reject before counter reservation or append.
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented inmemory schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
             let epoch = expected_epoch.unwrap_or_else(|| self.cached_epoch(shard));
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
@@ -1922,6 +2012,15 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
                 let d = g.get(shard).ok_or(EngineError::NotFound)?;
                 (d.retry_policy.max_attempts, d.request_id_retention_ms)
             };
+            // Pre-commit entity schema validation (ADR-011): reject before counter reservation.
+            // A rejected append leaves no idempotency entry (record happens only on success below).
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented inmemory schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
             let expires_at = request_expires_at(now, retention_ms);
             {
                 let mut idem = self
@@ -2046,6 +2145,7 @@ impl UpsertPort for SegmentedObjectLogInMemoryBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _metadata: Metadata,
+        _entity: Option<serde_json::Value>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -2218,10 +2318,11 @@ impl ProjectionRead for SegmentedObjectLogInMemoryBackend {
 mod recovery_tests {
     use super::*;
     use pqueue_core::{
-        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-        PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
+        EligibilityPolicy, EntitySchemaDocument, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RequestId, RetryPolicy,
     };
-    use pqueue_engine::{ControlPlaneStore, ProjectionRead, PushPort};
+    use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
+    use serde_json::json;
 
     /// A unique scratch directory under the system temp dir, removed on drop.
     struct TmpDir {
@@ -2283,7 +2384,26 @@ mod recovery_tests {
             max_claim_batch_size: 1000,
             max_eligible_group_size: None,
             secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
         }
+    }
+
+    fn typed_queue_def(tenant: &str, queue: &str) -> QueueDefinition {
+        let mut def = queue_def(tenant, queue);
+        def.entity_schema = Some(
+            serde_json::from_value::<EntitySchemaDocument>(json!({
+                "entity_schema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        def
     }
 
     fn spec(payload: &str) -> PushSpec {
@@ -2297,6 +2417,21 @@ mod recovery_tests {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            entity: None,
+        }
+    }
+
+    fn typed_valid_spec(payload: &str) -> PushSpec {
+        PushSpec {
+            entity: Some(json!({"name": payload})),
+            ..spec(payload)
+        }
+    }
+
+    fn typed_invalid_spec(payload: &str) -> PushSpec {
+        PushSpec {
+            entity: Some(json!({"count": payload.len()})),
+            ..spec(payload)
         }
     }
 
@@ -2486,5 +2621,83 @@ mod recovery_tests {
         );
         assert_eq!(stats.tail_replayed, 0);
         assert_eq!(b2.metrics(&shard).await.unwrap().pending, N as u64);
+    }
+
+    async fn schema_validation_backend<B>(backend: &B)
+    where
+        B: ControlPlaneStore + PushPort + ProjectionRead,
+    {
+        let def = typed_queue_def("t", "q");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+
+        let err = backend
+            .push(&shard, vec![typed_invalid_spec("bad")], ts(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
+
+        let rid = RequestId::new("req-1").unwrap();
+        let err = backend
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![typed_invalid_spec("bad")],
+                ts(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
+
+        let first = backend
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![typed_valid_spec("ok")],
+                ts(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+
+        let replay = backend
+            .push_with_request_id(&shard, rid, vec![typed_valid_spec("ok")], ts(), None)
+            .await
+            .unwrap();
+        assert_eq!(first, replay, "valid replay must reuse the committed ids");
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+    }
+
+    #[tokio::test]
+    async fn object_log_sqlite_schema_validation_rejects_before_append_and_idempotency() {
+        let tmp = TmpDir::new("schema-file");
+        let backend = ObjectLogSqliteBackend::open(tmp.object_root(), &tmp.projection()).unwrap();
+        schema_validation_backend(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn segmented_object_log_sqlite_schema_validation_rejects_before_append_and_idempotency() {
+        let tmp = TmpDir::new("schema-segmented");
+        let backend = SegmentedObjectLogSqliteBackend::open(
+            tmp.object_root(),
+            &tmp.projection(),
+            seal_each_config(),
+        )
+        .unwrap();
+        schema_validation_backend(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn segmented_object_log_inmemory_schema_validation_rejects_before_append_and_idempotency()
+    {
+        let tmp = TmpDir::new("schema-seginmem");
+        let backend =
+            SegmentedObjectLogInMemoryBackend::open(tmp.object_root(), seal_each_config()).unwrap();
+        schema_validation_backend(&backend).await;
     }
 }

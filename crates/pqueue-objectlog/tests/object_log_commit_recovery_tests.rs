@@ -84,6 +84,8 @@ fn big_qdef(tenant: &str, queue: &str) -> QueueDefinition {
         max_claim_batch_size: 10_000_000,
         max_eligible_group_size: None,
         secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
     }
 }
 

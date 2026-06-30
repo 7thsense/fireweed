@@ -161,6 +161,7 @@ async fn retention_tombstone_survives_reopen() {
                 None,
                 BTreeMap::new(),
                 Default::default(),
+                None,
                 ts(0),
                 None,
             )
@@ -197,6 +198,7 @@ async fn retention_tombstone_survives_reopen() {
             None,
             BTreeMap::new(),
             Default::default(),
+            None,
             ts(10),
             None
         )

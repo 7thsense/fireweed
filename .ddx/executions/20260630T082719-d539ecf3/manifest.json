@@ -1,0 +1,96 @@
+{
+  "attempt_id": "20260630T082719-d539ecf3",
+  "bead_id": "pqueue-4872154a",
+  "base_rev": "227c06764ae81e1b9e72147b372e996e4f7d8e89",
+  "created_at": "2026-06-30T08:27:19.88057738Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-4872154a",
+    "title": "Replace in-memory secondary indexes with axon-esf typed keys",
+    "description": "Replace ADR-010 raw length-prefixed byte index key encoding in crates/pqueue-projection with axon_esf typed index key helpers from axon-esf v0.3.2 for typed queues, while preserving legacy IndexSpec raw-byte behavior. Previous attempt landed typed keys but review found blockers: update_fields/set_entity_document None clears the stored entity and typed index membership even though None means leave unchanged; typed lookups through the old Vec\u003cVec\u003cu8\u003e\u003e API parse JSON ambiguously and reject string values like 123/true/null; legacy IndexSpec byte indexes regressed to lossy UTF-8 string semantics; typed indexes are attached only in MemoryBackend::create_queue, not InMemoryProjection::ensure_shard or objectlog projection construction/rebuild paths. Fix these before advancing. For this bead, keep legacy raw-byte lookup semantics intact; do not invent the final typed query API here beyond making the old raw API safe/explicit. In-scope files: crates/pqueue-projection/src/lib.rs, compose_impls if needed, memory/objectlog projection construction call sites, secondary index tests. Out-of-scope: relational SQL parity and public typed query API beyond non-ambiguous safe behavior.",
+    "acceptance": "cargo fmt --check passes; cargo test -p pqueue secondary_indexes -- --nocapture passes; cargo test -p pqueue-projection --lib -- --nocapture passes; tests cover update_fields with entity None preserving typed index membership and stored entity; legacy IndexSpec arbitrary invalid UTF-8 byte values remain byte-exact and non-lossy; typed string lookup values that are valid JSON tokens (123, true, false, null) are either queryable correctly through a documented unambiguous path or rejected with a clear Invalid error pending pqueue-9a733f91, not silently mis-typed; typed indexes are attached in MemoryBackend and every in-memory projection/objectlog projection constructor or rebuild path that receives QueueDefinition; rg -n 'from_utf8_lossy|encode_index_key|with_typed_indexes|typed_index_specs|set_entity_document' crates/pqueue-projection/src crates/pqueue-memory/src crates/pqueue-objectlog/src crates/pqueue-server/src/object_log_sqlite.rs shows no production lossy legacy index encoding and all projection constructors carry typed indexes where QueueDefinition is available.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "area:pqueue-projection",
+      "area:indexes",
+      "kind:implementation",
+      "adr-011",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "closing_commit_sha": "145f1a8bd9ef01f78719e61219099b9c1d489501",
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260630T075521-4bd243ae\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":14710908,\"output_tokens\":75868,\"total_tokens\":14786776,\"cost_usd\":0,\"duration_ms\":1495381,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=14786776 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "",
+          "body": "{\"candidate_ref\":\"refs/ddx/iterations/20260630T075521-4bd243ae/0\",\"cycle_index\":0,\"attempt_id\":\"20260630T075521-4bd243ae\",\"base_rev\":\"48627798de0dfcf53d1d8d478fb79eb512089bec\",\"result_rev\":\"1eccd001be690c87befd2be28771c3250721fb5f\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "candidate_cycle_pinned",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260630T075521-4bd243ae\",\"bead_id\":\"pqueue-4872154a\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=default powerClass=standard model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"escalation_count\":0,\"estimated_difficulty\":\"\",\"fallback_chain\":[],\"final_power_class\":\"\",\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"resolved_model\":\"gpt-5.4-mini\",\"resolved_power_class\":\"\",\"resolved_provider\":\"codex\",\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "ddx work",
+          "summary": "provider=codex model=gpt-5.4-mini"
+        },
+        {
+          "actor": "erik",
+          "body": "success\npowerClass=standard\ncycle_trace=[{\"cycle_index\":0,\"attempt_id\":\"20260630T075521-4bd243ae\",\"result_rev\":\"1eccd001be690c87befd2be28771c3250721fb5f\",\"implementer_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"review_result\":{},\"final_decision\":\"success\",\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}]\ndecision_audit={\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"default\",\"inferred_power_class\":\"standard\",\"requested_power_class\":\"standard\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"default\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=145f1a8bd9ef01f78719e61219099b9c1d489501\nbase_rev=48627798de0dfcf53d1d8d478fb79eb512089bec",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "success"
+        },
+        {
+          "actor": "",
+          "body": "",
+          "created_at": "2026-06-30T08:24:31.746946371Z",
+          "kind": "reopen",
+          "source": "",
+          "summary": ""
+        }
+      ],
+      "session_id": "eb-bcf89f2f",
+      "spec-id": "ADR-011"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T082719-d539ecf3",
+    "prompt": ".ddx/executions/20260630T082719-d539ecf3/prompt.md",
+    "manifest": ".ddx/executions/20260630T082719-d539ecf3/manifest.json",
+    "result": ".ddx/executions/20260630T082719-d539ecf3/result.json",
+    "checks": ".ddx/executions/20260630T082719-d539ecf3/checks.json",
+    "usage": ".ddx/executions/20260630T082719-d539ecf3/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-4872154a-20260630T082719-d539ecf3"
+  },
+  "prompt_sha": "86c0014149e8a81bfa382605cb22309fe8b91147b986432d4500a2cf6064b8a7"
+}

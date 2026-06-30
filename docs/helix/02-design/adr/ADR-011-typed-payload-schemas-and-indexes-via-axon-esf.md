@@ -1,6 +1,6 @@
 # ADR-011: Typed Payload Schemas and Secondary Indexes via the Shared `axon-esf` ESF Vocabulary
 
-- Status: Proposed (design; pqueue implementation BLOCKED on an axon release — see §7)
+- Status: Accepted / Implemented
 - Date: 2026-06-28
 - Supersedes: ADR-010's **declaration shape** (`IndexSpec { name, fields: Vec<String>, unique }` — the untyped, byte-keyed interim form). ADR-010's maintain-on-apply mechanism, per-queue scope, and in-memory-first phasing **stand**.
 - Relates: ADR-008 (queue as shard unit + two projection families), ADR-009 (encapsulated library surface + structured ItemId), FAC-1 (`update_fields`), CONTRACT-007 (consumer "cayce" index/schema needs), and **axon ADR-002** (ESF = JSON Schema 2020-12 entity bodies + Axon vocabulary).
@@ -50,9 +50,14 @@ mirroring its types, and not by depending on the full `axon-schema`.
    pqueue consumes its `entity_schema` (validation) and its index declarations (indexing) from the *same*
    document. No parallel pqueue copy of either the schema or the index defs.
 
-4. **Consumed as a git dependency**, pinned to an axon release tag — **no path dependencies**
-   (`axon-esf = { git = "ssh://…/axon", tag = "v0.3.x" }`). This also sets the direction to move pqueue's
-   other sibling path-deps (fjord/object-log/heimq) onto git pins over time.
+4. **Consumed as a git dependency**, pinned to axon release tag `v0.3.2` — **no path dependencies**
+   (`axon-esf = { git = "https://github.com/DocumentDrivenDX/axon", tag = "v0.3.2" }`). This also sets
+   the direction to move pqueue's other sibling path-deps (fjord/object-log/heimq) onto git pins over
+   time.
+
+5. **Named pqueue indexes wrap ESF declarations.** ESF single and compound index declarations do not carry
+   pqueue's query name, so pqueue stores them as `QueueIndex { name, declaration }`. The `declaration` is
+   axon's ESF type; `name` is the pqueue lookup handle used by `IndexQueryPort` and the public facade.
 
 This supersedes ADR-010's `IndexSpec`. ADR-010's maintain-on-apply pattern, per-queue scope, unique-conflict
 pre-commit validation, and in-memory-first phasing are unchanged — only the declaration/key *vocabulary*
@@ -66,9 +71,9 @@ becomes axon's, and validation gains the typed entity schema.
   for both the types **and** the encoder removes the seam entirely.
 - **It is the cleanest possible alignment with axon.** pqueue consumes axon ESF Layer 1 (pure JSON Schema)
   + Layer 4 (typed index defs) verbatim — exactly the layers axon kept reusable. No `x-` extension hazard.
-- **The dependency is thin and verified.** `axon-esf` (axon v0.3.0) depends on `serde` + `serde_json` +
-  `jsonschema` only; the axon workspace pins `jsonschema = { default-features = false }`, and
-  `cargo tree -p axon-esf` shows **no** reqwest/hyper/tower/axon-core/cypher-ast.
+- **The dependency is thin and verified.** `axon-esf` (axon `v0.3.2`) depends on `serde` + `serde_json` +
+  `jsonschema` only; the axon workspace pins `jsonschema = { default-features = false }`, and dependency
+  proof below shows **no** reqwest/hyper/tower/axon-core/cypher-ast in pqueue's `pqueue-core` tree.
 - **The typed model is what indexing wanted all along.** `IndexType` *is* the field typing the "is it
   strings?" question was really asking for; adopting it answers that question instead of inventing a parallel
   one.
@@ -98,31 +103,63 @@ becomes axon's, and validation gains the typed entity schema.
 
 - `QueueDefinition` gains an optional `entity_schema` (ESF) + typed index declarations; existing definitions
   default both to empty (`#[serde(default)]`) — no churn for non-schema queues.
+- JSON compatibility is preserved. Existing byte-oriented callers can continue using payload/field
+  carriers and the legacy `IndexSpec` path; typed queues add optional `entity_document`/`entity` JSON
+  carriers. `update_fields` with no replacement entity preserves the existing document, while a supplied
+  JSON entity is schema-validated and rekeys typed indexes pre-commit.
 - **Write-path cost:** payload validation per push/upsert/update_fields. Compile-once → ~83 ns/record;
   acceptable. (Hot-path-skippable when a queue declares no schema.)
 - **Dependency surface:** pqueue's published surface re-acquires a dependency on **pre-release axon**
   (`axon-esf`), inherited transitively by cayce. Mitigated by rev-pinning, both being pre-1.0, and co-
   ownership of both repos — but it is a deliberate re-coupling (pqueue had shed sibling couplings; ADR-009).
 - Sets the **no-path-deps** direction for pqueue's sibling dependencies generally.
+- Relational backends store typed index rows in a side table keyed by canonical ESF bytes. SQLite and
+  Postgres relational backends maintain those rows on push, update, replace-pending/upsert, and purge.
+  Postgres additionally uses a partial unique SQL index for atomic unique-key enforcement across backend
+  instances.
 
-## 7. Phasing & blocking
+## 7. Implementation status
 
-- **BLOCKED** on an axon release delivering bead **`axon-a1c87cb1`** (`axon_esf::index_key` — the canonical
-  order-preserving key encoder). The leaf crate itself (`axon-2811c376`) shipped in axon **v0.3.0**.
-- **Phase 1 (in-memory).** git-pin `axon-esf`; reshape the ADR-010 in-memory indexes to typed
-  `IndexDef`/`CompoundIndexDef` keyed via `index_key`; add `EntitySchemaDocument` validation on the write
-  ports; update the in-memory conformance scenarios. Unblocks cayce.
-- **Phase 2 (relational parity).** Map typed indexed fields to native columns + SQL indexes in the
-  `pqueue_items` relational backends; the entity schema validates the same way (the validator is backend-
-  independent). Conformance proves the in-memory and relational projections agree.
-- **CI:** `axon-esf` via a git-pinned tag with the existing deploy-key checkout (the pattern used for
-  fjord/object-log/heimq) — but as a **git dependency**, not a path dependency.
+- **Dependency pin:** implemented with workspace dependency `axon-esf` at axon tag `v0.3.2`.
+- **Entity schema storage:** `QueueDefinition.entity_schema` embeds the ESF `EntitySchemaDocument` and is
+  serialized through queue definitions and command/replay paths.
+- **Typed index declarations:** `QueueDefinition.typed_indexes` stores `Vec<QueueIndex>`, preserving
+  pqueue names around ESF single/compound declarations.
+- **Write validation:** push, request-id push, upsert/replace-pending, update-fields, and commit lifecycle
+  insert paths validate typed entity documents before any append/apply side effect.
+- **Index semantics:** string, integer, float, datetime, boolean, compound, sparse missing-field behavior,
+  unique conflicts, update rekeying, purge cleanup, and log replay/reconnect behavior are covered in shared
+  or backend-specific conformance.
+- **Relational parity:** sqlite and postgres relational backends implement `IndexQueryPort`; postgres live
+  verification remains env-gated by `PQUEUE_PG_TEST_URL` and skips loudly when absent.
 
-## 8. Open items
+## 8. Verification evidence
 
-1. Where the `EntitySchemaDocument` lives on `QueueDefinition` (embedded vs a referenced collection id) and
-   how it serializes for log replay.
-2. Whether index `name` (pqueue's query ergonomics) is kept as an additive field over axon's name-less
-   `IndexDef`, or queries address indexes by field-path like axon.
-3. `Datetime` input forms accepted by `index_key` (RFC3339 string vs epoch-nanos) — settled by `axon-a1c87cb1`.
-4. The general path-dep → git-pin migration for fjord/object-log/heimq (separate bead).
+Run on 2026-06-30:
+
+```bash
+cargo test -p pqueue-conformance -- --nocapture
+cargo test -p pqueue-memory adr011_ -- --nocapture
+cargo test -p pqueue-sqlite --test conformance adr011_ -- --nocapture
+cargo test -p pqueue-sqlite --test relational_conformance adr011_ -- --nocapture
+cargo test -p pqueue-postgres --test relational_conformance adr011_ -- --nocapture
+cargo test -p pqueue --test secondary_indexes -- --nocapture
+cargo test --workspace -- --nocapture
+```
+
+The Postgres ADR-011 relational tests compile and report explicit `PQUEUE_PG_TEST_URL` skips when no live
+database URL is present.
+
+Dependency proof:
+
+```bash
+cargo tree -p pqueue-core | rg 'axon-core|axon-schema|axon-cypher-ast|reqwest|hyper|tower'
+rg 'path = .*axon|../axon|/Users/.*/axon' Cargo.toml crates/*/Cargo.toml
+```
+
+Both commands return no matches. `cargo tree -p pqueue-core | rg axon` shows only the pinned
+`axon-esf v0.3.2` dependency.
+
+## 9. Remaining follow-up
+
+The general path-dep to git-pin migration for other sibling dependencies remains separate work.
