@@ -245,7 +245,10 @@ fn pg_qdef_nonunique_str_index(index_name: &str, field: &str) -> pqueue_core::Qu
 
 fn pg_entity(field: &str, value: &str) -> serde_json::Value {
     let mut m = serde_json::Map::new();
-    m.insert(field.to_string(), serde_json::Value::String(value.to_string()));
+    m.insert(
+        field.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
     serde_json::Value::Object(m)
 }
 
@@ -417,7 +420,11 @@ fn pg_rel_typed_unique_index_within_batch_conflict_rejected() {
                     matches!(result, Err(EngineError::Conflict)),
                     "within-batch duplicate must be rejected"
                 );
-                assert_eq!(b.metrics(&shard).await.unwrap().pending, 0, "nothing inserted");
+                assert_eq!(
+                    b.metrics(&shard).await.unwrap().pending,
+                    0,
+                    "nothing inserted"
+                );
             });
         }
         Err(_) => eprintln!(
@@ -645,7 +652,8 @@ fn pg_rel_typed_index_update_fields_unique_conflict_is_atomic() {
                     .await
                     .unwrap();
                 assert_eq!(
-                    hit.expect("failed update must keep old typed-index row").item_id,
+                    hit.expect("failed update must keep old typed-index row")
+                        .item_id,
                     ids[1]
                 );
                 assert_eq!(b.metrics(&shard).await.unwrap().pending, 2);

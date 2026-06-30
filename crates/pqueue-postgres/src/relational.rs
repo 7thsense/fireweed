@@ -483,10 +483,7 @@ fn decode_typed_lookup_value_rel(
 }
 
 /// Compute the canonical `index_key` bytes for a lookup against a named index.
-fn typed_lookup_canonical_key(
-    qi: &QueueIndex,
-    key_values: &[Vec<u8>],
-) -> EngineResult<Vec<u8>> {
+fn typed_lookup_canonical_key(qi: &QueueIndex, key_values: &[Vec<u8>]) -> EngineResult<Vec<u8>> {
     match &qi.declaration {
         IndexDeclaration::Single(def) => {
             let val = decode_typed_lookup_value_rel(&def.index_type, &key_values[0])?;
