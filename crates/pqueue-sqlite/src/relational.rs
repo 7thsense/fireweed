@@ -3684,10 +3684,16 @@ impl PushPort for SqliteRelationalBackend {
         // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
         // contract so the owner fence is uniform once the relational/object write paths thread it.
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
             let max_attempts = g
                 .queues
                 .get(shard)
@@ -3718,8 +3724,14 @@ impl PushPort for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
-            let fingerprint = push_request_fingerprint(&items)?;
             let mut g = self.inner.lock().expect("poisoned");
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
+            let fingerprint = push_request_fingerprint(&items)?;
             let max_attempts = g
                 .queues
                 .get(shard)
@@ -4116,6 +4128,7 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                 .ok_or(EngineError::NotFound)?;
             let expires_at = request_expires_at(&g.queues, shard, now)?;
             let epoch = expected_epoch.unwrap_or(0);
+            let schema = g.schemas.get(shard).cloned();
             let Inner {
                 conn,
                 queues,
@@ -4195,6 +4208,16 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                         .optional())?
                     .unwrap_or(0);
                     if let Err(e) = validate_instance_fence(stored as u64, fence) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                }
+                if !entry.lifecycle_items.is_empty() {
+                    if let Some(e) = entry
+                        .lifecycle_items
+                        .iter()
+                        .find_map(|item| validate_entity(schema.as_ref(), item.entity.as_ref()).err())
+                    {
                         recovery.push(reject(e));
                         continue;
                     }
@@ -5257,6 +5280,7 @@ mod group_summary_tests {
                 None,
                 BTreeMap::new(),
                 Default::default(),
+                None,
                 ts(0),
                 None,
             )
@@ -5281,6 +5305,7 @@ mod group_summary_tests {
                     None,
                     BTreeMap::new(),
                     Default::default(),
+                    None,
                     ts(2),
                     None
                 )

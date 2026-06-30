@@ -2664,6 +2664,12 @@ impl PushPort for PostgresRelationalBackend {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
             let max_attempts = g
                 .queues
                 .get(shard)
@@ -2694,8 +2700,14 @@ impl PushPort for PostgresRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
-            let fingerprint = push_request_fingerprint(&items)?;
             let mut g = self.inner.lock().expect("poisoned");
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
+            let fingerprint = push_request_fingerprint(&items)?;
             let max_attempts = g
                 .queues
                 .get(shard)

@@ -25,6 +25,7 @@ use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
@@ -43,8 +44,9 @@ use pqueue_engine::{
     PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey,
     QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
     RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, build_push_items, require_item_level_claim, validate_gate_command,
-    validate_gate_push, validate_purge_force,
+    CompiledSchema, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
+    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
+    validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -288,6 +290,7 @@ struct Inner {
     root: PathBuf,
     projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
+    schemas: HashMap<QueueKey, Arc<CompiledSchema>>,
     idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
     cmd_seq: u64,
     segment_config: ObjectLogSegmentConfig,
@@ -463,6 +466,15 @@ impl Inner {
                 }
                 proj.apply_command(&env.command)
                     .expect("durable log replays into a consistent projection");
+            }
+            if let Some(cs) = definition
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(|schema_val| compile_entity_schema(schema_val))
+                .transpose()?
+            {
+                self.schemas.insert(shard.clone(), cs);
             }
             self.projections.insert(shard, proj);
             self.queues.insert(key, definition);
@@ -695,6 +707,7 @@ impl ObjectLogBackend {
             root: root.into(),
             projections: HashMap::new(),
             queues: HashMap::new(),
+            schemas: HashMap::new(),
             idempotency: HashMap::new(),
             cmd_seq: 0,
             segment_config,
@@ -913,6 +926,12 @@ impl PushPort for ObjectLogBackend {
             if !g.projections.contains_key(shard) {
                 return Err(EngineError::NotFound);
             }
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
             let max_attempts = g
                 .queues
                 .get(&shard.clone())
@@ -948,11 +967,17 @@ impl PushPort for ObjectLogBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
-            let fingerprint = push_body_hash(&items)?;
             let mut g = self.inner.lock().expect("poisoned");
             if !g.projections.contains_key(shard) {
                 return Err(EngineError::NotFound);
             }
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
+            let fingerprint = push_body_hash(&items)?;
             let max_attempts = g
                 .queues
                 .get(&shard.clone())
@@ -1225,13 +1250,20 @@ impl ControlPlaneStore for ObjectLogBackend {
             let mut g = self.inner.lock().expect("poisoned");
             let root = g.root.clone();
             let outcome = create_queue_metadata(&root, &mut g.queues, definition)?;
+            let shard = QueueKey::new(
+                outcome.definition.tenant_id.clone(),
+                outcome.definition.queue_id.clone(),
+            );
+            let compiled_schema = outcome
+                .definition
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(|schema_val| compile_entity_schema(schema_val))
+                .transpose()?;
             if outcome.created {
-                let shard = QueueKey::new(
-                    outcome.definition.tenant_id.clone(),
-                    outcome.definition.queue_id.clone(),
-                );
                 g.projections.insert(
-                    shard,
+                    shard.clone(),
                     ProjectionData::new(
                         outcome.definition.priority_model,
                         outcome.definition.ordering_mode,
@@ -1240,6 +1272,9 @@ impl ControlPlaneStore for ObjectLogBackend {
                         &outcome.definition.secondary_indexes,
                     ),
                 );
+            }
+            if let Some(cs) = compiled_schema {
+                g.schemas.insert(shard, cs);
             }
             Ok(outcome)
         })();

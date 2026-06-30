@@ -640,6 +640,12 @@ impl PushPort for SqliteBackend {
             if !g.projections.contains_key(shard) {
                 return Err(EngineError::NotFound);
             }
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
             let max_attempts = g
                 .queues
                 .get(&shard.clone())
@@ -680,11 +686,17 @@ impl PushPort for SqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
-            let fingerprint = push_body_hash(&items)?;
             let mut g = self.inner.lock().expect("poisoned");
             if !g.projections.contains_key(shard) {
                 return Err(EngineError::NotFound);
             }
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
+            let fingerprint = push_body_hash(&items)?;
             let def = g.queues.get(shard).ok_or(EngineError::NotFound)?;
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(now, def.request_id_retention_ms);

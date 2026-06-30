@@ -11,7 +11,9 @@
 
 use bytes::Bytes;
 use pqueue_conformance::{qdef, shard};
-use pqueue_core::{LeaseToken, PriorityValue, RequestId, UtcTimestamp, WorkerId};
+use pqueue_core::{
+    EntitySchemaDocument, LeaseToken, PriorityValue, RequestId, UtcTimestamp, WorkerId,
+};
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome,
     CommitEntryStatus, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
@@ -20,6 +22,7 @@ use pqueue_engine::{
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 use rusqlite::Connection;
+use serde_json::json;
 
 fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()
@@ -49,6 +52,35 @@ fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
 fn item(priority: i64) -> PushSpec {
     PushSpec {
         priority: Some(PriorityValue::Int64(priority)),
+        ..Default::default()
+    }
+}
+
+fn typed_qdef() -> pqueue_core::QueueDefinition {
+    let mut def = qdef();
+    def.entity_schema = Some(
+        serde_json::from_value::<EntitySchemaDocument>(json!({
+            "entity_schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }
+        }))
+        .unwrap(),
+    );
+    def
+}
+
+fn typed_item(priority: i64, valid: bool) -> PushSpec {
+    PushSpec {
+        priority: Some(PriorityValue::Int64(priority)),
+        entity: Some(if valid {
+            json!({"name": "ok"})
+        } else {
+            json!({"count": 1})
+        }),
         ..Default::default()
     }
 }
@@ -593,5 +625,95 @@ async fn relational_explain_commit_recovers_transition_and_survives_reopen() {
     );
     assert_eq!(claimed.items[0].item_id, lifecycle_id);
 
+    let _ = std::fs::remove_file(&path);
+}
+
+async fn schema_validation_backend<B>(backend: &B)
+where
+    B: ControlPlaneStore
+        + ClaimPort
+        + PushPort
+        + ProjectionRead
+        + RecoveryReadPort
+        + CommitTransitionPort,
+{
+    let q = shard();
+    backend.create_queue(typed_qdef()).await.unwrap();
+
+    let err = backend
+        .push(&q, vec![typed_item(1, false)], ts(0), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(backend.metrics(&q).await.unwrap().pending, 0);
+
+    let rid = RequestId::new("req-1").unwrap();
+    let err = backend
+        .push_with_request_id(&q, rid.clone(), vec![typed_item(1, false)], ts(1), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+    assert_eq!(backend.metrics(&q).await.unwrap().pending, 0);
+
+    let first = backend
+        .push_with_request_id(&q, rid.clone(), vec![typed_item(1, true)], ts(2), None)
+        .await
+        .unwrap();
+    let replay = backend
+        .push_with_request_id(&q, rid, vec![typed_item(1, true)], ts(3), None)
+        .await
+        .unwrap();
+    assert_eq!(first, replay);
+    assert_eq!(backend.metrics(&q).await.unwrap().pending, 1);
+
+    backend
+        .push(&q, vec![item(5)], ts(4), None)
+        .await
+        .unwrap();
+    let claimed = backend.claim(claim_req(1, 600, 4)).await.unwrap();
+    let claim_ref = ClaimRef {
+        item_id: claimed.items[0].item_id,
+        lease_token: claimed.items[0]
+            .lease_token
+            .clone()
+            .expect("claimed item carries a token"),
+        lease_expires_at: claimed.items[0].lease_expires_at,
+        item_version: claimed.items[0].item_version,
+    };
+    let outcomes = backend
+        .commit_transition(
+            &q,
+            CommitTransition {
+                request_id: None,
+                entries: vec![CommitTransitionEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![side("schema/run-1", "bytes")],
+                    lifecycle_items: vec![typed_item(20, false)],
+                    instance_fence: None,
+                }],
+            },
+            ts(5),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcomes[0],
+        CommitEntryOutcome::Rejected(EngineError::EntitySchemaViolation(_))
+    ));
+    assert_eq!(backend.metrics(&q).await.unwrap().leased, 1);
+    assert!(
+        backend.side_record(&q, b"schema/run-1").await.unwrap().is_none(),
+        "invalid lifecycle items must reject before side records are written"
+    );
+}
+
+#[tokio::test]
+async fn schema_validation_rejects_before_append_and_idempotency_on_sqlite_relational() {
+    let path = unique_path("schema-relational");
+    let _ = std::fs::remove_file(&path);
+    let backend = SqliteRelationalBackend::open(&path).unwrap();
+    schema_validation_backend(&backend).await;
     let _ = std::fs::remove_file(&path);
 }

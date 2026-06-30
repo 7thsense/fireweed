@@ -513,6 +513,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             Some(Bytes::from_static(b"v1")),
             BTreeMap::new(),
             Default::default(),
+            None,
             ts(0),
             None,
         )
@@ -535,6 +536,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             Some(Bytes::from_static(b"v2")),
             BTreeMap::new(),
             Default::default(),
+            None,
             ts(1),
             None,
         )
@@ -562,6 +564,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
             None,
             BTreeMap::new(),
             Default::default(),
+            None,
             ts(2),
             None
         )
@@ -591,6 +594,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             BTreeMap::new(),
             Default::default(),
+            None,
             ts(0),
             None,
         )
@@ -626,6 +630,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             BTreeMap::new(),
             Default::default(),
+            None,
             ts(10),
             None
         )
@@ -645,6 +650,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
             None,
             BTreeMap::new(),
             Default::default(),
+            None,
             ts(70),
             None,
         )

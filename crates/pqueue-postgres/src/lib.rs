@@ -757,6 +757,12 @@ impl PushPort for PostgresBackend {
             if !g.projections.contains_key(shard) {
                 return Err(EngineError::NotFound);
             }
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
             let max_attempts = g
                 .queues
                 .get(&shard.clone())
@@ -797,9 +803,15 @@ impl PushPort for PostgresBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
-            let fingerprint = push_request_fingerprint(&items)?;
             let mut g = self.inner.lock().expect("poisoned");
             let def = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
+            let fingerprint = push_request_fingerprint(&items)?;
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(&def, now);
             let n = g.cmd_seq;
