@@ -40,8 +40,31 @@ use pqueue_engine::{
 use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, OptionalExtension, params};
 
+mod compose_log;
 mod relational;
+pub use compose_log::SqliteLog;
 pub use relational::{SqliteProjectionStore, SqliteRelationalBackend};
+
+use pqueue_engine::{ComposedBackend, InProcessControlPlane};
+use pqueue_projection::InMemoryProjection;
+
+/// The composed sqlite backend (ADR-012, Phase 1): the durable sqlite command LOG re-expressed as the
+/// orthogonal product `SqliteLog × InMemoryProjection × InProcessControlPlane`, assembled by the one
+/// generic `ComposedBackend`. Added ALONGSIDE the monolithic [`SqliteBackend`]; the shared TD-001
+/// conformance suite runs against BOTH, proving the composition is faithful before the monolith is removed
+/// (Phase 2). Like the monolith it is the in-memory log-replay family: a durable command log + an
+/// in-memory projection.
+pub type ComposedSqliteBackend =
+    ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>;
+
+/// Assemble a composed sqlite backend over an ephemeral `:memory:` durable log.
+pub fn composed_sqlite_backend_in_memory() -> EngineResult<ComposedSqliteBackend> {
+    Ok(ComposedBackend::new(
+        SqliteLog::in_memory()?,
+        InMemoryProjection::new(),
+        InProcessControlPlane::new(),
+    ))
+}
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (

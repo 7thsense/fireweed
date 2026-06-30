@@ -9,6 +9,7 @@ mod active_scope;
 mod auth;
 mod claim_validation;
 mod command;
+mod compose;
 mod control_plane;
 mod density;
 mod error;
@@ -27,6 +28,9 @@ pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
     validate_claim_compatibility,
+};
+pub use compose::{
+    ComposedBackend, ControlPlane, InProcessControlPlane, LogStore, ProjectionStore,
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState, OwnerResolution,

@@ -21,6 +21,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+mod compose_impls;
+pub use compose_impls::{InMemoryProjection, MemoryLog};
+
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, IndexSpec, ItemEvent, ItemId, ItemState, LeaseToken, Metadata,

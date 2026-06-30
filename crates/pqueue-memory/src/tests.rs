@@ -12,6 +12,14 @@ use pqueue_conformance::ts;
 // The full shared backend-conformance suite (16 port-level scenarios) against MemoryBackend.
 pqueue_conformance::conformance_suite!(MemoryBackend::new);
 
+/// ADR-012 Phase 1: the SAME shared conformance suite against the COMPOSED memory backend
+/// (`ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`). Passing identically to the
+/// monolith above proves the orthogonal composition is faithful before the monolith is removed (Phase 2).
+mod composed {
+    use crate::composed_memory_backend;
+    pqueue_conformance::conformance_suite!(composed_memory_backend);
+}
+
 #[tokio::test]
 async fn manual_clock_and_idgen_are_real() {
     let clock = ManualClock::at(10);

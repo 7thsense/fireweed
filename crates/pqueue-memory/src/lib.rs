@@ -1329,6 +1329,31 @@ impl SnapshotStore for MemoryBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Composed memory backend (ADR-012, Phase 1)
+//
+// The memory backend re-expressed as the orthogonal product `MemoryLog × InMemoryProjection ×
+// InProcessControlPlane`, assembled by the one generic `ComposedBackend`. Added ALONGSIDE the monolithic
+// `MemoryBackend` above (Phase 2 deletes the monolith); the shared TD-001 conformance suite runs against
+// BOTH, proving the composition is behaviorally identical before anything is removed.
+// ---------------------------------------------------------------------------
+
+use pqueue_engine::{ComposedBackend, InProcessControlPlane};
+use pqueue_projection::{InMemoryProjection, MemoryLog};
+
+/// The composed memory backend: `ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`.
+pub type ComposedMemoryBackend =
+    ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>;
+
+/// Assemble a fresh composed memory backend from one of each axis.
+pub fn composed_memory_backend() -> ComposedMemoryBackend {
+    ComposedBackend::new(
+        MemoryLog::new(),
+        InMemoryProjection::new(),
+        InProcessControlPlane::new(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Injected utilities: a controllable clock and a sequential id generator
 // ---------------------------------------------------------------------------
 

@@ -5,6 +5,16 @@ use pqueue_sqlite::SqliteBackend;
 
 pqueue_conformance::conformance_suite!(|| SqliteBackend::in_memory().expect("open :memory:"));
 
+/// ADR-012 Phase 1: the SAME shared conformance suite against the COMPOSED sqlite backend
+/// (`ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>`). Passing identically to the
+/// monolith above proves the orthogonal composition is faithful before the monolith is removed (Phase 2).
+mod composed {
+    use pqueue_sqlite::composed_sqlite_backend_in_memory;
+    pqueue_conformance::conformance_suite!(
+        || composed_sqlite_backend_in_memory().expect("compose :memory:")
+    );
+}
+
 /// B1a (ADR-009 / TD-003): a claim stamped with the owner's *cached* acquire-time epoch is fenced at the
 /// durable append once a newer epoch is acquired (the owner was superseded), and leases nothing; the
 /// current-epoch owner claims normally. Mirrors the memory white-box test against the sqlite log path.
