@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # composition over the engine ports: push/upsert/claim/ack/nack/peek/metrics. Depends on the domain
 # (engine + core) only; a concrete backend + clock are injected (hexagonal).
 [dependencies]
+axon-esf.workspace = true
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 bytes = "1"

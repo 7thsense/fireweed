@@ -78,6 +78,14 @@ fn queue_definition() -> QueueDefinition {
                 }),
             ),
             typed_index(
+                "by_ratio",
+                IndexDeclaration::Single(IndexDef {
+                    field: "ratio".to_string(),
+                    index_type: IndexType::Float,
+                    unique: false,
+                }),
+            ),
+            typed_index(
                 "by_region_zone",
                 IndexDeclaration::Compound(CompoundIndexDef {
                     fields: vec![
@@ -955,6 +963,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
                 "score": 99,
                 "active": false,
                 "due_at": "2026-06-30T12:00:00Z",
+                "ratio": 1.5,
                 "region": "eu-west",
                 "zone": 3,
                 "external_id": "typed-query-test"
@@ -978,6 +987,13 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
             "by_due_at",
             &[serde_json::json!("2026-06-30T12:00:00Z")],
         )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item_id, id);
+
+    let hits = pq
+        .query_index_typed(&q, "by_ratio", &[serde_json::json!(1.5)])
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
@@ -1013,6 +1029,31 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         err,
         pqueue::EngineError::Invalid("unknown secondary index"),
         "unknown index name on non-unique path must also return EngineError::Invalid"
+    );
+
+    let err = pq
+        .query_index_unique_typed(&q, "by_score", &[serde_json::json!("99")])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, pqueue::EngineError::Invalid(_)),
+        "string JSON must be rejected for Integer typed indexes"
+    );
+    let err = pq
+        .query_index_typed(&q, "by_due_at", &[serde_json::json!(false)])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, pqueue::EngineError::Invalid(_)),
+        "boolean JSON must be rejected for Datetime typed indexes"
+    );
+    let err = pq
+        .query_index_typed(&q, "by_ratio", &[serde_json::json!("1.5")])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, pqueue::EngineError::Invalid(_)),
+        "string JSON must be rejected for Float typed indexes"
     );
 
     // The typed query result is byte-for-byte equivalent to the raw-byte path with correct bytes.

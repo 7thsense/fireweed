@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
+use pqueue_core::QueueIndex;
 use pqueue_core::WorkerId;
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
@@ -124,6 +126,39 @@ fn json_value_to_index_key_bytes(value: &serde_json::Value) -> Vec<u8> {
         serde_json::Value::String(s) => s.as_bytes().to_vec(),
         other => serde_json::to_vec(other).expect("infallible JSON serialization"),
     }
+}
+
+fn typed_index_query_key_bytes(
+    spec: &QueueIndex,
+    key_values: &[serde_json::Value],
+) -> EngineResult<Vec<Vec<u8>>> {
+    let expected_arity = match &spec.declaration {
+        pqueue_core::IndexDeclaration::Single(_) => 1,
+        pqueue_core::IndexDeclaration::Compound(def) => def.fields.len(),
+    };
+    if key_values.len() != expected_arity {
+        return Err(EngineError::Invalid("secondary index key arity mismatch"));
+    }
+
+    let mut raw = Vec::with_capacity(key_values.len());
+    match &spec.declaration {
+        pqueue_core::IndexDeclaration::Single(def) => {
+            encode_index_value(&key_values[0], &def.index_type).map_err(|_| {
+                EngineError::Invalid("typed index value is not valid for declared type")
+            })?;
+            raw.push(json_value_to_index_key_bytes(&key_values[0]));
+        }
+        pqueue_core::IndexDeclaration::Compound(def) => {
+            for (value, field) in key_values.iter().zip(def.fields.iter()) {
+                encode_index_value(value, &field.index_type).map_err(|_| {
+                    EngineError::Invalid("typed index value is not valid for declared type")
+                })?;
+                raw.push(json_value_to_index_key_bytes(value));
+            }
+        }
+    }
+
+    Ok(raw)
 }
 
 /// `ts + millis`, normalizing nanoseconds — derives a lease expiry from `now`.
@@ -888,9 +923,10 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Typed composite-key get on a UNIQUE secondary index (ADR-011). `key_values` are the per-field
     /// [`serde_json::Value`]s in the [`QueueIndex`] declaration order — the index name must match the
-    /// configured [`QueueIndex::name`] exactly. Each value is serialized to the axon_esf-compatible byte
-    /// format (strings/datetimes as raw UTF-8; numbers and booleans as JSON bytes) and validated by the
-    /// projection against the declared field type; a wrong-type value returns [`EngineError::Invalid`].
+    /// configured [`QueueIndex::name`] exactly. Each value is validated against the declared field type
+    /// with the same ESF encoder used by the projection, then serialized to the axon_esf-compatible byte
+    /// format (strings/datetimes as raw UTF-8; numbers and booleans as JSON bytes) before lookup; a
+    /// wrong-type value returns [`EngineError::Invalid`].
     /// Pure read (no epoch/fence). `EngineError::Invalid` for an unknown index name, non-unique index, or
     /// arity mismatch; `EngineError::Unavailable` on a relational backend (Phase 2).
     pub async fn query_index_unique_typed(
@@ -899,18 +935,22 @@ impl<B: LibBackend> Pqueue<B> {
         index: &str,
         key_values: &[serde_json::Value],
     ) -> EngineResult<Option<IndexHit>> {
-        let raw: Vec<Vec<u8>> = key_values
+        let definition = self.backend.queue_definition(queue).await?;
+        let spec = definition
+            .typed_indexes
             .iter()
-            .map(json_value_to_index_key_bytes)
-            .collect();
+            .find(|spec| spec.name == index)
+            .ok_or_else(|| EngineError::Invalid("unknown secondary index"))?;
+        let raw = typed_index_query_key_bytes(spec, key_values)?;
         self.backend.index_get_unique(queue, index, &raw).await
     }
 
     /// Typed composite-key lookup on a secondary index — unique or non-unique (ADR-011). `key_values`
     /// are the per-field [`serde_json::Value`]s in the [`QueueIndex`] declaration order; the index name
     /// must match the configured [`QueueIndex::name`] exactly. Returns every matching item ordered by
-    /// `item_id` ascending; empty if none. Each value is serialized to the axon_esf-compatible byte format
-    /// and validated against the declared field type — a wrong-type value returns [`EngineError::Invalid`].
+    /// `item_id` ascending; empty if none. Each value is validated against the declared field type with
+    /// the same ESF encoder used by the projection, then serialized to the axon_esf-compatible byte
+    /// format before lookup — a wrong-type value returns [`EngineError::Invalid`].
     /// Pure read (no epoch/fence).
     pub async fn query_index_typed(
         &self,
@@ -918,10 +958,13 @@ impl<B: LibBackend> Pqueue<B> {
         index: &str,
         key_values: &[serde_json::Value],
     ) -> EngineResult<Vec<IndexHit>> {
-        let raw: Vec<Vec<u8>> = key_values
+        let definition = self.backend.queue_definition(queue).await?;
+        let spec = definition
+            .typed_indexes
             .iter()
-            .map(json_value_to_index_key_bytes)
-            .collect();
+            .find(|spec| spec.name == index)
+            .ok_or_else(|| EngineError::Invalid("unknown secondary index"))?;
+        let raw = typed_index_query_key_bytes(spec, key_values)?;
         self.backend.index_lookup(queue, index, &raw).await
     }
 
