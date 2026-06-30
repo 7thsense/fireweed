@@ -1,0 +1,24 @@
+{
+  "attempt_id": "20260630T061816-68ba5d81",
+  "bead_id": "pqueue-103570d4",
+  "trigger": "attempt_ended",
+  "scanned_at": "2026-06-30T06:44:28.344061291Z",
+  "reaped": [
+    {
+      "pid": 3046772,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 3,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    },
+    {
+      "pid": 3047372,
+      "provider": "claude",
+      "command": "[claude] \u003cdefunct\u003e",
+      "age_seconds": 1569,
+      "action": "terminated",
+      "reason": "defunct_provider_child"
+    }
+  ]
+}
