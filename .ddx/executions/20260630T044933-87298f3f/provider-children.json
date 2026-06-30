@@ -1,0 +1,17 @@
+{
+  "attempt_id": "20260630T044933-87298f3f",
+  "bead_id": "pqueue-1b13d001",
+  "trigger": "running_phase_non_route_provider_child",
+  "active_route": "claude-tui",
+  "scanned_at": "2026-06-30T04:49:37.789478924Z",
+  "reaped": [
+    {
+      "pid": 2822593,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 3,
+      "action": "terminated",
+      "reason": "running_phase_non_route_provider_child"
+    }
+  ]
+}

@@ -3551,6 +3551,8 @@ mod gated_group_summary_tests {
             max_claim_batch_size: 100,
             max_eligible_group_size: None,
             secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
         }
     }
     fn shard() -> QueueKey {
