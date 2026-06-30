@@ -23,9 +23,9 @@ use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand,
     CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, ControlPlaneStore,
     DiscoveryGranularity, DiscoveryPort, FenceLeaseCommand, FinalizeKind, FinalizeOutcome,
-    FinalizePort, GroupBatching, ProjectionRead, PurgePort, PushCommand, PushItem, PushPort,
-    PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SetGatesCommand,
-    UnfenceLeaseCommand, UpsertOutcome, UpsertPort,
+    FinalizePort, GroupBatching, PayloadUpdate, ProjectionRead, PurgePort, PushCommand, PushItem,
+    PushPort, PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
+    SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -2033,6 +2033,109 @@ async fn typed_index_replace_pending_updates_index() {
         .await
         .unwrap();
     assert!(hit.is_some(), "replacement must be in the index");
+}
+
+/// update_fields with a new entity document rekeys the side index.
+#[tokio::test]
+async fn typed_index_update_fields_moves_index_key() {
+    let b = make();
+    b.create_queue(qdef_unique_str_index("by_email", "email"))
+        .await
+        .unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![PushSpec {
+                entity: Some(entity("email", "old@example.com")),
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+
+    b.update_fields(
+        &shard(),
+        ids[0],
+        BTreeMap::new(),
+        PayloadUpdate::Keep,
+        Some(entity("email", "new@example.com")),
+        None,
+        ts(1),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let old = b
+        .index_get_unique(&shard(), "by_email", &[b"old@example.com".to_vec()])
+        .await
+        .unwrap();
+    assert!(old.is_none(), "old typed-index key must be removed");
+    let new = b
+        .index_get_unique(&shard(), "by_email", &[b"new@example.com".to_vec()])
+        .await
+        .unwrap();
+    assert_eq!(
+        new.expect("new typed-index key must find item").item_id,
+        ids[0]
+    );
+}
+
+/// update_fields unique conflicts roll back without losing the previous index row.
+#[tokio::test]
+async fn typed_index_update_fields_unique_conflict_is_atomic() {
+    let b = make();
+    b.create_queue(qdef_unique_str_index("by_email", "email"))
+        .await
+        .unwrap();
+    let ids = b
+        .push(
+            &shard(),
+            vec![
+                PushSpec {
+                    entity: Some(entity("email", "a@example.com")),
+                    ..Default::default()
+                },
+                PushSpec {
+                    entity: Some(entity("email", "b@example.com")),
+                    ..Default::default()
+                },
+            ],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let result = b
+        .update_fields(
+            &shard(),
+            ids[1],
+            BTreeMap::new(),
+            PayloadUpdate::Keep,
+            Some(entity("email", "a@example.com")),
+            None,
+            ts(1),
+            None,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(EngineError::Conflict)),
+        "moving into an occupied unique typed-index key must conflict"
+    );
+
+    let hit = b
+        .index_get_unique(&shard(), "by_email", &[b"b@example.com".to_vec()])
+        .await
+        .unwrap();
+    assert_eq!(
+        hit.expect("failed update must keep old typed-index row")
+            .item_id,
+        ids[1]
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 2);
 }
 
 /// Index rows survive a DB reopen (they are durable, not rebuilt from a log).
