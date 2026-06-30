@@ -285,7 +285,8 @@ impl Inner {
                 definition.max_rank_error,
                 definition.recurrence,
                 &definition.secondary_indexes,
-            );
+            )
+            .with_typed_indexes(&definition.typed_indexes);
             for env in self.read_log_envelopes(&t, &q)? {
                 // Command-id is `sql-{node}-{n}` (or legacy `sql-{n}`); the trailing component is the seq.
                 if let Some(n) = env
@@ -579,9 +580,10 @@ impl UpsertPort for SqliteBackend {
             match existing {
                 None => {
                     // Pre-commit unique-index validation (ADR-010 §5.1): a violating insert appends nothing.
+                    // Use index_validate_push so entity_document is passed to typed-index validation.
                     {
                         let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-                        proj.index_validate(&item.item_id, &item.fields, None)?;
+                        proj.index_validate_push(std::slice::from_ref(&item))?;
                     }
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
                     g.commit_locked(shard, env, expected_epoch)?;
@@ -903,7 +905,8 @@ impl UpdateFieldsPort for SqliteBackend {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.update_fields_validate(&item_id, expected_item_version)?;
                 // Pre-commit unique-index validation (ADR-010 §5.1): a violating update appends nothing.
-                proj.index_validate_update(&item_id, &field_ops)?;
+                // Pass entity so typed-index unique constraints are enforced.
+                proj.index_validate_update_with_entity(&item_id, &field_ops, entity.as_ref())?;
             }
             let cmd = QueueCommand::UpdateFields(UpdateFieldsCommand {
                 item_id,
@@ -1028,7 +1031,8 @@ impl ControlPlaneStore for SqliteBackend {
                     definition.max_rank_error,
                     definition.recurrence,
                     &definition.secondary_indexes,
-                ),
+                )
+                .with_typed_indexes(&definition.typed_indexes),
             );
             if let Some(cs) = compiled_schema {
                 g.schemas.insert(shard, cs);

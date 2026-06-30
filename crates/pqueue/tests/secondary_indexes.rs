@@ -702,3 +702,175 @@ async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
         "lossy UTF-8 replacement bytes must not collide with the byte-exact index entry"
     );
 }
+
+/// Bug fix: upsert INSERT path was calling legacy `index_validate` (entity = None), so a fresh
+/// upsert with a colliding typed-unique index key was silently accepted. Now it calls
+/// `index_validate_push` which passes `entity_document` to the typed-index check.
+#[tokio::test]
+async fn secondary_indexes_upsert_insert_typed_unique_conflict_is_rejected() {
+    let pq = new_pq().await;
+    let q = qkey();
+
+    // Push an item that occupies external_id "TAKEN" in the typed unique index.
+    pq.push(
+        &q,
+        item(json!({
+            "score": 1,
+            "active": false,
+            "due_at": "2026-06-30T12:00:00Z",
+            "region": "us-east",
+            "zone": 1,
+            "external_id": "TAKEN"
+        })),
+    )
+    .await
+    .unwrap();
+
+    // A fresh upsert (no prior entry for this client_item_key) that tries to claim the same
+    // typed-unique key must be rejected with Conflict.
+    let fresh_key = ClientItemKey::new("new-key-1").unwrap();
+    let err = pq
+        .upsert(
+            &q,
+            fresh_key,
+            item(json!({
+                "score": 2,
+                "active": true,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 2,
+                "external_id": "TAKEN"
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Conflict,
+        "upsert insert must reject typed-unique collision"
+    );
+
+    // The original holder must still be indexed.
+    let hit = pq
+        .query_index_unique(&q, "by_external_id", key(&["TAKEN"]))
+        .await
+        .unwrap()
+        .expect("original item must still hold the typed-unique key");
+    assert_eq!(
+        hit.item_version, 1,
+        "original item is unchanged after rejected insert"
+    );
+}
+
+/// Same typed-unique upsert-insert rejection exercised against the SQLite log-replay backend
+/// (no environment variable required — uses an ephemeral in-memory SQLite store). Verifies that
+/// `rebuild_all` and `create_queue` call `.with_typed_indexes` and that the upsert insert path
+/// routes through typed-aware validation.
+#[tokio::test]
+async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_unique_conflict() {
+    use pqueue_sqlite::SqliteBackend;
+
+    let backend = Arc::new(SqliteBackend::in_memory().expect("sqlite in-memory"));
+    let clock = Arc::new(ManualClock::at(0));
+    let pq = Pqueue::new(backend, clock);
+    pq.create_queue(queue_definition()).await.unwrap();
+    let q = qkey();
+
+    // Push an item occupying external_id "SLOT".
+    let original = pq
+        .push(
+            &q,
+            item(json!({
+                "score": 1,
+                "active": false,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 1,
+                "external_id": "SLOT"
+            })),
+        )
+        .await
+        .unwrap();
+
+    // Fresh upsert-insert with a colliding typed-unique key must be Conflict.
+    let fresh_key = ClientItemKey::new("new-sqlite-key").unwrap();
+    let insert_err = pq
+        .upsert(
+            &q,
+            fresh_key,
+            item(json!({
+                "score": 2,
+                "active": true,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 2,
+                "external_id": "SLOT"
+            })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        insert_err,
+        pqueue::EngineError::Conflict,
+        "sqlite upsert insert must reject typed-unique collision"
+    );
+
+    // Push another item for the update_fields conflict check.
+    let other = pq
+        .push(
+            &q,
+            item(json!({
+                "score": 3,
+                "active": true,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 3,
+                "external_id": "OTHER"
+            })),
+        )
+        .await
+        .unwrap();
+
+    // update_fields that would move `other` into the typed-unique slot held by `original`.
+    let update_err = pq
+        .update_fields(
+            &q,
+            other,
+            BTreeMap::new(),
+            PayloadUpdate::Keep,
+            Some(json!({
+                "score": 3,
+                "active": true,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 3,
+                "external_id": "SLOT"
+            })),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        update_err,
+        pqueue::EngineError::Conflict,
+        "sqlite update_fields must reject typed-unique collision"
+    );
+
+    // Both items remain in their original indexed positions.
+    assert_eq!(
+        pq.query_index_unique(&q, "by_external_id", key(&["SLOT"]))
+            .await
+            .unwrap()
+            .unwrap()
+            .item_id,
+        original
+    );
+    assert_eq!(
+        pq.query_index_unique(&q, "by_external_id", key(&["OTHER"]))
+            .await
+            .unwrap()
+            .unwrap()
+            .item_id,
+        other
+    );
+}

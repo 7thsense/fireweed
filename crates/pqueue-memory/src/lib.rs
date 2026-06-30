@@ -332,9 +332,10 @@ impl UpsertPort for MemoryBackend {
             match existing {
                 None => {
                     // Pre-commit unique-index validation (ADR-010 §5.1): a violating insert appends nothing.
+                    // Use index_validate_push so entity_document is passed to typed-index validation.
                     {
                         let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
-                        proj.index_validate(&item.item_id, &item.fields, None)?;
+                        proj.index_validate_push(std::slice::from_ref(&item))?;
                     }
                     let env = mk(QueueCommand::Push(PushCommand { items: vec![item] }));
                     Self::commit_locked(&mut g, shard, env, expected_epoch)?;
