@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, HashMap};
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
-    ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, EngineError, EngineResult,
-    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore, ProjectionSnapshot,
-    ProjectionStore, PushItem, QueueKey, QueueMetrics, SnapshotRef,
+    ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, EngineError,
+    EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore,
+    ProjectionSnapshot, ProjectionStore, PushItem, QueueKey, QueueMetrics, SnapshotRef,
 };
 
 use crate::{LogData, ProjectionData};
@@ -270,6 +270,31 @@ impl ProjectionStore for InMemoryProjection {
         field_ops: &BTreeMap<String, Option<Bytes>>,
     ) -> EngineResult<()> {
         self.get(shard)?.index_validate_update(id, field_ops)
+    }
+
+    // -- commit-class: the in-memory projection materializes the full Snorri commit-class read model
+    //    (side records + instance fences + lease-token/version commit validation), lifted verbatim from
+    //    `ProjectionData`, so the composed memory backend reaches capability parity with `MemoryBackend`.
+
+    fn supports_commit_transition(&self) -> bool {
+        true
+    }
+
+    fn commit_validate(
+        &self,
+        shard: &QueueKey,
+        refs: &[ClaimRef],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.get(shard)?.commit_validate(refs, now)
+    }
+
+    fn instance_fence(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<u64>> {
+        Ok(self.get(shard)?.instance_fence(key))
+    }
+
+    fn side_record(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
+        Ok(self.get(shard)?.side_record(key).cloned())
     }
 
     fn select_eligible(

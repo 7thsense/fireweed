@@ -16,7 +16,10 @@
 //! pre-validate — see the INVARIANT). Object names are zero-padded sequence numbers so lexical order is
 //! replay order; the next sequence is `max(existing)+1`, compaction-safe.
 
+pub mod compose_log;
 pub mod segmented;
+
+pub use compose_log::{ComposedObjectLogBackend, ObjectLog, composed_objectlog_backend};
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;

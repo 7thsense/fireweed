@@ -33,20 +33,24 @@ use pqueue_core::{
 
 use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
 use crate::command::{
-    ClaimCommand, CommandChecksum, CommandEnvelope, CommandId, FinalizeCommand, FinalizeOutcome,
-    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
-    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand,
-    UpdateFieldsCommand, build_push_items, validate_gate_command, validate_gate_push,
+    AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
+    FinalizeCommand, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand,
+    PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
+    ReplacePendingCommand, ScheduleUpdate, UpdateFieldsCommand, WriteSideRecordsCommand,
+    build_push_items, validate_gate_command, validate_gate_push,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
 use crate::idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 use crate::port::{
-    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPage, ControlPlaneStore,
-    CreateQueueOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseView, LiveItemView,
-    LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort,
-    PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, CommandPage,
+    CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition,
+    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery, FinalizePort,
+    IndexHit, IndexQueryPort, ItemView, LeaseView, LiveItemView, LogRead, LogWriter,
+    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec,
+    QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    ReschedulePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, validate_instance_fence,
 };
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
@@ -61,6 +65,15 @@ use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 /// (writes) / `&` (reads) WHILE the lock is held, so append+apply is one atomic unit of work. Object
 /// safety is not required — the composition is generic (zero-cost, monomorphized).
 pub trait LogStore: Send {
+    /// The durability class the composition inherits from its log axis (TD-007 §2). The default is
+    /// [`DurabilityClass::Atomic`] (the in-process/sqlite log-replay logs commit append+apply together under
+    /// one lock); an eventual-apply substrate (the object log's ack-after-seal group commit) overrides this
+    /// to [`DurabilityClass::EventualApply`], which the composition uses to refuse the atomic-only ports
+    /// (upsert / update_fields / reschedule / commit_transition) rather than silently degrading them.
+    fn durability_class(&self) -> DurabilityClass {
+        DurabilityClass::Atomic
+    }
+
     /// Register a shard's log (called from `create_queue`). Idempotent.
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()>;
 
@@ -177,6 +190,46 @@ pub trait ProjectionStore: Send {
         field_ops: &BTreeMap<String, Option<Bytes>>,
     ) -> EngineResult<()>;
 
+    // -- commit-class (Snorri authoritative vectorized commit boundary, ADR-009 / epic pqueue-2201fd37) --
+    //
+    // These back the composition's [`CommitTransitionPort`] / [`RecoveryReadPort`] (the side-record write +
+    // instance-fence advance themselves ride ordinary `QueueCommand`s through `apply`, so only the PRE-commit
+    // reads/validation live here). The default impls are the safe eventual/relational-stub answers: a
+    // projection that has not opted in advertises NO commit boundary (`supports_commit_transition() == false`),
+    // so the composition refuses `commit_transition` with `Unavailable` before touching these. ADR-012 1b-ii's
+    // unified relational store overrides `supports_commit_transition` + these reads with its own SQL.
+
+    /// Whether this projection materializes the Snorri commit-class read model (side records, instance fences,
+    /// lease-token/version commit validation). `false` (the default) makes the composition reject
+    /// `commit_transition` with `Unavailable`; [`InMemoryProjection`] overrides it to `true`.
+    fn supports_commit_transition(&self) -> bool {
+        false
+    }
+
+    /// Pre-commit validation of a vectorized commit's lease-token + version-fenced `claim_ref`s
+    /// ([`ProjectionData::commit_validate`] semantics). Mutates nothing. The default refuses with
+    /// `Unavailable` (no commit-class read model).
+    fn commit_validate(
+        &self,
+        _shard: &QueueKey,
+        _refs: &[ClaimRef],
+        _now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// Read the stored instance/state fence for `key` (`None`/`Ok(None)` == the unset value `0`). Used to
+    /// validate a caller-supplied [`crate::InstanceFence`] before advancing it. Default: `Ok(None)`.
+    fn instance_fence(&self, _shard: &QueueKey, _key: &[u8]) -> EngineResult<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Read an opaque non-work side record by key (recovery/audit read). Disjoint from work items, so it
+    /// survives input finalization. Default: `Ok(None)`.
+    fn side_record(&self, _shard: &QueueKey, _key: &[u8]) -> EngineResult<Option<Bytes>> {
+        Ok(None)
+    }
+
     // -- ProjectionRead surface ---------------------------------------------
 
     fn select_eligible(
@@ -292,6 +345,11 @@ struct Inner<L, P> {
     log: L,
     projection: P,
     idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+    /// Per-queue retained request-id cache for the vectorized claimed-work COMMIT path (epic
+    /// pqueue-2201fd37) — the same `QueueIdempotencyCache` machinery as `idempotency`, but the cached outcome
+    /// is the whole `Vec<EntryRecovery>` so a body+request_id replay returns the prior per-entry outcomes
+    /// verbatim with NO double-write. Held under the same UoW lock so check + append + record stays atomic.
+    commit_idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
     cmd_seq: u64,
 }
 
@@ -303,22 +361,35 @@ pub struct ComposedBackend<L, P, C> {
     /// Packed into every minted [`ItemId`] (ADR-009) so concurrent writers never collide. `0` default.
     node_id: u8,
     counters: QueueCounters,
+    /// The durability class inherited from the log axis at assembly (TD-007 §2). Read once from
+    /// `LogStore::durability_class` so the hot path never re-locks to decide whether an atomic-only port
+    /// (upsert / update_fields / reschedule / commit_transition) is available.
+    durability: DurabilityClass,
 }
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> {
     /// Assemble a backend from one of each axis.
     pub fn new(log: L, projection: P, control: C) -> Self {
+        let durability = log.durability_class();
         Self {
             inner: Mutex::new(Inner {
                 log,
                 projection,
                 idempotency: HashMap::new(),
+                commit_idempotency: HashMap::new(),
                 cmd_seq: 0,
             }),
             control,
             node_id: 0,
             counters: QueueCounters::default(),
+            durability,
         }
+    }
+
+    /// Whether the composition offers the atomic append+apply boundary the atomic-only ports require
+    /// (upsert / update_fields / reschedule / commit_transition). An eventual-apply log refuses them.
+    fn is_atomic(&self) -> bool {
+        self.durability == DurabilityClass::Atomic
     }
 
     /// Tag this backend with `node_id` — packed into the disambiguation byte of every minted [`ItemId`].
@@ -403,6 +474,32 @@ fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     Ok(BodyHash(h.finish()))
 }
 
+/// Stable body fingerprint for the vectorized commit path: a non-cryptographic hash over the serialized
+/// commit entries (the request_id is the cache KEY, not part of the body). A different body under the same
+/// request id is a `RequestIdConflict`; an equal body replays the prior per-entry outcomes.
+fn commit_body_hash(entries: &[crate::port::CommitTransitionEntry]) -> EngineResult<BodyHash> {
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    Ok(BodyHash(h.finish()))
+}
+
+/// Project the retained per-entry recovery records into the public per-entry outcomes (the commit return /
+/// replay value). The recovery record is the superset (it ALSO carries the consumed input id, instance
+/// fence, and side-record keys for `explain_commit`).
+fn outcomes_from_recovery(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
+    recovery
+        .iter()
+        .map(|r| match &r.status {
+            CommitEntryStatus::Committed => CommitEntryOutcome::Committed {
+                lifecycle_item_ids: r.lifecycle_item_ids.clone(),
+            },
+            CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // UoW writer views (Backend::write) — disjoint borrows of log / projection
 // ---------------------------------------------------------------------------
@@ -445,7 +542,35 @@ impl<P: ProjectionStore> ProjectionWriter for ProjectionWriterView<'_, P> {
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBackend<L, P, C> {
     fn durability_class(&self) -> DurabilityClass {
-        DurabilityClass::Atomic
+        self.durability
+    }
+
+    /// The authoritative-commit capabilities (Snorri StateStore boundary, epic pqueue-2201fd37). The
+    /// composition advertises the FULL vectorized-commit guarantees iff BOTH axes support it: the projection
+    /// materializes the commit-class read model (`supports_commit_transition`) AND the log gives an atomic
+    /// append+apply boundary. Otherwise it advertises the all-false default so a consumer (Snorri) rejects it
+    /// before activation. This reaches parity with the monolithic `MemoryBackend` for the composed memory
+    /// backend (`MemoryLog × InMemoryProjection`).
+    fn commit_capabilities(&self) -> CommitCapabilities {
+        let supports = {
+            let g = self.inner.lock().expect("composed backend poisoned");
+            g.projection.supports_commit_transition()
+        };
+        if supports && self.is_atomic() {
+            CommitCapabilities {
+                atomic_transition_commit: true,
+                vectorized_commit: true,
+                lease_validation: true,
+                retained_commit_idempotency: true,
+                non_work_side_records: true,
+                authoritative_recovery_reads: true,
+                delayed_awaits_timers: true,
+                durability_class: self.durability,
+                consistency: "atomic append+apply under one composed unit-of-work lock",
+            }
+        } else {
+            CommitCapabilities::default()
+        }
     }
 
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
@@ -689,6 +814,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
+            // Upsert (`ReplacePending`) needs the atomic look-then-replace boundary; an eventual-apply log
+            // refuses it (parity with the monolith's `upsert_is_unavailable`), rather than splitting it.
+            if !self.is_atomic() {
+                return Err(EngineError::Unavailable);
+            }
             let max_attempts = self.max_attempts(shard);
             let epoch = expected_epoch.unwrap_or(0);
             let counter_base = self.counters.reserve(shard, epoch, 1);
@@ -924,6 +1054,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
+            // In-place field/payload merge is an atomic-class feature; an eventual-apply log refuses it.
+            if !self.is_atomic() {
+                return Err(EngineError::Unavailable);
+            }
             let mut g = self.inner.lock().expect("poisoned");
             g.projection
                 .update_fields_validate(shard, &item_id, expected_item_version)?;
@@ -1232,8 +1366,300 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> SnapshotStore for Compose
 }
 
 // ---------------------------------------------------------------------------
-// Default-impl ports (relational-/commit-class features the log-replay composition refuses). These keep
-// ComposedBackend wirable into the LibBackend bound; each inherits the `Unavailable` default.
+// ReschedulePort — atomic in-place priority/not_before change (rides the UpdateFields command)
+// ---------------------------------------------------------------------------
+
+impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for ComposedBackend<L, P, C> {
+    fn reschedule(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        set_priority: ScheduleUpdate<PriorityValue>,
+        set_not_before: ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            // Reschedule is an atomic-class feature; an eventual-apply log refuses it (no eligibility re-key).
+            if !self.is_atomic() {
+                return Err(EngineError::Unavailable);
+            }
+            let mut g = self.inner.lock().expect("poisoned");
+            // Same pre-commit gate as a field update: an absent / terminal / superseded / fenced id or a
+            // version mismatch rejects and nothing is appended.
+            g.projection
+                .update_fields_validate(shard, &item_id, expected_item_version)?;
+            // Reschedule rides the UpdateFields command with an empty field/payload delta — only the
+            // priority/not_before reschedule is carried. The projection re-keys eligibility on a reprice.
+            let env = Self::make_envelope(
+                &mut g,
+                self.node_id,
+                QueueCommand::UpdateFields(UpdateFieldsCommand {
+                    item_id,
+                    field_ops: BTreeMap::new(),
+                    payload: PayloadUpdate::Keep,
+                    set_priority,
+                    set_not_before,
+                }),
+                vec![item_id],
+                now,
+            );
+            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            g.projection
+                .item_version(shard, &item_id)?
+                .ok_or(EngineError::NotFound)
+        })();
+        std::future::ready(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CommitTransitionPort — the authoritative vectorized claimed-work commit (Snorri StateStore boundary,
+// ADR-009 / epic pqueue-2201fd37), ported generically onto the composition via `commit_locked`.
+// ---------------------------------------------------------------------------
+
+impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
+    for ComposedBackend<L, P, C>
+{
+    /// The whole operation runs under ONE unit-of-work lock so request-id check + per-entry validate +
+    /// append + apply + record is a single atomic unit. Behaviorally identical to the monolithic
+    /// `MemoryBackend::commit_transition` (proven by the parity tests against `composed_memory_backend`).
+    fn commit_transition(
+        &self,
+        shard: &QueueKey,
+        transition: CommitTransition,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
+        let result = (|| {
+            let CommitTransition {
+                request_id,
+                entries,
+            } = transition;
+            let fingerprint = commit_body_hash(&entries)?;
+            // The commit boundary requires BOTH the atomic append+apply log AND a commit-class projection;
+            // otherwise refuse the whole operation rather than splitting/faking it (Snorri rejects the
+            // backend before activation via `commit_capabilities`).
+            let (max_attempts, retention) = {
+                let def = self.control.queue_definition(shard)?;
+                (def.retry_policy.max_attempts, def.request_id_retention_ms)
+            };
+            let mut g = self.inner.lock().expect("poisoned");
+            if !self.is_atomic() || !g.projection.supports_commit_transition() {
+                return Err(EngineError::Unavailable);
+            }
+
+            // (1) Request-id idempotency over the WHOLE commit body. A retained body+id REPLAYS the prior
+            //     per-entry outcomes (no re-write); a different body under that id is `RequestIdConflict`.
+            if let Some(rid) = &request_id {
+                match g
+                    .commit_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .check(rid, fingerprint, now)
+                {
+                    IdempotencyDecision::Replay(recovery) => {
+                        return Ok(outcomes_from_recovery(&recovery));
+                    }
+                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                    IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                }
+            }
+
+            // (2) Per entry: validate the lease-token + version-fenced claim_ref AND the optional instance
+            //     fence, then commit the entry's side-records + fence advance + lifecycle push + input
+            //     finalize atomically. A rejected entry mutates nothing.
+            let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let claim_ref = entry.claim_ref;
+                let consumed_input_id = claim_ref.item_id;
+                let reject = |e: EngineError| EntryRecovery {
+                    consumed_input_id,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(e),
+                };
+
+                if let Err(e) =
+                    g.projection
+                        .commit_validate(shard, std::slice::from_ref(&claim_ref), now)
+                {
+                    recovery.push(reject(e));
+                    continue;
+                }
+
+                // C6: validate the caller-supplied instance fence against the stored fence (absent == 0).
+                if let Some(fence) = &entry.instance_fence {
+                    let stored = g
+                        .projection
+                        .instance_fence(shard, &fence.instance_key)?
+                        .unwrap_or(0);
+                    if let Err(e) = validate_instance_fence(stored, fence) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                }
+
+                // Capture the recovery facts BEFORE moving the entry's records into commands.
+                let side_record_keys: Vec<Vec<u8>> =
+                    entry.side_records.iter().map(|r| r.key.clone()).collect();
+                let instance = entry
+                    .instance_fence
+                    .as_ref()
+                    .map(|f| (f.instance_key.clone(), f.next));
+
+                // Build the entry's envelopes WITHOUT committing yet, so a build-time rejection (e.g. a
+                // unique-index conflict on a lifecycle item) leaves nothing mutated. The caller's request_id
+                // propagates into every envelope.
+                let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+                let mk_env = |g: &mut Inner<L, P>, command: QueueCommand, item_ids: Vec<ItemId>| {
+                    let command_id = Self::next_command_id(g, self.node_id);
+                    CommandEnvelope {
+                        command_id,
+                        request_id: request_id.clone(),
+                        item_ids,
+                        command,
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    }
+                };
+                if !entry.side_records.is_empty() {
+                    let e = mk_env(
+                        &mut g,
+                        QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                            records: entry.side_records,
+                        }),
+                        Vec::new(),
+                    );
+                    envelopes.push(e);
+                }
+                if let Some(fence) = entry.instance_fence {
+                    let e = mk_env(
+                        &mut g,
+                        QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                            instance_key: fence.instance_key,
+                            expected: fence.expected,
+                            next: fence.next,
+                        }),
+                        Vec::new(),
+                    );
+                    envelopes.push(e);
+                }
+                let mut lifecycle_item_ids = Vec::new();
+                if !entry.lifecycle_items.is_empty() {
+                    let epoch = expected_epoch.unwrap_or(0);
+                    let counter_base =
+                        self.counters
+                            .reserve(shard, epoch, entry.lifecycle_items.len() as u32);
+                    let (push_items, ids) = build_push_items(
+                        entry.lifecycle_items,
+                        epoch,
+                        self.node_id,
+                        counter_base,
+                        max_attempts,
+                    );
+                    if let Err(e) = g.projection.index_validate_push(shard, &push_items) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                    lifecycle_item_ids = ids.clone();
+                    let e = mk_env(
+                        &mut g,
+                        QueueCommand::Push(PushCommand { items: push_items }),
+                        ids,
+                    );
+                    envelopes.push(e);
+                }
+                let e = mk_env(
+                    &mut g,
+                    QueueCommand::Finalize(FinalizeCommand {
+                        outcomes: vec![FinalizeOutcome::new(claim_ref.item_id, entry.finalize)],
+                    }),
+                    vec![claim_ref.item_id],
+                );
+                envelopes.push(e);
+
+                // Commit the entry's envelopes under the held lock. The epoch cannot change while we hold
+                // the lock, so either the first append fences (EpochFenced, before any mutation) or all of
+                // the entry's appends commit — each entry's writes are atomic.
+                for env in envelopes {
+                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+                }
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    instance,
+                    side_record_keys,
+                    lifecycle_item_ids,
+                    status: CommitEntryStatus::Committed,
+                });
+            }
+
+            // (3) Record the whole-body recovery only AFTER success, so a later replay/explain returns it
+            //     verbatim with no second append.
+            let outcomes = outcomes_from_recovery(&recovery);
+            if let Some(rid) = request_id {
+                let expires_at = request_expires_at(now, retention);
+                g.commit_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .record(rid, fingerprint, recovery, expires_at);
+            }
+            Ok(outcomes)
+        })();
+        std::future::ready(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RecoveryReadPort — explain_commit + side_record (Snorri recovery/audit reads)
+// ---------------------------------------------------------------------------
+
+impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RecoveryReadPort
+    for ComposedBackend<L, P, C>
+{
+    fn explain_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
+        let g = self.inner.lock().expect("poisoned");
+        // A backend with no commit boundary exposes no recovery surface (parity with the trait default).
+        let result = if !self.is_atomic() || !g.projection.supports_commit_transition() {
+            Err(EngineError::Unavailable)
+        } else {
+            Ok(g.commit_idempotency
+                .get(shard)
+                .and_then(|c| c.peek(&request_id))
+                .map(|entries| CommitRecovery {
+                    request_id,
+                    entries,
+                }))
+        };
+        std::future::ready(result)
+    }
+
+    fn side_record(
+        &self,
+        shard: &QueueKey,
+        key: &[u8],
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .side_record(shard, key);
+        std::future::ready(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default-impl ports (relational-class features the log-replay composition refuses). These keep
+// ComposedBackend wirable into the LibBackend bound; each inherits the `Unavailable` default. Gate state
+// (SetGates) and per-group active-scope discovery are relational-only — the in-memory / log-replay family
+// stores neither, so it refuses them exactly as the monolithic `MemoryBackend` does (capability parity).
 // ---------------------------------------------------------------------------
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
@@ -1241,18 +1667,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
 {
 }
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::DiscoveryPort
-    for ComposedBackend<L, P, C>
-{
-}
-impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::ReschedulePort
-    for ComposedBackend<L, P, C>
-{
-}
-impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CommitTransitionPort
-    for ComposedBackend<L, P, C>
-{
-}
-impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::RecoveryReadPort
     for ComposedBackend<L, P, C>
 {
 }

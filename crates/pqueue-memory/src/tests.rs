@@ -20,6 +20,331 @@ mod composed {
     pqueue_conformance::conformance_suite!(composed_memory_backend);
 }
 
+/// ADR-012 Phase 1b-i: CAPABILITY PARITY between the composed memory backend and the monolithic
+/// `MemoryBackend`. The shared conformance suite above already covers the data-plane ports; these
+/// white-box tests cover the commit-class ports the monolith implements that the composition previously
+/// took `Unavailable` defaults for — the Snorri authoritative vectorized commit boundary + its recovery
+/// reads, reschedule, and the relational-only refusals (set_gates / discover) — run against
+/// `composed_memory_backend()`.
+mod composed_capability_parity {
+    use super::*;
+    use crate::composed_memory_backend;
+    use bytes::Bytes;
+    use pqueue_conformance::{claim_req, qdef, qkey, shard};
+    use pqueue_core::RequestId;
+    use pqueue_engine::{
+        Backend, ClaimPort, ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+        CommitTransitionPort, ControlPlaneStore, DiscoveryGranularity, DiscoveryPort, EngineError,
+        FinalizeKind, InstanceFence, LogRead, ProjectionRead, PushPort, PushSpec, QueueCommand,
+        RecoveryReadPort, ReschedulePort, ScheduleUpdate, SetGatesCommand, SetGatesPort,
+        SideRecord,
+    };
+
+    /// Capability descriptors: the composed memory backend advertises the SAME full vectorized-commit
+    /// boundary as `MemoryBackend` (atomic class, the Snorri StateStore guarantees).
+    #[tokio::test]
+    async fn commit_capabilities_reach_memory_parity() {
+        let composed = composed_memory_backend().commit_capabilities();
+        let mono = MemoryBackend::new().commit_capabilities();
+        // Every guarantee field must match the monolith (the `consistency` note is an intentionally
+        // substrate-descriptive string, not a capability).
+        assert_eq!(
+            composed.atomic_transition_commit,
+            mono.atomic_transition_commit
+        );
+        assert_eq!(composed.vectorized_commit, mono.vectorized_commit);
+        assert_eq!(composed.lease_validation, mono.lease_validation);
+        assert_eq!(
+            composed.retained_commit_idempotency,
+            mono.retained_commit_idempotency
+        );
+        assert_eq!(composed.non_work_side_records, mono.non_work_side_records);
+        assert_eq!(
+            composed.authoritative_recovery_reads,
+            mono.authoritative_recovery_reads
+        );
+        assert_eq!(composed.delayed_awaits_timers, mono.delayed_awaits_timers);
+        assert_eq!(composed.durability_class, mono.durability_class);
+        assert!(composed.atomic_transition_commit);
+        assert!(composed.authoritative_recovery_reads);
+    }
+
+    /// The full vectorized claimed-work commit boundary works through the composition: one entry with a
+    /// side record + instance fence + lifecycle item + finalize commits atomically and returns Committed,
+    /// the request id propagates into every appended envelope, and explain/side_record reconstruct it.
+    #[tokio::test]
+    async fn vectorized_commit_recovery_and_side_records_round_trip() {
+        let b = composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        b.push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+        let c = &claimed.items[0];
+        let claim_ref = ClaimRef {
+            item_id: c.item_id,
+            lease_token: c.lease_token.clone().expect("lease token"),
+            lease_expires_at: c.lease_expires_at,
+            item_version: c.item_version,
+        };
+
+        let rid = RequestId::new("txn-composed-1").unwrap();
+        let outcomes = b
+            .commit_transition(
+                &shard(),
+                CommitTransition {
+                    request_id: Some(rid.clone()),
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref,
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![SideRecord {
+                            key: b"state/run".to_vec(),
+                            payload: Bytes::from_static(b"opaque"),
+                        }],
+                        lifecycle_items: vec![PushSpec::default()],
+                        instance_fence: Some(InstanceFence {
+                            instance_key: b"wf-1".to_vec(),
+                            expected: 0,
+                            next: 1,
+                        }),
+                    }],
+                },
+                ts(1),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcomes[0], CommitEntryOutcome::Committed { .. }));
+
+        // Recovery reads reconstruct the committed transition + the opaque side record survives finalize.
+        let recovered = b
+            .explain_commit(&shard(), rid.clone())
+            .await
+            .unwrap()
+            .expect("committed transition is recoverable by request id");
+        assert_eq!(recovered.request_id, rid);
+        assert_eq!(recovered.entries.len(), 1);
+        let sr = b.side_record(&shard(), b"state/run").await.unwrap();
+        assert_eq!(sr.as_deref(), Some(&b"opaque"[..]));
+
+        // Replay: the SAME body+id returns the prior outcomes with NO second commit (idempotent).
+        let log_before = b
+            .read_from(&shard(), None, 1000)
+            .await
+            .unwrap()
+            .entries
+            .len();
+        let replay = b
+            .commit_transition(
+                &shard(),
+                CommitTransition {
+                    request_id: Some(rid.clone()),
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref: ClaimRef {
+                            item_id: c.item_id,
+                            lease_token: c.lease_token.clone().unwrap(),
+                            lease_expires_at: c.lease_expires_at,
+                            item_version: c.item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![SideRecord {
+                            key: b"state/run".to_vec(),
+                            payload: Bytes::from_static(b"opaque"),
+                        }],
+                        lifecycle_items: vec![PushSpec::default()],
+                        instance_fence: Some(InstanceFence {
+                            instance_key: b"wf-1".to_vec(),
+                            expected: 0,
+                            next: 1,
+                        }),
+                    }],
+                },
+                ts(2),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(replay[0], CommitEntryOutcome::Committed { .. }));
+        let log_after = b
+            .read_from(&shard(), None, 1000)
+            .await
+            .unwrap()
+            .entries
+            .len();
+        assert_eq!(
+            log_before, log_after,
+            "request-id replay must not re-append"
+        );
+    }
+
+    /// Request-id CONFLICT on a body change under the same id (commit-path idempotency parity).
+    #[tokio::test]
+    async fn commit_request_id_conflicts_on_body_change() {
+        let b = composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        b.push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+        let c = &claimed.items[0];
+        let mk_ref = || ClaimRef {
+            item_id: c.item_id,
+            lease_token: c.lease_token.clone().unwrap(),
+            lease_expires_at: c.lease_expires_at,
+            item_version: c.item_version,
+        };
+        let rid = RequestId::new("txn-conflict").unwrap();
+        b.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: Some(rid.clone()),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref: mk_ref(),
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+        // Same id, DIFFERENT body (a lifecycle item now) -> RequestIdConflict.
+        let err = b
+            .commit_transition(
+                &shard(),
+                CommitTransition {
+                    request_id: Some(rid),
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref: mk_ref(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![PushSpec::default()],
+                        instance_fence: None,
+                    }],
+                },
+                ts(2),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, EngineError::RequestIdConflict);
+    }
+
+    /// Reschedule (atomic priority/not_before change) works through the composition and bumps item_version.
+    #[tokio::test]
+    async fn reschedule_reprices_live_item() {
+        let b = composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        let id = b
+            .push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap()[0];
+        let v0 = b.peek(&shard(), 10).await.unwrap()[0].item_version;
+        let v1 = b
+            .reschedule(
+                &shard(),
+                id,
+                ScheduleUpdate::Set(Some(PriorityValue::Int64(42))),
+                ScheduleUpdate::Keep,
+                Some(v0),
+                ts(1),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(v1 > v0, "reschedule bumps the item version");
+    }
+
+    /// The relational-only ports stay refused on the log-replay composition, exactly like `MemoryBackend`.
+    #[tokio::test]
+    async fn set_gates_and_discover_are_unavailable() {
+        let b = composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        let set_gates = b
+            .set_gates(
+                &shard(),
+                SetGatesCommand {
+                    gate_keys: vec!["hold".to_string()],
+                    blocked: true,
+                },
+                ts(0),
+                None,
+            )
+            .await;
+        assert_eq!(set_gates, Err(EngineError::Unavailable));
+        let discover = b
+            .discover_active_scopes(&qkey(), DiscoveryGranularity::Queue, ts(0))
+            .await;
+        assert!(matches!(discover, Err(EngineError::Unavailable)));
+    }
+
+    /// The commit envelope's request id propagates into every appended commit-path command (acceptance #4),
+    /// proven against the composition the same way the monolith proves it.
+    #[tokio::test]
+    async fn commit_path_propagates_request_id_into_every_command_envelope() {
+        let b = composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        b.push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+        let c = &claimed.items[0];
+        let claim_ref = ClaimRef {
+            item_id: c.item_id,
+            lease_token: c.lease_token.clone().unwrap(),
+            lease_expires_at: c.lease_expires_at,
+            item_version: c.item_version,
+        };
+        let rid = RequestId::new("txn-c10").unwrap();
+        b.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: Some(rid.clone()),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![SideRecord {
+                        key: b"state/run".to_vec(),
+                        payload: Bytes::from_static(b"opaque"),
+                    }],
+                    lifecycle_items: vec![PushSpec::default()],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: b"wf-1".to_vec(),
+                        expected: 0,
+                        next: 1,
+                    }),
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let page = b.read_from(&shard(), None, 1000).await.unwrap();
+        let mut commit_path_envs = 0;
+        for (_pos, env) in &page.entries {
+            match &env.command {
+                QueueCommand::WriteSideRecords(_)
+                | QueueCommand::AdvanceInstanceFence(_)
+                | QueueCommand::Finalize(_) => {
+                    assert_eq!(env.request_id.as_ref(), Some(&rid));
+                    commit_path_envs += 1;
+                }
+                QueueCommand::Push(_) if env.request_id.is_some() => {
+                    assert_eq!(env.request_id.as_ref(), Some(&rid));
+                    commit_path_envs += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(commit_path_envs, 4);
+    }
+}
+
 #[tokio::test]
 async fn manual_clock_and_idgen_are_real() {
     let clock = ManualClock::at(10);

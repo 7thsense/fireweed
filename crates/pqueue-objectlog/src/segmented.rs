@@ -920,6 +920,152 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .counters
             .clone()
     }
+
+    // -- high-water + snapshots (ADR-012 LogStore facets stored as blobs in the object store) ----------
+    //
+    // The orthogonal `LogStore` axis (compose.rs) requires a durable high-water mark and projection
+    // snapshots. The manifest tail is the authoritative command position, but the engine also drives an
+    // EXPLICIT high-water (snapshot truncation, TD-007 §4) and writes projection snapshots — both stored
+    // here as small JSON blobs alongside the segments, exactly as the per-file `ObjectLogBackend` keeps a
+    // `high_water.json`.
+
+    /// Read the durable high-water mark blob (`None` if no commit/set has advanced it yet).
+    pub fn read_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let key = format!("{}high_water.json", shard_prefix(shard));
+        match self.store.get(&key)? {
+            Some(bytes) => {
+                let hw: HighWaterBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
+                Ok(Some(CommandPosition::new(shard.clone(), hw.epoch, hw.seq)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Unconditionally advance the high-water blob to `position` (called by the append path after a seal,
+    /// where the new position always advances — no monotonic re-check needed on the hot path).
+    pub fn advance_high_water(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        let key = format!("{}high_water.json", shard_prefix(shard));
+        let blob = HighWaterBlob {
+            epoch: position.backend_epoch,
+            seq: position.sequence,
+        };
+        self.store.put(&key, &to_json(&blob)?)
+    }
+
+    /// Monotonically set the high-water blob (snapshot-truncation setter): reject a position that does not
+    /// advance the stored one (TD-007 §4), else persist it.
+    pub fn set_high_water(&self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()> {
+        if let Some(cur) = self.read_high_water(shard)?
+            && !cur.precedes(&position)
+            && cur != position
+        {
+            return Err(EngineError::Invalid("high-water regression"));
+        }
+        self.advance_high_water(shard, position)
+    }
+
+    /// Write a projection snapshot blob and return its distinct ref id (`snap-{n}`).
+    pub fn write_snapshot(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        payload: &[u8],
+    ) -> EngineResult<String> {
+        let prefix = format!("{}snap/", shard_prefix(shard));
+        let n = self.store.list(&prefix)?.len();
+        let ref_id = format!("snap-{n}");
+        let blob = SnapshotBlob {
+            epoch: position.backend_epoch,
+            seq: position.sequence,
+            payload: payload.to_vec(),
+        };
+        let key = format!("{prefix}{ref_id}.json");
+        self.store.put(&key, &to_json(&blob)?)?;
+        Ok(ref_id)
+    }
+
+    /// The most-recently written snapshot's `(ref_id, position)`, or `None`. Ordered by the numeric suffix
+    /// (so `snap-10` is newer than `snap-9` — a lexical max would be wrong).
+    pub fn latest_snapshot(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<Option<(String, CommandPosition)>> {
+        let prefix = format!("{}snap/", shard_prefix(shard));
+        let mut best: Option<(u64, String)> = None;
+        for key in self.store.list(&prefix)? {
+            let ref_id = key
+                .rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".json"))
+                .unwrap_or("");
+            if let Some(n) = ref_id
+                .strip_prefix("snap-")
+                .and_then(|s| s.parse::<u64>().ok())
+                && best.as_ref().is_none_or(|(bn, _)| n > *bn)
+            {
+                best = Some((n, ref_id.to_string()));
+            }
+        }
+        match best {
+            Some((_, ref_id)) => {
+                let blob = self.read_snapshot_blob(shard, &ref_id)?;
+                Ok(Some((
+                    ref_id,
+                    CommandPosition::new(shard.clone(), blob.epoch, blob.seq),
+                )))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Read a snapshot's payload by ref id.
+    pub fn read_snapshot(&self, shard: &QueueKey, ref_id: &str) -> EngineResult<Vec<u8>> {
+        Ok(self.read_snapshot_blob(shard, ref_id)?.payload)
+    }
+
+    fn read_snapshot_blob(&self, shard: &QueueKey, ref_id: &str) -> EngineResult<SnapshotBlob> {
+        let key = format!("{}snap/{ref_id}.json", shard_prefix(shard));
+        let bytes = self
+            .store
+            .get(&key)?
+            .ok_or_else(|| EngineError::Storage(format!("missing snapshot {ref_id}")))?;
+        serde_json::from_slice(&bytes).map_err(store_err)
+    }
+
+    /// Register a shard by key alone (the ADR-012 `LogStore::ensure_shard` seam — the control plane owns the
+    /// queue DEFINITION, so the log axis only needs the key to recover its manifest tail). Idempotent.
+    pub fn ensure_shard(&self, shard: &QueueKey) -> EngineResult<()> {
+        let (next_seq, next_index, epoch) = self.recover_manifest(shard)?;
+        let mut g = self.inner.lock().expect("segmented log poisoned");
+        g.shards.entry(shard.clone()).or_insert(ShardBuf {
+            buffered: Vec::new(),
+            buffered_bytes: 0,
+            oldest_buffered_ms: None,
+            next_seq,
+            next_manifest_index: next_index,
+            committed_epoch: epoch,
+        });
+        Ok(())
+    }
+}
+
+/// Durable high-water blob (the explicit command-position high-water; TD-007 §4).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HighWaterBlob {
+    epoch: u64,
+    seq: u64,
+}
+
+/// A projection snapshot blob (payload + the command position it was taken at).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotBlob {
+    epoch: u64,
+    seq: u64,
+    payload: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
