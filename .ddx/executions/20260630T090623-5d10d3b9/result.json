@@ -1,0 +1,56 @@
+{
+  "bead_id": "pqueue-9a733f91",
+  "attempt_id": "20260630T090623-5d10d3b9",
+  "base_rev": "e269639b90a698aeeec2359e4967a9188fe587cb",
+  "result_rev": "7716b14ac42896aa11a9c9f2682a009df22bf588",
+  "implementation_rev": "7716b14ac42896aa11a9c9f2682a009df22bf588",
+  "outcome": "task_succeeded",
+  "status": "success",
+  "detail": "success",
+  "candidate_ref": "refs/ddx/iterations/20260630T090623-5d10d3b9/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260630T090623-5d10d3b9",
+      "result_rev": "7716b14ac42896aa11a9c9f2682a009df22bf588",
+      "implementer_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "requested_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "actual_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "claude-tui",
+  "model": "sonnet-4.6",
+  "predicted_power": 8,
+  "predicted_cost_usd_per_1k_tokens": 0.009,
+  "predicted_cost_source": "subscription",
+  "session_id": "eb-3fd442a9",
+  "duration_ms": 344009,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260630T090623-5d10d3b9",
+  "prompt_file": ".ddx/executions/20260630T090623-5d10d3b9/prompt.md",
+  "manifest_file": ".ddx/executions/20260630T090623-5d10d3b9/manifest.json",
+  "result_file": ".ddx/executions/20260630T090623-5d10d3b9/result.json",
+  "usage_file": ".ddx/executions/20260630T090623-5d10d3b9/usage.json",
+  "started_at": "2026-06-30T09:06:23.854200443Z",
+  "finished_at": "2026-06-30T09:12:07.864101527Z"
+}
