@@ -123,6 +123,7 @@ fn spec(payload: &str) -> PushSpec {
         metadata: Metadata::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
+        entity: None,
     }
 }
 

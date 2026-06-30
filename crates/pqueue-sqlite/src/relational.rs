@@ -3994,6 +3994,7 @@ impl UpsertPort for SqliteRelationalBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                entity_document: None,
             };
             match existing {
                 None => {

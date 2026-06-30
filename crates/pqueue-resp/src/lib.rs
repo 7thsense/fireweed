@@ -607,6 +607,7 @@ async fn xadd<B: RespBackend, H: RespHooks>(
                 metadata,
                 cohort_size: None, // RESP XADD has no cohort declaration (library-only, plan §3)
                 gate_keys: Vec::new(), // RESP XADD carries no gate keys (library-only)
+                entity: None, // RESP XADD is schema-less (typed entities are library-only, ADR-011)
             };
             match backend.push(&shard, vec![spec], now, expected_epoch).await {
                 Ok(ids) => Resp::Bulk(ids[0].to_string().into_bytes()),

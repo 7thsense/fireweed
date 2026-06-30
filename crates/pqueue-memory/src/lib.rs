@@ -314,6 +314,7 @@ impl UpsertPort for MemoryBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                entity_document: None,
             };
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),

@@ -168,6 +168,11 @@ pub struct NewItem {
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d). A blocked gate key makes the item ineligible. Empty = un-gated.
     pub gate_keys: Vec<String>,
+    /// Typed JSON entity document (ADR-011). Present for schema-validated typed queues; absent for
+    /// schema-less queues that use the opaque `payload` bytes carrier instead. When both are present, the
+    /// `entity` is the canonical typed representation (used by schema validation and axon_esf index-key
+    /// computation); `payload` is preserved for legacy/schema-less callers and stored independently.
+    pub entity: Option<serde_json::Value>,
 }
 
 /// Map a public [`NewItem`] to the engine's [`PushSpec`] (shared by `push` and `commit`).
@@ -182,6 +187,7 @@ fn new_item_to_spec(it: NewItem) -> PushSpec {
         metadata: it.metadata,
         cohort_size: it.cohort_size,
         gate_keys: it.gate_keys,
+        entity: it.entity,
     }
 }
 

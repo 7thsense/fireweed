@@ -1307,6 +1307,7 @@ dependencies = [
  "bytes",
  "pqueue-core",
  "pqueue-engine",
+ "serde_json",
 ]
 
 [[package]]

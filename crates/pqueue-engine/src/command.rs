@@ -123,6 +123,7 @@ pub fn build_push_items(
             metadata: s.metadata,
             cohort_size: s.cohort_size,
             gate_keys: s.gate_keys,
+            entity_document: s.entity,
         });
     }
     (items, ids)
@@ -231,6 +232,12 @@ pub struct PushItem {
     /// the BQ-14d fresh-eyes review.
     #[serde(default)]
     pub gate_keys: Vec<String>,
+    /// Typed JSON entity document (ADR-011). The canonical typed representation for schema-validated typed
+    /// queues — used by schema validation and axon_esf index-key computation at push time.
+    /// `#[serde(default)]` preserves replay compatibility for log entries written before this field existed.
+    /// `None` for schema-less queues (which use the opaque `payload` bytes carrier).
+    #[serde(default)]
+    pub entity_document: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -472,6 +479,7 @@ mod serde_tests {
             metadata: Metadata::default(),
             cohort_size: Some(4),
             gate_keys: Vec::new(),
+            entity_document: None,
         }
     }
 

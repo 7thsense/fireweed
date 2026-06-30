@@ -559,6 +559,7 @@ impl UpsertPort for SqliteBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                entity_document: None,
             };
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("sql-{}-{n}", self.node_id)),

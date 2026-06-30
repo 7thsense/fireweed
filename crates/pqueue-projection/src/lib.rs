@@ -52,6 +52,10 @@ struct ItemRecord {
     fields: BTreeMap<String, Bytes>,
     metadata: Metadata,
     gate_keys: Vec<String>,
+    /// Typed JSON entity document (ADR-011). Carries the canonical typed representation through the
+    /// projection so schema validation and axon_esf index-key computation can address it.
+    /// `None` for schema-less queues that use the opaque `payload` bytes carrier.
+    entity_document: Option<serde_json::Value>,
     state: ItemState,
     item_version: u64,
     attempt_count: u32,
@@ -450,6 +454,7 @@ impl ProjectionData {
             fields: item.fields,
             metadata: item.metadata,
             gate_keys: item.gate_keys,
+            entity_document: item.entity_document,
             state: ItemState::Pending,
             item_version: 1,
             attempt_count: 0,
@@ -1321,6 +1326,7 @@ mod tests {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            entity_document: None,
         }
     }
     fn env(command: QueueCommand) -> CommandEnvelope {

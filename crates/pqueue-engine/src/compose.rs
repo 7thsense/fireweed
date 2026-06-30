@@ -705,6 +705,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                entity_document: None,
             };
             let mut g = self.inner.lock().expect("poisoned");
             let existing = g.projection.lookup_by_key(shard, client_item_key)?;

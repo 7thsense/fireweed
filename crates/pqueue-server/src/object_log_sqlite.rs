@@ -2299,6 +2299,7 @@ mod recovery_tests {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            entity: None,
         }
     }
 
