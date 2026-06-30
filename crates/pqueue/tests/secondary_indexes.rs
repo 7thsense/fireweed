@@ -874,3 +874,152 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
         other
     );
 }
+
+// ---------------------------------------------------------------------------
+// Typed query API (ADR-011) — raw-byte bypass prevention + name resolution
+// ---------------------------------------------------------------------------
+
+/// Raw bytes that do not decode to the declared field type for a typed index must be rejected with
+/// `EngineError::Invalid`, not silently accepted or panicked. This proves the typed index validation
+/// cannot be bypassed by passing arbitrary bytes through the raw-byte `query_index*` overloads.
+#[tokio::test]
+async fn secondary_indexes_raw_bytes_invalid_for_typed_index_are_rejected() {
+    let pq = new_pq().await;
+    let q = qkey();
+
+    // Push one item so the index is populated and non-trivially exercised.
+    pq.push(
+        &q,
+        item(json!({
+            "score": 42,
+            "active": true,
+            "due_at": "2026-06-30T12:00:00Z",
+            "region": "us-east",
+            "zone": 1,
+            "external_id": "guard"
+        })),
+    )
+    .await
+    .unwrap();
+
+    // b"not-a-number" is not valid JSON — the Integer-typed "by_score" index rejects it.
+    let err = pq
+        .query_index_unique(&q, "by_score", vec![b"not-a-number".to_vec()])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Invalid("lookup key is not a valid JSON number"),
+        "non-JSON bytes for Integer index must return EngineError::Invalid"
+    );
+
+    // b"maybe" is not valid JSON boolean — the Boolean-typed "by_active" index rejects it.
+    let err = pq
+        .query_index_unique(&q, "by_active", vec![b"maybe".to_vec()])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Invalid("lookup key is not a valid JSON boolean"),
+        "non-JSON-boolean bytes for Boolean index must return EngineError::Invalid"
+    );
+
+    // Valid bytes for the same fields succeed — the validation is type-specific, not blanket rejection.
+    let hit = pq
+        .query_index_unique(&q, "by_score", vec![serde_json::to_vec(&42i64).unwrap()])
+        .await
+        .unwrap();
+    assert!(hit.is_some(), "valid JSON number bytes resolve correctly");
+
+    let hit = pq
+        .query_index_unique(&q, "by_active", vec![b"true".to_vec()])
+        .await
+        .unwrap();
+    assert!(hit.is_some(), "valid JSON boolean bytes resolve correctly");
+}
+
+/// The `query_index_unique_typed` and `query_index_typed` methods accept `serde_json::Value`
+/// directly and resolve the index by the configured `QueueIndex.name`. This proves that:
+/// 1. The typed API encodes values correctly (the same result as the raw-byte path with valid bytes).
+/// 2. The index name used in the API must match `QueueIndex.name` exactly.
+/// 3. An unknown name returns `EngineError::Invalid`.
+#[tokio::test]
+async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
+    let pq = new_pq().await;
+    let q = qkey();
+
+    let id = pq
+        .push(
+            &q,
+            item(json!({
+                "score": 99,
+                "active": false,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "eu-west",
+                "zone": 3,
+                "external_id": "typed-query-test"
+            })),
+        )
+        .await
+        .unwrap();
+
+    // query_index_unique_typed resolves by QueueIndex.name ("by_score") with a serde_json::Value.
+    let hit = pq
+        .query_index_unique_typed(&q, "by_score", &[serde_json::json!(99i64)])
+        .await
+        .unwrap()
+        .expect("by_score typed query must find the item");
+    assert_eq!(hit.item_id, id, "typed query resolves the correct item");
+
+    // query_index_typed (non-unique) works the same way.
+    let hits = pq
+        .query_index_typed(&q, "by_due_at", &[serde_json::json!("2026-06-30T12:00:00Z")])
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item_id, id);
+
+    // Compound typed index: two-value key.
+    let hits = pq
+        .query_index_typed(&q, "by_region_zone", &[serde_json::json!("eu-west"), serde_json::json!(3i64)])
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item_id, id);
+
+    // An unknown index name must return EngineError::Invalid regardless of the query method used.
+    let err = pq
+        .query_index_unique_typed(&q, "no_such_index", &[serde_json::json!(99i64)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Invalid("unknown secondary index"),
+        "unknown index name must return EngineError::Invalid"
+    );
+    let err = pq
+        .query_index_typed(&q, "no_such_index", &[serde_json::json!("x")])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Invalid("unknown secondary index"),
+        "unknown index name on non-unique path must also return EngineError::Invalid"
+    );
+
+    // The typed query result is byte-for-byte equivalent to the raw-byte path with correct bytes.
+    let raw_hit = pq
+        .query_index_unique(&q, "by_external_id", key(&["typed-query-test"]))
+        .await
+        .unwrap()
+        .expect("raw-byte query finds the same item");
+    let typed_hit = pq
+        .query_index_unique_typed(&q, "by_external_id", &[serde_json::json!("typed-query-test")])
+        .await
+        .unwrap()
+        .expect("typed query finds the same item");
+    assert_eq!(
+        raw_hit.item_id, typed_hit.item_id,
+        "raw-byte and typed-value queries produce identical results for the same key"
+    );
+}

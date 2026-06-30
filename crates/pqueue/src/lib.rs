@@ -115,6 +115,17 @@ impl<T> LibBackend for T where
 {
 }
 
+/// Serialize a [`serde_json::Value`] to the axon_esf-compatible raw byte format expected by the
+/// typed-index lookup path in the projection (`decode_typed_lookup_value`):
+/// - `String`: raw UTF-8 bytes (no JSON quoting) — matches String and Datetime index types.
+/// - `Number` / `Bool` / other: JSON-encoded bytes — matches Integer, Float, and Boolean index types.
+fn json_value_to_index_key_bytes(value: &serde_json::Value) -> Vec<u8> {
+    match value {
+        serde_json::Value::String(s) => s.as_bytes().to_vec(),
+        other => serde_json::to_vec(other).expect("infallible JSON serialization"),
+    }
+}
+
 /// `ts + millis`, normalizing nanoseconds — derives a lease expiry from `now`.
 fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
     let total =
@@ -845,6 +856,11 @@ impl<B: LibBackend> Pqueue<B> {
     /// in the index's declared field order. Returns the single [`IndexHit`] holding the key, or `None`.
     /// Pure read (no epoch/fence). `EngineError::Invalid` if `index` is not a unique index on this queue;
     /// `EngineError::Unavailable` on a relational backend (Phase 2).
+    ///
+    /// For typed (ADR-011 [`QueueIndex`]) indexes, prefer [`Pqueue::query_index_unique_typed`] — it
+    /// accepts [`serde_json::Value`]s directly and validates the type encoding at the API boundary.
+    /// This raw-byte overload remains available for legacy [`IndexSpec`] indexes. For typed indexes,
+    /// passing bytes that do not decode to the declared field type returns [`EngineError::Invalid`].
     pub async fn query_index_unique(
         &self,
         queue: &QueueKey,
@@ -856,6 +872,11 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Exact composite-key lookup on a secondary index (unique or non-unique, ADR-010). Returns every
     /// matching item ordered by `item_id` ascending. Pure read (no epoch/fence).
+    ///
+    /// For typed (ADR-011 [`QueueIndex`]) indexes, prefer [`Pqueue::query_index_typed`] — it accepts
+    /// [`serde_json::Value`]s directly and validates the type encoding at the API boundary. This
+    /// raw-byte overload remains available for legacy [`IndexSpec`] indexes. For typed indexes,
+    /// passing bytes that do not decode to the declared field type returns [`EngineError::Invalid`].
     pub async fn query_index(
         &self,
         queue: &QueueKey,
@@ -863,6 +884,45 @@ impl<B: LibBackend> Pqueue<B> {
         key: Vec<Vec<u8>>,
     ) -> EngineResult<Vec<IndexHit>> {
         self.backend.index_lookup(queue, index, &key).await
+    }
+
+    /// Typed composite-key get on a UNIQUE secondary index (ADR-011). `key_values` are the per-field
+    /// [`serde_json::Value`]s in the [`QueueIndex`] declaration order — the index name must match the
+    /// configured [`QueueIndex::name`] exactly. Each value is serialized to the axon_esf-compatible byte
+    /// format (strings/datetimes as raw UTF-8; numbers and booleans as JSON bytes) and validated by the
+    /// projection against the declared field type; a wrong-type value returns [`EngineError::Invalid`].
+    /// Pure read (no epoch/fence). `EngineError::Invalid` for an unknown index name, non-unique index, or
+    /// arity mismatch; `EngineError::Unavailable` on a relational backend (Phase 2).
+    pub async fn query_index_unique_typed(
+        &self,
+        queue: &QueueKey,
+        index: &str,
+        key_values: &[serde_json::Value],
+    ) -> EngineResult<Option<IndexHit>> {
+        let raw: Vec<Vec<u8>> = key_values
+            .iter()
+            .map(json_value_to_index_key_bytes)
+            .collect();
+        self.backend.index_get_unique(queue, index, &raw).await
+    }
+
+    /// Typed composite-key lookup on a secondary index — unique or non-unique (ADR-011). `key_values`
+    /// are the per-field [`serde_json::Value`]s in the [`QueueIndex`] declaration order; the index name
+    /// must match the configured [`QueueIndex::name`] exactly. Returns every matching item ordered by
+    /// `item_id` ascending; empty if none. Each value is serialized to the axon_esf-compatible byte format
+    /// and validated against the declared field type — a wrong-type value returns [`EngineError::Invalid`].
+    /// Pure read (no epoch/fence).
+    pub async fn query_index_typed(
+        &self,
+        queue: &QueueKey,
+        index: &str,
+        key_values: &[serde_json::Value],
+    ) -> EngineResult<Vec<IndexHit>> {
+        let raw: Vec<Vec<u8>> = key_values
+            .iter()
+            .map(json_value_to_index_key_bytes)
+            .collect();
+        self.backend.index_lookup(queue, index, &raw).await
     }
 
     /// Dead-letter (terminal `fail`) the given leased items.
