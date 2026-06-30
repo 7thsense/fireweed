@@ -453,8 +453,18 @@ run_non_cluster_gates() {
     run_step "validate docs/microsite" validate_docs_microsite
 }
 
+free_kind_build_space() {
+    echo "=== deployment release gate: free kind image build space ==="
+    run_cmd rm -rf \
+        "${REPO_ROOT}/target/debug" \
+        "${REPO_ROOT}/target/release" \
+        "${REPO_ROOT}/target/coverage" \
+        "${REPO_ROOT}/target/llvm-cov-target"
+}
+
 prepare_kind_image_context() {
     echo "=== deployment release gate: prepare kind image context ==="
+    free_kind_build_space
     run_cmd cargo +1.92.0 build --release --bin pqueue-verify-ledger
     run_cmd cargo +1.92.0 build --release --bin pqueue-service
 
