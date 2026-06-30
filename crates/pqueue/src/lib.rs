@@ -18,8 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
-use pqueue_core::QueueIndex;
-use pqueue_core::WorkerId;
+use pqueue_core::{IndexDeclaration, QueueIndex, WorkerId};
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome, FinalizePort,
@@ -133,8 +132,8 @@ fn typed_index_query_key_bytes(
     key_values: &[serde_json::Value],
 ) -> EngineResult<Vec<Vec<u8>>> {
     let expected_arity = match &spec.declaration {
-        pqueue_core::IndexDeclaration::Single(_) => 1,
-        pqueue_core::IndexDeclaration::Compound(def) => def.fields.len(),
+        IndexDeclaration::Single(_) => 1,
+        IndexDeclaration::Compound(def) => def.fields.len(),
     };
     if key_values.len() != expected_arity {
         return Err(EngineError::Invalid("secondary index key arity mismatch"));
@@ -142,13 +141,13 @@ fn typed_index_query_key_bytes(
 
     let mut raw = Vec::with_capacity(key_values.len());
     match &spec.declaration {
-        pqueue_core::IndexDeclaration::Single(def) => {
+        IndexDeclaration::Single(def) => {
             encode_index_value(&key_values[0], &def.index_type).map_err(|_| {
                 EngineError::Invalid("typed index value is not valid for declared type")
             })?;
             raw.push(json_value_to_index_key_bytes(&key_values[0]));
         }
-        pqueue_core::IndexDeclaration::Compound(def) => {
+        IndexDeclaration::Compound(def) => {
             for (value, field) in key_values.iter().zip(def.fields.iter()) {
                 encode_index_value(value, &field.index_type).map_err(|_| {
                     EngineError::Invalid("typed index value is not valid for declared type")
@@ -159,6 +158,13 @@ fn typed_index_query_key_bytes(
     }
 
     Ok(raw)
+}
+
+fn typed_index_unique(spec: &QueueIndex) -> bool {
+    match &spec.declaration {
+        IndexDeclaration::Single(def) => def.unique,
+        IndexDeclaration::Compound(def) => def.unique,
+    }
 }
 
 /// `ts + millis`, normalizing nanoseconds — derives a lease expiry from `now`.
@@ -941,6 +947,9 @@ impl<B: LibBackend> Pqueue<B> {
             .iter()
             .find(|spec| spec.name == index)
             .ok_or_else(|| EngineError::Invalid("unknown secondary index"))?;
+        if !typed_index_unique(spec) {
+            return Err(EngineError::Invalid("secondary index is not unique"));
+        }
         let raw = typed_index_query_key_bytes(spec, key_values)?;
         self.backend.index_get_unique(queue, index, &raw).await
     }

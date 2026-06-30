@@ -222,12 +222,21 @@ fn legacy_index_key(
     Ok(Some(legacy_raw_key(&field_bytes)))
 }
 
-/// Decode a raw lookup byte slice into a JSON `Value` appropriate for `index_type`. For String
-/// and Datetime fields the bytes are treated as strict UTF-8 (not JSON-parsed), so `b"123"` stays
-/// `"123"` rather than the number 123.
+/// Decode a raw lookup byte slice into a JSON `Value` appropriate for `index_type`. String fields
+/// are treated as strict UTF-8 (not JSON-parsed), so `b"123"` stays `"123"` rather than the number
+/// 123. Datetime fields accept either RFC 3339 UTF-8 or JSON numeric epoch-nanos because axon-esf
+/// treats both as valid representations of the same instant.
 fn decode_typed_lookup_value(index_type: &IndexType, bytes: &[u8]) -> EngineResult<Value> {
     match index_type {
-        IndexType::String | IndexType::Datetime => {
+        IndexType::String => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            Ok(Value::String(s.to_owned()))
+        }
+        IndexType::Datetime => {
+            if let Ok(value @ Value::Number(_)) = serde_json::from_slice::<Value>(bytes) {
+                return Ok(value);
+            }
             let s = std::str::from_utf8(bytes)
                 .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
             Ok(Value::String(s.to_owned()))

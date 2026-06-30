@@ -14,6 +14,7 @@ use pqueue_core::{
     RetryPolicy, TenantId,
 };
 use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_sqlite::SqliteRelationalBackend;
 use serde_json::{Value, json};
 
 fn qkey() -> pqueue::QueueKey {
@@ -126,6 +127,14 @@ fn key(parts: &[&str]) -> Vec<Vec<u8>> {
 
 async fn new_pq() -> Pqueue<MemoryBackend> {
     let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(0));
+    let pq = Pqueue::new(backend, clock);
+    pq.create_queue(queue_definition()).await.unwrap();
+    pq
+}
+
+async fn new_sqlite_relational_pq() -> Pqueue<SqliteRelationalBackend> {
+    let backend = Arc::new(SqliteRelationalBackend::in_memory().unwrap());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     pq.create_queue(queue_definition()).await.unwrap();
@@ -993,6 +1002,20 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
     assert_eq!(hits[0].item_id, id);
 
     let hits = pq
+        .query_index_typed(
+            &q,
+            "by_due_at",
+            &[serde_json::json!(1_782_820_800_000_000_000i64)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        hits[0].item_id, id,
+        "numeric epoch-nanos datetime values accepted by axon-esf must query the same instant"
+    );
+
+    let hits = pq
         .query_index_typed(&q, "by_ratio", &[serde_json::json!(1.5)])
         .await
         .unwrap();
@@ -1056,6 +1079,20 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         "string JSON must be rejected for Float typed indexes"
     );
 
+    let err = pq
+        .query_index_unique_typed(
+            &q,
+            "by_due_at",
+            &[serde_json::json!("2026-06-30T12:00:00Z")],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Invalid("secondary index is not unique"),
+        "typed unique lookup must reject non-unique indexes before backend lookup"
+    );
+
     // The typed query result is byte-for-byte equivalent to the raw-byte path with correct bytes.
     let raw_hit = pq
         .query_index_unique(&q, "by_external_id", key(&["typed-query-test"]))
@@ -1074,5 +1111,35 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
     assert_eq!(
         raw_hit.item_id, typed_hit.item_id,
         "raw-byte and typed-value queries produce identical results for the same key"
+    );
+}
+
+#[tokio::test]
+async fn secondary_indexes_typed_query_relational_error_precedence_is_explicit() {
+    let pq = new_sqlite_relational_pq().await;
+    let q = qkey();
+
+    let err = pq
+        .query_index_unique_typed(
+            &q,
+            "by_due_at",
+            &[serde_json::json!("2026-06-30T12:00:00Z")],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Invalid("secondary index is not unique"),
+        "facade uniqueness validation should run before relational backend availability"
+    );
+
+    let err = pq
+        .query_index_typed(&q, "by_score", &[serde_json::json!(99i64)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        pqueue::EngineError::Unavailable,
+        "valid typed lookups still surface relational secondary-index unavailability until Phase 2"
     );
 }
