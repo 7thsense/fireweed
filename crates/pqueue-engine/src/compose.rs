@@ -23,7 +23,10 @@
 //! point with a single transactional store implementing BOTH axes — see ADR-012 §"The atomic write seam".
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -127,6 +130,179 @@ pub trait LogStore: Send {
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         Ok(Vec::new())
     }
+
+    // -- group-commit facet (ADR-012 P2, runtime-agnostic) -------------------
+    //
+    // The OPTIONAL ack-after-seal co-buffering seam (TD-004): instead of force-sealing one segment per
+    // `append`, the composition buffers concurrent writes per queue and seals MANY commands into one durable
+    // object (size- or latency-triggered), amortizing the per-object cost. These are `&self` (the substrate
+    // is interior-mutable) so the composition can call them while holding the unit-of-work lock WITHOUT
+    // `&mut self`. A log that does not opt in keeps `supports_group_commit() == false` and the composition
+    // uses the synchronous `append` path unchanged — the defaults here are never reached on the OFF path.
+
+    /// Whether this log implements the group-commit facet (the composition's ack-after-seal co-buffering
+    /// write path). `false` (the default) keeps the synchronous force-seal `append` path.
+    fn supports_group_commit(&self) -> bool {
+        false
+    }
+
+    /// Buffer `commands` for `shard` under `expected_epoch` (TD-004 step 1). If a size trigger fires the
+    /// buffered batch seals synchronously and its acked positions are returned; otherwise the commands stay
+    /// buffered (NOT acked) and an empty vec is returned. `now_ms` stamps the oldest-buffered age for the
+    /// latency trigger. Default: unsupported (never called on the OFF path).
+    fn gc_enqueue(
+        &self,
+        _shard: &QueueKey,
+        _commands: &[CommandEnvelope],
+        _expected_epoch: u64,
+        _now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// Force-seal whatever is buffered for `shard` into one segment and ack (TD-004 step 2 forced). A stale
+    /// `expected_epoch` is fenced before any object is written; empty if nothing was buffered. Default:
+    /// unsupported.
+    fn gc_seal(
+        &self,
+        _shard: &QueueKey,
+        _expected_epoch: u64,
+        _now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// Seal the buffered batch for `shard` iff its oldest command has aged past the latency cap (TD-004 step 2
+    /// latency trigger); acked positions, or empty if nothing was due. Default: unsupported.
+    fn gc_flush_due(
+        &self,
+        _shard: &QueueKey,
+        _expected_epoch: u64,
+        _now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// Advance the durable high-water to the last acked `position` after a seal (no monotonic re-check — the
+    /// post-seal position always advances). Default: unsupported.
+    fn gc_advance_high_water(
+        &self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+    ) -> EngineResult<()> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// The configured latency cap (ms). The externalized flusher polls each queue at `gc_max_latency_ms()/4`
+    /// so a buffer below the size threshold still acks within ~one latency window. Default: `0`.
+    fn gc_max_latency_ms(&self) -> u64 {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-free seal-wait (group-commit ack-after-seal, ADR-012 P2)
+// ---------------------------------------------------------------------------
+
+/// A one-shot seal-result slot a group-commit waiter parks on until its co-buffered batch seals. Runtime-
+/// free: [`SealFuture`] polls the slot and registers a [`Waker`]; [`SealSlot::complete`] fills the slot and
+/// wakes the parked poller. `EngineError: Clone`, so one seal outcome fans out to every waiter on the batch.
+struct SealSlot {
+    result: Mutex<Option<EngineResult<()>>>,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl SealSlot {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            waker: Mutex::new(None),
+        }
+    }
+
+    /// Fill the slot with the seal outcome and wake any parked poller. The result lock is held while taking
+    /// the waker so a concurrent [`SealFuture::poll`] either observes the result on its next poll or has its
+    /// just-registered waker woken — no lost wakeup (poll registers its waker under the same result lock).
+    fn complete(&self, outcome: EngineResult<()>) {
+        let mut r = self.result.lock().expect("seal slot poisoned");
+        *r = Some(outcome);
+        let waker = self.waker.lock().expect("seal slot poisoned").take();
+        drop(r);
+        if let Some(w) = waker {
+            w.wake();
+        }
+    }
+}
+
+/// The future a write port returns. `Ready` resolves immediately (the synchronous atomic path, and the
+/// group-commit ops that complete under the lock); `Seal` parks on a [`SealSlot`] until the waiter's co-
+/// buffered batch seals (the ack-after-seal `push`). Works on any executor (no runtime dependency).
+enum AckFuture<T> {
+    Ready(Option<EngineResult<T>>),
+    Seal {
+        slot: Arc<SealSlot>,
+        value: Option<T>,
+    },
+}
+
+impl<T> AckFuture<T> {
+    fn ready(result: EngineResult<T>) -> Self {
+        AckFuture::Ready(Some(result))
+    }
+
+    fn seal(slot: Arc<SealSlot>, value: T) -> Self {
+        AckFuture::Seal {
+            slot,
+            value: Some(value),
+        }
+    }
+}
+
+impl<T: Unpin> Future for AckFuture<T> {
+    type Output = EngineResult<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            AckFuture::Ready(slot) => {
+                Poll::Ready(slot.take().expect("AckFuture polled after completion"))
+            }
+            AckFuture::Seal { slot, value } => {
+                let mut r = slot.result.lock().expect("seal slot poisoned");
+                if let Some(outcome) = r.take() {
+                    return Poll::Ready(match outcome {
+                        Ok(()) => Ok(value.take().expect("AckFuture polled after completion")),
+                        Err(e) => Err(e),
+                    });
+                }
+                // Not sealed yet: register the waker WHILE holding the result lock (so `complete` cannot slip
+                // a result+wake between our check and our registration), then yield.
+                *slot.waker.lock().expect("seal slot poisoned") = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Per-queue group-commit coordination (ADR-012 P2): the engine-side mirror of the substrate's buffer. Held
+/// under the composition's existing `std::sync::Mutex<Inner>` — no async lock. `pending` mirrors the
+/// substrate's buffered envelopes 1:1 in arrival order (so a seal that drains the substrate buffer drains
+/// exactly the same `pending`/`waiters` prefix); each `waiters` slot is filled when its batch seals + applies.
+#[derive(Default)]
+struct ShardCoord {
+    /// Envelopes buffered-but-not-yet-acked, kept engine-side so `distribute` can apply them to the
+    /// projection on seal (the substrate's seal returns only positions).
+    pending: Vec<CommandEnvelope>,
+    /// One seal slot per buffered envelope; completed (Ok/Err) when the envelope's segment seals + applies.
+    waiters: Vec<Arc<SealSlot>>,
+    /// The assignment epoch the buffered batch will seal under (set when the first command buffers).
+    seal_epoch: u64,
+}
+
+/// `UtcTimestamp` → epoch milliseconds (the substrate's latency-trigger clock unit).
+fn ts_to_ms(now: UtcTimestamp) -> i64 {
+    now.seconds
+        .saturating_mul(1000)
+        .saturating_add((now.nanoseconds / 1_000_000) as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +566,10 @@ struct Inner<L, P> {
     /// verbatim with NO double-write. Held under the same UoW lock so check + append + record stays atomic.
     commit_idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
     cmd_seq: u64,
+    /// Per-queue group-commit coordinators (ADR-012 P2). Empty + unused on the synchronous (atomic / OFF)
+    /// path; populated only when the composition runs the ack-after-seal write path against a group-commit
+    /// log. Protected by the SAME `Mutex<Inner>` as `log`/`projection` — no async lock.
+    coords: HashMap<QueueKey, ShardCoord>,
 }
 
 /// Default recovery-window budget: the max durable-log tail (commands) a normal reopen replays beyond the
@@ -413,6 +593,11 @@ pub struct ComposedBackend<L, P, C> {
     durability: DurabilityClass,
     /// Recovery-window budget (max tail commands) before [`Self::recover`] logs a recovery-window warning.
     recovery_max_tail: u64,
+    /// Group-commit mode (ADR-012 P2), DEFAULT OFF. When `false` every write funnels through the synchronous
+    /// `commit_locked` force-seal/append→apply path UNCHANGED. When `true` AND the log axis advertises
+    /// `supports_group_commit()`, `push` co-buffers + acks-after-seal and read-modify-write ops force-seal the
+    /// buffered batch before they select/apply (so they observe applied state under the one composed lock).
+    group_commit: bool,
 }
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> {
@@ -426,12 +611,14 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 idempotency: HashMap::new(),
                 commit_idempotency: HashMap::new(),
                 cmd_seq: 0,
+                coords: HashMap::new(),
             }),
             control,
             node_id: 0,
             counters: QueueCounters::default(),
             durability,
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
+            group_commit: false,
         }
     }
 
@@ -440,6 +627,217 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
         self.recovery_max_tail = max_tail;
         self
+    }
+
+    /// Enable the ack-after-seal group-commit write path (ADR-012 P2). DEFAULT OFF. Only takes effect for a
+    /// log axis that advertises [`LogStore::supports_group_commit`]; on any other log the write path stays the
+    /// synchronous `commit_locked` path regardless of this flag.
+    pub fn with_group_commit(mut self, on: bool) -> Self {
+        self.group_commit = on;
+        self
+    }
+
+    /// Whether the composition runs the group-commit write path (the builder flag AND a group-commit-capable
+    /// log). The server uses this to decide whether to spawn the externalized flush task.
+    pub fn group_commit_enabled(&self) -> bool {
+        self.group_commit
+            && self
+                .inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .supports_group_commit()
+    }
+
+    /// The flush-task poll interval (ms): `gc_max_latency_ms()/4` (≥ 1), so a buffered-but-quiet segment
+    /// seals within ~one latency window — the same cadence the monolith's `spawn_flusher` uses.
+    pub fn group_commit_flush_interval_ms(&self) -> u64 {
+        (self.inner.lock().expect("poisoned").log.gc_max_latency_ms() / 4).max(1)
+    }
+
+    /// Observability/test seam: run `f` against the log axis under the unit-of-work lock (e.g. to read the
+    /// substrate's group-commit segment counters for the co-buffering proof).
+    pub fn with_log<R>(&self, f: impl FnOnce(&L) -> R) -> R {
+        f(&self.inner.lock().expect("poisoned").log)
+    }
+
+    // -- group-commit write-path helpers (ADR-012 P2) -----------------------
+
+    /// Buffer `env` into the group-commit coordinator + substrate and return its [`SealSlot`] (the
+    /// ack-after-seal handle). If a SIZE trigger fired during the enqueue the sealed batch is distributed
+    /// immediately (applied + its waiters completed); otherwise the command stays buffered and is acked by a
+    /// later size seal, the latency flusher, or a read-modify-write force-seal. Caller holds the `Inner` lock.
+    fn gc_buffer(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        env: CommandEnvelope,
+        expected_epoch: Option<u64>,
+        now: UtcTimestamp,
+    ) -> EngineResult<Arc<SealSlot>> {
+        let slot = Arc::new(SealSlot::new());
+        let now_ms = ts_to_ms(now);
+        let resolved_epoch = match expected_epoch {
+            Some(e) => e,
+            None => inner.log.current_epoch(shard)?,
+        };
+        let enqueued = {
+            let Inner { log, coords, .. } = &mut *inner;
+            let coord = coords.entry(shard.clone()).or_default();
+            if coord.pending.is_empty() {
+                coord.seal_epoch = resolved_epoch;
+            }
+            coord.pending.push(env);
+            coord.waiters.push(slot.clone());
+            // Enqueue by reference (no per-command envelope clone on the hot path); the seal epoch is the
+            // batch's, so co-buffered commands seal together under one epoch.
+            log.gc_enqueue(
+                shard,
+                std::slice::from_ref(coord.pending.last().expect("just pushed")),
+                coord.seal_epoch,
+                now_ms,
+            )
+        };
+        match enqueued {
+            Ok(positions) if !positions.is_empty() => {
+                // A size-triggered seal fired inside `gc_enqueue`; apply + complete the drained waiters.
+                let _ = Self::gc_distribute(inner, shard, positions);
+            }
+            Ok(_) => {}
+            // Fence/storage failure: the substrate discarded the buffer, so fail every registered waiter
+            // (including this one) to keep `pending` consistent with the now-empty substrate buffer.
+            Err(e) => Self::gc_fail_all(inner, shard, e),
+        }
+        Ok(slot)
+    }
+
+    /// Apply a freshly-sealed batch to the projection in ONE batch, advance the log high-water, then complete
+    /// every waiter that contributed to it. `positions` pairs 1:1 with the front of `pending`/`waiters` (a
+    /// seal drains the whole substrate buffer). Caller holds the `Inner` lock.
+    fn gc_distribute(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        positions: Vec<CommandPosition>,
+    ) -> EngineResult<()> {
+        let Inner {
+            log,
+            projection,
+            coords,
+            ..
+        } = inner;
+        let Some(coord) = coords.get_mut(shard) else {
+            return Ok(());
+        };
+        let n = positions
+            .len()
+            .min(coord.pending.len())
+            .min(coord.waiters.len());
+        let envelopes: Vec<CommandEnvelope> = coord.pending.drain(..n).collect();
+        let waiters: Vec<Arc<SealSlot>> = coord.waiters.drain(..n).collect();
+        let result = (|| {
+            let positions = &positions[..n];
+            if let Some(last) = positions.last() {
+                log.gc_advance_high_water(shard, last.clone())?;
+            }
+            projection.apply(positions, &envelopes)
+        })();
+        for w in waiters {
+            w.complete(result.clone());
+        }
+        result
+    }
+
+    /// A seal failed (epoch fence / storage): the substrate discarded its buffer, so fail every registered
+    /// waiter and clear `pending` to stay consistent with the now-empty substrate buffer.
+    fn gc_fail_all(inner: &mut Inner<L, P>, shard: &QueueKey, err: EngineError) {
+        if let Some(coord) = inner.coords.get_mut(shard) {
+            coord.pending.clear();
+            for w in coord.waiters.drain(..) {
+                w.complete(Err(err.clone()));
+            }
+        }
+    }
+
+    /// Force-seal `shard`'s buffered batch (if any) and distribute it, so the projection reflects every prior
+    /// co-buffered write BEFORE a read-modify-write op selects/validates against it. Caller holds the lock.
+    fn gc_force_seal(inner: &mut Inner<L, P>, shard: &QueueKey, now_ms: i64) -> EngineResult<()> {
+        let (seal_epoch, pending) = match inner.coords.get(shard) {
+            Some(c) => (c.seal_epoch, !c.pending.is_empty()),
+            None => (0, false),
+        };
+        if !pending {
+            return Ok(());
+        }
+        match inner.log.gc_seal(shard, seal_epoch, now_ms) {
+            Ok(positions) if !positions.is_empty() => Self::gc_distribute(inner, shard, positions),
+            Ok(_) => Ok(()),
+            Err(e) => {
+                Self::gc_fail_all(inner, shard, e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    /// Synchronously commit ONE read-modify-write command on the group-commit log: buffer it, force-seal it
+    /// (the buffer is empty — the caller force-sealed any prior batch first), advance the high-water, and
+    /// apply it. The op observes its own write before returning (ack-after-seal, but synchronous because the
+    /// caller already selected/validated under the lock). Caller holds the lock.
+    fn gc_commit_sync(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        env: CommandEnvelope,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        validate_gate_command(false, &env.command)?;
+        let now_ms = ts_to_ms(env.created_at);
+        let seal_epoch = match expected_epoch {
+            Some(e) => e,
+            None => inner.log.current_epoch(shard)?,
+        };
+        let mut positions =
+            inner
+                .log
+                .gc_enqueue(shard, std::slice::from_ref(&env), seal_epoch, now_ms)?;
+        if positions.is_empty() {
+            positions = inner.log.gc_seal(shard, seal_epoch, now_ms)?;
+        }
+        if let Some(last) = positions.last() {
+            inner.log.gc_advance_high_water(shard, last.clone())?;
+        }
+        inner
+            .projection
+            .apply(&positions, std::slice::from_ref(&env))
+    }
+
+    /// Whether the group-commit write path is active for this composition (the builder flag AND a capable
+    /// log). Read on the hot path with the lock already held.
+    fn gc_active(&self, inner: &Inner<L, P>) -> bool {
+        self.group_commit && inner.log.supports_group_commit()
+    }
+
+    /// Seal every latency-due queue's buffered batch + distribute it (ADR-012 P2 externalized flusher). The
+    /// runtime-bearing crate (`pqueue-server`, which has tokio) drives this on an interval at
+    /// `group_commit_flush_interval_ms()`; the engine stays runtime-free. A no-op when group-commit is off.
+    pub fn flush_tick(&self, now_ms: i64) -> EngineResult<()> {
+        let mut g = self.inner.lock().expect("composed backend poisoned");
+        if !self.gc_active(&g) {
+            return Ok(());
+        }
+        let shards: Vec<(QueueKey, u64)> = g
+            .coords
+            .iter()
+            .filter(|(_, c)| !c.pending.is_empty())
+            .map(|(k, c)| (k.clone(), c.seal_epoch))
+            .collect();
+        for (shard, seal_epoch) in shards {
+            match g.log.gc_flush_due(&shard, seal_epoch, now_ms) {
+                Ok(positions) if !positions.is_empty() => {
+                    Self::gc_distribute(&mut g, &shard, positions)?;
+                }
+                Ok(_) => {}
+                Err(e) => Self::gc_fail_all(&mut g, &shard, e),
+            }
+        }
+        Ok(())
     }
 
     /// Recovery-on-open (ADR-012 P2): rebuild the in-memory derived state from the durable substrates so a
@@ -836,7 +1234,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let result = (|| {
+        // Prologue (shared with the OFF path): build the push items + envelope. A pre-commit failure resolves
+        // immediately. The ON path then co-buffers the envelope and returns an ack-after-seal `SealFuture`.
+        let prepared = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let max_attempts = self.max_attempts(shard);
             let epoch = expected_epoch.unwrap_or(0);
@@ -852,10 +1252,25 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 ids.clone(),
                 now,
             );
-            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
-            Ok(ids)
+            Ok::<_, EngineError>((g, env, ids))
         })();
-        std::future::ready(result)
+        let (mut g, env, ids) = match prepared {
+            Ok(v) => v,
+            Err(e) => return AckFuture::ready(Err(e)),
+        };
+        if self.gc_active(&g) {
+            // Group-commit: co-buffer + register a SealSlot, drop the guard, return an ack-after-seal future.
+            let slot = match Self::gc_buffer(&mut g, shard, env, expected_epoch, now) {
+                Ok(slot) => slot,
+                Err(e) => return AckFuture::ready(Err(e)),
+            };
+            drop(g);
+            AckFuture::seal(slot, ids)
+        } else {
+            let result = Self::commit_locked(&mut g, shard, env, expected_epoch).map(|()| ids);
+            drop(g);
+            AckFuture::ready(result)
+        }
     }
 
     fn push_with_request_id(
@@ -866,6 +1281,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        // The request-id'd push is NOT the co-buffering hot path: in group-commit mode it force-seals the
+        // prior buffer + commits synchronously (`gc_commit_sync`) so the retained idempotency record is only
+        // written AFTER a successful durable commit (a deferred-seal failure must leave NO replay entry).
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let fingerprint = push_body_hash(&items)?;
@@ -873,6 +1291,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(now, def.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
+            let gc = self.gc_active(&g);
+            if gc {
+                Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
+            }
             match g.idempotency.entry(shard.clone()).or_default().check(
                 &request_id,
                 fingerprint,
@@ -896,7 +1318,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 checksum: CommandChecksum(0),
                 created_at: now,
             };
-            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            if gc {
+                Self::gc_commit_sync(&mut g, shard, env, expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            }
             g.idempotency.entry(shard.clone()).or_default().record(
                 request_id,
                 fingerprint,
@@ -905,7 +1331,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             );
             Ok(ids)
         })();
-        std::future::ready(result)
+        AckFuture::ready(result)
     }
 }
 
@@ -927,6 +1353,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 require_item_level_claim(&req.compatibility, req.max_items as u64, &def)?;
             }
             let mut g = self.inner.lock().expect("poisoned");
+            // Group-commit: force-seal any buffered batch + distribute it FIRST, so the select observes every
+            // prior co-buffered write and two claims can never pick the same candidate (the one composed lock
+            // serializes force-seal → select → commit → apply, replicating the monolith's `mutate_lock`).
+            let gc = self.gc_active(&g);
+            if gc {
+                Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
+            }
             let candidates =
                 g.projection
                     .eligible_candidates(&req.shard, req.now, req.max_items)?;
@@ -944,7 +1377,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 candidates.clone(),
                 req.now,
             );
-            Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
+            if gc {
+                Self::gc_commit_sync(&mut g, &req.shard, env, req.expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
+            }
             let items = g.projection.render_claimed(&req.shard, &candidates)?;
             debug_assert_eq!(
                 items.len(),
@@ -1071,6 +1508,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            let gc = self.gc_active(&g);
+            if gc {
+                Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
+            }
             g.projection.finalize_validate(shard, &outcomes)?;
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             let env = Self::make_envelope(
@@ -1080,7 +1521,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
                 item_ids,
                 now,
             );
-            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            if gc {
+                Self::gc_commit_sync(&mut g, shard, env, expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            }
             Ok(())
         })();
         std::future::ready(result)
@@ -1102,6 +1547,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            let gc = self.gc_active(&g);
+            if gc {
+                Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
+            }
             g.projection.renew_validate(shard, &item_ids)?;
             let env = Self::make_envelope(
                 &mut g,
@@ -1113,7 +1562,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
                 item_ids,
                 now,
             );
-            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            if gc {
+                Self::gc_commit_sync(&mut g, shard, env, expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            }
             Ok(())
         })();
         std::future::ready(result)
@@ -1134,6 +1587,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReassignLeasePort
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            let gc = self.gc_active(&g);
+            if gc {
+                Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
+            }
             g.projection.reassign_validate(shard, &item_ids)?;
             let env = Self::make_envelope(
                 &mut g,
@@ -1146,7 +1603,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReassignLeasePort
                 item_ids,
                 now,
             );
-            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            if gc {
+                Self::gc_commit_sync(&mut g, shard, env, expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            }
             Ok(())
         })();
         std::future::ready(result)
@@ -1168,6 +1629,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PurgePort for ComposedBac
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            let gc = self.gc_active(&g);
+            if gc {
+                Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
+            }
             // Pre-commit: enforce the force gate per id (a leased item needs force) and collect the ids
             // actually present (absent ids are no-ops, like Redis XDEL). De-dup so a repeated id counts once.
             let mut present: Vec<ItemId> = Vec::new();
@@ -1194,7 +1659,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PurgePort for ComposedBac
                 present,
                 now,
             );
-            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            if gc {
+                Self::gc_commit_sync(&mut g, shard, env, expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            }
             Ok(count)
         })();
         std::future::ready(result)
@@ -1264,6 +1733,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimPort for ComposedB
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            let gc = self.gc_active(&g);
+            if gc {
+                Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
+            }
             let mut ids = g.projection.expired_leases(shard, now)?;
             if let Some(limit) = limit {
                 ids.truncate(limit);
@@ -1280,7 +1753,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimPort for ComposedB
                 ids.clone(),
                 now,
             );
-            Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            if gc {
+                Self::gc_commit_sync(&mut g, shard, env, expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+            }
             Ok(ids)
         })();
         std::future::ready(result)
@@ -1294,6 +1771,19 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            let gc = self.gc_active(&g);
+            if gc {
+                // Force-seal every queue's buffered batch so the lease-expiry sweep observes applied state.
+                let shards: Vec<QueueKey> = g
+                    .coords
+                    .iter()
+                    .filter(|(_, c)| !c.pending.is_empty())
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for shard in shards {
+                    Self::gc_force_seal(&mut g, &shard, ts_to_ms(now))?;
+                }
+            }
             let expired = g.projection.all_expired_leases(now);
             let mut report = TickReport::default();
             for (shard, ids) in expired {
@@ -1306,7 +1796,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     ids.clone(),
                     now,
                 );
-                Self::commit_locked(&mut g, &shard, env, None)?;
+                if gc {
+                    Self::gc_commit_sync(&mut g, &shard, env, None)?;
+                } else {
+                    Self::commit_locked(&mut g, &shard, env, None)?;
+                }
                 report.leases_reclaimed += ids.len() as u64;
             }
             Ok(report)

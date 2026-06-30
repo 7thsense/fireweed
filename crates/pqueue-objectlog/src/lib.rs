@@ -19,7 +19,11 @@
 pub mod compose_log;
 pub mod segmented;
 
-pub use compose_log::{ComposedObjectLogBackend, ObjectLog, composed_objectlog_backend};
+pub use compose_log::{
+    ComposedObjectLogBackend, ObjectLog, composed_objectlog_backend,
+    composed_objectlog_backend_group_commit,
+};
+pub use segmented::SegmentConfig;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;

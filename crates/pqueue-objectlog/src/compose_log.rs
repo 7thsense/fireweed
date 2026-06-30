@@ -35,16 +35,48 @@ const APPEND_MAX_LATENCY_MS: u64 = u64::MAX;
 /// filesystem blob store, surfaced as a [`LogStore`].
 pub struct ObjectLog {
     log: SegmentedObjectLog<LocalFsBlobStore>,
+    config: SegmentConfig,
+    /// Whether this axis exposes the [`LogStore`] group-commit facet (ack-after-seal co-buffering). `false`
+    /// for [`ObjectLog::open`] — the synchronous force-seal-per-`append` path (every conformance/durability/
+    /// reconnect test runs on it, UNCHANGED). `true` for [`ObjectLog::open_group_commit`] — the composition
+    /// then co-buffers concurrent pushes into one sealed segment.
+    group_commit: bool,
 }
 
 impl ObjectLog {
-    /// Open (or recover) a segmented object log rooted at `root`.
+    /// Open (or recover) a segmented object log rooted at `root` on the synchronous force-seal `append` path
+    /// (group-commit facet OFF): a large segment target so `enqueue` never auto-seals mid-`append` and a
+    /// huge latency budget so the time trigger never fires — `append` force-seals exactly one segment per call.
     pub fn open(root: impl Into<std::path::PathBuf>) -> EngineResult<Self> {
         let store = LocalFsBlobStore::open(root)?;
         let config = SegmentConfig::new(APPEND_TARGET_BYTES, APPEND_MAX_LATENCY_MS)?;
         Ok(Self {
             log: SegmentedObjectLog::open(store, config),
+            config,
+            group_commit: false,
         })
+    }
+
+    /// Open (or recover) a segmented object log rooted at `root` with the ack-after-seal group-commit facet
+    /// ON, using the real `config` (byte-size + latency seal triggers). The composition then co-buffers
+    /// concurrent pushes into one sealed segment (`gc_enqueue`/`gc_seal`/`gc_flush_due`) and an externalized
+    /// flusher seals latency-due segments via the composition's `flush_tick`.
+    pub fn open_group_commit(
+        root: impl Into<std::path::PathBuf>,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
+        let store = LocalFsBlobStore::open(root)?;
+        Ok(Self {
+            log: SegmentedObjectLog::open(store, config),
+            config,
+            group_commit: true,
+        })
+    }
+
+    /// A snapshot of the substrate's measured group-commit segment counters (segments sealed, commands
+    /// committed, per-segment batch sizes) — the co-buffering proof surface.
+    pub fn counters(&self) -> crate::segmented::SegmentCounters {
+        self.log.counters()
     }
 }
 
@@ -159,6 +191,56 @@ impl LogStore for ObjectLog {
     fn recover_definitions(&self) -> EngineResult<Vec<pqueue_core::QueueDefinition>> {
         self.log.recover_definitions()
     }
+
+    // -- group-commit facet: delegate to the substrate's existing &self primitives (ADR-012 P2) -----------
+
+    fn supports_group_commit(&self) -> bool {
+        self.group_commit
+    }
+
+    fn gc_enqueue(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        // Buffer; the substrate seals + returns positions only if a SIZE trigger fired during this enqueue.
+        Ok(self
+            .log
+            .enqueue(shard, commands, expected_epoch, now_ms)?
+            .committed)
+    }
+
+    fn gc_seal(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        self.log.seal(shard, expected_epoch, now_ms)
+    }
+
+    fn gc_flush_due(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        self.log.flush_due(shard, expected_epoch, now_ms)
+    }
+
+    fn gc_advance_high_water(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        self.log.advance_high_water(shard, position)
+    }
+
+    fn gc_max_latency_ms(&self) -> u64 {
+        self.config.max_latency_ms
+    }
 }
 
 /// The composed object-log backend: `ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>`
@@ -177,5 +259,24 @@ pub fn composed_objectlog_backend(
         InMemoryProjection::new(),
         InProcessControlPlane::new(),
     )
+    .recover()
+}
+
+/// Assemble a composed object-log backend rooted at `root` with the ack-after-seal GROUP-COMMIT write path
+/// ON (ADR-012 P2): concurrent pushes co-buffer into one sealed segment (one durable object + one
+/// manifest-CAS + one batched projection apply) instead of force-sealing one segment per append. The caller
+/// (which has a runtime) must drive [`ComposedBackend::flush_tick`] on an interval so a buffer below the
+/// segment size threshold still acks within ~one latency window. Runs recovery-on-open like
+/// [`composed_objectlog_backend`].
+pub fn composed_objectlog_backend_group_commit(
+    root: impl Into<std::path::PathBuf>,
+    config: SegmentConfig,
+) -> EngineResult<ComposedObjectLogBackend> {
+    ComposedBackend::new(
+        ObjectLog::open_group_commit(root, config)?,
+        InMemoryProjection::new(),
+        InProcessControlPlane::new(),
+    )
+    .with_group_commit(true)
     .recover()
 }
