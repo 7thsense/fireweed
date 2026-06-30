@@ -17,8 +17,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use pqueue_core::{
     BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
@@ -35,7 +36,8 @@ use pqueue_engine::{
     QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
     RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore,
     TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
-    require_item_level_claim, validate_gate_command, validate_gate_push, validate_purge_force,
+    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
+    validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -151,6 +153,7 @@ struct Inner {
     conn: Connection,
     projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
+    schemas: HashMap<QueueKey, Arc<CompiledSchema>>,
     idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
     cmd_seq: u64,
 }
@@ -359,6 +362,7 @@ impl SqliteBackend {
             conn,
             projections: HashMap::new(),
             queues: HashMap::new(),
+            schemas: HashMap::new(),
             idempotency: HashMap::new(),
             cmd_seq: 0,
         };
@@ -526,11 +530,14 @@ impl UpsertPort for SqliteBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             let existing = {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.lookup_by_key(client_item_key)
@@ -559,7 +566,7 @@ impl UpsertPort for SqliteBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
-                entity_document: None,
+                entity_document: entity,
             };
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("sql-{}-{n}", self.node_id)),
@@ -871,12 +878,15 @@ impl UpdateFieldsPort for SqliteBackend {
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.update_fields_validate(&item_id, expected_item_version)?;
@@ -889,6 +899,7 @@ impl UpdateFieldsPort for SqliteBackend {
                 payload,
                 set_priority: Default::default(),
                 set_not_before: Default::default(),
+                set_entity_document: entity,
             });
             let env = g.make_envelope(cmd, vec![item_id], now);
             g.commit_locked(shard, env, expected_epoch)?;
@@ -983,6 +994,13 @@ impl ControlPlaneStore for SqliteBackend {
                     definition: existing.clone(),
                 });
             }
+            // Compile the entity schema once at create time.
+            let compiled_schema = definition
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(|schema_val| compile_entity_schema(schema_val))
+                .transpose()?;
             let (t, q) = (key.tenant_id.as_str(), key.queue_id.as_str());
             let def_json = to_json(&definition)?;
             st(g.conn.execute(
@@ -991,7 +1009,7 @@ impl ControlPlaneStore for SqliteBackend {
             ))?;
             let shard = key.clone();
             g.projections.insert(
-                shard,
+                shard.clone(),
                 ProjectionData::new(
                     definition.priority_model,
                     definition.ordering_mode,
@@ -1000,6 +1018,9 @@ impl ControlPlaneStore for SqliteBackend {
                     &definition.secondary_indexes,
                 ),
             );
+            if let Some(cs) = compiled_schema {
+                g.schemas.insert(shard, cs);
+            }
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
                 created: true,

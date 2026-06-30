@@ -517,7 +517,7 @@ pub async fn lifecycle<B: pqueue::LibBackend>(
             let mut ops = BTreeMap::new();
             ops.insert("bench_touch".to_string(), Some(Bytes::from_static(b"1")));
             let new_ver = pq
-                .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None)
+                .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None, None)
                 .await
                 .map_err(|e| format!("update_fields: {e:?}"))?;
             check(
@@ -548,7 +548,7 @@ pub async fn lifecycle<B: pqueue::LibBackend>(
             let mut ops = BTreeMap::new();
             ops.insert("bench_touch".to_string(), Some(Bytes::from_static(b"1")));
             match pq
-                .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None)
+                .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None, None)
                 .await
             {
                 Err(EngineError::Unavailable) => {}

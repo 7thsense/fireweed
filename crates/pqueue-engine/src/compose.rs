@@ -685,6 +685,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -705,7 +706,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
-                entity_document: None,
+                entity_document: entity,
             };
             let mut g = self.inner.lock().expect("poisoned");
             let existing = g.projection.lookup_by_key(shard, client_item_key)?;
@@ -920,6 +921,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
@@ -939,6 +941,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
                     payload,
                     set_priority: Default::default(),
                     set_not_before: Default::default(),
+                    set_entity_document: entity,
                 }),
                 vec![item_id],
                 now,

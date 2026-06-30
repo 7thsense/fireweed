@@ -190,6 +190,7 @@ impl UpsertPort for PostgresNativeBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -206,6 +207,7 @@ impl UpsertPort for PostgresNativeBackend {
                 payload,
                 fields,
                 metadata,
+                entity,
                 now,
                 expected_epoch,
             ))

@@ -487,6 +487,7 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
             ops,
             PayloadUpdate::Set(Some(Bytes::from_static(b"p1"))),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -507,6 +508,7 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
             id,
             BTreeMap::from([("a".to_string(), Some(Bytes::from_static(b"x")))]),
             PayloadUpdate::Keep,
+            None,
             Some(v - 1),
         )
         .await;
@@ -529,7 +531,7 @@ async fn update_fields_rejects_terminal_over_memory() {
     let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
     pq.ack(&q, claimed.iter().map(|c| c.item_id)).await.unwrap();
     let r = pq
-        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None)
+        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
         .await;
     assert!(matches!(r, Err(EngineError::Terminal)));
 }
@@ -548,7 +550,7 @@ async fn update_fields_unavailable_over_objectlog() {
     pq.create_queue(qdef()).await.unwrap();
     let id = pq.push(&q, at(5)).await.unwrap();
     let r = pq
-        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None)
+        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
         .await;
     assert_eq!(r.unwrap_err(), EngineError::Unavailable);
     let _ = std::fs::remove_dir_all(&root);

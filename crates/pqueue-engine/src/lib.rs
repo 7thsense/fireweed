@@ -18,6 +18,7 @@ mod idempotency;
 mod operator;
 mod ownership;
 mod port;
+pub mod schema_validation;
 mod types;
 
 pub use active_scope::{
@@ -52,7 +53,9 @@ pub use command::{
     SetGatesCommand, SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
     build_push_items, validate_gate_command, validate_gate_push,
 };
+pub use axon_esf::CompiledSchema;
 pub use error::{EngineError, EngineResult};
+pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use finalize_validation::{
     FinalizeTargeting, validate_finalize_targeting, validate_purge_force, validate_purge_targeting,
     validate_rearm,

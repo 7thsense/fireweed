@@ -159,6 +159,7 @@ async fn update_fields_moves_the_indexed_entry_read_after_write() {
             BTreeMap::from([("external_id".to_string(), Some(Bytes::from_static(b"NEW")))]),
             PayloadUpdate::Keep,
             None,
+            None,
         )
         .await
         .unwrap();

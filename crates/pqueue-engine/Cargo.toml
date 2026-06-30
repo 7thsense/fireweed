@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # depends on nothing outward). No I/O dependencies.
 [dependencies]
 pqueue-core = { path = "../pqueue-core" }
+axon-esf.workspace = true
 bytes = { version = "1", features = ["serde"] }
 sha2 = "0.11"
 # Command/log types derive Serialize/Deserialize so a durable backend can persist the command log.

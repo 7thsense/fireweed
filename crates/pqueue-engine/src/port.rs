@@ -340,6 +340,7 @@ pub trait UpsertPort: Send + Sync {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
@@ -742,6 +743,7 @@ pub trait UpdateFieldsPort: Send + Sync {
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: crate::PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,

@@ -572,6 +572,7 @@ impl<B: LibBackend> Pqueue<B> {
                 item.payload,
                 item.fields,
                 item.metadata,
+                item.entity,
                 self.clock.now(),
                 epoch,
             )
@@ -932,6 +933,7 @@ impl<B: LibBackend> Pqueue<B> {
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
     ) -> EngineResult<u64> {
         let epoch = self.session_epoch(queue).await?;
@@ -943,6 +945,7 @@ impl<B: LibBackend> Pqueue<B> {
                 item_id,
                 field_ops,
                 payload,
+                entity,
                 expected_item_version,
                 now,
                 epoch,

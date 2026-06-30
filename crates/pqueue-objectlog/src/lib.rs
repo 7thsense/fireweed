@@ -865,6 +865,7 @@ impl UpsertPort for ObjectLogBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _metadata: Metadata,
+        _entity: Option<serde_json::Value>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -882,6 +883,7 @@ impl UpdateFieldsPort for ObjectLogBackend {
         _item_id: ItemId,
         _field_ops: BTreeMap<String, Option<Bytes>>,
         _payload: PayloadUpdate,
+        _entity: Option<serde_json::Value>,
         _expected_item_version: Option<u64>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,

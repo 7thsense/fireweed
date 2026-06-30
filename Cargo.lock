@@ -1218,6 +1218,7 @@ dependencies = [
  "bytes",
  "pqueue-core",
  "pqueue-engine",
+ "serde_json",
 ]
 
 [[package]]
@@ -1234,6 +1235,7 @@ dependencies = [
 name = "pqueue-engine"
 version = "0.4.0"
 dependencies = [
+ "axon-esf",
  "bytes",
  "pqueue-core",
  "serde",
@@ -1254,6 +1256,7 @@ dependencies = [
 name = "pqueue-memory"
 version = "0.4.0"
 dependencies = [
+ "axon-esf",
  "bytes",
  "pqueue-conformance",
  "pqueue-core",
@@ -1284,6 +1287,7 @@ dependencies = [
 name = "pqueue-postgres"
 version = "0.4.0"
 dependencies = [
+ "axon-esf",
  "bytes",
  "futures",
  "native-tls",
@@ -1358,6 +1362,7 @@ dependencies = [
 name = "pqueue-sqlite"
 version = "0.4.0"
 dependencies = [
+ "axon-esf",
  "bytes",
  "pqueue-conformance",
  "pqueue-core",

@@ -40,6 +40,7 @@ pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )
@@ -83,6 +84,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             ]),
             PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
             None,
+            None,
             ts(20),
             None,
         )
@@ -113,6 +115,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
                 ("attempts".to_string(), Some(Bytes::from_static(b"2"))),
             ]),
             PayloadUpdate::Keep,
+            None,
             Some(v),
             ts(21),
             None,
@@ -151,6 +154,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             id,
             BTreeMap::from([("state".to_string(), Some(Bytes::from_static(b"x")))]),
             PayloadUpdate::Keep,
+            None,
             Some(v),
             ts(22),
             None,
@@ -165,6 +169,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             ItemId::new("90").unwrap(),
             BTreeMap::new(),
             PayloadUpdate::Keep,
+            None,
             None,
             ts(23),
             None,
@@ -188,6 +193,7 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
             id,
             BTreeMap::new(),
             PayloadUpdate::Keep,
+            None,
             None,
             ts(31),
             None
@@ -218,6 +224,7 @@ pub async fn update_fields_is_unavailable<B: ConformanceCore>(make: impl Fn() ->
             ItemId::new("1").unwrap(),
             BTreeMap::new(),
             PayloadUpdate::Keep,
+            None,
             None,
             ts(20),
             None
@@ -801,6 +808,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )
@@ -822,6 +830,7 @@ pub async fn upsert_inserts_then_replaces_pending<B: ConformanceCore>(make: impl
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(2),
             None,
         )
@@ -860,6 +869,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )
@@ -882,6 +892,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(20),
             None,
         )
@@ -910,6 +921,7 @@ pub async fn upsert_rejects_claimed_and_terminal<B: ConformanceCore>(make: impl 
             None,
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(30),
             None,
         )
@@ -936,6 +948,7 @@ pub async fn upsert_preserves_group_delay_and_payload_in_claim_shape<B: Conforma
             Some(Bytes::from_static(b"payload")),
             BTreeMap::new(),
             Metadata::default(),
+            None,
             ts(1),
             None,
         )

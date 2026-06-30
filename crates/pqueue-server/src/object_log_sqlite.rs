@@ -492,6 +492,7 @@ impl UpsertPort for ObjectLogSqliteBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _metadata: Metadata,
+        _entity: Option<serde_json::Value>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -1340,6 +1341,7 @@ impl UpsertPort for SegmentedObjectLogSqliteBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _metadata: Metadata,
+        _entity: Option<serde_json::Value>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
@@ -2046,6 +2048,7 @@ impl UpsertPort for SegmentedObjectLogInMemoryBackend {
         _payload: Option<Bytes>,
         _fields: BTreeMap<String, Bytes>,
         _metadata: Metadata,
+        _entity: Option<serde_json::Value>,
         _now: UtcTimestamp,
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {

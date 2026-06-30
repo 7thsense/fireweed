@@ -46,8 +46,9 @@
 //! must keep its reconnect assertions within this contract (no post-reopen token claims).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel,
@@ -69,8 +70,9 @@ use pqueue_engine::{
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
     RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
     TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    WriteSideRecordsCommand, build_push_items, project_scopes, validate_claim_compatibility,
-    validate_gate_push, validate_instance_fence, validate_purge_force,
+    WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
+    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
+    validate_purge_force,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -410,6 +412,7 @@ fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
         EngineError::EpochFenced => ("epoch_fenced", None),
         EngineError::Forbidden(why) => ("forbidden", Some((*why).to_string())),
         EngineError::Storage(msg) => ("storage", Some(msg.clone())),
+        EngineError::EntitySchemaViolation(msg) => ("entity_schema_violation", Some(msg.clone())),
     }
 }
 
@@ -872,6 +875,8 @@ struct Inner {
     conn: Connection,
     /// Definitions cache (priority model for `priority_sort`, retry bound). Rebuilt from `queues` on open.
     queues: HashMap<QueueKey, QueueDefinition>,
+    /// Compiled entity schemas (ADR-011). Rebuilt from `queues` on open; keyed by queue.
+    schemas: HashMap<QueueKey, Arc<CompiledSchema>>,
     /// Ephemeral live lease tokens (cleartext is never persisted; only the hash is). Lost on reopen.
     live_tokens: HashMap<ItemId, LeaseToken>,
 }
@@ -893,6 +898,15 @@ impl Inner {
             let definition: QueueDefinition =
                 serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            if let Some(cs) = definition
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(|sv| compile_entity_schema(sv))
+                .transpose()?
+            {
+                self.schemas.insert(key.clone(), cs);
+            }
             self.queues.insert(key, definition);
         }
         // NOTE: item-id restart-safety is handled by `restore_counters` (it seeds `QueueCounters` past the
@@ -3060,6 +3074,7 @@ fn open_inner(conn: Connection) -> EngineResult<Inner> {
     let mut inner = Inner {
         conn,
         queues: HashMap::new(),
+        schemas: HashMap::new(),
         live_tokens: HashMap::new(),
     };
     inner.reload()?;
@@ -3082,6 +3097,13 @@ fn create_queue_sql(
             definition: existing.clone(),
         });
     }
+    // Compile the entity schema once at create time (ADR-011).
+    let compiled_schema = definition
+        .entity_schema
+        .as_ref()
+        .and_then(|esd| esd.entity_schema.as_ref())
+        .map(|schema_val| compile_entity_schema(schema_val))
+        .transpose()?;
     let (t, q) = parts(&key);
     let def_json = to_json(&definition)?;
     st(g.conn.execute(
@@ -3092,6 +3114,9 @@ fn create_queue_sql(
         "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES(?1,?2,0,0)",
         params![t, q],
     ))?;
+    if let Some(cs) = compiled_schema {
+        g.schemas.insert(key.clone(), cs);
+    }
     g.queues.insert(key, definition.clone());
     Ok(CreateQueueOutcome {
         created: true,
@@ -3958,12 +3983,15 @@ impl UpsertPort for SqliteRelationalBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
             let mut g = self.inner.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             let max_attempts = g
                 .queues
                 .get(shard)
@@ -3994,7 +4022,7 @@ impl UpsertPort for SqliteRelationalBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
-                entity_document: None,
+                entity_document: entity,
             };
             match existing {
                 None => {
@@ -4496,12 +4524,15 @@ impl UpdateFieldsPort for SqliteRelationalBackend {
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             // Pre-validate with the SAME error precedence as `ProjectionData::update_fields_validate`
             // (commit has no rollback): absent => NotFound, fenced => StaleLease, terminal => Terminal,
             // superseded => Superseded, version mismatch => Conflict.
@@ -4543,6 +4574,7 @@ impl UpdateFieldsPort for SqliteRelationalBackend {
                     payload,
                     set_priority: Default::default(),
                     set_not_before: Default::default(),
+                    set_entity_document: entity,
                 }),
                 now,
                 expected_epoch,

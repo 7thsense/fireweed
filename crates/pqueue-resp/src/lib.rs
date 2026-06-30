@@ -583,6 +583,7 @@ async fn xadd<B: RespBackend, H: RespHooks>(
                     payload,
                     fields,
                     metadata,
+                    None,
                     now,
                     expected_epoch,
                 )

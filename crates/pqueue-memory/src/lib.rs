@@ -8,7 +8,7 @@
 //! `pqueue-projection` and is shared with the durable backends; this crate only locks and delegates.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use bytes::Bytes;
@@ -16,6 +16,7 @@ use pqueue_core::{
     BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
+use axon_esf::CompiledSchema;
 use pqueue_engine::{
     AdvanceInstanceFenceCommand, ClaimCompatibility, CommitCapabilities, CommitEntryOutcome,
     CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionPort, EntryRecovery,
@@ -23,8 +24,8 @@ use pqueue_engine::{
     PushPort, PushSpec, QueueCounters, QueueIdempotencyCache, ReassignLeaseCommand,
     ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort,
     UpdateFieldsCommand, UpdateFieldsPort, WriteSideRecordsCommand, build_push_items,
-    require_item_level_claim, validate_gate_command, validate_gate_push, validate_instance_fence,
-    validate_purge_force,
+    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, ClaimRequest, Claimed, ClaimedItem, Clock, CommandChecksum,
@@ -91,6 +92,7 @@ struct State {
     logs: HashMap<QueueKey, LogData>,
     projections: HashMap<QueueKey, ProjectionData>,
     queues: HashMap<QueueKey, QueueDefinition>,
+    schemas: HashMap<QueueKey, Arc<CompiledSchema>>,
     /// Per-queue retained request-id idempotency cache (TD-007 §4). Kept under the SAME `State` lock as
     /// the log/projection so a request-id'd write does check + append + record in one atomic unit of work.
     /// The cached outcome is the response ids the original request produced, so a replay returns them
@@ -282,11 +284,14 @@ impl UpsertPort for MemoryBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             let existing = {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.lookup_by_key(client_item_key)
@@ -314,7 +319,7 @@ impl UpsertPort for MemoryBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
-                entity_document: None,
+                entity_document: entity,
             };
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("mem-{}-{n}", self.node_id)),
@@ -397,6 +402,13 @@ impl PushPort for MemoryBackend {
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            // Pre-commit entity schema validation (ADR-011): reject before index validation or append.
+            {
+                let schema = g.schemas.get(shard);
+                for item in &push_items {
+                    validate_entity(schema, item.entity_document.as_ref())?;
+                }
+            }
             // Pre-commit unique-index validation (ADR-010 §5.1): a violating push appends nothing.
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
@@ -461,6 +473,14 @@ impl PushPort for MemoryBackend {
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+            // Pre-commit entity schema validation (ADR-011): reject before index validation or append.
+            // A rejected append leaves no idempotency entry (record happens only on success below).
+            {
+                let schema = g.schemas.get(shard);
+                for item in &push_items {
+                    validate_entity(schema, item.entity_document.as_ref())?;
+                }
+            }
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.index_validate_push(&push_items)?;
@@ -646,6 +666,17 @@ impl CommitTransitionPort for MemoryBackend {
                         counter_base,
                         max_attempts,
                     );
+                    // Pre-commit entity schema validation for lifecycle items (ADR-011).
+                    let schema_err = {
+                        let schema = g.schemas.get(shard);
+                        push_items
+                            .iter()
+                            .find_map(|item| validate_entity(schema, item.entity_document.as_ref()).err())
+                    };
+                    if let Some(e) = schema_err {
+                        recovery.push(reject(e));
+                        continue;
+                    }
                     if let Err(e) = {
                         let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                         proj.index_validate_push(&push_items)
@@ -870,6 +901,7 @@ impl pqueue_engine::ReschedulePort for MemoryBackend {
                 payload: PayloadUpdate::Keep,
                 set_priority,
                 set_not_before,
+                set_entity_document: None,
             });
             let env = self.make_envelope(cmd, vec![item_id], now);
             Self::commit_locked(&mut g, shard, env, expected_epoch)?;
@@ -889,12 +921,15 @@ impl UpdateFieldsPort for MemoryBackend {
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.state.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.update_fields_validate(&item_id, expected_item_version)?;
@@ -907,6 +942,7 @@ impl UpdateFieldsPort for MemoryBackend {
                 payload,
                 set_priority: Default::default(),
                 set_not_before: Default::default(),
+                set_entity_document: entity,
             });
             let env = self.make_envelope(cmd, vec![item_id], now);
             Self::commit_locked(&mut g, shard, env, expected_epoch)?;
@@ -1050,9 +1086,16 @@ impl ControlPlaneStore for MemoryBackend {
                     definition: existing.clone(),
                 });
             }
+            // Compile the entity schema once at create time; store in the cache keyed by queue.
+            let compiled_schema = definition
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(|schema_val| compile_entity_schema(schema_val))
+                .transpose()?;
             let shard = key.clone();
             g.logs.entry(shard.clone()).or_default();
-            g.projections.entry(shard).or_insert_with(|| {
+            g.projections.entry(shard.clone()).or_insert_with(|| {
                 ProjectionData::new(
                     definition.priority_model,
                     definition.ordering_mode,
@@ -1061,6 +1104,9 @@ impl ControlPlaneStore for MemoryBackend {
                     &definition.secondary_indexes,
                 )
             });
+            if let Some(cs) = compiled_schema {
+                g.schemas.insert(shard, cs);
+            }
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
                 created: true,

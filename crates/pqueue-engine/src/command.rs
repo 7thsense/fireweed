@@ -356,6 +356,11 @@ pub struct UpdateFieldsCommand {
     /// `Keep`.
     #[serde(default)]
     pub set_not_before: ScheduleUpdate<UtcTimestamp>,
+    /// Replace the item's entity document (ADR-011). `None` leaves it unchanged; `Some(doc)` replaces
+    /// it and triggers schema validation if the queue has a compiled schema. `#[serde(default)]` keeps
+    /// log-replay compatible with pre-ADR-011 commands (absent field → `None`).
+    #[serde(default)]
+    pub set_entity_document: Option<serde_json::Value>,
 }
 
 /// A field-reschedule disposition under [`UpdateFieldsCommand`] (BQ pqueue-7a96f929): leave the value as-is,

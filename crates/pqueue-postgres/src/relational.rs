@@ -46,8 +46,9 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
@@ -68,8 +69,8 @@ use pqueue_engine::{
     QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand,
     SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    build_push_items, project_scopes, validate_claim_compatibility, validate_gate_push,
-    validate_purge_force,
+    build_push_items, compile_entity_schema, project_scopes, validate_claim_compatibility,
+    validate_entity, validate_gate_push, validate_purge_force,
 };
 use sha2::{Digest, Sha256};
 
@@ -439,6 +440,7 @@ fn parse_priority(raw: Option<String>) -> EngineResult<Option<PriorityValue>> {
 struct Inner {
     client: Client,
     queues: HashMap<QueueKey, QueueDefinition>,
+    schemas: HashMap<QueueKey, Arc<CompiledSchema>>,
     live_tokens: HashMap<ItemId, LeaseToken>,
 }
 
@@ -455,6 +457,15 @@ impl Inner {
             let definition: QueueDefinition =
                 serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            if let Some(cs) = definition
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(|sv| compile_entity_schema(sv))
+                .transpose()?
+            {
+                self.schemas.insert(key.clone(), cs);
+            }
             self.queues.insert(key, definition);
         }
         Ok(())
@@ -2239,6 +2250,7 @@ impl PostgresRelationalBackend {
         let mut inner = Inner {
             client,
             queues: HashMap::new(),
+            schemas: HashMap::new(),
             live_tokens: HashMap::new(),
         };
         inner.reload()?;
@@ -2416,6 +2428,13 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                     definition: existing.clone(),
                 });
             }
+            // Compile the entity schema once at create time (ADR-011).
+            let compiled_schema = definition
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(|schema_val| compile_entity_schema(schema_val))
+                .transpose()?;
             let (t, q) = (
                 key.tenant_id.as_str().to_string(),
                 key.queue_id.as_str().to_string(),
@@ -2429,6 +2448,9 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                 "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES($1,$2,0,0)",
                 &[&t, &q],
             ))?;
+            if let Some(cs) = compiled_schema {
+                g.schemas.insert(key.clone(), cs);
+            }
             g.queues.insert(key, definition.clone());
             Ok(CreateQueueOutcome {
                 created: true,
@@ -2952,12 +2974,15 @@ impl UpsertPort for PostgresRelationalBackend {
         payload: Option<Bytes>,
         fields: BTreeMap<String, Bytes>,
         metadata: Metadata,
+        entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
             let mut g = self.inner.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             let max_attempts = g
                 .queues
                 .get(shard)
@@ -2983,7 +3008,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
-                entity_document: None,
+                entity_document: entity,
             };
             match existing {
                 None => {
@@ -3174,6 +3199,7 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
         item_id: ItemId,
         field_ops: BTreeMap<String, Option<Bytes>>,
         payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
@@ -3182,6 +3208,8 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
             let (t, q) = parts(shard);
             let id_str = item_id.to_string();
             let mut g = self.inner.lock().expect("poisoned");
+            // Pre-commit entity schema validation (ADR-011): reject before any mutation.
+            validate_entity(g.schemas.get(shard), entity.as_ref())?;
             // Pre-validate exactly like the in-memory `update_fields_validate`: absent=NotFound,
             // fenced=StaleLease, terminal=Terminal, superseded=Superseded, version-mismatch=Conflict.
             // Nothing is appended on rejection (commit has no rollback).
@@ -3217,6 +3245,7 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
                     payload,
                     set_priority: Default::default(),
                     set_not_before: Default::default(),
+                    set_entity_document: entity,
                 }),
                 now,
                 expected_epoch,

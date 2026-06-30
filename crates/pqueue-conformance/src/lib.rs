@@ -461,3 +461,55 @@ macro_rules! eventual_apply_suite {
         $crate::log_replay_suite!($make);
     };
 }
+
+#[cfg(test)]
+mod storage_conformance {
+    use pqueue_engine::{compile_entity_schema, validate_entity, EngineError};
+    use serde_json::json;
+
+    #[test]
+    fn storage_conformance_entity_schema_rejects_missing_required() {
+        let schema = json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}});
+        let cs = compile_entity_schema(&schema).expect("compiles");
+        let doc = json!({"age": 42});
+        let err = validate_entity(Some(&cs), Some(&doc)).unwrap_err();
+        assert!(
+            matches!(err, EngineError::EntitySchemaViolation(_)),
+            "expected EntitySchemaViolation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn storage_conformance_entity_schema_accepts_valid_document() {
+        let schema = json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}});
+        let cs = compile_entity_schema(&schema).expect("compiles");
+        let doc = json!({"name": "alice"});
+        validate_entity(Some(&cs), Some(&doc)).expect("valid document should pass");
+    }
+
+    #[test]
+    fn storage_conformance_no_schema_accepts_anything() {
+        let doc = json!({"whatever": true});
+        validate_entity(None, Some(&doc)).expect("no schema — always ok");
+        validate_entity(None, None).expect("no schema, no doc — always ok");
+    }
+
+    #[test]
+    fn storage_conformance_entity_schema_error_has_resp_token() {
+        let schema = json!({"type": "object", "required": ["x"]});
+        let cs = compile_entity_schema(&schema).expect("compiles");
+        let err = validate_entity(Some(&cs), Some(&json!({}))).unwrap_err();
+        assert_eq!(
+            err.resp_token(),
+            Some("-ERR pqueue entity_schema_violation"),
+            "RESP token must match ADR-011"
+        );
+    }
+
+    #[test]
+    fn storage_conformance_schema_compile_error_on_invalid_schema() {
+        let bad = json!({"type": "not-a-valid-type"});
+        let result = compile_entity_schema(&bad);
+        assert!(result.is_err(), "invalid schema must fail compilation");
+    }
+}
