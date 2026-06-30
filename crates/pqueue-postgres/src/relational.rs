@@ -50,6 +50,7 @@ use std::sync::{Arc, Mutex};
 
 use axon_esf::CompiledSchema;
 use bytes::Bytes;
+use postgres::error::SqlState;
 use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
 use pqueue_core::{
@@ -193,20 +194,25 @@ CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
 CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
     ON pqueue_request_idempotency (expires_at);
 -- ADR-011 (pqueue-f4ffd679): typed secondary index rows. PK is (tenant, queue, index_name, item_id)
--- because each item has at most one canonical key per named index. Uniqueness is enforced in application
--- logic before INSERT (SQL cannot express a per-name unique constraint on a single row). Rows are inserted
--- on Push/ReplacePending/UpdateFields and deleted only on PurgeItems — terminal items keep their index
--- rows so they are still findable (parity with in-memory projection).
+-- because each item has at most one canonical key per named index. Unique typed indexes are also protected
+-- by a partial unique index over `(tenant, queue, index_name, index_key) WHERE is_unique`, so cross-instance
+-- writers cannot race past the application-level pre-check. Rows are inserted on Push/ReplacePending/
+-- UpdateFields and deleted only on PurgeItems — terminal items keep their index rows so they are still
+-- findable (parity with in-memory projection).
 CREATE TABLE IF NOT EXISTS pqueue_item_index (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,
     index_name TEXT NOT NULL,
     index_key BYTEA NOT NULL,
     item_id TEXT NOT NULL,
+    is_unique BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (tenant_id, queue_id, index_name, item_id)
 );
 CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
     ON pqueue_item_index (tenant_id, queue_id, index_name, index_key);
+CREATE UNIQUE INDEX IF NOT EXISTS pqueue_item_index_unique_key_idx
+    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key)
+    WHERE is_unique = true;
 "#;
 
 const COHORT_EXPIRY_SWEEP_LIMIT: i64 = 128;
@@ -535,6 +541,10 @@ fn index_is_unique(qi: &QueueIndex) -> bool {
     }
 }
 
+fn is_unique_violation(err: &postgres::Error) -> bool {
+    err.code() == Some(&SqlState::UNIQUE_VIOLATION)
+}
+
 /// Check unique-index constraints for `keys` against existing DB rows. Returns `Conflict` if any
 /// unique index already maps the same key to a *different* item.
 fn check_typed_unique_conflicts(
@@ -581,16 +591,30 @@ fn insert_typed_index_rows(
     tx: &mut postgres::Transaction<'_>,
     t: &str,
     q: &str,
+    typed_indexes: &[QueueIndex],
     item_id: &str,
     keys: &[(String, Vec<u8>)],
 ) -> EngineResult<()> {
     for (name, key) in keys {
-        st(tx.execute(
+        let is_unique = typed_indexes
+            .iter()
+            .find(|qi| &qi.name == name)
+            .map(index_is_unique)
+            .unwrap_or(false);
+        tx.execute(
             "INSERT INTO pqueue_item_index \
-             (tenant_id, queue_id, index_name, index_key, item_id) VALUES ($1,$2,$3,$4,$5) \
-             ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET index_key=EXCLUDED.index_key",
-            &[&t, &q, name, &key.as_slice(), &item_id],
-        ))?;
+             (tenant_id, queue_id, index_name, index_key, item_id, is_unique) VALUES ($1,$2,$3,$4,$5,$6) \
+             ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
+             index_key=EXCLUDED.index_key, is_unique=EXCLUDED.is_unique",
+            &[&t, &q, name, &key.as_slice(), &item_id, &is_unique],
+        )
+        .map_err(|err| {
+            if is_unique_violation(&err) {
+                EngineError::Conflict
+            } else {
+                EngineError::Storage(err.to_string())
+            }
+        })?;
     }
     Ok(())
 }
@@ -651,7 +675,7 @@ fn maintain_typed_indexes_on_insert(
         item_keys.push((item.item_id.to_string(), keys));
     }
     for (item_id, keys) in &item_keys {
-        insert_typed_index_rows(tx, t, q, item_id, keys)?;
+        insert_typed_index_rows(tx, t, q, typed_indexes, item_id, keys)?;
     }
     Ok(())
 }
@@ -1421,7 +1445,7 @@ fn apply_command_sql(
                     delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
                     let new_keys = typed_index_keys_for_entity(typed_indexes, Some(doc))?;
                     check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &new_keys, None)?;
-                    insert_typed_index_rows(tx, &t, &q, &item_id, &new_keys)?;
+                    insert_typed_index_rows(tx, &t, &q, typed_indexes, &item_id, &new_keys)?;
                 }
             }
             Ok(())
@@ -3879,12 +3903,23 @@ mod sql_shape_tests {
             "pqueue_cohorts",
             "pqueue_item_gates",
             "pqueue_gate_state",
+            "pqueue_item_index",
         ] {
             assert!(RELATIONAL_SCHEMA.contains(table), "missing {table}");
         }
         assert!(
             RELATIONAL_SCHEMA.contains("WHERE superseded = false"),
             "active-key partial unique index"
+        );
+        assert!(
+            RELATIONAL_SCHEMA.contains("is_unique BOOLEAN NOT NULL DEFAULT false"),
+            "typed side index rows must carry uniqueness metadata"
+        );
+        assert!(
+            RELATIONAL_SCHEMA
+                .contains("CREATE UNIQUE INDEX IF NOT EXISTS pqueue_item_index_unique_key_idx")
+                && RELATIONAL_SCHEMA.contains("WHERE is_unique = true"),
+            "unique typed indexes must be protected by a database-level partial unique index"
         );
     }
 }
