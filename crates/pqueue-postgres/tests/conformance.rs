@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{EntitySchemaDocument, RequestId};
 use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
-use serde_json::json;
 use pqueue_postgres::PostgresBackend;
+use serde_json::json;
 
 /// A process-unique schema name per backend instance (pid + monotonic counter), so concurrent scenarios
 /// and repeated `make()` calls within a scenario never collide.
@@ -128,7 +128,12 @@ where
     backend.create_queue(typed_qdef()).await.unwrap();
 
     let err = backend
-        .push(&shard, vec![typed_item(false)], pqueue_conformance::ts(0), None)
+        .push(
+            &shard,
+            vec![typed_item(false)],
+            pqueue_conformance::ts(0),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EntitySchemaViolation(_)));

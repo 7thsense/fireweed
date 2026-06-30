@@ -391,7 +391,12 @@ where
     backend.create_queue(typed_qdef()).await.unwrap();
 
     let err = backend
-        .push(&q, vec![typed_invalid_item("bad")], pqueue_conformance::ts(0), None)
+        .push(
+            &q,
+            vec![typed_invalid_item("bad")],
+            pqueue_conformance::ts(0),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EntitySchemaViolation(_)));

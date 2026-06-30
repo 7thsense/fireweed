@@ -67,10 +67,7 @@ fn typed_def() -> QueueDefinition {
 }
 
 fn make() -> Pqueue<MemoryBackend> {
-    Pqueue::new(
-        Arc::new(MemoryBackend::new()),
-        Arc::new(ManualClock::at(0)),
-    )
+    Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)))
 }
 
 fn valid_item(priority: i64) -> NewItem {
@@ -107,10 +104,7 @@ async fn schema_validation_push_invalid_entity_rejected() {
     let q = qkey();
     pq.create_queue(typed_def()).await.unwrap();
 
-    let err = pq
-        .push(&q, invalid_item(1))
-        .await
-        .unwrap_err();
+    let err = pq.push(&q, invalid_item(1)).await.unwrap_err();
     assert!(
         matches!(err, EngineError::EntitySchemaViolation(_)),
         "expected EntitySchemaViolation, got {err:?}"

@@ -3684,7 +3684,7 @@ impl PushPort for SqliteRelationalBackend {
         // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
         // contract so the owner fence is uniform once the relational/object write paths thread it.
         expected_epoch: Option<u64>,
-        ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
@@ -4213,11 +4213,9 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                     }
                 }
                 if !entry.lifecycle_items.is_empty() {
-                    if let Some(e) = entry
-                        .lifecycle_items
-                        .iter()
-                        .find_map(|item| validate_entity(schema.as_ref(), item.entity.as_ref()).err())
-                    {
+                    if let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
+                        validate_entity(schema.as_ref(), item.entity.as_ref()).err()
+                    }) {
                         recovery.push(reject(e));
                         continue;
                     }

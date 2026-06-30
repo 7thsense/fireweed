@@ -8,15 +8,15 @@
 //! `pqueue-projection` and is shared with the durable backends; this crate only locks and delegates.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use pqueue_core::{
     BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
-use axon_esf::CompiledSchema;
 use pqueue_engine::{
     AdvanceInstanceFenceCommand, ClaimCompatibility, CommitCapabilities, CommitEntryOutcome,
     CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionPort, EntryRecovery,
@@ -669,9 +669,9 @@ impl CommitTransitionPort for MemoryBackend {
                     // Pre-commit entity schema validation for lifecycle items (ADR-011).
                     let schema_err = {
                         let schema = g.schemas.get(shard);
-                        push_items
-                            .iter()
-                            .find_map(|item| validate_entity(schema, item.entity_document.as_ref()).err())
+                        push_items.iter().find_map(|item| {
+                            validate_entity(schema, item.entity_document.as_ref()).err()
+                        })
                     };
                     if let Some(e) = schema_err {
                         recovery.push(reject(e));

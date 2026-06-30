@@ -464,7 +464,7 @@ macro_rules! eventual_apply_suite {
 
 #[cfg(test)]
 mod storage_conformance {
-    use pqueue_engine::{compile_entity_schema, validate_entity, EngineError};
+    use pqueue_engine::{EngineError, compile_entity_schema, validate_entity};
     use serde_json::json;
 
     #[test]

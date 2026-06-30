@@ -44,6 +44,7 @@ pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
+pub use axon_esf::CompiledSchema;
 pub use command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
@@ -53,9 +54,7 @@ pub use command::{
     SetGatesCommand, SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
     build_push_items, validate_gate_command, validate_gate_push,
 };
-pub use axon_esf::CompiledSchema;
 pub use error::{EngineError, EngineResult};
-pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use finalize_validation::{
     FinalizeTargeting, validate_finalize_targeting, validate_purge_force, validate_purge_targeting,
     validate_rearm,
@@ -71,6 +70,7 @@ pub use port::{
     RecoveryReadPort, RenewLeasePort, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
     TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
 };
+pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
 
 #[cfg(test)]

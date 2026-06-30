@@ -138,9 +138,7 @@ fn typed_invalid_item() -> pqueue_engine::PushSpec {
 
 async fn schema_validation_backend<B>(backend: &B)
 where
-    B: pqueue_engine::ControlPlaneStore
-        + pqueue_engine::PushPort
-        + pqueue_engine::ProjectionRead,
+    B: pqueue_engine::ControlPlaneStore + pqueue_engine::PushPort + pqueue_engine::ProjectionRead,
 {
     use pqueue_core::RequestId;
     use pqueue_engine::EngineError;
@@ -149,7 +147,12 @@ where
     backend.create_queue(typed_qdef()).await.unwrap();
 
     let err = backend
-        .push(&shard, vec![typed_invalid_item()], pqueue_conformance::ts(0), None)
+        .push(
+            &shard,
+            vec![typed_invalid_item()],
+            pqueue_conformance::ts(0),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EntitySchemaViolation(_)));

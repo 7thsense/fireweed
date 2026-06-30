@@ -17,14 +17,14 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort,
-    IdempotencyDecision, ItemView, LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead,
-    ProjectionWriter, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters,
-    QueueIdempotencyCache, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, RenewLeaseCommand, RenewLeasePort, TickReport, UpsertOutcome, UpsertPort,
-    build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
-    validate_gate_command, validate_gate_push, CompiledSchema,
+    CommandEnvelope, CommandId, CommandPosition, CompiledSchema, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
+    FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView, LeaseView, LiveItemView, LogRead,
+    LogWriter, ProjectionRead, ProjectionWriter, PurgePort, PushCommand, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
+    TickReport, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
+    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
 };
 use pqueue_objectlog::LocalObjectLog;
 use pqueue_objectlog::segmented::{
@@ -66,9 +66,7 @@ fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     Ok(BodyHash(h.finish()))
 }
 
-fn compile_queue_schema(
-    definition: &QueueDefinition,
-) -> EngineResult<Option<Arc<CompiledSchema>>> {
+fn compile_queue_schema(definition: &QueueDefinition) -> EngineResult<Option<Arc<CompiledSchema>>> {
     definition
         .entity_schema
         .as_ref()
@@ -2292,7 +2290,7 @@ mod recovery_tests {
         EligibilityPolicy, EntitySchemaDocument, OrderingMode, PriorityDirection, PriorityModel,
         PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RequestId, RetryPolicy,
     };
-    use pqueue_engine::{EngineError, ControlPlaneStore, ProjectionRead, PushPort};
+    use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
     use serde_json::json;
 
     /// A unique scratch directory under the system temp dir, removed on drop.
@@ -2611,14 +2609,26 @@ mod recovery_tests {
 
         let rid = RequestId::new("req-1").unwrap();
         let err = backend
-            .push_with_request_id(&shard, rid.clone(), vec![typed_invalid_spec("bad")], ts(), None)
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![typed_invalid_spec("bad")],
+                ts(),
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
         assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
 
         let first = backend
-            .push_with_request_id(&shard, rid.clone(), vec![typed_valid_spec("ok")], ts(), None)
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![typed_valid_spec("ok")],
+                ts(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(first.len(), 1);

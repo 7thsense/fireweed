@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{EntitySchemaDocument, RequestId};
 use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
-use serde_json::json;
 use pqueue_postgres::PostgresRelationalBackend;
+use serde_json::json;
 
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -135,7 +135,12 @@ where
     backend.create_queue(typed_qdef()).await.unwrap();
 
     let err = backend
-        .push(&shard, vec![typed_item(false)], pqueue_conformance::ts(0), None)
+        .push(
+            &shard,
+            vec![typed_item(false)],
+            pqueue_conformance::ts(0),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EntitySchemaViolation(_)));

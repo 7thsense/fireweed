@@ -666,10 +666,7 @@ where
     assert_eq!(first, replay);
     assert_eq!(backend.metrics(&q).await.unwrap().pending, 1);
 
-    backend
-        .push(&q, vec![item(5)], ts(4), None)
-        .await
-        .unwrap();
+    backend.push(&q, vec![item(5)], ts(4), None).await.unwrap();
     let claimed = backend.claim(claim_req(1, 600, 4)).await.unwrap();
     let claim_ref = ClaimRef {
         item_id: claimed.items[0].item_id,
@@ -704,7 +701,11 @@ where
     ));
     assert_eq!(backend.metrics(&q).await.unwrap().leased, 1);
     assert!(
-        backend.side_record(&q, b"schema/run-1").await.unwrap().is_none(),
+        backend
+            .side_record(&q, b"schema/run-1")
+            .await
+            .unwrap()
+            .is_none(),
         "invalid lifecycle items must reject before side records are written"
     );
 }

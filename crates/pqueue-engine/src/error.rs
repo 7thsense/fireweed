@@ -61,9 +61,7 @@ impl EngineError {
             EngineError::RequestIdConflict => Some("-ERR pqueue request_id_conflict"),
             EngineError::RequestExpired => Some("-ERR pqueue request_expired"),
             EngineError::EpochFenced => Some("-ERR pqueue epoch_stale"),
-            EngineError::EntitySchemaViolation(_) => {
-                Some("-ERR pqueue entity_schema_violation")
-            }
+            EngineError::EntitySchemaViolation(_) => Some("-ERR pqueue entity_schema_violation"),
             // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR pqueue` mappings handled by the adapter.
             EngineError::NotFound
             | EngineError::QueueDefinitionConflict

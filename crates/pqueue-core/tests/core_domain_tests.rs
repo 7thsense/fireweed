@@ -465,7 +465,10 @@ fn core_domain_tests_typed_indexes_carried_through_validate() {
         make_single_queue_index("by_status", "status", IndexType::String),
         make_compound_queue_index(
             "by_priority_region",
-            &[("priority", IndexType::Integer), ("region", IndexType::String)],
+            &[
+                ("priority", IndexType::Integer),
+                ("region", IndexType::String),
+            ],
         ),
     ];
     let definition = request.validate(&policy()).unwrap();
@@ -495,7 +498,11 @@ fn core_domain_tests_entity_schema_carried_through_validate() {
 #[test]
 fn core_domain_tests_queue_definition_serde_defaults_entity_schema_and_typed_indexes() {
     let mut request = valid_create_queue();
-    request.typed_indexes = vec![make_single_queue_index("by_id", "job_id", IndexType::String)];
+    request.typed_indexes = vec![make_single_queue_index(
+        "by_id",
+        "job_id",
+        IndexType::String,
+    )];
     let definition = request.validate(&policy()).unwrap();
 
     let mut json: serde_json::Value = serde_json::to_value(&definition).unwrap();
@@ -546,7 +553,13 @@ fn core_domain_tests_rejects_typed_index_duplicate_name() {
 fn core_domain_tests_rejects_typed_index_cap_exceeded() {
     let mut request = valid_create_queue();
     request.typed_indexes = (0..33)
-        .map(|i| make_single_queue_index(&format!("idx_{i}"), &format!("field_{i}"), IndexType::String))
+        .map(|i| {
+            make_single_queue_index(
+                &format!("idx_{i}"),
+                &format!("field_{i}"),
+                IndexType::String,
+            )
+        })
         .collect();
     let err = request.validate(&policy()).unwrap_err();
     assert_eq!(err.kind, CreateQueueErrorKind::InvalidRequest);
@@ -584,8 +597,11 @@ fn core_domain_tests_conflict_typed_and_secondary_same_name() {
         fields: vec!["region".to_string()],
         unique: false,
     }];
-    request.typed_indexes =
-        vec![make_single_queue_index("by_region", "region", IndexType::String)];
+    request.typed_indexes = vec![make_single_queue_index(
+        "by_region",
+        "region",
+        IndexType::String,
+    )];
     let err = request.validate(&policy()).unwrap_err();
     assert_eq!(err.kind, CreateQueueErrorKind::QueueDefinitionConflict);
     assert!(
