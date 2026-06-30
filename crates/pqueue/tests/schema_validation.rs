@@ -1,4 +1,4 @@
-//! ADR-011 schema validation integration tests over MemoryBackend.
+//! ADR-011 schema validation integration tests over the composed memory backend.
 //!
 //! Proves that entity schema violations are rejected BEFORE log append, idempotency recording,
 //! SQL mutation, or projection apply — and that schema-less queues are byte-identical.
@@ -15,7 +15,7 @@ use pqueue_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{ManualClock, MemoryBackend};
+use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 use serde_json::json;
 
 fn qkey() -> QueueKey {
@@ -69,8 +69,11 @@ fn typed_def() -> QueueDefinition {
     }
 }
 
-fn make() -> Pqueue<MemoryBackend> {
-    Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)))
+fn make() -> Pqueue<ComposedMemoryBackend> {
+    Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    )
 }
 
 fn valid_item(priority: i64) -> NewItem {

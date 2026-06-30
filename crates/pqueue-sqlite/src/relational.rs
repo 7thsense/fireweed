@@ -899,6 +899,8 @@ fn typed_index_keys_for_entity(
     Ok(out)
 }
 
+type TypedIndexRows = Vec<(String, Vec<(String, Vec<u8>)>)>;
+
 fn index_is_unique(qi: &QueueIndex) -> bool {
     match &qi.declaration {
         IndexDeclaration::Single(def) => def.unique,
@@ -1009,7 +1011,7 @@ fn maintain_typed_indexes_on_insert(
     // Collect (item_id, keys) and enforce within-batch uniqueness in a single pass.
     let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
         std::collections::HashMap::new();
-    let mut item_keys: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::with_capacity(items.len());
+    let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
         let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
         // DB-level unique check (no exclusion: new items have no prior rows).
@@ -1141,7 +1143,7 @@ impl Inner {
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
-                .map(|sv| compile_entity_schema(sv))
+                .map(compile_entity_schema)
                 .transpose()?
             {
                 self.schemas.insert(key.clone(), cs);
@@ -3368,7 +3370,7 @@ fn create_queue_sql(
         .entity_schema
         .as_ref()
         .and_then(|esd| esd.entity_schema.as_ref())
-        .map(|schema_val| compile_entity_schema(schema_val))
+        .map(compile_entity_schema)
         .transpose()?;
     let (t, q) = parts(&key);
     let def_json = to_json(&definition)?;
@@ -4565,13 +4567,13 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                         continue;
                     }
                 }
-                if !entry.lifecycle_items.is_empty() {
-                    if let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
+                if !entry.lifecycle_items.is_empty()
+                    && let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
                         validate_entity(schema.as_ref(), item.entity.as_ref()).err()
-                    }) {
-                        recovery.push(reject(e));
-                        continue;
-                    }
+                    })
+                {
+                    recovery.push(reject(e));
+                    continue;
                 }
                 let side_record_keys: Vec<Vec<u8>> =
                     entry.side_records.iter().map(|r| r.key.clone()).collect();

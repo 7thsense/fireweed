@@ -667,7 +667,7 @@ async fn secondary_indexes_string_typed_field_with_numeric_looking_value_is_quer
 /// UTF-8 were silently mangled; the new length-prefix encoding is byte-exact.
 #[tokio::test]
 async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
-    let backend = Arc::new(MemoryBackend::new());
+    let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
 
@@ -785,9 +785,9 @@ async fn secondary_indexes_upsert_insert_typed_unique_conflict_is_rejected() {
 /// routes through typed-aware validation.
 #[tokio::test]
 async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_unique_conflict() {
-    use pqueue_sqlite::SqliteBackend;
+    use pqueue_sqlite::composed_sqlite_backend_in_memory;
 
-    let backend = Arc::new(SqliteBackend::in_memory().expect("sqlite in-memory"));
+    let backend = Arc::new(composed_sqlite_backend_in_memory().expect("sqlite in-memory"));
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(backend, clock);
     pq.create_queue(queue_definition()).await.unwrap();

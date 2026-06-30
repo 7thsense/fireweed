@@ -599,7 +599,10 @@ async fn reclaim_expired_recovers_leased_over_memory() {
 /// this test pins that contract so a future typed-payload refactor cannot silently break them.
 #[tokio::test]
 async fn legacy_bytes_items_push_claim_roundtrip() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
@@ -639,7 +642,10 @@ async fn legacy_bytes_items_push_claim_roundtrip() {
 /// representation survives both paths identically: the bytes carrier is agnostic to payload content.
 #[tokio::test]
 async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
-    let pq = Pqueue::new(Arc::new(MemoryBackend::new()), Arc::new(ManualClock::at(0)));
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 

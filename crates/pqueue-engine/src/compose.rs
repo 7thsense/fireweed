@@ -2141,9 +2141,19 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
             // The commit boundary requires BOTH the atomic append+apply log AND a commit-class projection;
             // otherwise refuse the whole operation rather than splitting/faking it (Snorri rejects the
             // backend before activation via `commit_capabilities`).
-            let (max_attempts, retention) = {
+            let (max_attempts, retention, schema) = {
                 let def = self.control.queue_definition(shard)?;
-                (def.retry_policy.max_attempts, def.request_id_retention_ms)
+                let schema = def
+                    .entity_schema
+                    .as_ref()
+                    .and_then(|esd| esd.entity_schema.as_ref())
+                    .map(compile_entity_schema)
+                    .transpose()?;
+                (
+                    def.retry_policy.max_attempts,
+                    def.request_id_retention_ms,
+                    schema,
+                )
             };
             let mut g = self.inner.lock().expect("poisoned");
             if !self.is_atomic() || !g.projection.supports_commit_transition() {
@@ -2249,6 +2259,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 }
                 let mut lifecycle_item_ids = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
+                    if let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
+                        validate_entity(schema.as_ref(), item.entity.as_ref()).err()
+                    }) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
                     let epoch = expected_epoch.unwrap_or(0);
                     let counter_base =
                         self.counters

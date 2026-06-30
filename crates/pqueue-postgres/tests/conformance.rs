@@ -190,8 +190,7 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_log() {
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES CONFORMANCE SKIPPED ({}) — set PQUEUE_PG_TEST_URL to a live DB",
-                "schema_validation_rejects_before_append_and_idempotency_on_postgres_log"
+                "POSTGRES CONFORMANCE SKIPPED (schema_validation_rejects_before_append_and_idempotency_on_postgres_log) — set PQUEUE_PG_TEST_URL to a live DB"
             );
         }
     }

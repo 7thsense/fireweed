@@ -1162,7 +1162,7 @@ impl ControlPlaneStore for PostgresBackend {
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
-                .map(|schema_val| compile_entity_schema(schema_val))
+                .map(compile_entity_schema)
                 .transpose()?;
             let (t, q) = (
                 key.tenant_id.as_str().to_string(),

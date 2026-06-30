@@ -946,7 +946,7 @@ impl<B: LibBackend> Pqueue<B> {
             .typed_indexes
             .iter()
             .find(|spec| spec.name == index)
-            .ok_or_else(|| EngineError::Invalid("unknown secondary index"))?;
+            .ok_or(EngineError::Invalid("unknown secondary index"))?;
         if !typed_index_unique(spec) {
             return Err(EngineError::Invalid("secondary index is not unique"));
         }
@@ -972,7 +972,7 @@ impl<B: LibBackend> Pqueue<B> {
             .typed_indexes
             .iter()
             .find(|spec| spec.name == index)
-            .ok_or_else(|| EngineError::Invalid("unknown secondary index"))?;
+            .ok_or(EngineError::Invalid("unknown secondary index"))?;
         let raw = typed_index_query_key_bytes(spec, key_values)?;
         self.backend.index_lookup(queue, index, &raw).await
     }

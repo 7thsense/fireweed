@@ -205,8 +205,7 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_relationa
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED ({}) — set PQUEUE_PG_TEST_URL to a live DB",
-                "schema_validation_rejects_before_append_and_idempotency_on_postgres_relational"
+                "POSTGRES RELATIONAL SKIPPED (schema_validation_rejects_before_append_and_idempotency_on_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
             );
         }
     }

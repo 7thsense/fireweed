@@ -538,6 +538,8 @@ fn typed_index_keys_for_entity(
     Ok(out)
 }
 
+type TypedIndexRows = Vec<(String, Vec<(String, Vec<u8>)>)>;
+
 fn index_is_unique(qi: &QueueIndex) -> bool {
     match &qi.declaration {
         IndexDeclaration::Single(def) => def.unique,
@@ -654,7 +656,7 @@ fn maintain_typed_indexes_on_insert(
     }
     let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
         std::collections::HashMap::new();
-    let mut item_keys: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::with_capacity(items.len());
+    let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
         let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
         check_typed_unique_conflicts(tx, t, q, typed_indexes, &keys, None)?;
@@ -712,7 +714,7 @@ impl Inner {
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
-                .map(|sv| compile_entity_schema(sv))
+                .map(compile_entity_schema)
                 .transpose()?
             {
                 self.schemas.insert(key.clone(), cs);
@@ -2710,7 +2712,7 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
-                .map(|schema_val| compile_entity_schema(schema_val))
+                .map(compile_entity_schema)
                 .transpose()?;
             let (t, q) = (
                 key.tenant_id.as_str().to_string(),

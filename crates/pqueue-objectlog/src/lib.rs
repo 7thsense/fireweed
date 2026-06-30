@@ -478,7 +478,7 @@ impl Inner {
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
-                .map(|schema_val| compile_entity_schema(schema_val))
+                .map(compile_entity_schema)
                 .transpose()?
             {
                 self.schemas.insert(shard.clone(), cs);
@@ -1266,7 +1266,7 @@ impl ControlPlaneStore for ObjectLogBackend {
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
-                .map(|schema_val| compile_entity_schema(schema_val))
+                .map(compile_entity_schema)
                 .transpose()?;
             if outcome.created {
                 g.projections.insert(
