@@ -1752,10 +1752,10 @@ async fn discover_empty_queue_is_empty() {
 // ---------------------------------------------------------------------------
 
 use pqueue_core::{IndexDeclaration, IndexType, QueueIndex};
-use pqueue_engine::{IndexQueryPort, EngineError};
+use pqueue_engine::{EngineError, IndexQueryPort};
 
 fn qdef_unique_str_index(index_name: &str, field: &str) -> QueueDefinition {
-    use axon_esf::{IndexDef};
+    use axon_esf::IndexDef;
     QueueDefinition {
         typed_indexes: vec![QueueIndex {
             name: index_name.to_string(),
@@ -1770,7 +1770,7 @@ fn qdef_unique_str_index(index_name: &str, field: &str) -> QueueDefinition {
 }
 
 fn qdef_nonunique_str_index(index_name: &str, field: &str) -> QueueDefinition {
-    use axon_esf::{IndexDef};
+    use axon_esf::IndexDef;
     QueueDefinition {
         typed_indexes: vec![QueueIndex {
             name: index_name.to_string(),
@@ -1786,7 +1786,10 @@ fn qdef_nonunique_str_index(index_name: &str, field: &str) -> QueueDefinition {
 
 fn entity(field: &str, value: &str) -> serde_json::Value {
     let mut m = serde_json::Map::new();
-    m.insert(field.to_string(), serde_json::Value::String(value.to_string()));
+    m.insert(
+        field.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
     serde_json::Value::Object(m)
 }
 
@@ -1922,7 +1925,11 @@ async fn typed_unique_index_within_batch_conflict_rejected() {
         matches!(result, Err(EngineError::Conflict)),
         "within-batch duplicate must be rejected"
     );
-    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0, "nothing inserted");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        0,
+        "nothing inserted"
+    );
 }
 
 /// Purging an item removes its index row; the same unique key can then be pushed again.

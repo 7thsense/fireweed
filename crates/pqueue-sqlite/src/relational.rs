@@ -55,7 +55,6 @@ use pqueue_core::{
     Metadata, PriorityModel, PriorityValue, QueueDefinition, QueueId, QueueIndex, RequestId,
     TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
-use serde_json::Value as JsonValue;
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
@@ -77,6 +76,7 @@ use pqueue_engine::{
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 /// The relational schema. `pqueue_items` is TD-002's item projection (sqlite-typed); `fenced`,
@@ -1005,8 +1005,7 @@ fn maintain_typed_indexes_on_insert(
     // Collect (item_id, keys) and enforce within-batch uniqueness in a single pass.
     let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
         std::collections::HashMap::new();
-    let mut item_keys: Vec<(String, Vec<(String, Vec<u8>)>)> =
-        Vec::with_capacity(items.len());
+    let mut item_keys: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::with_capacity(items.len());
     for item in items {
         let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
         // DB-level unique check (no exclusion: new items have no prior rows).
@@ -1920,11 +1919,8 @@ fn apply_command_sql(
                     if !typed_indexes.is_empty() {
                         let item_id_str = c.item_id.to_string();
                         delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id_str))?;
-                        let new_keys =
-                            typed_index_keys_for_entity(typed_indexes, Some(doc))?;
-                        check_typed_unique_conflicts(
-                            tx, &t, &q, typed_indexes, &new_keys, None,
-                        )?;
+                        let new_keys = typed_index_keys_for_entity(typed_indexes, Some(doc))?;
+                        check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &new_keys, None)?;
                         insert_typed_index_rows(tx, &t, &q, &item_id_str, &new_keys)?;
                     }
                 }
@@ -3948,8 +3944,7 @@ impl IndexQueryPort for SqliteRelationalBackend {
                 .optional())?;
             Ok(row.map(|(id_str, ck_str, ver)| IndexHit {
                 item_id: ItemId::new(id_str).expect("valid stored item_id"),
-                client_item_key: ClientItemKey::new(ck_str)
-                    .expect("valid stored client_item_key"),
+                client_item_key: ClientItemKey::new(ck_str).expect("valid stored client_item_key"),
                 item_version: ver as u64,
             }))
         })();
@@ -3988,10 +3983,15 @@ impl IndexQueryPort for SqliteRelationalBackend {
                    AND idx.index_name=?3 AND idx.index_key=?4 \
                  ORDER BY i.item_id",
             ))?;
-            let rows = st(stmt.query_map(
-                params![t, q, index, canonical.as_slice()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
-            ))?;
+            let rows = st(
+                stmt.query_map(params![t, q, index, canonical.as_slice()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                }),
+            )?;
             let mut out = Vec::new();
             for r in rows {
                 let (id_str, ck_str, ver) = st(r)?;

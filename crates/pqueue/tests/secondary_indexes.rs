@@ -1133,13 +1133,12 @@ async fn secondary_indexes_typed_query_relational_error_precedence_is_explicit()
         "facade uniqueness validation should run before relational backend availability"
     );
 
-    let err = pq
+    let hits = pq
         .query_index_typed(&q, "by_score", &[serde_json::json!(99i64)])
         .await
-        .unwrap_err();
-    assert_eq!(
-        err,
-        pqueue::EngineError::Unavailable,
-        "valid typed lookups still surface relational secondary-index unavailability until Phase 2"
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "sqlite relational typed indexes are implemented and a valid missing key returns an empty result"
     );
 }
