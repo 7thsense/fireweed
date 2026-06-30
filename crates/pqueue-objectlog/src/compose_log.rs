@@ -148,6 +148,17 @@ impl LogStore for ObjectLog {
                 .read_snapshot(&snapshot_ref.queue, &snapshot_ref.ref_id)?,
         })
     }
+
+    fn persist_definition(
+        &mut self,
+        definition: &pqueue_core::QueueDefinition,
+    ) -> EngineResult<()> {
+        self.log.persist_definition(definition)
+    }
+
+    fn recover_definitions(&self) -> EngineResult<Vec<pqueue_core::QueueDefinition>> {
+        self.log.recover_definitions()
+    }
 }
 
 /// The composed object-log backend: `ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>`
@@ -156,13 +167,15 @@ impl LogStore for ObjectLog {
 pub type ComposedObjectLogBackend =
     ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>;
 
-/// Assemble a composed object-log backend rooted at `root`.
+/// Assemble a composed object-log backend rooted at `root`. Runs recovery-on-open (ADR-012 P2): a reopen
+/// enumerates the durable queue catalog and rebuilds the in-memory projection by replaying the object log.
 pub fn composed_objectlog_backend(
     root: impl Into<std::path::PathBuf>,
 ) -> EngineResult<ComposedObjectLogBackend> {
-    Ok(ComposedBackend::new(
+    ComposedBackend::new(
         ObjectLog::open(root)?,
         InMemoryProjection::new(),
         InProcessControlPlane::new(),
-    ))
+    )
+    .recover()
 }

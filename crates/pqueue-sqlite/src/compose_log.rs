@@ -9,6 +9,7 @@
 //! ADR-012 co-locates the epoch/fence authority with the log and leaves queue DEFINITIONS to the separate
 //! control-plane axis. There is therefore no `queues` table here: the control plane owns definitions.
 
+use pqueue_core::QueueDefinition;
 use pqueue_engine::{
     CommandEnvelope, CommandPage, CommandPosition, EngineError, EngineResult, LogStore,
     ProjectionSnapshot, QueueKey, SnapshotRef,
@@ -34,6 +35,13 @@ CREATE TABLE IF NOT EXISTS snapshots (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, ref_id TEXT NOT NULL,
     epoch INTEGER NOT NULL, seq INTEGER NOT NULL, payload BLOB NOT NULL,
     PRIMARY KEY (tenant, queue, ref_id)
+);
+-- Durable queue-definition catalog (ADR-012 P2 recovery-on-open). The composition's in-process control
+-- plane is not durable, so the log persists definitions here; a reopened composition enumerates them to
+-- rebuild the in-memory projection WITHOUT a re-create_queue. The epoch/fence stays in `log_epochs`.
+CREATE TABLE IF NOT EXISTS queue_defs (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
+    PRIMARY KEY (tenant, queue)
 );
 "#;
 
@@ -320,5 +328,29 @@ impl LogStore for SqliteLog {
         payload
             .map(|payload| ProjectionSnapshot { payload })
             .ok_or(EngineError::NotFound)
+    }
+
+    fn persist_definition(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
+        let (t, q) = parts(&QueueKey::new(
+            definition.tenant_id.clone(),
+            definition.queue_id.clone(),
+        ));
+        st(self.conn.execute(
+            "INSERT INTO queue_defs(tenant,queue,definition) VALUES(?1,?2,?3) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET definition=excluded.definition",
+            params![t, q, to_json(definition)?],
+        ))?;
+        Ok(())
+    }
+
+    fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        let mut stmt = st(self.conn.prepare("SELECT definition FROM queue_defs"))?;
+        let mapped = st(stmt.query_map([], |row| row.get::<_, String>(0)))?;
+        let mut out = Vec::new();
+        for r in mapped {
+            let json = st(r)?;
+            out.push(serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?);
+        }
+        Ok(out)
     }
 }

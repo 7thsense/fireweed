@@ -5110,6 +5110,29 @@ impl ProjectionStore for SqliteRelational {
         apply_committed_batch_sql(&mut g, positions, commands)
     }
 
+    // -- recovery-on-open (ADR-012 P2): the DB-authoritative store already holds the full projection +
+    //    definitions, so there is nothing to replay (the default `recovery_high_water` → `None` makes the
+    //    composition's `read_from` return an empty page). Recovery only repopulates the in-process control
+    //    plane (via `recover_definitions`) and re-seeds the id-mint counters from `pqueue_items`.
+
+    fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        Ok(self.lock().queues.values().cloned().collect())
+    }
+
+    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+        let g = self.lock();
+        let (t, q) = parts(shard);
+        let mut stmt = st(g
+            .conn
+            .prepare("SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2"))?;
+        let rows = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
+        for r in rows {
+            let id = ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?;
+            counters.observe(shard, id);
+        }
+        Ok(())
+    }
+
     fn eligible_candidates(
         &self,
         shard: &QueueKey,
@@ -5318,6 +5341,24 @@ impl ProjectionStore for SqliteProjectionStore {
         self.apply_committed_batch(positions, commands)
     }
 
+    // -- recovery-on-open (ADR-012 P2): this derived sqlite projection persists its high-water + definitions,
+    //    so a reopened composition replays only the object-/sqlite-log tail beyond the snapshot.
+
+    fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        // The inherent method returns `next_seq`; the last position already absorbed is `next_seq - 1`
+        // (the log's `read_from` resumes at `sequence + 1`, so the first replayed command is `next_seq`).
+        let next = SqliteProjectionStore::recovery_high_water(self, shard)?;
+        Ok(next.and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1))))
+    }
+
+    fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        Ok(self.lock().queues.values().cloned().collect())
+    }
+
+    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+        self.observe_item_counters(shard, counters)
+    }
+
     fn eligible_candidates(
         &self,
         shard: &QueueKey,
@@ -5505,6 +5546,14 @@ pub fn composed_sqlite_relational_in_memory() -> EngineResult<ComposedSqliteRela
         store,
         InProcessControlPlane::new(),
     ))
+}
+
+/// Assemble a unified sqlite-relational composition over a DURABLE store at `path`. Runs recovery-on-open
+/// (ADR-012 P2): the DB-authoritative projection needs no log replay, so recovery only repopulates the
+/// in-process control plane from the durable `queues` catalog and re-seeds the id-mint counters.
+pub fn composed_sqlite_relational(path: &str) -> EngineResult<ComposedSqliteRelationalBackend> {
+    let store = SqliteRelational::open(path)?;
+    ComposedBackend::new(store.clone(), store, InProcessControlPlane::new()).recover()
 }
 
 #[cfg(test)]

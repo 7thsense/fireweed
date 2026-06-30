@@ -111,12 +111,12 @@ pub enum ControlPlaneSpec {
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
 /// [`start`] assembles the concrete backend from this spec.
 ///
-/// NOTE (ADR-012 P2 status): the spec is the one composition axis the server selects on, but the DURABLE
-/// families are still assembled from their existing recovery-capable backends. The generic
-/// `ComposedBackend` does not yet rebuild its projection from the durable log on reopen (the conformance
-/// suites prove fresh-state equivalence only, not crash recovery), so swapping the durable monoliths for the
-/// bare composition would regress restart durability. Wiring those onto `ComposedBackend` is gated on adding
-/// a generic log-replay-on-open recovery pass; see the report accompanying this change.
+/// NOTE (ADR-012 P2 status): the spec is the one composition axis the server selects on. The generic
+/// `ComposedBackend` now performs generic log-replay-on-open recovery (`ComposedBackend::recover` rebuilds
+/// the projection + counters + cmd-seq from the durable log/projection, honored across every durable
+/// composition by the reopen/recovery conformance dimension), so the bare composition no longer regresses
+/// restart durability. The server still assembles the DURABLE families from their existing monoliths pending
+/// the next phase, which deletes those monoliths in favor of the recovery-capable composition.
 pub struct BackendSpec {
     pub log: LogSpec,
     pub projection: ProjectionSpec,

@@ -3846,6 +3846,29 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
+    // -- recovery-on-open (ADR-012 P2): the DB-authoritative store holds the full projection + definitions,
+    //    so there is nothing to replay (the default `recovery_high_water` → `None`). Recovery only
+    //    repopulates the in-process control plane and re-seeds the id-mint counters from `pqueue_items`.
+
+    fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        Ok(self.lock().queues.values().cloned().collect())
+    }
+
+    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+        let mut g = self.lock();
+        let (t, q) = parts(shard);
+        let rows = st(g.client.query(
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2",
+            &[&t, &q],
+        ))?;
+        for row in rows {
+            let id: String = row.get(0);
+            let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+            counters.observe(shard, item_id);
+        }
+        Ok(())
+    }
+
     fn eligible_candidates(
         &self,
         shard: &QueueKey,
@@ -4015,17 +4038,15 @@ pub type ComposedPostgresRelationalBackend =
     ComposedBackend<PostgresRelational, PostgresRelational, InProcessControlPlane>;
 
 /// Assemble a unified postgres-relational composition isolated in `schema`. Both axes are clones of the SAME
-/// store (shared `Client`), so the orthogonal `commit_locked` drives one durable transaction.
+/// store (shared `Client`), so the orthogonal `commit_locked` drives one durable transaction. Runs
+/// recovery-on-open (ADR-012 P2): a reconnect to the same schema repopulates the in-process control plane
+/// from the durable `queues` catalog and re-seeds the id-mint counters (the DB projection needs no replay).
 pub fn composed_postgres_relational_in_schema(
     url: &str,
     schema: &str,
 ) -> EngineResult<ComposedPostgresRelationalBackend> {
     let store = PostgresRelational::connect_in_schema(url, schema)?;
-    Ok(ComposedBackend::new(
-        store.clone(),
-        store,
-        InProcessControlPlane::new(),
-    ))
+    ComposedBackend::new(store.clone(), store, InProcessControlPlane::new()).recover()
 }
 
 #[cfg(test)]

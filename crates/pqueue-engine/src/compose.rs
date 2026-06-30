@@ -113,6 +113,20 @@ pub trait LogStore: Send {
     ) -> EngineResult<SnapshotRef>;
     fn latest_snapshot(&self, shard: &QueueKey) -> EngineResult<Option<SnapshotRef>>;
     fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot>;
+
+    /// Persist `definition` in the log's durable queue catalog (called from `create_queue` when a queue is
+    /// first created) so a reopened composition can enumerate its queues for recovery WITHOUT a
+    /// re-`create_queue`. Default: no-op — an in-process log ([`crate::MemoryLog`] analogue) or a unified
+    /// relational store (whose definitions live in its projection axis) persist nothing here.
+    fn persist_definition(&mut self, _definition: &QueueDefinition) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// Enumerate the durable queue definitions this log persists, for recovery-on-open (ADR-012 P2). Default:
+    /// empty — a reopened in-process log is a fresh process with nothing to recover.
+    fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        Ok(Vec::new())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +275,31 @@ pub trait ProjectionStore: Send {
         index: &str,
         key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>>;
+
+    // -- recovery-on-open (ADR-012 P2) --------------------------------------
+
+    /// The position this projection has ALREADY durably absorbed. The composition replays the durable log
+    /// forward from here via [`LogStore::read_from`]. `None` (the default) is genesis — a fresh in-memory
+    /// projection replays the whole log; a durable sqlite projection returns its persisted high-water so only
+    /// the object-log tail beyond the snapshot is replayed (bead pqueue-8a76daad); a unified relational store
+    /// has nothing to replay (its `apply` already wrote durably in the same transaction).
+    fn recovery_high_water(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        Ok(None)
+    }
+
+    /// Enumerate the durable queue definitions this projection persists, for recovery-on-open. Default: empty
+    /// (the in-memory projection persists nothing; the durable sqlite/relational projections override this).
+    fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        Ok(Vec::new())
+    }
+
+    /// Seed the composition's per-queue id-mint `counters` past every item id already materialized in the
+    /// durable projection snapshot, so a push after a snapshot-tail reopen never re-mints an existing id.
+    /// Default: no-op — the in-memory projection has no persisted snapshot, so its counters are restored by
+    /// observing the ids in the replayed log instead.
+    fn restore_counters(&self, _shard: &QueueKey, _counters: &QueueCounters) -> EngineResult<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +392,13 @@ struct Inner<L, P> {
     cmd_seq: u64,
 }
 
+/// Default recovery-window budget: the max durable-log tail (commands) a normal reopen replays beyond the
+/// projection's recovery high-water before [`ComposedBackend::recover`] logs a recovery-window warning. The
+/// durable projection advances its high-water inside the same transaction that applies each batch, so the
+/// tail is normally a handful of commands; exceeding this suggests a projection that has fallen far behind
+/// the log. (For a fresh in-memory projection the whole log is the "tail", so the budget is generous.)
+pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
+
 /// The one generic backend (ADR-012): `Backend = LogStore × ProjectionStore × ControlPlane`. Implements
 /// every engine port by delegating to the three axes.
 pub struct ComposedBackend<L, P, C> {
@@ -365,6 +411,8 @@ pub struct ComposedBackend<L, P, C> {
     /// `LogStore::durability_class` so the hot path never re-locks to decide whether an atomic-only port
     /// (upsert / update_fields / reschedule / commit_transition) is available.
     durability: DurabilityClass,
+    /// Recovery-window budget (max tail commands) before [`Self::recover`] logs a recovery-window warning.
+    recovery_max_tail: u64,
 }
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> {
@@ -383,7 +431,121 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             node_id: 0,
             counters: QueueCounters::default(),
             durability,
+            recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
         }
+    }
+
+    /// Override the recovery-window budget (max durable-log tail commands a reopen replays before a
+    /// recovery-window warning is logged) — the composition-root form of `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`.
+    pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
+        self.recovery_max_tail = max_tail;
+        self
+    }
+
+    /// Recovery-on-open (ADR-012 P2): rebuild the in-memory derived state from the durable substrates so a
+    /// reopened durable composition recovers identically to its monolith — WITHOUT a re-`create_queue`. For
+    /// every durable queue (enumerated from the projection's then the log's durable catalog) this:
+    ///
+    /// 1. repopulates the in-process control plane + ensures the log/projection shards exist (the durable
+    ///    epoch/fence in the log is preserved, never reset);
+    /// 2. seeds the id-mint counters from the durable projection snapshot ([`ProjectionStore::restore_counters`]);
+    /// 3. replays the durable log forward from the projection's [`ProjectionStore::recovery_high_water`]
+    ///    (genesis for a fresh in-memory projection; the snapshot tail for a durable sqlite projection; nothing
+    ///    for a unified relational store), applying each batch through [`ProjectionStore::apply`] and observing
+    ///    the minted ids + the command sequence so post-reopen mints never collide.
+    ///
+    /// A fresh (`:memory:` / never-written) composition has empty durable catalogs, so this is a cheap no-op.
+    /// Durable constructors call this; the in-process memory composition does not need it.
+    pub fn recover(self) -> EngineResult<Self> {
+        self.run_recovery()?;
+        Ok(self)
+    }
+
+    fn run_recovery(&self) -> EngineResult<()> {
+        // 1. Gather the durable definitions, projection catalog first then log catalog, deduped by key.
+        let definitions: Vec<QueueDefinition> = {
+            let g = self.inner.lock().expect("composed backend poisoned");
+            let mut seen: std::collections::HashSet<QueueKey> = std::collections::HashSet::new();
+            let mut defs = Vec::new();
+            for def in g
+                .projection
+                .recover_definitions()?
+                .into_iter()
+                .chain(g.log.recover_definitions()?)
+            {
+                let key = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+                if seen.insert(key) {
+                    defs.push(def);
+                }
+            }
+            defs
+        };
+        if definitions.is_empty() {
+            return Ok(());
+        }
+
+        let mut max_cmd_seq: Option<u64> = None;
+        for def in definitions {
+            let key = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+            // Repopulate the in-process control plane (idempotent for a compatible re-create).
+            self.control.create_queue(def.clone())?;
+            let mut g = self.inner.lock().expect("composed backend poisoned");
+            let Inner {
+                log, projection, ..
+            } = &mut *g;
+            log.ensure_shard(&key)?;
+            projection.ensure_shard(&def)?;
+            // Seed counters from the durable projection snapshot (no-op for the in-memory projection).
+            projection.restore_counters(&key, &self.counters)?;
+            // Replay the durable log tail from the projection's recovery high-water (genesis when `None`).
+            let mut from = projection.recovery_high_water(&key)?;
+            let mut tail: u64 = 0;
+            loop {
+                let page = log.read_from(&key, from.clone(), 256)?;
+                if !page.entries.is_empty() {
+                    let positions: Vec<CommandPosition> =
+                        page.entries.iter().map(|(p, _)| p.clone()).collect();
+                    let envelopes: Vec<CommandEnvelope> =
+                        page.entries.iter().map(|(_, e)| e.clone()).collect();
+                    for env in &envelopes {
+                        for id in &env.item_ids {
+                            self.counters.observe(&key, *id);
+                        }
+                        // The composition mints `cmp-{node}-{n}` command ids; resume past the highest replayed
+                        // sequence so a post-reopen append never re-mints an existing command id.
+                        if let Some(n) = env
+                            .command_id
+                            .0
+                            .rsplit('-')
+                            .next()
+                            .and_then(|s| s.parse::<u64>().ok())
+                        {
+                            max_cmd_seq = Some(max_cmd_seq.map_or(n, |m| m.max(n)));
+                        }
+                    }
+                    tail += positions.len() as u64;
+                    projection.apply(&positions, &envelopes)?;
+                }
+                match page.next {
+                    Some(next) => from = Some(next),
+                    None => break,
+                }
+            }
+            if tail > self.recovery_max_tail {
+                eprintln!(
+                    "[recovery] composed backend tail for {}:{} replayed {tail} commands beyond the \
+                     projection high-water (budget {}); the projection may have fallen behind the log",
+                    key.tenant_id.as_str(),
+                    key.queue_id.as_str(),
+                    self.recovery_max_tail,
+                );
+            }
+        }
+        if let Some(m) = max_cmd_seq {
+            let mut g = self.inner.lock().expect("composed backend poisoned");
+            g.cmd_seq = g.cmd_seq.max(m + 1);
+        }
+        Ok(())
     }
 
     /// Whether the composition offers the atomic append+apply boundary the atomic-only ports require
@@ -612,6 +774,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                 } = &mut *g;
                 log.ensure_shard(&key)?;
                 projection.ensure_shard(&outcome.definition)?;
+                // Record the definition in the log's durable catalog so a reopened composition can recover
+                // this queue without a re-`create_queue` (no-op for in-process / unified-relational logs).
+                log.persist_definition(&outcome.definition)?;
             }
             Ok(outcome)
         })();

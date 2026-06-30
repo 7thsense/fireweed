@@ -1051,6 +1051,31 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         });
         Ok(())
     }
+
+    /// Persist a queue definition as a durable per-shard `queue.json` object (ADR-012 P2 recovery-on-open).
+    /// The composition's in-process control plane is not durable, so the object log catalogs definitions
+    /// here; a reopened composition enumerates them ([`Self::recover_definitions`]) to rebuild WITHOUT a
+    /// re-create_queue. Unconditional PUT (idempotent at a stable key — a compatible re-create re-writes
+    /// identical bytes).
+    pub fn persist_definition(&self, def: &QueueDefinition) -> EngineResult<()> {
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let key = format!("{}queue.json", shard_prefix(&shard));
+        self.store.put(&key, &to_json(def)?)
+    }
+
+    /// Enumerate every durable queue definition catalogued under the store root (the `queue.json` objects).
+    pub fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        let mut out = Vec::new();
+        for key in self.store.list("t/")? {
+            if !key.ends_with("/queue.json") {
+                continue;
+            }
+            if let Some(bytes) = self.store.get(&key)? {
+                out.push(serde_json::from_slice(&bytes).map_err(store_err)?);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Durable high-water blob (the explicit command-position high-water; TD-007 §4).

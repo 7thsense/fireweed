@@ -45,7 +45,7 @@ mod relational;
 pub use compose_log::SqliteLog;
 pub use relational::{
     ComposedSqliteRelationalBackend, SqliteProjectionStore, SqliteRelational,
-    SqliteRelationalBackend, composed_sqlite_relational_in_memory,
+    SqliteRelationalBackend, composed_sqlite_relational, composed_sqlite_relational_in_memory,
 };
 
 use pqueue_engine::{ComposedBackend, InProcessControlPlane};
@@ -70,13 +70,15 @@ pub fn composed_sqlite_backend_in_memory() -> EngineResult<ComposedSqliteBackend
 }
 
 /// Assemble a composed sqlite backend over a DURABLE sqlite command log at `path` — the composed
-/// replacement for the monolithic `SqliteBackend::open(path)` (the composition root wires this).
+/// replacement for the monolithic `SqliteBackend::open(path)` (the composition root wires this). Runs
+/// recovery-on-open (ADR-012 P2): a reopen rebuilds the in-memory projection by replaying the durable log.
 pub fn composed_sqlite_backend(path: &str) -> EngineResult<ComposedSqliteBackend> {
-    Ok(ComposedBackend::new(
+    ComposedBackend::new(
         SqliteLog::open(path)?,
         InMemoryProjection::new(),
         InProcessControlPlane::new(),
-    ))
+    )
+    .recover()
 }
 
 /// The composed sqlite-LOG + sqlite-PROJECTION backend (ADR-012 P1b-ii, Part B): a durable sqlite command
@@ -94,6 +96,21 @@ pub fn composed_sqlite_log_sqlite_projection_in_memory()
         SqliteProjectionStore::in_memory()?,
         InProcessControlPlane::new(),
     ))
+}
+
+/// Assemble a composed sqlite-LOG + sqlite-PROJECTION backend over DURABLE stores (the log at `log_path`,
+/// the derived projection at `projection_path`). Runs recovery-on-open (ADR-012 P2): a reopen replays only
+/// the durable log tail beyond the persisted projection high-water (snapshot-tail recovery).
+pub fn composed_sqlite_log_sqlite_projection(
+    log_path: &str,
+    projection_path: &str,
+) -> EngineResult<ComposedSqliteLogSqliteProjectionBackend> {
+    ComposedBackend::new(
+        SqliteLog::open(log_path)?,
+        SqliteProjectionStore::open(projection_path)?,
+        InProcessControlPlane::new(),
+    )
+    .recover()
 }
 
 const SCHEMA: &str = r#"
