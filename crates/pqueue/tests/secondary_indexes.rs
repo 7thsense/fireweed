@@ -973,7 +973,11 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
 
     // query_index_typed (non-unique) works the same way.
     let hits = pq
-        .query_index_typed(&q, "by_due_at", &[serde_json::json!("2026-06-30T12:00:00Z")])
+        .query_index_typed(
+            &q,
+            "by_due_at",
+            &[serde_json::json!("2026-06-30T12:00:00Z")],
+        )
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
@@ -981,7 +985,11 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
 
     // Compound typed index: two-value key.
     let hits = pq
-        .query_index_typed(&q, "by_region_zone", &[serde_json::json!("eu-west"), serde_json::json!(3i64)])
+        .query_index_typed(
+            &q,
+            "by_region_zone",
+            &[serde_json::json!("eu-west"), serde_json::json!(3i64)],
+        )
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
@@ -1014,7 +1022,11 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         .unwrap()
         .expect("raw-byte query finds the same item");
     let typed_hit = pq
-        .query_index_unique_typed(&q, "by_external_id", &[serde_json::json!("typed-query-test")])
+        .query_index_unique_typed(
+            &q,
+            "by_external_id",
+            &[serde_json::json!("typed-query-test")],
+        )
         .await
         .unwrap()
         .expect("typed query finds the same item");
