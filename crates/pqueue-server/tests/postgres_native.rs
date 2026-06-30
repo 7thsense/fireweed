@@ -17,7 +17,19 @@ use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use pqueue_server::{Backend, Config, resolve_postgres_backend, start};
+use pqueue_server::{
+    BackendSpec, Config, ControlPlaneSpec, LogSpec, ProjectionSpec, resolve_postgres_log, start,
+};
+
+/// Build a `BackendSpec` carrying the postgres log axis + in-memory projection (the server's only wired
+/// postgres pairing), so the tests can keep expressing "the postgres-native backend" concisely.
+fn pg_spec(url: String, credentials: Option<pqueue_postgres::CredentialProvider>) -> BackendSpec {
+    BackendSpec {
+        log: LogSpec::Postgres { url, credentials },
+        projection: ProjectionSpec::InMemory,
+        control_plane: ControlPlaneSpec::InProcess,
+    }
+}
 
 fn qdef() -> QueueDefinition {
     QueueDefinition {
@@ -51,16 +63,13 @@ fn qdef() -> QueueDefinition {
 #[test]
 fn postgres_native_backend_variant_is_selectable() {
     let config = Config::new(
-        Backend::PostgresNative {
-            url: "postgres://postgres@127.0.0.1:1/postgres".to_string(),
-            credentials: None,
-        },
+        pg_spec("postgres://postgres@127.0.0.1:1/postgres".to_string(), None),
         7,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
         vec![qdef()],
     );
-    assert!(matches!(config.backend, Backend::PostgresNative { .. }));
+    assert!(matches!(config.backend.log, LogSpec::Postgres { .. }));
 }
 
 /// No-DB config-parse proof (acceptance 2): the composition-root config layer accepts the EXACT env names
@@ -88,9 +97,9 @@ fn lakebase_env_resolves_to_postgres_native_with_tls_and_databricks_credentials(
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
 
-    let backend = resolve_postgres_backend(&env).expect("Lakebase env resolves without a live DB");
-    let Backend::PostgresNative { url, credentials } = backend else {
-        panic!("Lakebase env must select Backend::PostgresNative");
+    let backend = resolve_postgres_log(&env).expect("Lakebase env resolves without a live DB");
+    let LogSpec::Postgres { url, credentials } = backend else {
+        panic!("Lakebase env must select LogSpec::Postgres");
     };
     // The DSN is taken from the Lakebase Secret env name, and it demands TLS (no plaintext downgrade).
     assert_eq!(
@@ -118,10 +127,10 @@ fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
     )]
     .into_iter()
     .collect();
-    let Backend::PostgresNative { url, credentials } =
-        resolve_postgres_backend(&keyvalue).expect("key=value DSN resolves")
+    let LogSpec::Postgres { url, credentials } =
+        resolve_postgres_log(&keyvalue).expect("key=value DSN resolves")
     else {
-        panic!("expected PostgresNative");
+        panic!("expected LogSpec::Postgres");
     };
     assert!(credentials.is_none(), "no Databricks env => no provider");
     assert_eq!(
@@ -138,8 +147,8 @@ fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
     .into_iter()
     .collect();
     assert!(matches!(
-        resolve_postgres_backend(&fallback).expect("PQUEUE_PG_URL fallback resolves"),
-        Backend::PostgresNative { .. }
+        resolve_postgres_log(&fallback).expect("PQUEUE_PG_URL fallback resolves"),
+        LogSpec::Postgres { .. }
     ));
 }
 
@@ -153,10 +162,10 @@ fn require_dsn_fails_closed_without_tls_feature() {
     )]
     .into_iter()
     .collect();
-    let resolved = resolve_postgres_backend(&env);
+    let resolved = resolve_postgres_log(&env);
     if cfg!(feature = "tls") {
         assert!(
-            matches!(resolved, Ok(Backend::PostgresNative { .. })),
+            matches!(resolved, Ok(LogSpec::Postgres { .. })),
             "tls build must accept sslmode=require"
         );
     } else {
@@ -178,10 +187,7 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         start(Config::new(
-            Backend::PostgresNative {
-                url: "postgres://postgres@127.0.0.1:1/postgres".to_string(),
-                credentials: None,
-            },
+            pg_spec("postgres://postgres@127.0.0.1:1/postgres".to_string(), None),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -233,10 +239,7 @@ async fn postgres_native_live_push_claim_ack_over_resp() {
     }
 
     let server = start(Config::new(
-        Backend::PostgresNative {
-            url: url.clone(),
-            credentials: None,
-        },
+        pg_spec(url.clone(), None),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),

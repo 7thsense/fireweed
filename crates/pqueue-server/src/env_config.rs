@@ -18,7 +18,10 @@ use pqueue_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 
-use crate::{Backend, Config, DEFAULT_RECOVERY_MAX_TAIL, SegmentConfig, resolve_node_id};
+use crate::{
+    BackendSpec, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL, LogSpec, ProjectionSpec,
+    SegmentConfig, resolve_node_id,
+};
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
 /// map (unknown/unsupported backend combination, malformed `PQUEUE_BOOTSTRAP_QUEUES`, invalid segment
@@ -61,12 +64,8 @@ fn parse_duration_ms(env: &BTreeMap<String, String>, key: &str, default_ms: u64)
     Duration::from_millis(parse_u64(env, key, default_ms))
 }
 
-fn unsupported_storage(log: &str, projection: &str, reason: &str) -> ConfigError {
-    ConfigError::new(format!(
-        "unsupported storage configuration PQUEUE_LOG_BACKEND={log} PQUEUE_PROJECTION_BACKEND={projection}: {reason}"
-    ))
-}
-
+/// The group-commit segment configuration for the segmented object-log families (byte-size + latency seal
+/// triggers), from `PQUEUE_SEGMENT_TARGET_BYTES` / `PQUEUE_SEGMENT_MAX_LATENCY_MS`.
 fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, ConfigError> {
     let target_bytes = parse_usize(env, "PQUEUE_SEGMENT_TARGET_BYTES", 262_144);
     let max_latency_ms = parse_u64(env, "PQUEUE_SEGMENT_MAX_LATENCY_MS", 20);
@@ -74,95 +73,107 @@ fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, Confi
         .map_err(|e| ConfigError::new(format!("invalid segment configuration: {e}")))
 }
 
-fn parse_backend(env: &BTreeMap<String, String>) -> Result<Backend, ConfigError> {
+fn unsupported_storage(log: &str, projection: &str, reason: &str) -> ConfigError {
+    ConfigError::new(format!(
+        "unsupported storage configuration PQUEUE_LOG_BACKEND={log} PQUEUE_PROJECTION_BACKEND={projection}: {reason}"
+    ))
+}
+
+/// Map the documented `PQUEUE_LOG_BACKEND` × `PQUEUE_PROJECTION_BACKEND` env names onto the typed two-axis
+/// [`BackendSpec`] (ADR-012). Each axis is parsed independently, then the pairing is validated against the
+/// set pqueue-server actually wires. The `PQUEUE_OBJECT_LOG_MODE` pseudo-axis is retired — the object log's
+/// only production form is the segmented group-commit substrate, which the composed `ObjectLog` axis is.
+fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigError> {
     let log = env_or(env, "PQUEUE_LOG_BACKEND", "objectlog");
     let projection = env_or(env, "PQUEUE_PROJECTION_BACKEND", "inmemory");
 
-    match (log.as_str(), projection.as_str()) {
-        ("memory", "inmemory") => Ok(Backend::Memory),
-        ("sqlite", "inmemory") => Ok(Backend::Sqlite(PathBuf::from(env_or(
-            env,
-            "PQUEUE_SQLITE_LOG_PATH",
-            "/var/lib/pqueue/pqueue-log.db",
-        )))),
-        ("objectlog", "inmemory") => {
-            let object_root = PathBuf::from(env_or(
+    let log_spec = match log.as_str() {
+        "memory" => LogSpec::Memory,
+        "sqlite" => LogSpec::Sqlite {
+            path: PathBuf::from(env_or(
+                env,
+                "PQUEUE_SQLITE_LOG_PATH",
+                "/var/lib/pqueue/pqueue-log.db",
+            )),
+        },
+        "objectlog" => LogSpec::ObjectLog {
+            root: PathBuf::from(env_or(
                 env,
                 "PQUEUE_OBJECT_LOG_ROOT",
                 "/var/lib/pqueue/object-log",
-            ));
-            // `file` (default) = the per-command file `ObjectLogBackend`; `segmented` = the group-commit
-            // substrate over an IN-MEMORY projection (Fix B): durable via the sealed log, fast apply.
-            match env_or(env, "PQUEUE_OBJECT_LOG_MODE", "file").as_str() {
-                "file" => Ok(Backend::ObjectLog(object_root)),
-                "segmented" => Ok(Backend::SegmentedObjectLogInMemory {
-                    object_root,
-                    config: segment_config(env)?,
-                }),
-                other => Err(unsupported_storage(
-                    &log,
-                    &projection,
-                    &format!("unknown PQUEUE_OBJECT_LOG_MODE={other:?}; expected file|segmented"),
-                )),
-            }
+            )),
+        },
+        #[cfg(feature = "postgres")]
+        "postgres" => {
+            // Resolve the DSN + optional Databricks credentials from the env names the Helm Lakebase
+            // profile renders (DSN secret `PQUEUE_POSTGRES_LOG_DATABASE_URL`; `PQUEUE_PG_URL` is the
+            // local/dev fallback). Fails closed if an sslmode=require DSN meets a non-tls build.
+            crate::resolve_postgres_log(env)
+                .map_err(|reason| unsupported_storage(&log, &projection, &reason))?
         }
-        ("objectlog", "sqlite") => {
-            let object_root = PathBuf::from(env_or(
-                env,
-                "PQUEUE_OBJECT_LOG_ROOT",
-                "/var/lib/pqueue/object-log",
+        #[cfg(not(feature = "postgres"))]
+        "postgres" => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "postgres adapter is wired through the blocking-safe PostgresNativeBackend, but this \
+                 binary was built without the `postgres` cargo feature; rebuild with `--features \
+                 postgres` (or `--features postgres,tls` for native-tls)",
             ));
-            let projection_path = PathBuf::from(env_or(
+        }
+        other => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                &format!(
+                    "unknown PQUEUE_LOG_BACKEND={other:?}; expected memory|sqlite|objectlog|postgres"
+                ),
+            ));
+        }
+    };
+
+    let projection_spec = match projection.as_str() {
+        "inmemory" => ProjectionSpec::InMemory,
+        "sqlite" => ProjectionSpec::Sqlite {
+            path: PathBuf::from(env_or(
                 env,
                 "PQUEUE_SQLITE_PROJECTION_PATH",
                 "/var/lib/pqueue/pqueue-projection.db",
+            )),
+        },
+        other => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                &format!("unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite"),
             ));
-            // `file` (default) preserves the per-command object-log path; `segmented` selects the
-            // group-commit substrate (one sealed segment object + one batched SQLite apply per batch).
-            match env_or(env, "PQUEUE_OBJECT_LOG_MODE", "file").as_str() {
-                "file" => Ok(Backend::ObjectLogSqlite {
-                    object_root,
-                    projection_path,
-                }),
-                "segmented" => Ok(Backend::SegmentedObjectLogSqlite {
-                    object_root,
-                    projection_path,
-                    config: segment_config(env)?,
-                }),
-                other => Err(unsupported_storage(
-                    &log,
-                    &projection,
-                    &format!("unknown PQUEUE_OBJECT_LOG_MODE={other:?}; expected file|segmented"),
-                )),
-            }
         }
+    };
+
+    // Only specific log×projection pairings are wired (preserve the prior behavior): memory/inmemory,
+    // sqlite/inmemory, objectlog/inmemory, objectlog/sqlite, and (with the feature) postgres/inmemory.
+    let wired = match (&log_spec, &projection_spec) {
+        (LogSpec::Memory, ProjectionSpec::InMemory) => true,
+        (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
+        (LogSpec::ObjectLog { .. }, ProjectionSpec::InMemory) => true,
+        (LogSpec::ObjectLog { .. }, ProjectionSpec::Sqlite { .. }) => true,
         #[cfg(feature = "postgres")]
-        ("postgres", "inmemory") => {
-            // Resolve the DSN + optional Databricks credentials from the env names the Helm Lakebase
-            // profile renders (the DSN secret is `PQUEUE_POSTGRES_LOG_DATABASE_URL`; `PQUEUE_PG_URL` is the
-            // local/dev fallback). Fails closed if an sslmode=require DSN meets a non-tls build.
-            crate::resolve_postgres_backend(env)
-                .map_err(|reason| unsupported_storage(&log, &projection, &reason))
-        }
-        #[cfg(not(feature = "postgres"))]
-        ("postgres", "inmemory") => Err(unsupported_storage(
+        (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
+        _ => false,
+    };
+    if !wired {
+        return Err(unsupported_storage(
             &log,
             &projection,
-            "postgres adapter is wired through the blocking-safe PostgresNativeBackend, but this binary \
-             was built without the `postgres` cargo feature; rebuild with `--features postgres` (or \
-             `--features postgres,tls` for native-tls)",
-        )),
-        (_, "sqlite" | "postgres") => Err(unsupported_storage(
-            &log,
-            &projection,
-            "the requested projection backend is not wired by pqueue-server yet",
-        )),
-        _ => Err(unsupported_storage(
-            &log,
-            &projection,
-            "supported wired combinations are memory/inmemory, sqlite/inmemory, and objectlog/inmemory",
-        )),
+            "this PQUEUE_LOG_BACKEND × PQUEUE_PROJECTION_BACKEND pairing is not wired by pqueue-server",
+        ));
     }
+
+    Ok(BackendSpec {
+        log: log_spec,
+        projection: projection_spec,
+        control_plane: ControlPlaneSpec::InProcess,
+    })
 }
 
 fn queue_definition(tenant: &str, queue: &str) -> Result<QueueDefinition, ConfigError> {
@@ -228,6 +239,7 @@ impl Config {
             listen: env_or(env, "PQUEUE_LISTEN_ADDR", "0.0.0.0:8080"),
             reclaim_interval: parse_duration_ms(env, "PQUEUE_RECLAIM_INTERVAL_MS", 1_000),
             queues: parse_bootstrap_queues(env)?,
+            segment_config: segment_config(env)?,
             recovery_max_tail: parse_u64(
                 env,
                 "PQUEUE_RECOVERY_MAX_TAIL_COMMANDS",
@@ -258,7 +270,11 @@ mod tests {
     #[test]
     fn defaults_when_env_is_empty() {
         let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
-        assert!(matches!(config.backend, Backend::ObjectLog(_)));
+        assert!(matches!(config.backend.log, LogSpec::ObjectLog { .. }));
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::InMemory
+        ));
         assert_eq!(config.node_id, 0);
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.reclaim_interval, Duration::from_millis(1_000));
@@ -284,7 +300,11 @@ mod tests {
             ("PQUEUE_BOOTSTRAP_QUEUES", "ta:qa,tb:qb"),
         ]))
         .expect("valid env");
-        assert!(matches!(config.backend, Backend::Memory));
+        assert!(matches!(config.backend.log, LogSpec::Memory));
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::InMemory
+        ));
         assert_eq!(config.node_id, 7);
         assert_eq!(config.listen, "127.0.0.1:6390");
         assert_eq!(config.worker_threads, Some(4));
@@ -302,49 +322,57 @@ mod tests {
             ("PQUEUE_SQLITE_LOG_PATH", "/data/log.db"),
         ]))
         .expect("valid env");
-        match config.backend {
-            Backend::Sqlite(path) => assert_eq!(path, PathBuf::from("/data/log.db")),
-            _ => panic!("expected Backend::Sqlite"),
+        match config.backend.log {
+            LogSpec::Sqlite { path } => assert_eq!(path, PathBuf::from("/data/log.db")),
+            _ => panic!("expected LogSpec::Sqlite"),
         }
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::InMemory
+        ));
     }
 
     #[test]
-    fn segmented_objectlog_sqlite_carries_segment_config_and_paths() {
+    fn objectlog_sqlite_projection_carries_paths_and_segment_config() {
+        // The object log's only production form is the segmented group-commit substrate; the retired
+        // `PQUEUE_OBJECT_LOG_MODE` knob is ignored, and the projection axis is the derived sqlite store.
         let config = Config::from_env(&map(&[
             ("PQUEUE_LOG_BACKEND", "objectlog"),
             ("PQUEUE_PROJECTION_BACKEND", "sqlite"),
-            ("PQUEUE_OBJECT_LOG_MODE", "segmented"),
             ("PQUEUE_OBJECT_LOG_ROOT", "/data/olog"),
             ("PQUEUE_SQLITE_PROJECTION_PATH", "/data/proj.db"),
             ("PQUEUE_SEGMENT_TARGET_BYTES", "131072"),
             ("PQUEUE_SEGMENT_MAX_LATENCY_MS", "5"),
         ]))
         .expect("valid env");
-        match config.backend {
-            Backend::SegmentedObjectLogSqlite {
-                object_root,
-                projection_path,
-                config: segment,
-            } => {
-                assert_eq!(object_root, PathBuf::from("/data/olog"));
-                assert_eq!(projection_path, PathBuf::from("/data/proj.db"));
-                assert_eq!(segment.target_bytes, 131_072);
-                assert_eq!(segment.max_latency_ms, 5);
+        assert_eq!(config.segment_config.target_bytes, 131_072);
+        assert_eq!(config.segment_config.max_latency_ms, 5);
+        match (config.backend.log, config.backend.projection) {
+            (LogSpec::ObjectLog { root }, ProjectionSpec::Sqlite { path }) => {
+                assert_eq!(root, PathBuf::from("/data/olog"));
+                assert_eq!(path, PathBuf::from("/data/proj.db"));
             }
-            _ => panic!("expected SegmentedObjectLogSqlite"),
+            _ => panic!("expected objectlog log × sqlite projection"),
         }
     }
 
     #[test]
-    fn unknown_object_log_mode_is_rejected() {
-        let result = Config::from_env(&map(&[
-            ("PQUEUE_LOG_BACKEND", "objectlog"),
-            ("PQUEUE_OBJECT_LOG_MODE", "bogus"),
-        ]));
+    fn unknown_log_backend_is_rejected() {
+        let result = Config::from_env(&map(&[("PQUEUE_LOG_BACKEND", "bogus")]));
         let Err(err) = result else {
-            panic!("unknown mode must fail");
+            panic!("unknown log backend must fail");
         };
-        assert!(err.0.contains("PQUEUE_OBJECT_LOG_MODE"), "{}", err.0);
+        assert!(err.0.contains("PQUEUE_LOG_BACKEND"), "{}", err.0);
+    }
+
+    #[test]
+    fn unwired_pairing_is_rejected() {
+        // sqlite log + sqlite projection is not a wired pairing (only objectlog pairs with sqlite proj).
+        let result = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "sqlite"),
+            ("PQUEUE_PROJECTION_BACKEND", "sqlite"),
+        ]));
+        assert!(result.is_err(), "sqlite/sqlite is not wired");
     }
 
     #[test]
@@ -372,15 +400,19 @@ mod tests {
             ("DATABRICKS_CLIENT_SECRET", "sp-secret"),
         ]))
         .expect("Lakebase env resolves without a live DB");
-        match config.backend {
-            Backend::PostgresNative { url, credentials } => {
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::InMemory
+        ));
+        match config.backend.log {
+            LogSpec::Postgres { url, credentials } => {
                 assert!(url.contains("sslmode=require"));
                 assert!(
                     credentials.is_some(),
                     "Databricks service-principal env must inject a credential provider"
                 );
             }
-            _ => panic!("postgres env must select Backend::PostgresNative"),
+            _ => panic!("postgres env must select LogSpec::Postgres"),
         }
     }
 }

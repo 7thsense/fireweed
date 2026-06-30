@@ -69,6 +69,16 @@ pub fn composed_sqlite_backend_in_memory() -> EngineResult<ComposedSqliteBackend
     ))
 }
 
+/// Assemble a composed sqlite backend over a DURABLE sqlite command log at `path` — the composed
+/// replacement for the monolithic `SqliteBackend::open(path)` (the composition root wires this).
+pub fn composed_sqlite_backend(path: &str) -> EngineResult<ComposedSqliteBackend> {
+    Ok(ComposedBackend::new(
+        SqliteLog::open(path)?,
+        InMemoryProjection::new(),
+        InProcessControlPlane::new(),
+    ))
+}
+
 /// The composed sqlite-LOG + sqlite-PROJECTION backend (ADR-012 P1b-ii, Part B): a durable sqlite command
 /// LOG ([`SqliteLog`]) paired with the DERIVED relational SQL projection ([`SqliteProjectionStore`]) instead
 /// of the in-memory projection. Atomic durability class (the log axis), so it runs the full

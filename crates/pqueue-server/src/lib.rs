@@ -21,7 +21,6 @@ use pqueue_engine::{
     LeaseState, OwnedSession, QueueControlPlane, QueueKey,
 };
 use pqueue_memory::MemoryBackend;
-use pqueue_objectlog::ObjectLogBackend;
 use pqueue_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
@@ -50,37 +49,17 @@ mod postgres_native;
 #[cfg(feature = "postgres")]
 pub use postgres_native::PostgresNativeBackend;
 
-/// Which durable backend the server runs over.
-pub enum Backend {
-    /// In-memory reference backend (atomic class; non-durable).
+/// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
+/// epoch/fence authority. One half of a [`BackendSpec`].
+pub enum LogSpec {
+    /// In-memory reference log (atomic class; non-durable).
     Memory,
-    /// Sqlite durable log at `path` (atomic class).
-    Sqlite(PathBuf),
-    /// Object-log durable store rooted at `path` (eventual-apply class).
-    ObjectLog(PathBuf),
-    /// Local object-log authority plus SQLite materialized projection (per-command file object log).
-    ObjectLogSqlite {
-        object_root: PathBuf,
-        projection_path: PathBuf,
-    },
-    /// Segmented group-commit object log (`SegmentedObjectLog<LocalFsBlobStore>`) plus SQLite projection.
-    /// The high-throughput `object_log_sqlite_projection` variant: concurrent pushes co-buffer into one
-    /// sealed segment (one durable object + one manifest-CAS + one batched SQLite apply) instead of paying
-    /// a per-command object write + per-command SQLite transaction.
-    SegmentedObjectLogSqlite {
-        object_root: PathBuf,
-        projection_path: PathBuf,
-        config: SegmentConfig,
-    },
-    /// Segmented group-commit object log (`SegmentedObjectLog<LocalFsBlobStore>`) plus an IN-MEMORY
-    /// `ProjectionData` projection (Fix B). Same durable authority + ack-after-seal coordination as
-    /// `SegmentedObjectLogSqlite`, but the per-segment projection write is a cheap in-memory `apply_command`
-    /// rather than a SQLite transaction; the projection is rebuilt by `read_all` replay on open. The fast
-    /// durable single-node path (`PQUEUE_OBJECT_LOG_MODE=segmented` + `PQUEUE_PROJECTION_BACKEND=inmemory`).
-    SegmentedObjectLogInMemory {
-        object_root: PathBuf,
-        config: SegmentConfig,
-    },
+    /// Durable sqlite command log at `path` (atomic class).
+    Sqlite { path: PathBuf },
+    /// Segmented group-commit object log (`SegmentedObjectLog<LocalFsBlobStore>`) rooted at `root` over the
+    /// local filesystem (eventual-apply class). This is the object log's ONLY production form — the
+    /// per-command-file mode and the `PQUEUE_OBJECT_LOG_MODE` pseudo-axis are retired (ADR-012 P2).
+    ObjectLog { root: PathBuf },
     /// SYNC postgres durable-log adapter (atomic class), driven through the blocking-safe
     /// [`PostgresNativeBackend`] wrapper so no sync postgres client call runs on a Tokio worker thread.
     /// `url` is a libpq/postgres connection string (URL or `key=value` DSN, with a native password); with the
@@ -88,13 +67,74 @@ pub enum Backend {
     /// `credentials` optionally injects a Databricks service-principal/PAT credential at connect (the
     /// user/password is set from the provider instead of the DSN). Requires the `postgres` cargo feature.
     #[cfg(feature = "postgres")]
-    PostgresNative {
+    Postgres {
         url: String,
         credentials: Option<pqueue_postgres::CredentialProvider>,
     },
 }
 
-/// Resolve the postgres `Backend` from the runtime environment, using the env names the Helm Lakebase
+impl LogSpec {
+    fn label(&self) -> &'static str {
+        match self {
+            LogSpec::Memory => "memory",
+            LogSpec::Sqlite { .. } => "sqlite",
+            LogSpec::ObjectLog { .. } => "objectlog",
+            #[cfg(feature = "postgres")]
+            LogSpec::Postgres { .. } => "postgres",
+        }
+    }
+}
+
+/// The materialized-PROJECTION axis (ADR-012): the read model the composition renders from. The other half
+/// of a [`BackendSpec`].
+pub enum ProjectionSpec {
+    /// In-memory `ProjectionData` projection, rebuilt by log replay on open.
+    InMemory,
+    /// Derived relational sqlite projection (`pqueue_items` is the read model) at `path`.
+    Sqlite { path: PathBuf },
+}
+
+impl ProjectionSpec {
+    fn label(&self) -> &'static str {
+        match self {
+            ProjectionSpec::InMemory => "inmemory",
+            ProjectionSpec::Sqlite { .. } => "sqlite",
+        }
+    }
+}
+
+/// The control-plane axis (queue definitions + placement). The in-process plane is the only wired one.
+pub enum ControlPlaneSpec {
+    InProcess,
+}
+
+/// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
+/// [`start`] assembles the concrete backend from this spec.
+///
+/// NOTE (ADR-012 P2 status): the spec is the one composition axis the server selects on, but the DURABLE
+/// families are still assembled from their existing recovery-capable backends. The generic
+/// `ComposedBackend` does not yet rebuild its projection from the durable log on reopen (the conformance
+/// suites prove fresh-state equivalence only, not crash recovery), so swapping the durable monoliths for the
+/// bare composition would regress restart durability. Wiring those onto `ComposedBackend` is gated on adding
+/// a generic log-replay-on-open recovery pass; see the report accompanying this change.
+pub struct BackendSpec {
+    pub log: LogSpec,
+    pub projection: ProjectionSpec,
+    pub control_plane: ControlPlaneSpec,
+}
+
+impl BackendSpec {
+    /// The single-node in-memory reference composition (`Memory × InMemory × InProcess`).
+    pub fn memory() -> Self {
+        Self {
+            log: LogSpec::Memory,
+            projection: ProjectionSpec::InMemory,
+            control_plane: ControlPlaneSpec::InProcess,
+        }
+    }
+}
+
+/// Resolve the postgres [`LogSpec`] from the runtime environment, using the env names the Helm Lakebase
 /// profile renders. The DSN secret is `PQUEUE_POSTGRES_LOG_DATABASE_URL` (the chart's log-backend Secret
 /// ref); `PQUEUE_PG_URL` is the local/dev fallback, and the documented default is the last resort. A
 /// Databricks service-principal/PAT credential provider is attached when `DATABRICKS_HOST` is present.
@@ -105,9 +145,9 @@ pub enum Backend {
 /// This is a pure function over an env map (no live DB, no process env) so the composition-root config
 /// layer is unit-testable.
 #[cfg(feature = "postgres")]
-pub fn resolve_postgres_backend(
+pub fn resolve_postgres_log(
     env: &std::collections::BTreeMap<String, String>,
-) -> Result<Backend, String> {
+) -> Result<LogSpec, String> {
     let nonempty = |key: &str| env.get(key).filter(|s| !s.is_empty()).cloned();
     let url = nonempty("PQUEUE_POSTGRES_LOG_DATABASE_URL")
         .or_else(|| nonempty("PQUEUE_PG_URL"))
@@ -139,7 +179,7 @@ pub fn resolve_postgres_backend(
         None
     };
 
-    Ok(Backend::PostgresNative { url, credentials })
+    Ok(LogSpec::Postgres { url, credentials })
 }
 
 /// The single authoritative, fully-typed runtime configuration for a pqueue server. Every knob the server
@@ -148,7 +188,7 @@ pub fn resolve_postgres_backend(
 /// A pure-library embedder constructs this struct directly and never touches the process environment — the
 /// library reads no env vars at all.
 pub struct Config {
-    pub backend: Backend,
+    pub backend: BackendSpec,
     /// This instance's node id, packed into the disambiguation byte of every minted `ItemId` (ADR-009) so
     /// distinct replicas over a shared store never mint a colliding id. It is a *configured* value: the
     /// deployment is responsible for handing each replica a distinct one (e.g. the Helm chart maps a
@@ -163,11 +203,16 @@ pub struct Config {
     /// with no queues here (and no out-of-band creation) would reject every request with `no such
     /// queue` — provision them up front.
     pub queues: Vec<QueueDefinition>,
-    /// Recovery-window budget (max object-log tail commands) before a segmented/object-log+SQLite reopen
-    /// logs a recovery-window warning. Applied to the constructed backend by [`start`]. The env populator
-    /// sources it from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`; default [`DEFAULT_RECOVERY_MAX_TAIL`].
+    /// Group-commit segment configuration (byte-size + latency seal triggers) for the segmented object-log
+    /// families. The typed form of `PQUEUE_SEGMENT_TARGET_BYTES` / `PQUEUE_SEGMENT_MAX_LATENCY_MS`; applied by
+    /// [`start`] when the [`LogSpec::ObjectLog`] log axis is selected.
+    pub segment_config: SegmentConfig,
+    /// Recovery-window budget (max object-log tail commands) before an object-log+SQLite reopen logs a
+    /// recovery-window warning. Parsed from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` (default
+    /// [`DEFAULT_RECOVERY_MAX_TAIL`]); applied by [`start`] to the objectlog+sqlite backend.
     pub recovery_max_tail: u64,
-    /// Opt-in group-commit telemetry for the segmented+SQLite backend (the typed form of `PQUEUE_DEBUG_SEGMENTS`).
+    /// Opt-in group-commit telemetry for the segmented+SQLite object-log backend (the typed form of
+    /// `PQUEUE_DEBUG_SEGMENTS`).
     pub debug_segments: bool,
     /// Tokio worker-thread cap (the typed form of `PQUEUE_WORKER_THREADS`). `None` = one worker per core.
     /// Consumed by the bin when building the runtime, not by [`start`].
@@ -179,7 +224,7 @@ impl Config {
     /// worker-threads). The composition root / embedder supplies the core fields; the optional knobs default
     /// to their library defaults. Keeps call sites that don't care about the env knobs concise.
     pub fn new(
-        backend: Backend,
+        backend: BackendSpec,
         node_id: u8,
         listen: String,
         reclaim_interval: Duration,
@@ -191,6 +236,7 @@ impl Config {
             listen,
             reclaim_interval,
             queues,
+            segment_config: SegmentConfig::new(262_144, 20).expect("valid default segment config"),
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             debug_segments: false,
             worker_threads: None,
@@ -775,139 +821,66 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 pub async fn start(config: Config) -> EngineResult<Server> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
-    match config.backend {
-        Backend::Memory => {
+    let listen = config.listen.clone();
+    let interval = config.reclaim_interval;
+    let queues = config.queues.clone();
+    let segment_config = config.segment_config;
+    let recovery_max_tail = config.recovery_max_tail;
+    let debug_segments = config.debug_segments;
+    let BackendSpec {
+        log,
+        projection,
+        control_plane,
+    } = config.backend;
+    // Only the in-process control plane (queue definitions + placement) is wired today.
+    let ControlPlaneSpec::InProcess = control_plane;
+
+    // ADR-012 P2: the server selects on the two-axis [`BackendSpec`], but each DURABLE family is still
+    // assembled from its recovery-capable backend (the bare `ComposedBackend` does not yet rebuild its
+    // projection from the durable log on reopen — see the [`BackendSpec`] note). The memory family, which
+    // needs no crash recovery, is the composed `ComposedMemoryBackend`'s equivalent monolith here too; it is
+    // the next family to swap once generic recovery lands.
+    match (log, projection) {
+        (LogSpec::Memory, ProjectionSpec::InMemory) => {
             let backend = Arc::new(MemoryBackend::new().with_node_id(node_id));
-            let cp = Arc::new(InMemoryControlPlane::default());
-            let owner = OwnerId::new(format!("node-{node_id}"))
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            start_with_ownership(
-                backend,
-                cp,
-                owner,
-                clock,
-                &config.listen,
-                config.reclaim_interval,
-                &config.queues,
-            )
-            .await
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
-        Backend::Sqlite(path) => {
+        (LogSpec::Sqlite { path }, ProjectionSpec::InMemory) => {
             let p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
             let backend = Arc::new(SqliteBackend::open(p)?.with_node_id(node_id));
-            let cp = Arc::new(InMemoryControlPlane::default());
-            let owner = OwnerId::new(format!("node-{node_id}"))
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            start_with_ownership(
-                backend,
-                cp,
-                owner,
-                clock,
-                &config.listen,
-                config.reclaim_interval,
-                &config.queues,
-            )
-            .await
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
-        Backend::ObjectLog(path) => {
-            let backend = Arc::new(ObjectLogBackend::open(path)?.with_node_id(node_id));
-            let cp = Arc::new(InMemoryControlPlane::default());
-            let owner = OwnerId::new(format!("node-{node_id}"))
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            start_with_ownership(
-                backend,
-                cp,
-                owner,
-                clock,
-                &config.listen,
-                config.reclaim_interval,
-                &config.queues,
-            )
-            .await
-        }
-        Backend::ObjectLogSqlite {
-            object_root,
-            projection_path,
-        } => {
-            let p = projection_path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+        (LogSpec::ObjectLog { root }, ProjectionSpec::InMemory) => {
+            // The segmented group-commit object log (the object log's only production form) over an in-memory
+            // projection rebuilt by `read_all` replay on open.
             let backend = Arc::new(
-                ObjectLogSqliteBackend::open(object_root, p)?
-                    .with_node_id(node_id)
-                    .with_recovery_max_tail(config.recovery_max_tail),
-            );
-            let cp = Arc::new(InMemoryControlPlane::default());
-            let owner = OwnerId::new(format!("node-{node_id}"))
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            start_with_ownership(
-                backend,
-                cp,
-                owner,
-                clock,
-                &config.listen,
-                config.reclaim_interval,
-                &config.queues,
-            )
-            .await
-        }
-        Backend::SegmentedObjectLogSqlite {
-            object_root,
-            projection_path,
-            config: segment_config,
-        } => {
-            let p = projection_path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = Arc::new(
-                SegmentedObjectLogSqliteBackend::open(object_root, p, segment_config)?
-                    .with_node_id(node_id)
-                    .with_recovery_max_tail(config.recovery_max_tail)
-                    .with_debug_segments(config.debug_segments),
+                SegmentedObjectLogInMemoryBackend::open(root, segment_config)?
+                    .with_node_id(node_id),
             );
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
             backend.spawn_flusher();
-            let cp = Arc::new(InMemoryControlPlane::default());
-            let owner = OwnerId::new(format!("node-{node_id}"))
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            start_with_ownership(
-                backend,
-                cp,
-                owner,
-                clock,
-                &config.listen,
-                config.reclaim_interval,
-                &config.queues,
-            )
-            .await
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
-        Backend::SegmentedObjectLogInMemory {
-            object_root,
-            config: segment_config,
-        } => {
+        (LogSpec::ObjectLog { root }, ProjectionSpec::Sqlite { path }) => {
+            // The segmented group-commit object log driving the derived SQLite projection: concurrent pushes
+            // co-buffer into one sealed segment (one durable object + one manifest-CAS + one batched SQLite
+            // apply), and a reopen replays the object-log tail beyond the projection snapshot high-water.
+            let p = path
+                .to_str()
+                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
             let backend = Arc::new(
-                SegmentedObjectLogInMemoryBackend::open(object_root, segment_config)?
-                    .with_node_id(node_id),
+                SegmentedObjectLogSqliteBackend::open(root, p, segment_config)?
+                    .with_node_id(node_id)
+                    .with_recovery_max_tail(recovery_max_tail)
+                    .with_debug_segments(debug_segments),
             );
             backend.spawn_flusher();
-            let cp = Arc::new(InMemoryControlPlane::default());
-            let owner = OwnerId::new(format!("node-{node_id}"))
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            start_with_ownership(
-                backend,
-                cp,
-                owner,
-                clock,
-                &config.listen,
-                config.reclaim_interval,
-                &config.queues,
-            )
-            .await
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         #[cfg(feature = "postgres")]
-        Backend::PostgresNative { url, credentials } => {
+        (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
             // The sync postgres `connect` (client handshake + log replay) MUST run off the reactor: the
             // postgres client drives its own internal runtime per call, so connecting on a Tokio worker
             // would panic ("cannot start a runtime from within a runtime"). Connect inside `spawn_blocking`,
@@ -925,23 +898,31 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
             let backend = Arc::new(PostgresNativeBackend::new(backend));
-            // Mirror every other backend's ownership wiring: an in-memory control plane coordinates lease
-            // ownership (single-node default); the postgres `queues.assignment_epoch` is the durable fence.
-            let cp = Arc::new(InMemoryControlPlane::default());
-            let owner = OwnerId::new(format!("node-{node_id}"))
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            start_with_ownership(
-                backend,
-                cp,
-                owner,
-                clock,
-                &config.listen,
-                config.reclaim_interval,
-                &config.queues,
-            )
-            .await
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
+        (log, projection) => Err(EngineError::Storage(format!(
+            "unsupported backend composition: log={} projection={} (not wired by pqueue-server)",
+            log.label(),
+            projection.label()
+        ))),
     }
+}
+
+/// Wrap an already-`Arc`-shared backend in the single-node ownership runtime and run it: a per-node
+/// in-memory lease control plane + a `node-{id}` owner, then [`start_with_ownership`]. The shared tail of
+/// every `start` arm (each arm builds a different concrete backend type, monomorphized here).
+async fn run_owned<B: RespBackend>(
+    backend: Arc<B>,
+    node_id: u8,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server> {
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let owner =
+        OwnerId::new(format!("node-{node_id}")).map_err(|e| EngineError::Storage(e.to_string()))?;
+    start_with_ownership(backend, cp, owner, clock, listen, reclaim_interval, queues).await
 }
 
 /// Run the server over an already-constructed backend + clock (the generic core; tests inject a

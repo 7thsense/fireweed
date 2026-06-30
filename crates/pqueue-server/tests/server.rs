@@ -15,7 +15,20 @@ use pqueue_engine::{
 };
 use pqueue_memory::{ManualClock, MemoryBackend};
 use pqueue_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
-use pqueue_server::{Backend, Config, OwnershipRuntime, start, start_with};
+use pqueue_server::{
+    BackendSpec, Config, ControlPlaneSpec, LogSpec, OwnershipRuntime, ProjectionSpec, start,
+    start_with,
+};
+
+/// The composed objectlog-LOG + sqlite-PROJECTION spec (replaces the retired `Backend::ObjectLogSqlite` /
+/// `Backend::SegmentedObjectLogSqlite` variants — both are now this one composition).
+fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
+    BackendSpec {
+        log: LogSpec::ObjectLog { root },
+        projection: ProjectionSpec::Sqlite { path: projection },
+        control_plane: ControlPlaneSpec::InProcess,
+    }
+}
 use redis::streams::StreamReadReply;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -561,7 +574,7 @@ async fn start_provisions_queues_and_serves_end_to_end() {
     // `start()` constructs the backend internally, so the ONLY way it can serve a request is if it
     // provisions the config's queues. Boot it, then drive it with a stock client (no out-of-band setup).
     let server = start(Config::new(
-        Backend::Memory,
+        BackendSpec::memory(),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -603,10 +616,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
     let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
     let first_id = {
         let server = start(Config::new(
-            Backend::ObjectLogSqlite {
-                object_root: object_root.clone(),
-                projection_path: projection_path.clone(),
-            },
+            objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -649,10 +659,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
 
     let _ = std::fs::remove_file(&projection_path);
     let server = start(Config::new(
-        Backend::ObjectLogSqlite {
-            object_root: object_root.clone(),
-            projection_path: projection_path.clone(),
-        },
+        objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -695,17 +702,12 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen() {
-    use pqueue_server::SegmentConfig;
-    // Small latency cap so the group-commit flusher seals a quiet single-push segment promptly.
-    let config = SegmentConfig::new(262_144, 5).unwrap();
+    // The composed objectlog-LOG + sqlite-PROJECTION backend (the segmented object log is the composed
+    // `ObjectLog` axis); a push acks only after its segment seals (durable) AND applies to the projection.
     let (object_root, projection_path) = tmp_runtime_paths("segolsqlite");
     let first_id = {
         let server = start(Config::new(
-            Backend::SegmentedObjectLogSqlite {
-                object_root: object_root.clone(),
-                projection_path: projection_path.clone(),
-                config,
-            },
+            objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
             0,
             "127.0.0.1:0".to_string(),
             Duration::from_secs(60),
@@ -751,11 +753,7 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
     // committed segments (via `read_all`) so the acked item is NOT redelivered and ids keep advancing.
     let _ = std::fs::remove_file(&projection_path);
     let server = start(Config::new(
-        Backend::SegmentedObjectLogSqlite {
-            object_root: object_root.clone(),
-            projection_path: projection_path.clone(),
-            config,
-        },
+        objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
