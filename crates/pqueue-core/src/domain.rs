@@ -2,6 +2,11 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+pub use axon_esf::{
+    CompoundIndexDef, CompoundIndexField, EntitySchemaDocument, IndexDeclaration, IndexDef,
+    IndexType,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentifierError {
     pub message: String,
@@ -560,6 +565,20 @@ pub struct IndexSpec {
     pub unique: bool,
 }
 
+/// A named typed secondary index for pqueue query ergonomics (ADR-011).
+///
+/// Wraps an `axon_esf::IndexDeclaration` (single-field or compound) with a pqueue-specific `name`
+/// so that callers can address indexes by name rather than by field path. The declaration drives
+/// typed key encoding via `axon_esf::encode_index_value` / `encode_compound_index_key` — keys are
+/// byte-identical to those produced by axon and sort correctly for all ESF `IndexType` variants.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueueIndex {
+    /// Unique index name within the queue (the query handle).
+    pub name: String,
+    /// The ESF typed index declaration — single-field or compound.
+    pub declaration: IndexDeclaration,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateQueue {
     pub tenant_id: TenantId,
@@ -585,6 +604,11 @@ pub struct CreateQueue {
     pub max_eligible_group_size: Option<u64>,
     /// Per-queue secondary indexes over configured item fields (ADR-010). Empty (default) = no indexes.
     pub secondary_indexes: Vec<IndexSpec>,
+    /// Optional ESF entity schema document (ADR-011). Absent = no payload validation.
+    pub entity_schema: Option<EntitySchemaDocument>,
+    /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a pqueue name.
+    /// Empty = no typed indexes. Must not overlap `secondary_indexes` by name.
+    pub typed_indexes: Vec<QueueIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -615,6 +639,14 @@ pub struct QueueDefinition {
     /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
     #[serde(default)]
     pub secondary_indexes: Vec<IndexSpec>,
+    /// Optional ESF entity schema document (ADR-011). Absent = no payload validation.
+    /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
+    #[serde(default)]
+    pub entity_schema: Option<EntitySchemaDocument>,
+    /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a pqueue name.
+    /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
+    #[serde(default)]
+    pub typed_indexes: Vec<QueueIndex>,
 }
 
 fn default_terminal_retention_ms() -> u64 {
@@ -807,6 +839,51 @@ impl CreateQueue {
             }
         }
 
+        // Typed-index declarations (ADR-011): each QueueIndex needs a non-empty name unique within
+        // the queue. Names must not collide with legacy secondary_indexes (mixing both forms for the
+        // same logical index is a QueueDefinitionConflict). A per-queue cap of 32 typed indexes is
+        // enforced; compound indexes must have at least one field.
+        const MAX_TYPED_INDEXES: usize = 32;
+        if self.typed_indexes.len() > MAX_TYPED_INDEXES {
+            return Err(CreateQueueError::invalid_request(format!(
+                "typed_indexes: at most {MAX_TYPED_INDEXES} typed indexes are allowed per queue"
+            )));
+        }
+        let mut seen_typed_names = std::collections::BTreeSet::new();
+        for idx in &self.typed_indexes {
+            if idx.name.trim().is_empty() {
+                return Err(CreateQueueError::invalid_request(
+                    "typed index name must not be empty",
+                ));
+            }
+            if !seen_typed_names.insert(idx.name.as_str()) {
+                return Err(CreateQueueError::invalid_request(format!(
+                    "typed index names must be unique within the queue: '{}' appears more than once",
+                    idx.name
+                )));
+            }
+            match &idx.declaration {
+                IndexDeclaration::Compound(c) if c.fields.is_empty() => {
+                    return Err(CreateQueueError::invalid_request(format!(
+                        "typed index '{}': compound index must declare at least one field",
+                        idx.name
+                    )));
+                }
+                _ => {}
+            }
+        }
+        // QueueDefinitionConflict: typed_indexes and secondary_indexes must not share a name
+        // (the same logical index cannot be declared in both forms simultaneously).
+        for idx in &self.typed_indexes {
+            if seen_index_names.contains(idx.name.as_str()) {
+                return Err(CreateQueueError::conflict(format!(
+                    "index '{}' appears in both secondary_indexes (ADR-010) and typed_indexes \
+                     (ADR-011); declare it in one form only",
+                    idx.name
+                )));
+            }
+        }
+
         let mut eligibility_policy = self.eligibility_policy;
         eligibility_policy = match eligibility_policy.gate_keys {
             GateKeyPolicy::None => {
@@ -870,6 +947,8 @@ impl CreateQueue {
             max_claim_batch_size: self.max_claim_batch_size,
             max_eligible_group_size: self.max_eligible_group_size,
             secondary_indexes: self.secondary_indexes,
+            entity_schema: self.entity_schema,
+            typed_indexes: self.typed_indexes,
         })
     }
 }
@@ -1324,6 +1403,8 @@ mod coverage_tests {
             max_claim_batch_size: 50,
             max_eligible_group_size: Some(25),
             secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
         }
     }
 

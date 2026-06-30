@@ -1,8 +1,9 @@
 use pqueue_core::{
-    ApiError, ApiErrorCode, ClientItemKey, CohortOnIncomplete, CohortPolicy, CreateQueue,
-    CreateQueueErrorKind, GateKeyPolicy, ItemId, Metadata, MetadataValue, OrderingMode,
+    ApiError, ApiErrorCode, ClientItemKey, CohortOnIncomplete, CohortPolicy, CompoundIndexDef,
+    CompoundIndexField, CreateQueue, CreateQueueErrorKind, EntitySchemaDocument, GateKeyPolicy,
+    IndexDeclaration, IndexDef, IndexType, ItemId, Metadata, MetadataValue, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueCreationPolicy,
-    QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    QueueId, QueueIndex, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 
 type CreateQueueMutation = fn(&mut CreateQueue);
@@ -28,6 +29,8 @@ fn valid_create_queue() -> CreateQueue {
         max_claim_batch_size: 50,
         max_eligible_group_size: Some(25),
         secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
     }
 }
 
@@ -404,4 +407,190 @@ fn core_domain_tests_exercises_result_identifier_variants() {
     assert_eq!(ItemId::from_u64(item_id.as_u64()), item_id);
     // The epoch field is masked to its low 24 bits (it wraps, per the design).
     assert_eq!(ItemId::mint((1 << 24) + 5, 0, 0).epoch(), 5);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-011: QueueIndex, EntitySchemaDocument, typed index validation
+// ---------------------------------------------------------------------------
+
+fn make_single_queue_index(name: &str, field: &str, index_type: IndexType) -> QueueIndex {
+    QueueIndex {
+        name: name.to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: field.to_string(),
+            index_type,
+            unique: false,
+        }),
+    }
+}
+
+fn make_compound_queue_index(name: &str, fields: &[(&str, IndexType)]) -> QueueIndex {
+    QueueIndex {
+        name: name.to_string(),
+        declaration: IndexDeclaration::Compound(CompoundIndexDef {
+            fields: fields
+                .iter()
+                .map(|(f, t)| CompoundIndexField {
+                    field: f.to_string(),
+                    index_type: t.clone(),
+                })
+                .collect(),
+            unique: false,
+        }),
+    }
+}
+
+#[test]
+fn core_domain_tests_queue_index_serde_round_trip() {
+    let single = make_single_queue_index("by_status", "status", IndexType::String);
+    let json = serde_json::to_string(&single).unwrap();
+    let back: QueueIndex = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.name, "by_status");
+    assert!(matches!(back.declaration, IndexDeclaration::Single(_)));
+
+    let compound = make_compound_queue_index(
+        "by_region_zone",
+        &[("region", IndexType::String), ("zone", IndexType::String)],
+    );
+    let json = serde_json::to_string(&compound).unwrap();
+    let back: QueueIndex = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.name, "by_region_zone");
+    assert!(matches!(back.declaration, IndexDeclaration::Compound(_)));
+}
+
+#[test]
+fn core_domain_tests_typed_indexes_carried_through_validate() {
+    let mut request = valid_create_queue();
+    request.typed_indexes = vec![
+        make_single_queue_index("by_status", "status", IndexType::String),
+        make_compound_queue_index(
+            "by_priority_region",
+            &[("priority", IndexType::Integer), ("region", IndexType::String)],
+        ),
+    ];
+    let definition = request.validate(&policy()).unwrap();
+    assert_eq!(definition.typed_indexes.len(), 2);
+    assert_eq!(definition.typed_indexes[0].name, "by_status");
+    assert_eq!(definition.typed_indexes[1].name, "by_priority_region");
+}
+
+#[test]
+fn core_domain_tests_entity_schema_carried_through_validate() {
+    let schema_doc: EntitySchemaDocument = serde_json::from_value(serde_json::json!({
+        "entity_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"}
+            }
+        }
+    }))
+    .unwrap();
+
+    let mut request = valid_create_queue();
+    request.entity_schema = Some(schema_doc.clone());
+    let definition = request.validate(&policy()).unwrap();
+    assert!(definition.entity_schema.is_some());
+}
+
+#[test]
+fn core_domain_tests_queue_definition_serde_defaults_entity_schema_and_typed_indexes() {
+    let mut request = valid_create_queue();
+    request.typed_indexes = vec![make_single_queue_index("by_id", "job_id", IndexType::String)];
+    let definition = request.validate(&policy()).unwrap();
+
+    let mut json: serde_json::Value = serde_json::to_value(&definition).unwrap();
+    json.as_object_mut().unwrap().remove("entity_schema");
+    json.as_object_mut().unwrap().remove("typed_indexes");
+    let restored: pqueue_core::QueueDefinition = serde_json::from_value(json).unwrap();
+    assert!(restored.entity_schema.is_none());
+    assert!(restored.typed_indexes.is_empty());
+}
+
+#[test]
+fn core_domain_tests_rejects_typed_index_empty_name() {
+    let mut request = valid_create_queue();
+    request.typed_indexes = vec![QueueIndex {
+        name: "  ".to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: "status".to_string(),
+            index_type: IndexType::String,
+            unique: false,
+        }),
+    }];
+    let err = request.validate(&policy()).unwrap_err();
+    assert_eq!(err.kind, CreateQueueErrorKind::InvalidRequest);
+    assert!(
+        err.message.contains("typed index name must not be empty"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn core_domain_tests_rejects_typed_index_duplicate_name() {
+    let mut request = valid_create_queue();
+    request.typed_indexes = vec![
+        make_single_queue_index("by_status", "status", IndexType::String),
+        make_single_queue_index("by_status", "other_field", IndexType::String),
+    ];
+    let err = request.validate(&policy()).unwrap_err();
+    assert_eq!(err.kind, CreateQueueErrorKind::InvalidRequest);
+    assert!(
+        err.message.contains("unique within the queue"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn core_domain_tests_rejects_typed_index_cap_exceeded() {
+    let mut request = valid_create_queue();
+    request.typed_indexes = (0..33)
+        .map(|i| make_single_queue_index(&format!("idx_{i}"), &format!("field_{i}"), IndexType::String))
+        .collect();
+    let err = request.validate(&policy()).unwrap_err();
+    assert_eq!(err.kind, CreateQueueErrorKind::InvalidRequest);
+    assert!(
+        err.message.contains("at most 32"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn core_domain_tests_rejects_empty_compound_typed_index() {
+    let mut request = valid_create_queue();
+    request.typed_indexes = vec![QueueIndex {
+        name: "bad_compound".to_string(),
+        declaration: IndexDeclaration::Compound(CompoundIndexDef {
+            fields: vec![],
+            unique: false,
+        }),
+    }];
+    let err = request.validate(&policy()).unwrap_err();
+    assert_eq!(err.kind, CreateQueueErrorKind::InvalidRequest);
+    assert!(
+        err.message.contains("at least one field"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn core_domain_tests_conflict_typed_and_secondary_same_name() {
+    let mut request = valid_create_queue();
+    request.secondary_indexes = vec![pqueue_core::IndexSpec {
+        name: "by_region".to_string(),
+        fields: vec!["region".to_string()],
+        unique: false,
+    }];
+    request.typed_indexes =
+        vec![make_single_queue_index("by_region", "region", IndexType::String)];
+    let err = request.validate(&policy()).unwrap_err();
+    assert_eq!(err.kind, CreateQueueErrorKind::QueueDefinitionConflict);
+    assert!(
+        err.message.contains("by_region"),
+        "unexpected error: {}",
+        err.message
+    );
 }
