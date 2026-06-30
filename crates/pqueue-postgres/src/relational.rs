@@ -53,9 +53,9 @@ use bytes::Bytes;
 use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
 use pqueue_core::{
-    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityModel,
-    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, is_retry_exhausted,
-    priority_sort,
+    ClientItemKey, CohortId, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken,
+    Metadata, PriorityModel, PriorityValue, QueueDefinition, QueueId, QueueIndex, RequestId,
+    TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
     ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit,
@@ -192,6 +192,21 @@ CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
 );
 CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
     ON pqueue_request_idempotency (expires_at);
+-- ADR-011 (pqueue-f4ffd679): typed secondary index rows. PK is (tenant, queue, index_name, item_id)
+-- because each item has at most one canonical key per named index. Uniqueness is enforced in application
+-- logic before INSERT (SQL cannot express a per-name unique constraint on a single row). Rows are inserted
+-- on Push/ReplacePending/UpdateFields and deleted only on PurgeItems — terminal items keep their index
+-- rows so they are still findable (parity with in-memory projection).
+CREATE TABLE IF NOT EXISTS pqueue_item_index (
+    tenant_id TEXT NOT NULL,
+    queue_id TEXT NOT NULL,
+    index_name TEXT NOT NULL,
+    index_key BYTEA NOT NULL,
+    item_id TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, index_name, item_id)
+);
+CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
+    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key);
 "#;
 
 const COHORT_EXPIRY_SWEEP_LIMIT: i64 = 128;
@@ -431,6 +446,217 @@ fn lease_hash(token: &LeaseToken) -> Vec<u8> {
 fn parse_priority(raw: Option<String>) -> EngineResult<Option<PriorityValue>> {
     raw.map(|s| serde_json::from_str(&s).map_err(|e| EngineError::Storage(e.to_string())))
         .transpose()
+}
+
+// ---------------------------------------------------------------------------
+// ADR-011 typed secondary index helpers (port of the sqlite relational helpers)
+// ---------------------------------------------------------------------------
+
+/// Decode a caller-supplied raw lookup byte slice into a `serde_json::Value` for re-encoding via
+/// `IndexDef::index_key` / `CompoundIndexDef::index_key`. Mirrors `decode_typed_lookup_value_rel`
+/// in `pqueue_sqlite::relational` — the two must stay identical so lookup keys byte-match stored keys.
+fn decode_typed_lookup_value_rel(
+    index_type: &IndexType,
+    bytes: &[u8],
+) -> EngineResult<serde_json::Value> {
+    match index_type {
+        IndexType::String => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            Ok(serde_json::Value::String(s.to_owned()))
+        }
+        IndexType::Datetime => {
+            if let Ok(value @ serde_json::Value::Number(_)) =
+                serde_json::from_slice::<serde_json::Value>(bytes)
+            {
+                return Ok(value);
+            }
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            Ok(serde_json::Value::String(s.to_owned()))
+        }
+        IndexType::Integer | IndexType::Float => serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number")),
+        IndexType::Boolean => serde_json::from_slice::<serde_json::Value>(bytes)
+            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON boolean")),
+    }
+}
+
+/// Compute the canonical `index_key` bytes for a lookup against a named index.
+fn typed_lookup_canonical_key(
+    qi: &QueueIndex,
+    key_values: &[Vec<u8>],
+) -> EngineResult<Vec<u8>> {
+    match &qi.declaration {
+        IndexDeclaration::Single(def) => {
+            let val = decode_typed_lookup_value_rel(&def.index_type, &key_values[0])?;
+            let mut record = serde_json::Map::new();
+            record.insert(def.field.clone(), val);
+            def.index_key(&serde_json::Value::Object(record))
+                .map_err(|e| EngineError::Storage(e.to_string()))?
+                .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
+        }
+        IndexDeclaration::Compound(def) => {
+            let mut record = serde_json::Map::new();
+            for (field, bytes) in def.fields.iter().zip(key_values.iter()) {
+                let val = decode_typed_lookup_value_rel(&field.index_type, bytes)?;
+                record.insert(field.field.clone(), val);
+            }
+            def.index_key(&serde_json::Value::Object(record))
+                .map_err(|e| EngineError::Storage(e.to_string()))?
+                .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
+        }
+    }
+}
+
+/// Compute `(index_name, canonical_key_bytes)` pairs for an item's `entity_document`.
+/// Returns empty when `typed_indexes` is empty or `entity` is `None` (schema-less queues).
+fn typed_index_keys_for_entity(
+    typed_indexes: &[QueueIndex],
+    entity: Option<&serde_json::Value>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    let Some(entity) = entity else {
+        return Ok(vec![]);
+    };
+    let mut out = Vec::with_capacity(typed_indexes.len());
+    for qi in typed_indexes {
+        let key = match &qi.declaration {
+            IndexDeclaration::Single(def) => def.index_key(entity),
+            IndexDeclaration::Compound(def) => def.index_key(entity),
+        };
+        if let Some(k) = key.map_err(|e| EngineError::Storage(e.to_string()))? {
+            out.push((qi.name.clone(), k));
+        }
+    }
+    Ok(out)
+}
+
+fn index_is_unique(qi: &QueueIndex) -> bool {
+    match &qi.declaration {
+        IndexDeclaration::Single(def) => def.unique,
+        IndexDeclaration::Compound(def) => def.unique,
+    }
+}
+
+/// Check unique-index constraints for `keys` against existing DB rows. Returns `Conflict` if any
+/// unique index already maps the same key to a *different* item.
+fn check_typed_unique_conflicts(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    typed_indexes: &[QueueIndex],
+    keys: &[(String, Vec<u8>)],
+    exclude_item_id: Option<&str>,
+) -> EngineResult<()> {
+    for (name, key) in keys {
+        let unique = typed_indexes
+            .iter()
+            .find(|qi| &qi.name == name)
+            .map(index_is_unique)
+            .unwrap_or(false);
+        if !unique {
+            continue;
+        }
+        let holder: Option<String> = match exclude_item_id {
+            Some(excl) => st(tx.query_opt(
+                "SELECT item_id FROM pqueue_item_index \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND index_name=$3 AND index_key=$4 \
+                 AND item_id<>$5 LIMIT 1",
+                &[&t, &q, name, &key.as_slice(), &excl],
+            ))?
+            .map(|row| row.get(0)),
+            None => st(tx.query_opt(
+                "SELECT item_id FROM pqueue_item_index \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND index_name=$3 AND index_key=$4 LIMIT 1",
+                &[&t, &q, name, &key.as_slice()],
+            ))?
+            .map(|row| row.get(0)),
+        };
+        if holder.is_some() {
+            return Err(EngineError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+/// Insert `pqueue_item_index` rows for one item's `(name, key)` pairs (upsert so a retry is safe).
+fn insert_typed_index_rows(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    item_id: &str,
+    keys: &[(String, Vec<u8>)],
+) -> EngineResult<()> {
+    for (name, key) in keys {
+        st(tx.execute(
+            "INSERT INTO pqueue_item_index \
+             (tenant_id, queue_id, index_name, index_key, item_id) VALUES ($1,$2,$3,$4,$5) \
+             ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET index_key=EXCLUDED.index_key",
+            &[&t, &q, name, &key.as_slice(), &item_id],
+        ))?;
+    }
+    Ok(())
+}
+
+/// Delete all `pqueue_item_index` rows for the given item IDs.
+fn delete_typed_index_rows(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    item_ids: &[String],
+) -> EngineResult<()> {
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+    st(tx.execute(
+        "DELETE FROM pqueue_item_index \
+         WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+        &[&t, &q, &item_ids],
+    ))?;
+    Ok(())
+}
+
+/// Enforce unique constraints and insert index rows for all `items` in a push batch.
+fn maintain_typed_indexes_on_insert(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    typed_indexes: &[QueueIndex],
+    items: &[PushItem],
+) -> EngineResult<()> {
+    if typed_indexes.is_empty() {
+        return Ok(());
+    }
+    let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
+        std::collections::HashMap::new();
+    let mut item_keys: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::with_capacity(items.len());
+    for item in items {
+        let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
+        check_typed_unique_conflicts(tx, t, q, typed_indexes, &keys, None)?;
+        for (name, key) in &keys {
+            if typed_indexes
+                .iter()
+                .find(|qi| &qi.name == name)
+                .map(index_is_unique)
+                .unwrap_or(false)
+            {
+                let bk = (name.clone(), key.clone());
+                let id_str = item.item_id.to_string();
+                if let Some(prev) = batch_unique.get(&bk) {
+                    if prev != &id_str {
+                        return Err(EngineError::Conflict);
+                    }
+                } else {
+                    batch_unique.insert(bk, id_str);
+                }
+            }
+        }
+        item_keys.push((item.item_id.to_string(), keys));
+    }
+    for (item_id, keys) in &item_keys {
+        insert_typed_index_rows(tx, t, q, item_id, keys)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +1032,12 @@ fn insert_items(
     }
     insert_gates(tx, &t, &q, items)?;
     upsert_cohorts(tx, queues, shard, &t, &q, items, now_n)?;
+    // ADR-011: typed secondary index maintenance.
+    let typed_indexes = queues
+        .get(shard)
+        .map(|d| d.typed_indexes.as_slice())
+        .unwrap_or(&[]);
+    maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, items)?;
     Ok(())
 }
 
@@ -1181,6 +1413,20 @@ fn apply_command_sql(
                     ))?;
                 }
             }
+            // ADR-011: if a new entity document was supplied, re-index this item. Delete the
+            // old rows first so the unique slot is freed before the conflict check fires.
+            if let Some(ref doc) = c.set_entity_document {
+                let typed_indexes = queues
+                    .get(shard)
+                    .map(|d| d.typed_indexes.as_slice())
+                    .unwrap_or(&[]);
+                if !typed_indexes.is_empty() {
+                    delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
+                    let new_keys = typed_index_keys_for_entity(typed_indexes, Some(doc))?;
+                    check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &new_keys, None)?;
+                    insert_typed_index_rows(tx, &t, &q, &item_id, &new_keys)?;
+                }
+            }
             Ok(())
         }
         QueueCommand::ReassignLease(c) => {
@@ -1351,6 +1597,10 @@ fn apply_command_sql(
             Ok(())
         }
         QueueCommand::ReplacePending(c) => {
+            // ADR-011: delete the superseded item's index rows first so the replacement can claim
+            // the same unique key without a spurious Conflict.
+            let superseded_str = c.superseded_item_id.to_string();
+            delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&superseded_str))?;
             st(tx.execute(
                 "UPDATE pqueue_items SET superseded=true, updated_at=$4, last_command_sequence=$5 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
@@ -1528,6 +1778,8 @@ fn apply_command_sql(
                 "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &id_strs],
             ))?;
+            // ADR-011: drop the purged items' typed secondary index rows.
+            delete_typed_index_rows(tx, &t, &q, &id_strs)?;
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(*id));
             }
@@ -2614,25 +2866,110 @@ impl ProjectionRead for PostgresRelationalBackend {
     }
 }
 
-/// Secondary-index queries are a Phase 2 (relational) feature (ADR-010 §7): the side index table and its
-/// maintenance are not yet built, so the relational family reports `Unavailable` rather than a wrong answer.
+/// ADR-011 (pqueue-f4ffd679): typed secondary index queries backed by `pqueue_item_index`.
 impl IndexQueryPort for PostgresRelationalBackend {
     fn index_get_unique(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
-        std::future::ready(Err(EngineError::Unavailable))
+        let result = (|| {
+            let mut g = self.inner.lock().expect("projection store poisoned");
+            let qi = g
+                .queues
+                .get(shard)
+                .and_then(|d| d.typed_indexes.iter().find(|qi| qi.name == index))
+                .ok_or(EngineError::Invalid("unknown secondary index"))?
+                .clone();
+            if !index_is_unique(&qi) {
+                return Err(EngineError::Invalid("secondary index is not unique"));
+            }
+            let expected_arity = match &qi.declaration {
+                IndexDeclaration::Single(_) => 1,
+                IndexDeclaration::Compound(def) => def.fields.len(),
+            };
+            if key.len() != expected_arity {
+                return Err(EngineError::Invalid("secondary index key arity mismatch"));
+            }
+            let canonical = typed_lookup_canonical_key(&qi, key)?;
+            let (t, q) = parts(shard);
+            let row = st(g.client.query_opt(
+                "SELECT i.item_id, i.client_item_key, i.item_version \
+                 FROM pqueue_item_index idx \
+                 JOIN pqueue_items i \
+                   ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
+                  AND i.item_id=idx.item_id \
+                 WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
+                   AND idx.index_name=$3 AND idx.index_key=$4 \
+                 LIMIT 1",
+                &[&t, &q, &index, &canonical.as_slice()],
+            ))?;
+            Ok(row.map(|row| {
+                let id_str: String = row.get(0);
+                let ck_str: String = row.get(1);
+                let ver: i64 = row.get(2);
+                IndexHit {
+                    item_id: ItemId::new(id_str).expect("valid stored item_id"),
+                    client_item_key: ClientItemKey::new(ck_str)
+                        .expect("valid stored client_item_key"),
+                    item_version: ver as u64,
+                }
+            }))
+        })();
+        std::future::ready(result)
     }
 
     fn index_lookup(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
-        std::future::ready(Err(EngineError::Unavailable))
+        let result = (|| {
+            let mut g = self.inner.lock().expect("projection store poisoned");
+            let qi = g
+                .queues
+                .get(shard)
+                .and_then(|d| d.typed_indexes.iter().find(|qi| qi.name == index))
+                .ok_or(EngineError::Invalid("unknown secondary index"))?
+                .clone();
+            let expected_arity = match &qi.declaration {
+                IndexDeclaration::Single(_) => 1,
+                IndexDeclaration::Compound(def) => def.fields.len(),
+            };
+            if key.len() != expected_arity {
+                return Err(EngineError::Invalid("secondary index key arity mismatch"));
+            }
+            let canonical = typed_lookup_canonical_key(&qi, key)?;
+            let (t, q) = parts(shard);
+            let rows = st(g.client.query(
+                "SELECT i.item_id, i.client_item_key, i.item_version \
+                 FROM pqueue_item_index idx \
+                 JOIN pqueue_items i \
+                   ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
+                  AND i.item_id=idx.item_id \
+                 WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
+                   AND idx.index_name=$3 AND idx.index_key=$4 \
+                 ORDER BY i.item_id",
+                &[&t, &q, &index, &canonical.as_slice()],
+            ))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let id_str: String = row.get(0);
+                let ck_str: String = row.get(1);
+                let ver: i64 = row.get(2);
+                out.push(IndexHit {
+                    item_id: ItemId::new(id_str)
+                        .map_err(|e| EngineError::Storage(e.to_string()))?,
+                    client_item_key: ClientItemKey::new(ck_str)
+                        .map_err(|e| EngineError::Storage(e.to_string()))?,
+                    item_version: ver as u64,
+                });
+            }
+            Ok(out)
+        })();
+        std::future::ready(result)
     }
 }
 

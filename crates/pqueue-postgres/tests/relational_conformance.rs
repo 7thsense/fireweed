@@ -203,3 +203,488 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_relationa
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-011 typed secondary index conformance — postgres relational backend
+// These tests mirror pqueue-sqlite/tests/relational_conformance.rs §9 and are
+// env-gated on PQUEUE_PG_TEST_URL exactly like the rest of this file.
+// ---------------------------------------------------------------------------
+
+use axon_esf::IndexDef;
+use pqueue_core::{ClientItemKey, IndexDeclaration, IndexType, QueueIndex};
+use pqueue_engine::{IndexQueryPort, PayloadUpdate, PurgePort, UpdateFieldsPort, UpsertPort};
+use std::collections::BTreeMap;
+
+fn pg_qdef_unique_str_index(index_name: &str, field: &str) -> pqueue_core::QueueDefinition {
+    pqueue_core::QueueDefinition {
+        typed_indexes: vec![QueueIndex {
+            name: index_name.to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: field.to_string(),
+                index_type: IndexType::String,
+                unique: true,
+            }),
+        }],
+        ..pqueue_conformance::qdef()
+    }
+}
+
+fn pg_qdef_nonunique_str_index(index_name: &str, field: &str) -> pqueue_core::QueueDefinition {
+    pqueue_core::QueueDefinition {
+        typed_indexes: vec![QueueIndex {
+            name: index_name.to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: field.to_string(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        }],
+        ..pqueue_conformance::qdef()
+    }
+}
+
+fn pg_entity(field: &str, value: &str) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert(field.to_string(), serde_json::Value::String(value.to_string()));
+    serde_json::Value::Object(m)
+}
+
+fn pg_typed_connect(url: &str, schema: &str) -> PostgresRelationalBackend {
+    PostgresRelationalBackend::connect_in_schema(url, schema)
+        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+}
+
+#[test]
+fn pg_rel_typed_index_push_then_get_unique() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_unique_str_index("by_email", "email"))
+                    .await
+                    .unwrap();
+                let ids = b
+                    .push(
+                        &shard,
+                        vec![pqueue_engine::PushSpec {
+                            entity: Some(pg_entity("email", "alice@example.com")),
+                            ..Default::default()
+                        }],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let hit = b
+                    .index_get_unique(&shard, "by_email", &[b"alice@example.com".to_vec()])
+                    .await
+                    .unwrap();
+                assert!(hit.is_some(), "indexed item must be findable");
+                assert_eq!(hit.unwrap().item_id, ids[0]);
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_push_then_get_unique) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_index_push_then_lookup_nonunique() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_nonunique_str_index("by_tag", "tag"))
+                    .await
+                    .unwrap();
+                let ids = b
+                    .push(
+                        &shard,
+                        vec![
+                            pqueue_engine::PushSpec {
+                                entity: Some(pg_entity("tag", "red")),
+                                ..Default::default()
+                            },
+                            pqueue_engine::PushSpec {
+                                entity: Some(pg_entity("tag", "red")),
+                                ..Default::default()
+                            },
+                        ],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let hits = b
+                    .index_lookup(&shard, "by_tag", &[b"red".to_vec()])
+                    .await
+                    .unwrap();
+                assert_eq!(hits.len(), 2);
+                let mut found: Vec<_> = hits.iter().map(|h| h.item_id).collect();
+                found.sort();
+                let mut expected = ids.to_vec();
+                expected.sort();
+                assert_eq!(found, expected);
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_push_then_lookup_nonunique) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_unique_index_conflict_is_rejected() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_unique_str_index("by_email", "email"))
+                    .await
+                    .unwrap();
+                b.push(
+                    &shard,
+                    vec![pqueue_engine::PushSpec {
+                        entity: Some(pg_entity("email", "alice@example.com")),
+                        ..Default::default()
+                    }],
+                    pqueue_conformance::ts(0),
+                    None,
+                )
+                .await
+                .unwrap();
+                let result = b
+                    .push(
+                        &shard,
+                        vec![pqueue_engine::PushSpec {
+                            entity: Some(pg_entity("email", "alice@example.com")),
+                            ..Default::default()
+                        }],
+                        pqueue_conformance::ts(1),
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(result, Err(EngineError::Conflict)),
+                    "duplicate unique key must be rejected: {:?}",
+                    result
+                );
+                assert_eq!(b.metrics(&shard).await.unwrap().pending, 1);
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_unique_index_conflict_is_rejected) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_unique_index_within_batch_conflict_rejected() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_unique_str_index("by_email", "email"))
+                    .await
+                    .unwrap();
+                let result = b
+                    .push(
+                        &shard,
+                        vec![
+                            pqueue_engine::PushSpec {
+                                entity: Some(pg_entity("email", "shared@example.com")),
+                                ..Default::default()
+                            },
+                            pqueue_engine::PushSpec {
+                                entity: Some(pg_entity("email", "shared@example.com")),
+                                ..Default::default()
+                            },
+                        ],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(result, Err(EngineError::Conflict)),
+                    "within-batch duplicate must be rejected"
+                );
+                assert_eq!(b.metrics(&shard).await.unwrap().pending, 0, "nothing inserted");
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_unique_index_within_batch_conflict_rejected) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_index_purge_frees_unique_key() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_unique_str_index("by_email", "email"))
+                    .await
+                    .unwrap();
+                let ids = b
+                    .push(
+                        &shard,
+                        vec![pqueue_engine::PushSpec {
+                            entity: Some(pg_entity("email", "purge_me@example.com")),
+                            ..Default::default()
+                        }],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                b.purge(&shard, vec![ids[0]], false, pqueue_conformance::ts(1), None)
+                    .await
+                    .unwrap();
+                let hit = b
+                    .index_get_unique(&shard, "by_email", &[b"purge_me@example.com".to_vec()])
+                    .await
+                    .unwrap();
+                assert!(hit.is_none(), "purged item must not appear in index");
+                let new_ids = b
+                    .push(
+                        &shard,
+                        vec![pqueue_engine::PushSpec {
+                            entity: Some(pg_entity("email", "purge_me@example.com")),
+                            ..Default::default()
+                        }],
+                        pqueue_conformance::ts(2),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(new_ids.len(), 1);
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_purge_frees_unique_key) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_index_replace_pending_updates_index() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_unique_str_index("by_email", "email"))
+                    .await
+                    .unwrap();
+                let key = ClientItemKey::new("ck1").unwrap();
+                b.replace_if_pending(
+                    &shard,
+                    &key,
+                    None,
+                    None,
+                    None,
+                    None,
+                    BTreeMap::new(),
+                    Default::default(),
+                    Some(pg_entity("email", "orig@example.com")),
+                    pqueue_conformance::ts(0),
+                    None,
+                )
+                .await
+                .unwrap();
+                let result = b
+                    .replace_if_pending(
+                        &shard,
+                        &key,
+                        None,
+                        None,
+                        None,
+                        None,
+                        BTreeMap::new(),
+                        Default::default(),
+                        Some(pg_entity("email", "orig@example.com")),
+                        pqueue_conformance::ts(1),
+                        None,
+                    )
+                    .await;
+                assert!(
+                    result.is_ok(),
+                    "replacing with same unique key must not conflict: {:?}",
+                    result
+                );
+                assert_eq!(b.metrics(&shard).await.unwrap().pending, 1);
+                let hit = b
+                    .index_get_unique(&shard, "by_email", &[b"orig@example.com".to_vec()])
+                    .await
+                    .unwrap();
+                assert!(hit.is_some(), "replacement must be in the index");
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_replace_pending_updates_index) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_index_update_fields_moves_index_key() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_unique_str_index("by_email", "email"))
+                    .await
+                    .unwrap();
+                let ids = b
+                    .push(
+                        &shard,
+                        vec![pqueue_engine::PushSpec {
+                            entity: Some(pg_entity("email", "old@example.com")),
+                            ..Default::default()
+                        }],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                b.update_fields(
+                    &shard,
+                    ids[0],
+                    BTreeMap::new(),
+                    PayloadUpdate::Keep,
+                    Some(pg_entity("email", "new@example.com")),
+                    None,
+                    pqueue_conformance::ts(1),
+                    None,
+                )
+                .await
+                .unwrap();
+                let old = b
+                    .index_get_unique(&shard, "by_email", &[b"old@example.com".to_vec()])
+                    .await
+                    .unwrap();
+                assert!(old.is_none(), "old typed-index key must be removed");
+                let new = b
+                    .index_get_unique(&shard, "by_email", &[b"new@example.com".to_vec()])
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    new.expect("new typed-index key must find item").item_id,
+                    ids[0]
+                );
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_update_fields_moves_index_key) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_index_update_fields_unique_conflict_is_atomic() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pg_qdef_unique_str_index("by_email", "email"))
+                    .await
+                    .unwrap();
+                let ids = b
+                    .push(
+                        &shard,
+                        vec![
+                            pqueue_engine::PushSpec {
+                                entity: Some(pg_entity("email", "a@example.com")),
+                                ..Default::default()
+                            },
+                            pqueue_engine::PushSpec {
+                                entity: Some(pg_entity("email", "b@example.com")),
+                                ..Default::default()
+                            },
+                        ],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let result = b
+                    .update_fields(
+                        &shard,
+                        ids[1],
+                        BTreeMap::new(),
+                        PayloadUpdate::Keep,
+                        Some(pg_entity("email", "a@example.com")),
+                        None,
+                        pqueue_conformance::ts(1),
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(result, Err(EngineError::Conflict)),
+                    "moving into an occupied unique typed-index key must conflict"
+                );
+                let hit = b
+                    .index_get_unique(&shard, "by_email", &[b"b@example.com".to_vec()])
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    hit.expect("failed update must keep old typed-index row").item_id,
+                    ids[1]
+                );
+                assert_eq!(b.metrics(&shard).await.unwrap().pending, 2);
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_update_fields_unique_conflict_is_atomic) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
+
+#[test]
+fn pg_rel_typed_index_schema_less_queue_unaffected() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let b = pg_typed_connect(&url, &schema);
+                let shard = pqueue_conformance::shard();
+                b.create_queue(pqueue_conformance::qdef()).await.unwrap();
+                let ids = b
+                    .push(
+                        &shard,
+                        vec![pqueue_engine::PushSpec::default()],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(ids.len(), 1);
+                assert_eq!(b.metrics(&shard).await.unwrap().pending, 1);
+                let res = b
+                    .index_get_unique(&shard, "nonexistent", &[b"x".to_vec()])
+                    .await;
+                assert!(res.is_err(), "unknown index name must error");
+            });
+        }
+        Err(_) => eprintln!(
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_schema_less_queue_unaffected) — set PQUEUE_PG_TEST_URL"
+        ),
+    }
+}
