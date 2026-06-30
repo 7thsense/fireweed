@@ -153,6 +153,7 @@ impl ProjectionStore for InMemoryProjection {
                 definition.recurrence,
                 &definition.secondary_indexes,
             )
+            .with_typed_indexes(&definition.typed_indexes)
         });
         Ok(())
     }

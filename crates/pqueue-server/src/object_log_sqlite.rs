@@ -1866,13 +1866,16 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
         async move {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             self.log.create_queue(&definition)?;
-            let proj = Arc::new(Mutex::new(ProjectionData::new(
-                definition.priority_model,
-                definition.ordering_mode,
-                definition.max_rank_error,
-                definition.recurrence,
-                &definition.secondary_indexes,
-            )));
+            let proj = Arc::new(Mutex::new(
+                ProjectionData::new(
+                    definition.priority_model,
+                    definition.ordering_mode,
+                    definition.max_rank_error,
+                    definition.recurrence,
+                    &definition.secondary_indexes,
+                )
+                .with_typed_indexes(&definition.typed_indexes),
+            ));
             self.projections
                 .lock()
                 .expect("segmented inmemory projections poisoned")

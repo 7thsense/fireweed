@@ -446,7 +446,8 @@ impl Inner {
                 definition.max_rank_error,
                 definition.recurrence,
                 &definition.secondary_indexes,
-            );
+            )
+            .with_typed_indexes(&definition.typed_indexes);
             for (_seq, _epoch, env) in self.read_envelopes(&shard)? {
                 // Command-id is `obj-{node}-{n}` (or legacy `obj-{n}`); the trailing component is the seq.
                 if let Some(n) = env
@@ -1269,7 +1270,8 @@ impl ControlPlaneStore for ObjectLogBackend {
                         outcome.definition.max_rank_error,
                         outcome.definition.recurrence,
                         &outcome.definition.secondary_indexes,
-                    ),
+                    )
+                    .with_typed_indexes(&outcome.definition.typed_indexes),
                 );
             }
             if let Some(cs) = compiled_schema {

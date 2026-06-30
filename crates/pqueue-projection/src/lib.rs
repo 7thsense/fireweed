@@ -26,10 +26,9 @@ pub use compose_impls::{InMemoryProjection, MemoryLog};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CompoundIndexDef, CompoundIndexField, GroupKey, IndexDeclaration, IndexDef,
-    IndexSpec, IndexType, ItemEvent, ItemId, ItemState, LeaseToken, Metadata, OrderingMode,
-    PriorityModel, PriorityValue, QueueIndex, RecurrenceMode, RecurrencePolicy, UtcTimestamp,
-    apply_transition, failure_event, priority_sort,
+    ClientItemKey, GroupKey, IndexDeclaration, IndexSpec, IndexType, ItemEvent, ItemId, ItemState,
+    LeaseToken, Metadata, OrderingMode, PriorityModel, PriorityValue, QueueIndex, RecurrenceMode,
+    RecurrencePolicy, UtcTimestamp, apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
@@ -170,124 +169,73 @@ impl<'a> IndexLookupSpec<'a> {
     fn lookup_key(&self, key_values: &[Vec<u8>]) -> EngineResult<Vec<u8>> {
         match self {
             Self::Legacy(_) => {
-                let values_as_json: Vec<Value> = key_values
-                    .iter()
-                    .map(|value| Value::String(String::from_utf8_lossy(value).into_owned()))
-                    .collect();
-                match values_as_json.len() {
-                    0 => Ok(Vec::new()),
-                    1 => {
-                        let decl = IndexDef {
-                            field: "value".to_string(),
-                            index_type: IndexType::String,
-                            unique: false,
-                        };
-                        let record = serde_json::json!({ "value": values_as_json[0].clone() });
-                        let key: Result<Option<Vec<u8>>, _> = decl.index_key(&record);
-                        key.map_err(|err| EngineError::Storage(err.to_string()))?
-                            .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-                    }
-                    _ => {
-                        let decl = CompoundIndexDef {
-                            fields: (0..values_as_json.len())
-                                .map(|i| CompoundIndexField {
-                                    field: i.to_string(),
-                                    index_type: IndexType::String,
-                                })
-                                .collect(),
-                            unique: false,
-                        };
-                        let mut record = serde_json::Map::new();
-                        for (i, value) in values_as_json.into_iter().enumerate() {
-                            record.insert(i.to_string(), value);
-                        }
-                        let key: Result<Option<Vec<u8>>, _> =
-                            decl.index_key(&Value::Object(record));
-                        key.map_err(|err| EngineError::Storage(err.to_string()))?
-                            .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-                    }
-                }
+                let slices: Vec<&[u8]> = key_values.iter().map(|v| v.as_slice()).collect();
+                Ok(legacy_raw_key(&slices))
             }
-            Self::Typed(spec) => {
-                let values_as_json: Vec<Value> = key_values
-                    .iter()
-                    .map(|value| {
-                        serde_json::from_slice::<Value>(value).unwrap_or_else(|_| {
-                            Value::String(String::from_utf8_lossy(value).into_owned())
-                        })
-                    })
-                    .collect();
-                match &spec.declaration {
-                    IndexDeclaration::Single(def) => {
-                        let mut record = serde_json::Map::new();
-                        record.insert(def.field.clone(), values_as_json[0].clone());
-                        let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
-                        key.map_err(|err| EngineError::Storage(err.to_string()))?
-                            .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-                    }
-                    IndexDeclaration::Compound(def) => {
-                        let mut record = serde_json::Map::new();
-                        for (field, value) in def.fields.iter().zip(values_as_json.into_iter()) {
-                            record.insert(field.field.clone(), value);
-                        }
-                        let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
-                        key.map_err(|err| EngineError::Storage(err.to_string()))?
-                            .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-                    }
+            Self::Typed(spec) => match &spec.declaration {
+                IndexDeclaration::Single(def) => {
+                    let value = decode_typed_lookup_value(&def.index_type, &key_values[0])?;
+                    let mut record = serde_json::Map::new();
+                    record.insert(def.field.clone(), value);
+                    let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
+                    key.map_err(|err| EngineError::Storage(err.to_string()))?
+                        .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
                 }
-            }
+                IndexDeclaration::Compound(def) => {
+                    let mut record = serde_json::Map::new();
+                    for (field, value_bytes) in def.fields.iter().zip(key_values.iter()) {
+                        let value = decode_typed_lookup_value(&field.index_type, value_bytes)?;
+                        record.insert(field.field.clone(), value);
+                    }
+                    let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
+                    key.map_err(|err| EngineError::Storage(err.to_string()))?
+                        .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
+                }
+            },
         }
     }
 }
 
-fn legacy_index_declaration(spec: &IndexSpec) -> IndexDeclaration {
-    if spec.fields.len() == 1 {
-        IndexDeclaration::Single(IndexDef {
-            field: spec.fields[0].clone(),
-            index_type: IndexType::String,
-            unique: spec.unique,
-        })
-    } else {
-        IndexDeclaration::Compound(CompoundIndexDef {
-            fields: spec
-                .fields
-                .iter()
-                .cloned()
-                .map(|field| CompoundIndexField {
-                    field,
-                    index_type: IndexType::String,
-                })
-                .collect(),
-            unique: spec.unique,
-        })
+/// Length-prefix raw byte encoding for legacy index keys. Each field is prefixed with its 4-byte
+/// big-endian length so concatenated multi-field keys round-trip losslessly regardless of byte
+/// content (no UTF-8 assumption, no JSON quoting).
+fn legacy_raw_key(field_bytes: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for bytes in field_bytes {
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(bytes);
     }
-}
-
-fn legacy_record_from_fields(fields: &BTreeMap<String, Bytes>) -> Value {
-    let mut record = serde_json::Map::new();
-    for (field, value) in fields {
-        record.insert(
-            field.clone(),
-            Value::String(String::from_utf8_lossy(value).into_owned()),
-        );
-    }
-    Value::Object(record)
+    out
 }
 
 fn legacy_index_key(
     spec: &IndexSpec,
     fields: &BTreeMap<String, Bytes>,
 ) -> EngineResult<Option<Vec<u8>>> {
-    let record = legacy_record_from_fields(fields);
-    match legacy_index_declaration(spec) {
-        IndexDeclaration::Single(def) => {
-            let key: Result<Option<Vec<u8>>, _> = def.index_key(&record);
-            key.map_err(|err| EngineError::Storage(err.to_string()))
+    let mut field_bytes: Vec<&[u8]> = Vec::new();
+    for field_name in &spec.fields {
+        match fields.get(field_name) {
+            Some(v) => field_bytes.push(v.as_ref()),
+            None => return Ok(None),
         }
-        IndexDeclaration::Compound(def) => {
-            let key: Result<Option<Vec<u8>>, _> = def.index_key(&record);
-            key.map_err(|err| EngineError::Storage(err.to_string()))
+    }
+    Ok(Some(legacy_raw_key(&field_bytes)))
+}
+
+/// Decode a raw lookup byte slice into a JSON `Value` appropriate for `index_type`. For String
+/// and Datetime fields the bytes are treated as strict UTF-8 (not JSON-parsed), so `b"123"` stays
+/// `"123"` rather than the number 123.
+fn decode_typed_lookup_value(index_type: &IndexType, bytes: &[u8]) -> EngineResult<Value> {
+    match index_type {
+        IndexType::String | IndexType::Datetime => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            Ok(Value::String(s.to_owned()))
         }
+        IndexType::Integer | IndexType::Float => serde_json::from_slice::<Value>(bytes)
+            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number")),
+        IndexType::Boolean => serde_json::from_slice::<Value>(bytes)
+            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON boolean")),
     }
 }
 
@@ -780,12 +728,17 @@ impl ProjectionData {
                             }
                         }
                     }
-                    let next_entity = c.set_entity_document.as_ref();
+                    let next_entity = c
+                        .set_entity_document
+                        .as_ref()
+                        .or(rec.entity_document.as_ref());
                     let new_keys = self.record_index_keys(&next_fields, next_entity)?;
 
                     let mut next_rec = rec.clone();
                     next_rec.fields = next_fields;
-                    next_rec.entity_document = c.set_entity_document.clone();
+                    if c.set_entity_document.is_some() {
+                        next_rec.entity_document = c.set_entity_document.clone();
+                    }
                     if let PayloadUpdate::Set(p) = &c.payload {
                         next_rec.payload = p.clone();
                     }
@@ -817,7 +770,9 @@ impl ProjectionData {
                     PayloadUpdate::Keep => {}
                     PayloadUpdate::Set(p) => rec.payload = p.clone(),
                 }
-                rec.entity_document = c.set_entity_document.clone();
+                if c.set_entity_document.is_some() {
+                    rec.entity_document = c.set_entity_document.clone();
+                }
                 if let ScheduleUpdate::Set(p) = &c.set_priority {
                     rec.priority = p.clone();
                 }

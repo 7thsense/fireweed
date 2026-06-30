@@ -5,12 +5,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use pqueue::{NewItem, PayloadUpdate, Pqueue};
 use pqueue_core::{
     ClientItemKey, CompoundIndexDef, CompoundIndexField, EligibilityPolicy, IndexDeclaration,
-    IndexDef, IndexType, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy, RetryPolicy,
-    TenantId,
+    IndexDef, IndexSpec, IndexType, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
+    RetryPolicy, TenantId,
 };
 use pqueue_memory::{ManualClock, MemoryBackend};
 use serde_json::{Value, json};
@@ -555,5 +556,149 @@ async fn secondary_indexes_purge_removes_the_index_entry() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// Bug #1: `update_fields` with `entity: None` must leave the entity document and typed index
+/// memberships unchanged. Previously `None` incorrectly cleared the entity, ejecting the item
+/// from every typed index it belonged to.
+#[tokio::test]
+async fn secondary_indexes_update_fields_none_entity_preserves_typed_index() {
+    let pq = new_pq().await;
+    let q = qkey();
+
+    let id = pq
+        .push(
+            &q,
+            item(json!({
+                "score": 42,
+                "active": false,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-west",
+                "zone": 5,
+                "external_id": "keep-me"
+            })),
+        )
+        .await
+        .unwrap();
+
+    // entity: None means "leave unchanged"; item must stay in all typed indexes
+    let new_version = pq
+        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
+        .await
+        .unwrap();
+    assert_eq!(new_version, 2, "version bumps even on no-op entity");
+
+    let hit = pq
+        .query_index_unique(&q, "by_external_id", key(&["keep-me"]))
+        .await
+        .unwrap()
+        .expect("item must remain in typed index after update_fields with entity:None");
+    assert_eq!(hit.item_id, id);
+    assert_eq!(hit.item_version, 2);
+
+    // A second entity-None update must also keep the index intact
+    let v3 = pq
+        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
+        .await
+        .unwrap();
+    assert_eq!(v3, 3);
+    assert_eq!(
+        pq.query_index_unique(&q, "by_external_id", key(&["keep-me"]))
+            .await
+            .unwrap()
+            .unwrap()
+            .item_id,
+        id
+    );
+}
+
+/// Bug #2: a String-typed field whose stored value looks like a JSON token (e.g. "123") must be
+/// queryable by passing the raw UTF-8 bytes. Previously the lookup bytes were JSON-parsed first
+/// (`b"123"` → `Number(123)`), causing a type mismatch against the stored `String("123")` key.
+#[tokio::test]
+async fn secondary_indexes_string_typed_field_with_numeric_looking_value_is_queryable() {
+    let pq = new_pq().await;
+    let q = qkey();
+
+    let id = pq
+        .push(
+            &q,
+            item(json!({
+                "score": 1,
+                "active": false,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 1,
+                "external_id": "123"
+            })),
+        )
+        .await
+        .unwrap();
+
+    // b"123" as lookup bytes for a String-typed field must match the stored string "123"
+    let hit = pq
+        .query_index_unique(&q, "by_external_id", key(&["123"]))
+        .await
+        .unwrap()
+        .expect("String-typed field \"123\" must be found by byte slice b\"123\"");
+    assert_eq!(hit.item_id, id);
+}
+
+/// Bug #3: legacy `IndexSpec` (byte-field) indexes must round-trip arbitrary bytes without
+/// loss. Previously the encoding used `from_utf8_lossy`, so byte sequences that are invalid
+/// UTF-8 were silently mangled; the new length-prefix encoding is byte-exact.
+#[tokio::test]
+async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
+    let backend = Arc::new(MemoryBackend::new());
+    let clock = Arc::new(ManualClock::at(0));
+    let pq = Pqueue::new(backend, clock);
+
+    let def = QueueDefinition {
+        secondary_indexes: vec![IndexSpec {
+            name: "by_raw".to_string(),
+            fields: vec!["raw_field".to_string()],
+            unique: false,
+        }],
+        typed_indexes: vec![],
+        ..queue_definition()
+    };
+    pq.create_queue(def).await.unwrap();
+    let q = qkey();
+
+    // 0xff 0x00 0xfe is not valid UTF-8
+    let raw: Bytes = Bytes::from_static(&[0xff, 0x00, 0xfe]);
+    let id = pq
+        .push(
+            &q,
+            NewItem {
+                fields: {
+                    let mut m = BTreeMap::new();
+                    m.insert("raw_field".to_string(), raw.clone());
+                    m
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Lookup with the exact same bytes must find the item
+    let hits = pq
+        .query_index(&q, "by_raw", vec![raw.to_vec()])
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1, "byte-exact index must match on raw bytes");
+    assert_eq!(hits[0].item_id, id);
+
+    // The lossy replacement encoding (U+FFFD sequences) must NOT match the byte-exact entry
+    let lossy_string = String::from_utf8_lossy(&raw).into_owned();
+    let lossy_hits = pq
+        .query_index(&q, "by_raw", vec![lossy_string.into_bytes()])
+        .await
+        .unwrap();
+    assert!(
+        lossy_hits.is_empty(),
+        "lossy UTF-8 replacement bytes must not collide with the byte-exact index entry"
     );
 }
