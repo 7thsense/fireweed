@@ -219,6 +219,7 @@ pub fn make_item(shape: &Shape, idx: u64) -> NewItem {
         metadata: Default::default(),
         cohort_size,
         gate_keys: Vec::new(),
+        entity: None,
     }
 }
 

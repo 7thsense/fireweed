@@ -87,7 +87,7 @@ cargo +nightly llvm-cov --package pqueue-core --branch --lcov \
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov" \
     --crate pqueue-core --min-lines 90 --min-branches 85
-${CARGO} llvm-cov --package pqueue-engine --lcov \
+${CARGO} llvm-cov --workspace --lcov \
     --output-path "${REPO_ROOT}/target/coverage/pqueue-engine.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-engine.lcov" --crate pqueue-engine --min-lines 80

@@ -30,16 +30,45 @@ crate = sys.argv[2]
 min_lines = float(sys.argv[3])
 min_branches = float(sys.argv[4]) if sys.argv[4] else None
 
-found = hit = branches_found = branches_hit = 0
+def record_matches_crate(record):
+    sf = next((line.split(":", 1)[1] for line in record if line.startswith("SF:")), "")
+    if not sf:
+        return False
+    parts = Path(sf).parts
+    for idx, part in enumerate(parts[:-1]):
+        if part == "crates" and idx + 1 < len(parts) and parts[idx + 1] == crate:
+            return True
+    return f"crates/{crate}/" in sf or f"crates\\{crate}\\" in sf
+
+records = []
+current = []
 for raw in path.read_text(encoding="utf-8").splitlines():
-    if raw.startswith("LF:"):
-        found += int(raw.split(":", 1)[1])
-    elif raw.startswith("LH:"):
-        hit += int(raw.split(":", 1)[1])
-    elif raw.startswith("BRF:"):
-        branches_found += int(raw.split(":", 1)[1])
-    elif raw.startswith("BRH:"):
-        branches_hit += int(raw.split(":", 1)[1])
+    current.append(raw)
+    if raw == "end_of_record":
+        records.append(current)
+        current = []
+if current:
+    records.append(current)
+
+found = hit = branches_found = branches_hit = 0
+matched_records = 0
+for record in records:
+    if not record_matches_crate(record):
+        continue
+    matched_records += 1
+    for raw in record:
+        if raw.startswith("LF:"):
+            found += int(raw.split(":", 1)[1])
+        elif raw.startswith("LH:"):
+            hit += int(raw.split(":", 1)[1])
+        elif raw.startswith("BRF:"):
+            branches_found += int(raw.split(":", 1)[1])
+        elif raw.startswith("BRH:"):
+            branches_hit += int(raw.split(":", 1)[1])
+
+if matched_records == 0:
+    print(f"{crate}: no LCOV records found for crate", file=sys.stderr)
+    sys.exit(1)
 
 line_pct = 100.0 if found == 0 else hit * 100.0 / found
 print(f"{crate}: lines {line_pct:.2f}% ({hit}/{found})")
