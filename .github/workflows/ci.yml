@@ -58,9 +58,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend:
-          - postgres_native
-          - object_log_sqlite_projection
+        include:
+          - storage: objectlog-inmemory
+            log_backend: objectlog
+            projection_backend: inmemory
     steps:
       - name: Checkout pqueue
         uses: actions/checkout@v4
@@ -83,7 +84,7 @@ jobs:
       - name: Helm static validation gate
         run: bash scripts/ci/helm-gate.sh
 
-      - name: kind Helm integration proof (${{ matrix.backend }})
+      - name: kind Helm integration proof (${{ matrix.storage }})
         env:
           KIND_NODE_IMAGE: kindest/node:v1.31.0
-        run: bash scripts/ci/kind-helm-test.sh --backend ${{ matrix.backend }}
+        run: bash scripts/ci/kind-helm-test.sh --log-backend ${{ matrix.log_backend }} --projection-backend ${{ matrix.projection_backend }}
