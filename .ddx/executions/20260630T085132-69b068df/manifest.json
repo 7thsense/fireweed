@@ -1,0 +1,152 @@
+{
+  "attempt_id": "20260630T085132-69b068df",
+  "bead_id": "pqueue-4872154a",
+  "base_rev": "a8dcee1fb17fee056d01a3333e8236383505eede",
+  "created_at": "2026-06-30T08:51:32.384036705Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-4872154a",
+    "title": "Replace in-memory secondary indexes with axon-esf typed keys",
+    "description": "Replace ADR-010 raw length-prefixed byte index key encoding in crates/pqueue-projection with axon_esf typed index key helpers from axon-esf v0.3.2 for typed queues, while preserving legacy IndexSpec raw-byte behavior. Prior repairs closed update_fields None preservation, typed string lookup ambiguity, legacy raw-byte exactness, and objectlog/in-memory projection constructors, but focused review found remaining blockers: sqlite/postgres log-replay projection construction still omits .with_typed_indexes; fresh upsert insert paths in memory/sqlite/postgres call legacy-only index_validate without entity, and sqlite/postgres update_fields validate with legacy-only index_validate_update, allowing typed unique conflicts to commit. Fix these before advancing. In-scope files: pqueue-memory, pqueue-sqlite, pqueue-postgres, pqueue-projection tests or facade/backend tests as needed. Out-of-scope: relational SQL typed index tables and public typed query API beyond preserving current safe projection behavior.",
+    "acceptance": "cargo fmt --check passes; cargo test -p pqueue secondary_indexes -- --nocapture passes; cargo test -p pqueue-projection --lib -- --nocapture passes; tests cover typed unique conflict rejection for upsert insert and update_fields on memory plus sqlite log-replay where available without env; sqlite/postgres log-replay ProjectionData constructors and rebuild/open paths call .with_typed_indexes(\u0026definition.typed_indexes); memory/sqlite/postgres upsert insert validation passes replacement entity_document into typed-aware unique validation; sqlite/postgres update_fields validation passes set_entity_document into typed-aware update validation; rg -n 'ProjectionData::new|index_validate\\(|index_validate_update\\(' crates/pqueue-memory/src/lib.rs crates/pqueue-sqlite/src/lib.rs crates/pqueue-postgres/src/lib.rs shows no remaining typed-index-capable path using legacy-only validation where entity_document is available.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "area:pqueue-projection",
+      "area:indexes",
+      "kind:implementation",
+      "adr-011",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "closing_commit_sha": "df47804398f9e2edecd26471f8f6be149cc52426",
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260630T075521-4bd243ae\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":14710908,\"output_tokens\":75868,\"total_tokens\":14786776,\"cost_usd\":0,\"duration_ms\":1495381,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=14786776 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "",
+          "body": "{\"candidate_ref\":\"refs/ddx/iterations/20260630T075521-4bd243ae/0\",\"cycle_index\":0,\"attempt_id\":\"20260630T075521-4bd243ae\",\"base_rev\":\"48627798de0dfcf53d1d8d478fb79eb512089bec\",\"result_rev\":\"1eccd001be690c87befd2be28771c3250721fb5f\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "candidate_cycle_pinned",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260630T075521-4bd243ae\",\"bead_id\":\"pqueue-4872154a\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=default powerClass=standard model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"escalation_count\":0,\"estimated_difficulty\":\"\",\"fallback_chain\":[],\"final_power_class\":\"\",\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"resolved_model\":\"gpt-5.4-mini\",\"resolved_power_class\":\"\",\"resolved_provider\":\"codex\",\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "ddx work",
+          "summary": "provider=codex model=gpt-5.4-mini"
+        },
+        {
+          "actor": "erik",
+          "body": "success\npowerClass=standard\ncycle_trace=[{\"cycle_index\":0,\"attempt_id\":\"20260630T075521-4bd243ae\",\"result_rev\":\"1eccd001be690c87befd2be28771c3250721fb5f\",\"implementer_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\"},\"review_result\":{},\"final_decision\":\"success\",\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}]\ndecision_audit={\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"default\",\"inferred_power_class\":\"standard\",\"requested_power_class\":\"standard\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"default\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=145f1a8bd9ef01f78719e61219099b9c1d489501\nbase_rev=48627798de0dfcf53d1d8d478fb79eb512089bec",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "success"
+        },
+        {
+          "actor": "",
+          "body": "",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "reopen",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude-tui\",\"resolved_model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=116.5\",\"fallback_chain\":[]}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude-tui model=sonnet-4.6 reason=policy=default; score=116.5"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260630T082719-d539ecf3\",\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=116.5\",\"input_tokens\":1,\"output_tokens\":517,\"total_tokens\":518,\"cost_usd\":0,\"duration_ms\":1000574,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=518 model=sonnet-4.6"
+        },
+        {
+          "actor": "",
+          "body": "{\"candidate_ref\":\"refs/ddx/iterations/20260630T082719-d539ecf3/0\",\"cycle_index\":0,\"attempt_id\":\"20260630T082719-d539ecf3\",\"base_rev\":\"227c06764ae81e1b9e72147b372e996e4f7d8e89\",\"result_rev\":\"941f6add9e86585e3596b8b7bae817cf3fa80225\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "candidate_cycle_pinned",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude-tui\",\"actual_model\":\"sonnet-4.6\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260630T082719-d539ecf3\",\"bead_id\":\"pqueue-4872154a\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=default powerClass=standard model=sonnet-4.6 harness=claude-tui"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"escalation_count\":0,\"estimated_difficulty\":\"\",\"fallback_chain\":[],\"final_power_class\":\"\",\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"resolved_model\":\"sonnet-4.6\",\"resolved_power_class\":\"\",\"resolved_provider\":\"claude-tui\",\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "ddx work",
+          "summary": "provider=claude-tui model=sonnet-4.6"
+        },
+        {
+          "actor": "erik",
+          "body": "success\npowerClass=standard\ncycle_trace=[{\"cycle_index\":0,\"attempt_id\":\"20260630T082719-d539ecf3\",\"result_rev\":\"941f6add9e86585e3596b8b7bae817cf3fa80225\",\"implementer_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"review_result\":{},\"final_decision\":\"success\",\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}]\ndecision_audit={\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"profile\":\"default\",\"routing_intent_source\":\"default\",\"inferred_power_class\":\"standard\",\"requested_power_class\":\"standard\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"default\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=df47804398f9e2edecd26471f8f6be149cc52426\nbase_rev=227c06764ae81e1b9e72147b372e996e4f7d8e89",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "success"
+        },
+        {
+          "actor": "",
+          "body": "",
+          "created_at": "2026-06-30T08:48:57.424384308Z",
+          "kind": "reopen",
+          "source": "",
+          "summary": ""
+        }
+      ],
+      "session_id": "eb-c4fbba1f",
+      "spec-id": "ADR-011"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T085132-69b068df",
+    "prompt": ".ddx/executions/20260630T085132-69b068df/prompt.md",
+    "manifest": ".ddx/executions/20260630T085132-69b068df/manifest.json",
+    "result": ".ddx/executions/20260630T085132-69b068df/result.json",
+    "checks": ".ddx/executions/20260630T085132-69b068df/checks.json",
+    "usage": ".ddx/executions/20260630T085132-69b068df/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-4872154a-20260630T085132-69b068df"
+  },
+  "prompt_sha": "f2395cd338c48647c23408350f741a3d824c93ed3f7e9b607863afe981351a4a"
+}
