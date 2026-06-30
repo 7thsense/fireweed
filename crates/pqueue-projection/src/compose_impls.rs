@@ -246,9 +246,11 @@ impl ProjectionStore for InMemoryProjection {
         shard: &QueueKey,
         item_id: &ItemId,
         fields: &BTreeMap<String, Bytes>,
+        entity: Option<&serde_json::Value>,
         exclude: Option<&ItemId>,
     ) -> EngineResult<()> {
-        self.get(shard)?.index_validate(item_id, fields, exclude)
+        self.get(shard)?
+            .index_validate_with_entity(item_id, fields, entity, exclude)
     }
 
     fn index_validate_push(&self, shard: &QueueKey, items: &[PushItem]) -> EngineResult<()> {
@@ -269,8 +271,10 @@ impl ProjectionStore for InMemoryProjection {
         shard: &QueueKey,
         id: &ItemId,
         field_ops: &BTreeMap<String, Option<Bytes>>,
+        entity: Option<&serde_json::Value>,
     ) -> EngineResult<()> {
-        self.get(shard)?.index_validate_update(id, field_ops)
+        self.get(shard)?
+            .index_validate_update_with_entity(id, field_ops, entity)
     }
 
     fn select_eligible(

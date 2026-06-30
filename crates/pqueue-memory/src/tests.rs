@@ -11,6 +11,8 @@ use pqueue_conformance::ts;
 
 // The full shared backend-conformance suite (16 port-level scenarios) against MemoryBackend.
 pqueue_conformance::conformance_suite!(MemoryBackend::new);
+pqueue_conformance::adr011_typed_conformance_suite!(MemoryBackend::new);
+pqueue_conformance::adr011_typed_log_replay_suite!(MemoryBackend::new);
 
 /// ADR-012 Phase 1: the SAME shared conformance suite against the COMPOSED memory backend
 /// (`ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`). Passing identically to the
@@ -18,6 +20,8 @@ pqueue_conformance::conformance_suite!(MemoryBackend::new);
 mod composed {
     use crate::composed_memory_backend;
     pqueue_conformance::conformance_suite!(composed_memory_backend);
+    pqueue_conformance::adr011_typed_conformance_suite!(composed_memory_backend);
+    pqueue_conformance::adr011_typed_log_replay_suite!(composed_memory_backend);
 }
 
 #[tokio::test]

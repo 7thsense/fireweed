@@ -534,6 +534,7 @@ mod serde_tests {
                 payload: PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
                 set_priority: ScheduleUpdate::Keep,
                 set_not_before: ScheduleUpdate::Keep,
+                set_entity_document: None,
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
                 item_ids: vec![iid("a")],

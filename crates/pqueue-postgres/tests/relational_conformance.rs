@@ -97,6 +97,14 @@ pg_relational!(
     claim_compatibility_is_resolved_and_gated,
     stale_epoch_append_is_fenced,
     epoch_fence_closes_pre_segment_window,
+    adr011_schema_validation_rejects_before_visible_state,
+    adr011_typed_scalar_and_compound_indexes_work,
+    adr011_typed_missing_fields_remain_sparse,
+    adr011_typed_unique_conflicts_are_atomic,
+    adr011_typed_update_fields_and_replace_rekey,
+    adr011_typed_purge_frees_unique_key,
+    adr011_typed_upsert_insert_unique_conflict_is_atomic,
+    adr011_typed_schema_less_queue_unaffected,
 );
 
 fn typed_qdef() -> pqueue_core::QueueDefinition {

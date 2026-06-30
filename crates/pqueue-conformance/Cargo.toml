@@ -16,6 +16,7 @@ path = "src/lib.rs"
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 bytes = "1"
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"

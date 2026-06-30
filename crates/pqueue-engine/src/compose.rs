@@ -48,6 +48,7 @@ use crate::port::{
     PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
     SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
+use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
 // ---------------------------------------------------------------------------
@@ -161,6 +162,7 @@ pub trait ProjectionStore: Send {
         shard: &QueueKey,
         item_id: &ItemId,
         fields: &BTreeMap<String, Bytes>,
+        entity: Option<&serde_json::Value>,
         exclude: Option<&ItemId>,
     ) -> EngineResult<()>;
     fn index_validate_push(&self, shard: &QueueKey, items: &[PushItem]) -> EngineResult<()>;
@@ -175,6 +177,7 @@ pub trait ProjectionStore: Send {
         shard: &QueueKey,
         id: &ItemId,
         field_ops: &BTreeMap<String, Option<Bytes>>,
+        entity: Option<&serde_json::Value>,
     ) -> EngineResult<()>;
 
     // -- ProjectionRead surface ---------------------------------------------
@@ -372,13 +375,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             .projection
             .apply(&positions, std::slice::from_ref(&env))
     }
-
-    fn max_attempts(&self, shard: &QueueKey) -> u32 {
-        self.control
-            .queue_definition(shard)
-            .map(|d| d.retry_policy.max_attempts)
-            .unwrap_or(1)
-    }
 }
 
 /// `now + retention_ms` as the idempotency entry expiry.
@@ -548,7 +544,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
-            let max_attempts = self.max_attempts(shard);
+            let def = self.control.queue_definition(shard)?;
+            let schema = def
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(compile_entity_schema)
+                .transpose()?;
+            for item in &items {
+                validate_entity(schema.as_ref(), item.entity.as_ref())?;
+            }
+            let max_attempts = def.retry_policy.max_attempts;
             let epoch = expected_epoch.unwrap_or(0);
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
@@ -580,6 +586,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             validate_gate_push(self.supports_gates(), &items)?;
             let fingerprint = push_body_hash(&items)?;
             let def = self.control.queue_definition(shard)?;
+            let schema = def
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(compile_entity_schema)
+                .transpose()?;
+            for item in &items {
+                validate_entity(schema.as_ref(), item.entity.as_ref())?;
+            }
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(now, def.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
@@ -690,7 +705,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let result = (|| {
-            let max_attempts = self.max_attempts(shard);
+            let def = self.control.queue_definition(shard)?;
+            let schema = def
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(compile_entity_schema)
+                .transpose()?;
+            validate_entity(schema.as_ref(), entity.as_ref())?;
+            let max_attempts = def.retry_policy.max_attempts;
             let epoch = expected_epoch.unwrap_or(0);
             let counter_base = self.counters.reserve(shard, epoch, 1);
             let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
@@ -712,8 +735,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
             let existing = g.projection.lookup_by_key(shard, client_item_key)?;
             match existing {
                 None => {
-                    g.projection
-                        .index_validate(shard, &item.item_id, &item.fields, None)?;
+                    g.projection.index_validate(
+                        shard,
+                        &item.item_id,
+                        &item.fields,
+                        item.entity_document.as_ref(),
+                        None,
+                    )?;
                     let env = Self::make_envelope(
                         &mut g,
                         self.node_id,
@@ -927,11 +955,19 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
+            let def = self.control.queue_definition(shard)?;
+            let schema = def
+                .entity_schema
+                .as_ref()
+                .and_then(|esd| esd.entity_schema.as_ref())
+                .map(compile_entity_schema)
+                .transpose()?;
+            validate_entity(schema.as_ref(), entity.as_ref())?;
             let mut g = self.inner.lock().expect("poisoned");
             g.projection
                 .update_fields_validate(shard, &item_id, expected_item_version)?;
             g.projection
-                .index_validate_update(shard, &item_id, &field_ops)?;
+                .index_validate_update(shard, &item_id, &field_ops, entity.as_ref())?;
             let env = Self::make_envelope(
                 &mut g,
                 self.node_id,

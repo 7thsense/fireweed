@@ -4,6 +4,12 @@
 use pqueue_sqlite::SqliteBackend;
 
 pqueue_conformance::conformance_suite!(|| SqliteBackend::in_memory().expect("open :memory:"));
+pqueue_conformance::adr011_typed_conformance_suite!(|| {
+    SqliteBackend::in_memory().expect("open :memory:")
+});
+pqueue_conformance::adr011_typed_log_replay_suite!(|| {
+    SqliteBackend::in_memory().expect("open :memory:")
+});
 
 /// ADR-012 Phase 1: the SAME shared conformance suite against the COMPOSED sqlite backend
 /// (`ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>`). Passing identically to the
@@ -11,6 +17,12 @@ pqueue_conformance::conformance_suite!(|| SqliteBackend::in_memory().expect("ope
 mod composed {
     use pqueue_sqlite::composed_sqlite_backend_in_memory;
     pqueue_conformance::conformance_suite!(
+        || composed_sqlite_backend_in_memory().expect("compose :memory:")
+    );
+    pqueue_conformance::adr011_typed_conformance_suite!(
+        || composed_sqlite_backend_in_memory().expect("compose :memory:")
+    );
+    pqueue_conformance::adr011_typed_log_replay_suite!(
         || composed_sqlite_backend_in_memory().expect("compose :memory:")
     );
 }

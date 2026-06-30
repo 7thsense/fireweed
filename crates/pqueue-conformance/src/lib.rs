@@ -57,8 +57,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
-    CommandId, ControlPlaneStore, FinalizePort, LogRead, ProjectionRead, PurgePort, PushItem,
-    PushPort, QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    CommandId, ControlPlaneStore, FinalizePort, IndexQueryPort, LogRead, ProjectionRead, PurgePort,
+    PushItem, PushPort, QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort,
     RenewLeasePort, SnapshotStore, UpdateFieldsPort, UpsertPort,
 };
 
@@ -112,6 +112,12 @@ impl<T> ConformanceCore for T where
 pub trait ConformanceBackend: ConformanceCore + SnapshotStore + LogRead {}
 
 impl<T> ConformanceBackend for T where T: ConformanceCore + SnapshotStore + LogRead {}
+
+/// ADR-011 typed-schema/index conformance backend. This is separate from [`ConformanceCore`] so
+/// ADR-010-only backends can still satisfy the core queue contract without typed index lookup.
+pub trait Adr011ConformanceBackend: ConformanceCore + IndexQueryPort {}
+
+impl<T> Adr011ConformanceBackend for T where T: ConformanceCore + IndexQueryPort {}
 
 // ---------------------------------------------------------------------------
 // Shared fixtures (public so adapters' own white-box tests can reuse them too)
@@ -428,6 +434,39 @@ macro_rules! durable_reconnect_suite {
 macro_rules! relational_reconnect_suite {
     ($make:expr) => {
         $crate::durable_reconnect_suite!($make);
+    };
+}
+
+/// ADR-011 typed entity-schema and typed secondary-index scenario class. Backends that persist typed
+/// entity documents and implement `IndexQueryPort` should run this alongside their core suite. Durable
+/// reopen/replay mechanics remain backend-specific because each adapter owns how its factory reopens
+/// shared state.
+#[macro_export]
+macro_rules! adr011_typed_conformance_suite {
+    ($make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            adr011_schema_validation_rejects_before_visible_state,
+            adr011_typed_scalar_and_compound_indexes_work,
+            adr011_typed_missing_fields_remain_sparse,
+            adr011_typed_unique_conflicts_are_atomic,
+            adr011_typed_update_fields_unique_conflict_is_atomic,
+            adr011_typed_update_fields_and_replace_rekey,
+            adr011_typed_purge_frees_unique_key,
+            adr011_typed_upsert_insert_unique_conflict_is_atomic,
+            adr011_typed_schema_less_queue_unaffected,
+        );
+    };
+}
+
+/// ADR-011 log-replay scenario class. Log-bearing typed-index backends run this to prove typed index
+/// rows are reconstructed from committed commands, while DB-authoritative relational reconnect remains
+/// covered by adapter-specific durable-reopen tests.
+#[macro_export]
+macro_rules! adr011_typed_log_replay_suite {
+    ($make:expr) => {
+        $crate::conformance_suite!(@scenarios $make,
+            adr011_typed_log_replay_reconstructs_index_rows,
+        );
     };
 }
 
