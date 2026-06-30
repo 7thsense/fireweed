@@ -939,8 +939,8 @@ impl UpdateFieldsPort for MemoryBackend {
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.update_fields_validate(&item_id, expected_item_version)?;
-                // Pre-commit unique-index validation (ADR-010 §5.1): a violating update appends nothing.
-                proj.index_validate_update(&item_id, &field_ops)?;
+                // Pre-commit unique-index validation: a violating update appends nothing.
+                proj.index_validate_update_with_entity(&item_id, &field_ops, entity.as_ref())?;
             }
             let cmd = QueueCommand::UpdateFields(UpdateFieldsCommand {
                 item_id,
@@ -1109,6 +1109,7 @@ impl ControlPlaneStore for MemoryBackend {
                     definition.recurrence,
                     &definition.secondary_indexes,
                 )
+                .with_typed_indexes(&definition.typed_indexes)
             });
             if let Some(cs) = compiled_schema {
                 g.schemas.insert(shard, cs);
