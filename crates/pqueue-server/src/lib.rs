@@ -20,12 +20,12 @@ use pqueue_engine::{
     AcquireOutcome, AuthContext, Clock, EngineError, EngineResult, InMemoryControlPlane,
     LeaseState, OwnedSession, QueueControlPlane, QueueKey,
 };
-use pqueue_memory::MemoryBackend;
+use pqueue_memory::composed_memory_backend;
 use pqueue_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
 };
-use pqueue_sqlite::SqliteBackend;
+use pqueue_sqlite::composed_sqlite_backend;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -47,7 +47,7 @@ pub use env_config::ConfigError;
 #[cfg(feature = "postgres")]
 mod postgres_native;
 #[cfg(feature = "postgres")]
-pub use postgres_native::PostgresNativeBackend;
+pub use postgres_native::{BlockingBackend, PostgresNativeBackend};
 
 /// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
 /// epoch/fence authority. One half of a [`BackendSpec`].
@@ -111,12 +111,17 @@ pub enum ControlPlaneSpec {
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
 /// [`start`] assembles the concrete backend from this spec.
 ///
-/// NOTE (ADR-012 P2 status): the spec is the one composition axis the server selects on. The generic
-/// `ComposedBackend` now performs generic log-replay-on-open recovery (`ComposedBackend::recover` rebuilds
-/// the projection + counters + cmd-seq from the durable log/projection, honored across every durable
-/// composition by the reopen/recovery conformance dimension), so the bare composition no longer regresses
-/// restart durability. The server still assembles the DURABLE families from their existing monoliths pending
-/// the next phase, which deletes those monoliths in favor of the recovery-capable composition.
+/// NOTE (ADR-012 P2 status): the spec is the one composition axis the server selects on, and [`start`] now
+/// assembles the wired families from the ONE generic `ComposedBackend` — `Memory → composed_memory_backend`,
+/// `Sqlite → composed_sqlite_backend`, `Postgres → composed_postgres_backend_with_config` (the durable
+/// `PostgresLog` command log + in-memory projection, driven blocking-safe through [`BlockingBackend`]). The
+/// generic `ComposedBackend::recover` rebuilds the projection + counters + cmd-seq from the durable
+/// log/projection on open (honored across every durable composition by the reopen/recovery conformance
+/// dimension), so no composed family regresses restart durability. The object-log families
+/// (`ObjectLog × {InMemory, Sqlite}`) still run on the segmented group-commit backends because their
+/// production env contract — concurrent segment co-buffering + the latency-seal flusher + segment-config /
+/// debug-segments / recovery-tail knobs — is not yet expressed by the per-append-seal composed `ObjectLog`
+/// axis; folding that contract into the axis (then deleting the segmented backends) is the remaining step.
 pub struct BackendSpec {
     pub log: LogSpec,
     pub projection: ProjectionSpec,
@@ -835,21 +840,22 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     // Only the in-process control plane (queue definitions + placement) is wired today.
     let ControlPlaneSpec::InProcess = control_plane;
 
-    // ADR-012 P2: the server selects on the two-axis [`BackendSpec`], but each DURABLE family is still
-    // assembled from its recovery-capable backend (the bare `ComposedBackend` does not yet rebuild its
-    // projection from the durable log on reopen — see the [`BackendSpec`] note). The memory family, which
-    // needs no crash recovery, is the composed `ComposedMemoryBackend`'s equivalent monolith here too; it is
-    // the next family to swap once generic recovery lands.
+    // ADR-012 P2: the server selects on the two-axis [`BackendSpec`] and assembles every wired family from
+    // the ONE generic recovery-capable `ComposedBackend` (the monoliths are gone). The memory family needs
+    // no crash recovery; the durable sqlite/postgres families run `ComposedBackend::recover` on open. The
+    // object-log families still carry their own segmented group-commit + flusher + segment-config /
+    // debug-segments / recovery-tail env contract (which the per-append-seal composed `ObjectLog` axis does
+    // not express), so they remain on the segmented backends until that contract is folded into the axis.
     match (log, projection) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => {
-            let backend = Arc::new(MemoryBackend::new().with_node_id(node_id));
+            let backend = Arc::new(composed_memory_backend().with_node_id(node_id));
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         (LogSpec::Sqlite { path }, ProjectionSpec::InMemory) => {
             let p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = Arc::new(SqliteBackend::open(p)?.with_node_id(node_id));
+            let backend = Arc::new(composed_sqlite_backend(p)?.with_node_id(node_id));
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         (LogSpec::ObjectLog { root }, ProjectionSpec::InMemory) => {
@@ -881,23 +887,27 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
-            // The sync postgres `connect` (client handshake + log replay) MUST run off the reactor: the
-            // postgres client drives its own internal runtime per call, so connecting on a Tokio worker
-            // would panic ("cannot start a runtime from within a runtime"). Connect inside `spawn_blocking`,
-            // then drive the backend only through the blocking-safe wrapper.
+            // ADR-012 P2: the composed postgres backend (`ComposedBackend<PostgresLog, InMemoryProjection,
+            // InProcessControlPlane>`) — the durable postgres command log + in-memory projection, assembled
+            // by the one generic composition with recovery-on-open. The sync postgres `connect` (client
+            // handshake + log replay) MUST run off the reactor: the postgres client drives its own internal
+            // runtime per call, so connecting on a Tokio worker would panic ("cannot start a runtime from
+            // within a runtime"). Connect + recover inside `spawn_blocking`, then drive the composition only
+            // through the blocking-safe `BlockingBackend` wrapper so no sync postgres call hits a reactor
+            // worker.
             let backend = tokio::task::spawn_blocking(move || {
                 let mut connect_config = pqueue_postgres::PostgresConnectConfig::new(url);
                 if let Some(provider) = credentials {
                     connect_config = connect_config.with_credential_provider(provider);
                 }
-                pqueue_postgres::PostgresBackend::connect_with_config(connect_config)
+                pqueue_postgres::composed_postgres_backend_with_config(connect_config)
                     .map(|b| b.with_node_id(node_id))
             })
             .await
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(PostgresNativeBackend::new(backend));
+            let backend = Arc::new(BlockingBackend::new(backend));
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         (log, projection) => Err(EngineError::Storage(format!(

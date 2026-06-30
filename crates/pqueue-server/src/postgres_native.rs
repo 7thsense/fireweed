@@ -36,6 +36,7 @@ use pqueue_engine::{
     UpsertOutcome, UpsertPort,
 };
 use pqueue_postgres::PostgresBackend;
+use pqueue_resp::RespBackend;
 
 /// Drive a sync postgres closure on Tokio's blocking pool (off the reactor), mapping a join failure to a
 /// structured storage error.
@@ -53,38 +54,43 @@ where
 /// port surface by delegating every call through [`spawn_blocking`](tokio::task::spawn_blocking).
 ///
 /// [`RespBackend`]: pqueue_resp::RespBackend
-pub struct PostgresNativeBackend {
+pub struct BlockingBackend<B: Send + Sync + 'static> {
     // `Option` so [`Drop`] can move the inner backend off the reactor (see the `Drop` impl). It is `Some`
-    // for the wrapper's whole lifetime and only taken once, during drop.
-    inner: Option<Arc<PostgresBackend>>,
+    // for the wrapper's whole lifetime and only taken once, during drop. The `Send + Sync + 'static` bound
+    // (always satisfied — `B` is a `RespBackend`) lets [`Drop`] move the inner `Arc<B>` onto a plain OS
+    // thread to close the sync postgres connection off any reactor worker.
+    inner: Option<Arc<B>>,
 }
 
-impl PostgresNativeBackend {
-    /// Wrap an already-constructed [`PostgresBackend`]. The backend's `connect`/`with_node_id` must run on a
-    /// non-reactor thread (the composition root connects inside `spawn_blocking`).
-    pub fn new(inner: PostgresBackend) -> Self {
+/// Back-compat alias: the blocking wrapper around the monolithic [`PostgresBackend`]. The composition root
+/// now wraps the composed postgres backend ([`pqueue_postgres::ComposedPostgresBackend`]) in the same
+/// generic [`BlockingBackend`].
+pub type PostgresNativeBackend = BlockingBackend<PostgresBackend>;
+
+impl<B: RespBackend> BlockingBackend<B> {
+    /// Wrap an already-constructed backend. The backend's `connect`/`with_node_id` must run on a non-reactor
+    /// thread (the composition root connects inside `spawn_blocking`).
+    pub fn new(inner: B) -> Self {
         Self {
             inner: Some(Arc::new(inner)),
         }
     }
 
     /// A fresh `Arc` handle to move into a `spawn_blocking` closure.
-    fn arc(&self) -> Arc<PostgresBackend> {
+    fn arc(&self) -> Arc<B> {
         self.inner
             .as_ref()
-            .expect("postgres backend present until drop")
+            .expect("backend present until drop")
             .clone()
     }
 
     /// A borrow of the inner backend for the cheap synchronous descriptor methods.
-    fn backend(&self) -> &PostgresBackend {
-        self.inner
-            .as_ref()
-            .expect("postgres backend present until drop")
+    fn backend(&self) -> &B {
+        self.inner.as_ref().expect("backend present until drop")
     }
 }
 
-impl Drop for PostgresNativeBackend {
+impl<B: Send + Sync + 'static> Drop for BlockingBackend<B> {
     fn drop(&mut self) {
         // The sync postgres `Client::drop` does a blocking `block_on` to close the connection. If the final
         // `Arc` drops on a Tokio worker thread that PANICS ("cannot start a runtime from within a runtime").
@@ -98,7 +104,7 @@ impl Drop for PostgresNativeBackend {
     }
 }
 
-impl Backend for PostgresNativeBackend {
+impl<B: RespBackend> Backend for BlockingBackend<B> {
     fn durability_class(&self) -> DurabilityClass {
         self.backend().durability_class()
     }
@@ -131,7 +137,7 @@ impl Backend for PostgresNativeBackend {
     }
 }
 
-impl PushPort for PostgresNativeBackend {
+impl<B: RespBackend> PushPort for BlockingBackend<B> {
     fn push(
         &self,
         shard: &QueueKey,
@@ -168,7 +174,7 @@ impl PushPort for PostgresNativeBackend {
     }
 }
 
-impl ClaimPort for PostgresNativeBackend {
+impl<B: RespBackend> ClaimPort for BlockingBackend<B> {
     fn claim(
         &self,
         req: ClaimRequest,
@@ -178,7 +184,7 @@ impl ClaimPort for PostgresNativeBackend {
     }
 }
 
-impl UpsertPort for PostgresNativeBackend {
+impl<B: RespBackend> UpsertPort for BlockingBackend<B> {
     #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
@@ -213,7 +219,7 @@ impl UpsertPort for PostgresNativeBackend {
     }
 }
 
-impl FinalizePort for PostgresNativeBackend {
+impl<B: RespBackend> FinalizePort for BlockingBackend<B> {
     fn finalize(
         &self,
         shard: &QueueKey,
@@ -229,7 +235,7 @@ impl FinalizePort for PostgresNativeBackend {
     }
 }
 
-impl RenewLeasePort for PostgresNativeBackend {
+impl<B: RespBackend> RenewLeasePort for BlockingBackend<B> {
     fn renew(
         &self,
         shard: &QueueKey,
@@ -252,7 +258,7 @@ impl RenewLeasePort for PostgresNativeBackend {
     }
 }
 
-impl ReassignLeasePort for PostgresNativeBackend {
+impl<B: RespBackend> ReassignLeasePort for BlockingBackend<B> {
     fn reassign(
         &self,
         shard: &QueueKey,
@@ -277,7 +283,7 @@ impl ReassignLeasePort for PostgresNativeBackend {
     }
 }
 
-impl PurgePort for PostgresNativeBackend {
+impl<B: RespBackend> PurgePort for BlockingBackend<B> {
     fn purge(
         &self,
         shard: &QueueKey,
@@ -294,7 +300,7 @@ impl PurgePort for PostgresNativeBackend {
     }
 }
 
-impl ReclaimDriver for PostgresNativeBackend {
+impl<B: RespBackend> ReclaimDriver for BlockingBackend<B> {
     fn tick(
         &self,
         now: UtcTimestamp,
@@ -304,7 +310,7 @@ impl ReclaimDriver for PostgresNativeBackend {
     }
 }
 
-impl ControlPlaneStore for PostgresNativeBackend {
+impl<B: RespBackend> ControlPlaneStore for BlockingBackend<B> {
     fn create_queue(
         &self,
         definition: QueueDefinition,
@@ -350,7 +356,7 @@ impl ControlPlaneStore for PostgresNativeBackend {
     }
 }
 
-impl ProjectionRead for PostgresNativeBackend {
+impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
     fn select_eligible(
         &self,
         shard: &QueueKey,

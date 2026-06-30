@@ -65,13 +65,16 @@ use pqueue_engine::{
     UpsertPort, build_push_items, require_item_level_claim, validate_gate_command,
     validate_gate_push, validate_purge_force,
 };
-use pqueue_projection::ProjectionData;
+use pqueue_engine::{ComposedBackend, InProcessControlPlane};
+use pqueue_projection::{InMemoryProjection, ProjectionData};
 use sha2::{Digest, Sha256};
 
+mod compose_log;
 mod connect;
 mod control_plane;
 mod credential;
 mod relational;
+pub use compose_log::PostgresLog;
 pub use connect::{
     ConnectorChoice, CredentialProvider, PostgresConnectConfig, PostgresSslMode, connect,
     default_max_connection_lifetime, select_connector,
@@ -422,6 +425,43 @@ impl Inner {
         }
         Ok(out)
     }
+}
+
+/// The composed postgres backend (ADR-012 P2): `ComposedBackend<PostgresLog, InMemoryProjection,
+/// InProcessControlPlane>` — the durable postgres command log + the shared in-memory projection + the
+/// in-process control plane. Capability-equivalent to the monolithic [`PostgresBackend`]
+/// (postgres-as-durable-log + log-replay projection), with the orchestration living ONCE in
+/// [`ComposedBackend`]. MUST be driven off the reactor (the sync postgres client); the `pqueue-server`
+/// blocking wrapper provides that boundary.
+pub type ComposedPostgresBackend =
+    ComposedBackend<PostgresLog, InMemoryProjection, InProcessControlPlane>;
+
+/// Assemble the composed postgres backend over `url` (default `search_path`) and run recovery-on-open
+/// (ADR-012 P2): replay the durable log into the fresh in-memory projection so a reopen recovers identically
+/// to the monolith. The credential-provider-aware form is [`composed_postgres_backend_with_config`].
+pub fn composed_postgres_backend(url: &str) -> EngineResult<ComposedPostgresBackend> {
+    composed_postgres_backend_with_config(PostgresConnectConfig::new(url))
+}
+
+/// Assemble the composed postgres backend from a fully-built [`PostgresConnectConfig`] (the
+/// credential-provider-aware path the `pqueue-server` composition root uses for Lakebase), with
+/// recovery-on-open.
+pub fn composed_postgres_backend_with_config(
+    config: PostgresConnectConfig,
+) -> EngineResult<ComposedPostgresBackend> {
+    let log = PostgresLog::connect_with_config(config)?;
+    ComposedBackend::new(log, InMemoryProjection::new(), InProcessControlPlane::new()).recover()
+}
+
+/// Assemble the composed postgres backend isolated in `schema` (`CREATE SCHEMA IF NOT EXISTS` + `SET
+/// search_path`), with recovery-on-open. Reconnecting with the SAME `schema` reopens the same durable log
+/// (the postgres analogue of reopening a sqlite file) — used by the conformance + reopen/recovery suites.
+pub fn composed_postgres_backend_in_schema(
+    url: &str,
+    schema: &str,
+) -> EngineResult<ComposedPostgresBackend> {
+    let log = PostgresLog::connect_in_schema(url, schema)?;
+    ComposedBackend::new(log, InMemoryProjection::new(), InProcessControlPlane::new()).recover()
 }
 
 /// Postgres-backed atomic-class backend.
