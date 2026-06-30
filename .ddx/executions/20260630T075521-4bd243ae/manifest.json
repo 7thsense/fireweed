@@ -1,0 +1,36 @@
+{
+  "attempt_id": "20260630T075521-4bd243ae",
+  "bead_id": "pqueue-4872154a",
+  "base_rev": "48627798de0dfcf53d1d8d478fb79eb512089bec",
+  "created_at": "2026-06-30T07:55:22.304198576Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-4872154a",
+    "title": "Replace in-memory secondary indexes with axon-esf typed keys",
+    "description": "Replace ADR-010 raw length-prefixed byte index key encoding in crates/pqueue-projection with axon_esf typed index key helpers from axon-esf v0.3.2. In-scope files: crates/pqueue-projection/src/lib.rs, crates/pqueue/tests/secondary_indexes.rs, pqueue-core domain usage as needed. Remove or bypass encode_index_key/encode_index_lookup_key raw byte semantics for typed queues. Delegate missing field, null, datetime, float, boolean, compound, and leftmost-prefix semantics to axon-esf; sparse missing-field behavior remains unless axon-esf explicitly errors. Preserve unique conflict atomicity for push/update_fields/replace_pending and index removal on purge. Out-of-scope: relational SQL parity.",
+    "acceptance": "cargo test -p pqueue secondary_indexes -- --nocapture passes; tests cover integer numeric equality/order-vs-lexical regression, boolean, datetime, compound key, missing-field sparse behavior, unique conflicts, update_fields move, replace_pending move, and purge removal; rg 'len\\)|to_be_bytes\\(\\).*index|ADR-010.*bytes|encode_index_key' crates/pqueue-projection/src/lib.rs shows no production raw secondary-index encoder remains.",
+    "parent": "pqueue-fc8ef1aa",
+    "labels": [
+      "area:pqueue-projection",
+      "area:indexes",
+      "kind:implementation",
+      "adr-011",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "spec-id": "ADR-011"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260630T075521-4bd243ae",
+    "prompt": ".ddx/executions/20260630T075521-4bd243ae/prompt.md",
+    "manifest": ".ddx/executions/20260630T075521-4bd243ae/manifest.json",
+    "result": ".ddx/executions/20260630T075521-4bd243ae/result.json",
+    "checks": ".ddx/executions/20260630T075521-4bd243ae/checks.json",
+    "usage": ".ddx/executions/20260630T075521-4bd243ae/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-4872154a-20260630T075521-4bd243ae"
+  },
+  "prompt_sha": "0bcbba0a804b38998d4830b795394a583e04d6857e8a5efc383961996a8ecd73"
+}
