@@ -395,6 +395,14 @@ impl PushPort for MemoryBackend {
                 .get(&shard.clone())
                 .map(|d| d.retry_policy.max_attempts)
                 .unwrap_or(1);
+            // Pre-commit entity schema validation (ADR-011): reject before cmd_seq/counter mutation or
+            // index validation, so invalid documents consume neither id space nor command sequence numbers.
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
             // The command id stays a backend-local sequence; the ITEM ids are minted from
             // (epoch, node, per-queue counter) so concurrent writers to one queue never collide (ADR-009).
             let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
@@ -402,13 +410,6 @@ impl PushPort for MemoryBackend {
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
-            // Pre-commit entity schema validation (ADR-011): reject before index validation or append.
-            {
-                let schema = g.schemas.get(shard);
-                for item in &push_items {
-                    validate_entity(schema, item.entity_document.as_ref())?;
-                }
-            }
             // Pre-commit unique-index validation (ADR-010 §5.1): a violating push appends nothing.
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
@@ -466,6 +467,14 @@ impl PushPort for MemoryBackend {
                 // expired entry as a genuinely new logical request, per the module mapping in `idempotency`).
                 IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
             }
+            // Pre-commit entity schema validation (ADR-011): reject before cmd_seq/counter mutation.
+            // A rejected append leaves no idempotency entry (record happens only on success below).
+            {
+                let schema = g.schemas.get(shard);
+                for item in &items {
+                    validate_entity(schema, item.entity.as_ref())?;
+                }
+            }
             // The ITEM ids are minted from (epoch, node, per-queue counter) so concurrent writers never
             // collide (ADR-009), exactly as the request-id-less push path does.
             let n = self.cmd_seq.fetch_add(1, Ordering::SeqCst);
@@ -473,14 +482,6 @@ impl PushPort for MemoryBackend {
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
-            // Pre-commit entity schema validation (ADR-011): reject before index validation or append.
-            // A rejected append leaves no idempotency entry (record happens only on success below).
-            {
-                let schema = g.schemas.get(shard);
-                for item in &push_items {
-                    validate_entity(schema, item.entity_document.as_ref())?;
-                }
-            }
             {
                 let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                 proj.index_validate_push(&push_items)?;
@@ -655,6 +656,19 @@ impl CommitTransitionPort for MemoryBackend {
                 }
                 let mut lifecycle_item_ids = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
+                    // Pre-commit entity schema validation for lifecycle items (ADR-011): reject before
+                    // counter reservation so invalid documents do not consume item-id counter space.
+                    let schema_err = {
+                        let schema = g.schemas.get(shard);
+                        entry
+                            .lifecycle_items
+                            .iter()
+                            .find_map(|item| validate_entity(schema, item.entity.as_ref()).err())
+                    };
+                    if let Some(e) = schema_err {
+                        recovery.push(reject(e));
+                        continue;
+                    }
                     let epoch = expected_epoch.unwrap_or(0);
                     let counter_base =
                         self.counters
@@ -666,17 +680,6 @@ impl CommitTransitionPort for MemoryBackend {
                         counter_base,
                         max_attempts,
                     );
-                    // Pre-commit entity schema validation for lifecycle items (ADR-011).
-                    let schema_err = {
-                        let schema = g.schemas.get(shard);
-                        push_items.iter().find_map(|item| {
-                            validate_entity(schema, item.entity_document.as_ref()).err()
-                        })
-                    };
-                    if let Some(e) = schema_err {
-                        recovery.push(reject(e));
-                        continue;
-                    }
                     if let Err(e) = {
                         let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
                         proj.index_validate_push(&push_items)

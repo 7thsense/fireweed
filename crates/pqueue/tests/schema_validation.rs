@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use pqueue::{EngineError, NewItem, PayloadUpdate, Pqueue, RequestId};
+use pqueue::{
+    ClaimRef, ClaimedItem, CommitEntry, CommitRequest, EngineError, EntryOutcome, FinalizeKind,
+    NewItem, PayloadUpdate, Pqueue, RequestId,
+};
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, EntitySchemaDocument, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
@@ -249,6 +252,106 @@ async fn schema_validation_update_fields_invalid_entity_rejected() {
     assert!(
         matches!(err, EngineError::EntitySchemaViolation(_)),
         "expected EntitySchemaViolation on update_fields, got {err:?}"
+    );
+}
+
+// ── counter not consumed by invalid entity ────────────────────────────────────
+
+/// An invalid entity push must NOT advance the item-id counter. The first successful push
+/// after a failed push must still receive counter=0 (the next unused slot in the queue).
+#[tokio::test]
+async fn schema_validation_invalid_push_does_not_consume_item_counter() {
+    let pq = make();
+    let q = qkey();
+    pq.create_queue(typed_def()).await.unwrap();
+
+    let err = pq.push(&q, invalid_item(1)).await.unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+
+    let id = pq.push(&q, valid_item(1)).await.unwrap();
+    assert_eq!(
+        id.counter(),
+        0,
+        "invalid push must not consume item-id counter space"
+    );
+}
+
+/// An invalid push_with_request_id must NOT advance the item-id counter.
+#[tokio::test]
+async fn schema_validation_invalid_push_with_request_id_does_not_consume_item_counter() {
+    let pq = make();
+    let q = qkey();
+    pq.create_queue(typed_def()).await.unwrap();
+    let rid = RequestId::new("r1").unwrap();
+
+    let err = pq
+        .push_with_request_id(&q, rid, invalid_item(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
+
+    let id = pq.push(&q, valid_item(1)).await.unwrap();
+    assert_eq!(
+        id.counter(),
+        0,
+        "invalid push_with_request_id must not consume item-id counter space"
+    );
+}
+
+/// An invalid lifecycle item in a commit_transition entry must NOT advance the item-id counter.
+/// After a per-entry rejection, the next valid push must receive the next sequential counter slot.
+#[tokio::test]
+async fn schema_validation_invalid_commit_lifecycle_item_does_not_consume_item_counter() {
+    let pq = make();
+    let q = qkey();
+    pq.create_queue(typed_def()).await.unwrap();
+
+    // Push one valid item (counter=0) and claim it.
+    let input_id = pq.push(&q, valid_item(1)).await.unwrap();
+    assert_eq!(input_id.counter(), 0);
+    let claimed: Vec<ClaimedItem> = pq.claim(&q, 1, 60_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let ci = &claimed[0];
+    let claim_ref = ClaimRef {
+        item_id: ci.item_id,
+        lease_token: ci.lease_token.clone().expect("lease"),
+        lease_expires_at: ci.lease_expires_at,
+        item_version: ci.item_version,
+    };
+
+    // Commit with an invalid lifecycle item — the entry must be per-entry rejected.
+    let outcomes = pq
+        .commit(
+            &q,
+            CommitRequest {
+                request_id: None,
+                entries: vec![CommitEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![invalid_item(2)],
+                    instance_fence: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        matches!(
+            outcomes[0],
+            EntryOutcome::Rejected(EngineError::EntitySchemaViolation(_))
+        ),
+        "commit entry with invalid lifecycle item must be per-entry rejected"
+    );
+
+    // The input item is still leased (the entry was rejected — nothing finalized).
+    // Push a new valid item; it must get counter=1 (not counter=2 or higher).
+    let next_id = pq.push(&q, valid_item(3)).await.unwrap();
+    assert_eq!(
+        next_id.counter(),
+        1,
+        "invalid commit lifecycle item must not consume item-id counter space"
     );
 }
 

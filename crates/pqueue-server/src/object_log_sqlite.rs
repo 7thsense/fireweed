@@ -1563,6 +1563,9 @@ pub struct SegmentedObjectLogInMemoryBackend {
     /// query ports). A derived, rebuildable view — `read_all` replay reconstructs it on open.
     projections: Mutex<HashMap<QueueKey, Arc<Mutex<ProjectionData>>>>,
     queues: Mutex<HashMap<QueueKey, QueueDefinition>>,
+    /// Compiled entity schema per queue (ADR-011). Populated at `create_queue` time; consulted on every
+    /// push path to reject invalid entity documents before counter reservation or durable append.
+    schemas: Mutex<HashMap<QueueKey, Arc<CompiledSchema>>>,
     epochs: Mutex<HashMap<QueueKey, u64>>,
     coords: Mutex<HashMap<QueueKey, Arc<ShardCoord>>>,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
@@ -1586,6 +1589,7 @@ impl SegmentedObjectLogInMemoryBackend {
             log,
             projections: Mutex::new(HashMap::new()),
             queues: Mutex::new(HashMap::new()),
+            schemas: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
             coords: Mutex::new(HashMap::new()),
             mutate_locks: Mutex::new(HashMap::new()),
@@ -1877,6 +1881,13 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
                 .lock()
                 .expect("segmented queues poisoned")
                 .insert(key.clone(), definition.clone());
+            let compiled_schema = compile_queue_schema(&definition)?;
+            if let Some(cs) = compiled_schema {
+                self.schemas
+                    .lock()
+                    .expect("segmented inmemory schemas poisoned")
+                    .insert(key.clone(), cs);
+            }
             let epoch = self.log.current_epoch(&key).unwrap_or(0);
             self.set_epoch(&key, epoch);
             let _ = self.coord_for(&key);
@@ -1956,6 +1967,14 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
                     .map(|d| d.retry_policy.max_attempts)
                     .ok_or(EngineError::NotFound)?
             };
+            // Pre-commit entity schema validation (ADR-011): reject before counter reservation or append.
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented inmemory schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
             let epoch = expected_epoch.unwrap_or_else(|| self.cached_epoch(shard));
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
@@ -1990,6 +2009,15 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
                 let d = g.get(shard).ok_or(EngineError::NotFound)?;
                 (d.retry_policy.max_attempts, d.request_id_retention_ms)
             };
+            // Pre-commit entity schema validation (ADR-011): reject before counter reservation.
+            // A rejected append leaves no idempotency entry (record happens only on success below).
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented inmemory schemas poisoned")
+                .get(shard)
+                .cloned();
+            validate_push_items(schema.as_ref(), &items)?;
             let expires_at = request_expires_at(now, retention_ms);
             {
                 let mut idem = self
@@ -2658,6 +2686,15 @@ mod recovery_tests {
             seal_each_config(),
         )
         .unwrap();
+        schema_validation_backend(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn segmented_object_log_inmemory_schema_validation_rejects_before_append_and_idempotency()
+    {
+        let tmp = TmpDir::new("schema-seginmem");
+        let backend =
+            SegmentedObjectLogInMemoryBackend::open(tmp.object_root(), seal_each_config()).unwrap();
         schema_validation_backend(&backend).await;
     }
 }
