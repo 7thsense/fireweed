@@ -613,6 +613,21 @@ impl CommitTransitionPort for MemoryBackend {
                     }
                 }
 
+                // Pre-commit entity schema validation for lifecycle items (ADR-011): validate
+                // BEFORE any mk/cmd_seq.fetch_add so a schema violation never consumes
+                // cmd_seq for side-record or instance-fence envelopes.
+                if !entry.lifecycle_items.is_empty() {
+                    let schema = g.schemas.get(shard);
+                    if let Some(e) = entry
+                        .lifecycle_items
+                        .iter()
+                        .find_map(|item| validate_entity(schema, item.entity.as_ref()).err())
+                    {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                }
+
                 // Capture the recovery facts BEFORE moving the entry's records into commands.
                 let side_record_keys: Vec<Vec<u8>> =
                     entry.side_records.iter().map(|r| r.key.clone()).collect();
@@ -656,19 +671,7 @@ impl CommitTransitionPort for MemoryBackend {
                 }
                 let mut lifecycle_item_ids = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
-                    // Pre-commit entity schema validation for lifecycle items (ADR-011): reject before
-                    // counter reservation so invalid documents do not consume item-id counter space.
-                    let schema_err = {
-                        let schema = g.schemas.get(shard);
-                        entry
-                            .lifecycle_items
-                            .iter()
-                            .find_map(|item| validate_entity(schema, item.entity.as_ref()).err())
-                    };
-                    if let Some(e) = schema_err {
-                        recovery.push(reject(e));
-                        continue;
-                    }
+                    // Schema already validated above (before any mk/cmd_seq.fetch_add).
                     let epoch = expected_epoch.unwrap_or(0);
                     let counter_base =
                         self.counters
