@@ -328,6 +328,49 @@ pub struct LogLineageIdentity {
     pub high_water: Option<CommandPosition>,
 }
 
+/// Where recovery-on-open must begin replaying the durable log for one shard, once poison / backpressure
+/// health has been folded in (see [`resolve_recovery_start`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryStart {
+    /// Trust the projection's durably recorded high-water and replay only the object-log tail beyond it.
+    FromHighWater(Option<CommandPosition>),
+    /// The projection's high-water is not trustworthy (HARD async-apply backpressure); replay the whole
+    /// retained log from genesis rather than skipping history. The high-water is NOT advanced past the
+    /// unvalidated debt.
+    FromGenesis,
+}
+
+/// Resolve where recovery replay must start for a shard, given the projection's recorded high-water and its
+/// async-apply health (TD-004 §"Async apply debt, backpressure, and poison thresholds").
+///
+/// - **Poison ⇒ fail closed.** If `poison` is `Some`, the projection has latched an unrepairable state
+///   (persistent checkpoint errors, corruption, or an unresolved replay-apply gap). Unresolved replay
+///   poison MUST stop serving, so this returns `Err(Storage)` — the composition aborts recovery rather than
+///   hydrating a divergent image. This is the "high-water must not advance past poison" invariant: a
+///   poisoned shard never reaches the tail-replay loop that would advance state.
+/// - **Hard backpressure ⇒ replay from genesis.** If the projection is under hard async-apply
+///   backpressure (`hard_backpressure == true`) but not poisoned, its lagging `sqlite_high_water` MUST NOT
+///   be advertised as a safe replay-skip point; recovery replays from an earlier authoritative source
+///   (genesis) so no acknowledged command is skipped.
+/// - **Healthy ⇒ trust the high-water.** Otherwise replay only the object-log tail beyond the recorded
+///   high-water (the normal owner-local fast restart).
+pub fn resolve_recovery_start(
+    poison: Option<&str>,
+    hard_backpressure: bool,
+    high_water: Option<CommandPosition>,
+) -> EngineResult<RecoveryStart> {
+    if let Some(reason) = poison {
+        return Err(EngineError::Storage(format!(
+            "recovery refused: hybrid-async projection is poisoned and must not advance past the poison \
+             point: {reason}"
+        )));
+    }
+    if hard_backpressure {
+        return Ok(RecoveryStart::FromGenesis);
+    }
+    Ok(RecoveryStart::FromHighWater(high_water))
+}
+
 /// The projection axis: the materialized read model. Exposes the full `ProjectionRead` surface, the
 /// secondary-index queries, the pre-commit VALIDATION helpers the orchestration relies on (so the
 /// post-append `apply` is infallible — commit has no rollback), and the `apply` seam itself.
@@ -495,6 +538,25 @@ pub trait ProjectionStore: Send {
     /// validate.
     fn validate_recovery_lineage(&mut self, _identity: &LogLineageIdentity) -> EngineResult<()> {
         Ok(())
+    }
+
+    /// The projection's poison state for `shard` during recovery-on-open, or `None` when healthy. A
+    /// projection that has latched poison — persistent checkpoint errors, corruption, or an unresolved
+    /// replay-apply gap it cannot repair by waiting — MUST report it here so the composition stops serving
+    /// (fail closed) instead of hydrating and advertising a divergent image (TD-004 §"Async apply debt,
+    /// backpressure, and poison thresholds": poison). Default: `None` (the in-memory / relational
+    /// projections carry no async-apply poison).
+    fn recovery_poison(&self, _shard: &QueueKey) -> Option<String> {
+        None
+    }
+
+    /// Whether the projection is under HARD async-apply backpressure for `shard` — its durable
+    /// `sqlite_high_water` is lagging far enough that it MUST NOT be advertised as a safe replay-skip point
+    /// (TD-004 "Recovery/high-water backpressure"). Unlike poison this is repairable by waiting, so the
+    /// composition does not fail closed; it replays from an earlier authoritative source (genesis) rather
+    /// than trusting the lagging high-water. Default: `false`.
+    fn recovery_backpressured(&self, _shard: &QueueKey) -> bool {
+        false
     }
 
     /// Enumerate the durable queue definitions this projection persists, for recovery-on-open. Default: empty
@@ -943,6 +1005,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 high_water: log.high_water(&key)?,
             };
             projection.validate_recovery_lineage(&identity)?;
+            // Fold async-apply poison / hard-backpressure health into the replay-start decision (TD-004
+            // §backpressure/poison): a poisoned projection fails closed here (unresolved replay poison must
+            // stop serving; high-water must not advance past poison), and a hard-backpressured one replays
+            // from genesis rather than trusting its lagging high-water as a safe skip point.
+            let recovery_poison = projection.recovery_poison(&key);
+            let hard_backpressure = projection.recovery_backpressured(&key);
             if self.durability == DurabilityClass::EventualApply {
                 Self::rebuild_push_idempotency_from_log(
                     log,
@@ -951,8 +1019,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     def.request_id_retention_ms,
                 )?;
             }
-            // Replay the durable log tail from the projection's recovery high-water (genesis when `None`).
-            let mut from = projection.recovery_high_water(&key)?;
+            // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
+            // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
+            let recorded_high_water = projection.recovery_high_water(&key)?;
+            let mut from = match resolve_recovery_start(
+                recovery_poison.as_deref(),
+                hard_backpressure,
+                recorded_high_water,
+            )? {
+                RecoveryStart::FromHighWater(pos) => pos,
+                RecoveryStart::FromGenesis => None,
+            };
             let mut tail: u64 = 0;
             loop {
                 let page = log.read_from(&key, from.clone(), 256)?;
@@ -3151,5 +3228,78 @@ mod ordered_tests {
                 .apply_batches(),
             vec![vec!["push", "push"], vec!["claim"], vec!["claim"]]
         );
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    //! Recovery-on-open poison / high-water fail-closed decisions (TD-004 §"Async apply debt,
+    //! backpressure, and poison thresholds"; bead pqueue-6da52695).
+    use super::*;
+
+    fn shard() -> QueueKey {
+        QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        )
+    }
+
+    fn hw(seq: u64) -> CommandPosition {
+        CommandPosition::new(shard(), 0, seq)
+    }
+
+    #[test]
+    fn poison_stops_recovery_by_failing_closed() {
+        // Unresolved replay poison MUST stop serving: recovery resolution returns a Storage error rather
+        // than a replay-start position, so the composition aborts recover() instead of hydrating.
+        let err = resolve_recovery_start(Some("persistent checkpoint error"), false, Some(hw(41)))
+            .expect_err("a poisoned projection must fail closed");
+        match err {
+            EngineError::Storage(msg) => {
+                assert!(msg.contains("poisoned"), "{msg}");
+                assert!(msg.contains("persistent checkpoint error"), "{msg}");
+            }
+            other => panic!("expected Storage poison error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn poison_high_water_never_advances_past_the_poison_point() {
+        // Even with a recorded high-water present, poison forbids advancing past it — the resolver never
+        // yields a FromHighWater(Some(..)) skip point for a poisoned shard.
+        let result = resolve_recovery_start(Some("corruption"), false, Some(hw(100)));
+        assert!(
+            result.is_err(),
+            "high-water must not advance past poison: {result:?}"
+        );
+    }
+
+    #[test]
+    fn hard_backpressure_without_poison_replays_from_genesis_not_the_lagging_high_water() {
+        // A lagging (hard-backpressured) but un-poisoned projection MUST NOT advertise its high-water as a
+        // safe replay-skip point; recovery restarts from genesis so no acknowledged command is skipped.
+        let start = resolve_recovery_start(None, true, Some(hw(41)))
+            .expect("hard backpressure is repairable, not fail-closed");
+        assert_eq!(start, RecoveryStart::FromGenesis);
+    }
+
+    #[test]
+    fn healthy_projection_trusts_its_recovery_high_water() {
+        let start = resolve_recovery_start(None, false, Some(hw(41)))
+            .expect("a healthy projection trusts its high-water");
+        assert_eq!(start, RecoveryStart::FromHighWater(Some(hw(41))));
+    }
+
+    #[test]
+    fn healthy_empty_projection_replays_from_genesis() {
+        let start = resolve_recovery_start(None, false, None)
+            .expect("empty projection replays from genesis");
+        assert_eq!(start, RecoveryStart::FromHighWater(None));
+    }
+
+    #[test]
+    fn poison_takes_precedence_over_hard_backpressure() {
+        // When both conditions hold, fail-closed poison wins over the (softer) genesis-replay path.
+        assert!(resolve_recovery_start(Some("gap"), true, None).is_err());
     }
 }

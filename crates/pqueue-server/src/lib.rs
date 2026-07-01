@@ -27,7 +27,7 @@ use pqueue_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
 };
-use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend};
+use pqueue_sqlite::{HybridAsyncThresholds, HybridProjectionStore, composed_sqlite_backend};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -230,6 +230,11 @@ pub struct Config {
     /// Tokio worker-thread cap (the typed form of `PQUEUE_WORKER_THREADS`). `None` = one worker per core.
     /// Consumed by the bin when building the runtime, not by [`start`].
     pub worker_threads: Option<usize>,
+    /// Per-queue bounds on `objectlog/hybrid-async` async SQLite apply debt (bead pqueue-6da52695): the
+    /// hard lag/bytes/depth/age limits and the apply-retry poison threshold that drive backpressure and
+    /// fail-closed poison (TD-004 §"Async apply debt, backpressure, and poison thresholds"). The typed form
+    /// of the `PQUEUE_HYBRID_ASYNC_*` env names; applied by the hybrid-async projection's apply pipeline.
+    pub hybrid_async: HybridAsyncThresholds,
 }
 
 impl Config {
@@ -253,6 +258,7 @@ impl Config {
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             debug_segments: false,
             worker_threads: None,
+            hybrid_async: HybridAsyncThresholds::default(),
         }
     }
 }

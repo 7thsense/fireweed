@@ -17,6 +17,7 @@ use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
+use pqueue_sqlite::HybridAsyncThresholds;
 
 use crate::{
     BackendSpec, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL, LogSpec, ProjectionSpec,
@@ -71,6 +72,50 @@ fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, Confi
     let max_latency_ms = parse_u64(env, "PQUEUE_SEGMENT_MAX_LATENCY_MS", 20);
     SegmentConfig::new(target_bytes, max_latency_ms)
         .map_err(|e| ConfigError::new(format!("invalid segment configuration: {e}")))
+}
+
+fn parse_u32(env: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
+    env.get(key)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+/// The `objectlog/hybrid-async` async-apply debt bounds (bead pqueue-6da52695): hard lag/bytes/depth/age
+/// limits and the apply-retry poison threshold that drive backpressure and fail-closed poison, from the
+/// `PQUEUE_HYBRID_ASYNC_*` env names. A zero bound is rejected by [`HybridAsyncThresholds::new`] (it would
+/// leave the queue instantly backpressured), surfaced here as a [`ConfigError`].
+fn hybrid_async_thresholds(
+    env: &BTreeMap<String, String>,
+) -> Result<HybridAsyncThresholds, ConfigError> {
+    let d = HybridAsyncThresholds::default();
+    HybridAsyncThresholds::new(
+        parse_u64(
+            env,
+            "PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS",
+            d.apply_lag_max_commands,
+        ),
+        parse_u64(
+            env,
+            "PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES",
+            d.apply_debt_max_bytes,
+        ),
+        parse_u64(
+            env,
+            "PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX",
+            d.apply_queue_depth_max,
+        ),
+        parse_u64(
+            env,
+            "PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS",
+            d.oldest_unapplied_max_ms,
+        ),
+        parse_u32(
+            env,
+            "PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD",
+            d.apply_poison_retry_threshold,
+        ),
+    )
+    .map_err(|e| ConfigError::new(format!("invalid hybrid-async threshold configuration: {e}")))
 }
 
 fn unsupported_storage(log: &str, projection: &str, reason: &str) -> ConfigError {
@@ -264,6 +309,7 @@ impl Config {
                 .get("PQUEUE_WORKER_THREADS")
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n > 0),
+            hybrid_async: hybrid_async_thresholds(env)?,
         })
     }
 }
@@ -388,6 +434,57 @@ mod tests {
             }
             _ => panic!("expected objectlog log × hybrid projection"),
         }
+    }
+
+    #[test]
+    fn hybrid_async_thresholds_default_when_env_absent() {
+        let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
+        assert_eq!(config.hybrid_async, HybridAsyncThresholds::default());
+    }
+
+    #[test]
+    fn hybrid_async_thresholds_parsed_from_env() {
+        let config = Config::from_env(&map(&[
+            ("PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS", "5000"),
+            ("PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES", "1048576"),
+            ("PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX", "64"),
+            ("PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS", "30000"),
+            ("PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD", "5"),
+        ]))
+        .expect("valid hybrid-async env");
+        assert_eq!(config.hybrid_async.apply_lag_max_commands, 5000);
+        assert_eq!(config.hybrid_async.apply_debt_max_bytes, 1_048_576);
+        assert_eq!(config.hybrid_async.apply_queue_depth_max, 64);
+        assert_eq!(config.hybrid_async.oldest_unapplied_max_ms, 30_000);
+        assert_eq!(config.hybrid_async.apply_poison_retry_threshold, 5);
+    }
+
+    #[test]
+    fn hybrid_async_zero_threshold_is_rejected() {
+        // A zero debt bound would leave the queue instantly and permanently backpressured — reject it at
+        // configuration time rather than silently accepting a queue that can never admit a mutation.
+        let result = Config::from_env(&map(&[("PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS", "0")]));
+        let Err(err) = result else {
+            panic!("zero hybrid-async lag bound must fail");
+        };
+        assert!(
+            err.0
+                .contains("hybrid-async threshold apply_lag_max_commands"),
+            "{}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn hybrid_async_zero_poison_retry_threshold_is_rejected() {
+        let result = Config::from_env(&map(&[(
+            "PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD",
+            "0",
+        )]));
+        let Err(err) = result else {
+            panic!("zero poison retry threshold must fail");
+        };
+        assert!(err.0.contains("apply_poison_retry_threshold"), "{}", err.0);
     }
 
     #[test]
