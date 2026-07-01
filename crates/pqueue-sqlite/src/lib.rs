@@ -13,9 +13,9 @@ mod relational;
 pub use compose_log::SqliteLog;
 pub use relational::{
     BackpressureLevel, CheckpointLineage, CheckpointProgress, ComposedSqliteRelationalBackend,
-    HybridAsyncDebt, HybridAsyncMetrics, HybridAsyncMonitor, HybridAsyncThresholds,
-    HybridProjectionStore, SqliteCheckpointStore, SqliteProjectionStore, SqliteRelational,
-    SqliteRelationalBackend, WalCheckpointStats, composed_sqlite_relational,
+    DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncDebt, HybridAsyncMetrics, HybridAsyncMonitor,
+    HybridAsyncThresholds, HybridProjectionStore, SqliteCheckpointStore, SqliteProjectionStore,
+    SqliteRelational, SqliteRelationalBackend, WalCheckpointStats, composed_sqlite_relational,
     composed_sqlite_relational_in_memory,
 };
 

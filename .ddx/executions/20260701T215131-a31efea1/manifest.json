@@ -1,0 +1,31 @@
+{
+  "attempt_id": "20260701T215131-a31efea1",
+  "bead_id": "pqueue-8e5e7846",
+  "base_rev": "5c415c6acc2721f63362220cc92ad1cad3532529",
+  "created_at": "2026-07-01T21:51:31.53451548Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-8e5e7846",
+    "title": "Tune hybrid async deferred flush chunk for 100k ack p99",
+    "description": "The bounded-flush fix proved partial draining, but the default 2,000-command chunk still drains the whole 100k release backlog (hundreds of batched commands) under the composed backend mutex and leaves ack p99 failing. Tune or configure the production/test default so deferred SQLite checkpoint work is sliced small enough to protect push ack p99 while preserving bounded debt and exact-once recovery. In scope: default chunk sizing/config seam, docs/evidence notes, tests/perf evidence. Out of scope: weakening the \u003c=1.20 hot-path gate.",
+    "acceptance": "1. `cargo test -p pqueue-server --test performance_object_log_hybrid_tests performance_object_log_hybrid_deferred_flush_chunking -- --nocapture` passes and asserts the default flush chunk is below the 100k release suite command backlog size.\n2. `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_async_apply_exactly_once -- --nocapture` passes.\n3. `PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=100000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture` passes with bars_met=true.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:performance",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T215131-a31efea1",
+    "prompt": ".ddx/executions/20260701T215131-a31efea1/prompt.md",
+    "manifest": ".ddx/executions/20260701T215131-a31efea1/manifest.json",
+    "result": ".ddx/executions/20260701T215131-a31efea1/result.json",
+    "checks": ".ddx/executions/20260701T215131-a31efea1/checks.json",
+    "usage": ".ddx/executions/20260701T215131-a31efea1/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-8e5e7846-20260701T215131-a31efea1"
+  },
+  "prompt_sha": "a960bd881157179427512e4017ff8b3bda767eed5f596f0b5d1f44a98b20c6d6"
+}
