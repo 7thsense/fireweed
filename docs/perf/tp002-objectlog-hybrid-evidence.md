@@ -1,4 +1,4 @@
-# TP-002 objectlog/hybrid smoke evidence and 10M release blocker
+# TP-002 objectlog/hybrid smoke evidence and 10M release lane
 
 **Bead:** `pqueue-1363098f`. **Date:** 2026-07-01.
 **Suite:** `crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs`.
@@ -23,34 +23,36 @@ Result: **pass**, emitted
 
 | profile | push/s | ack p50 | ack p95 | ack p99 | claim/finalize p95 | segments | objects PUT | mean commands/segment |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| objectlog/hybrid | 47,448.871 | 1.927 ms | 2.683 ms | 2.683 ms | 2.167 ms | 30 | 60 | 1.0 |
-| objectlog/inmemory | 50,779.305 | 1.953 ms | 2.405 ms | 2.405 ms | 1.346 ms | 30 | 60 | 1.0 |
-| objectlog/sqlite | 50,020.476 | 1.979 ms | 2.375 ms | 2.375 ms | 3.118 ms | 30 | 60 | 1.0 |
+| objectlog/hybrid | 47,003.927 | 2.107 ms | 3.985 ms | 3.985 ms | 2.137 ms | 30 | 60 | 1.0 |
+| objectlog/inmemory | 41,771.761 | 2.111 ms | 3.887 ms | 3.887 ms | 2.355 ms | 30 | 60 | 1.0 |
+| objectlog/sqlite | 66,857.371 | 1.862 ms | 2.251 ms | 2.251 ms | 2.986 ms | 30 | 60 | 1.0 |
 
 Hybrid ratios:
 
 | comparison | ratio |
 |---|---:|
-| ack p99 vs objectlog/inmemory | 1.116 |
-| claim/finalize p95 vs objectlog/inmemory | 1.610 |
-| ack p99 vs objectlog/sqlite | 1.130 |
-| claim/finalize p95 vs objectlog/sqlite | 0.695 |
+| ack p99 vs objectlog/inmemory | 1.025 |
+| claim/finalize p95 vs objectlog/inmemory | 0.907 |
+| ack p99 vs objectlog/sqlite | 1.770 |
+| claim/finalize p95 vs objectlog/sqlite | 0.716 |
+
+`hybrid_claim_finalize_p95_vs_inmemory_ratio`: `0.907` (`<= 1.20`).
 
 Smoke recovery:
 
 | metric | value |
 |---|---:|
 | resident items | 1,000 |
-| normal restart hydrate + tail | 5.194 ms |
+| normal restart hydrate + tail | 5.423 ms |
 | normal restart tail commands | 0 |
 | normal restart pending after | 1,000 |
-| disk-loss reconstruction wall | 136.938 ms |
+| disk-loss reconstruction wall | 101.999 ms |
 | disk-loss pending after | 1,000 |
 
 The smoke recovery gate passed (`<= 5s`, `<= 1000` tail commands) and disk-loss
-reconstruction was exact for the resident count. The smoke hot-path row is not a
-release pass because claim/finalize p95 was 61% over `objectlog/inmemory`; the
-release-tier command is therefore blocked rather than recorded as passing.
+reconstruction was exact for the resident count. The smoke hot-path row passed:
+claim/finalize p95 was 0.907x `objectlog/inmemory`, below the 1.200x gate, and
+the emitted ledger row has `bars_met=true`.
 
 ## Release-tier command
 

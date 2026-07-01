@@ -90,7 +90,14 @@ impl LedgerRow {
 /// `Config` populator (`pqueue_server::Config::from_env`) is the only env→config path for the server itself.
 pub fn ledger_path(manifest_dir: &str, suite: &str) -> std::path::PathBuf {
     let dir = match std::env::var("PQUEUE_LEDGER_DIR") {
-        Ok(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
+        Ok(d) if !d.trim().is_empty() => {
+            let path = std::path::PathBuf::from(d);
+            if path.is_absolute() {
+                path
+            } else {
+                Path::new(manifest_dir).join("../..").join(path)
+            }
+        }
         // `..` resolves at IO time; crates/<x>/../../target == repo-root target.
         _ => Path::new(manifest_dir).join("../../target/pqueue-ledger"),
     };
@@ -1307,6 +1314,11 @@ mod tests {
         assert_eq!(
             ledger_path("/repo/crates/x", "suite_a"),
             std::path::PathBuf::from("/tmp/pq-ledger/suite_a.jsonl")
+        );
+        unsafe { std::env::set_var("PQUEUE_LEDGER_DIR", "docs/perf/evidence") };
+        assert_eq!(
+            ledger_path("/repo/crates/x", "suite_a"),
+            std::path::PathBuf::from("/repo/crates/x/../../docs/perf/evidence/suite_a.jsonl")
         );
         unsafe { std::env::remove_var("PQUEUE_LEDGER_DIR") };
         assert_eq!(

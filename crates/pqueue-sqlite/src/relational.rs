@@ -1135,6 +1135,7 @@ struct Inner {
     queues: HashMap<QueueKey, QueueDefinition>,
     /// Compiled entity schemas (ADR-011). Rebuilt from `queues` on open; keyed by queue.
     schemas: HashMap<QueueKey, Arc<CompiledSchema>>,
+    grouped_shards: HashSet<QueueKey>,
     /// Ephemeral live lease tokens (cleartext is never persisted; only the hash is). Lost on reopen.
     live_tokens: HashMap<ItemId, LeaseToken>,
 }
@@ -1167,6 +1168,20 @@ impl Inner {
             }
             self.queues.insert(key, definition);
         }
+        self.grouped_shards.clear();
+        let mut stmt = st(self.conn.prepare(
+            "SELECT DISTINCT tenant_id, queue_id FROM pqueue_items WHERE group_key IS NOT NULL",
+        ))?;
+        let mapped = st(stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }))?;
+        for r in mapped {
+            let (tenant, queue) = st(r)?;
+            self.grouped_shards.insert(QueueKey::new(
+                TenantId::new(tenant).map_err(|e| EngineError::Storage(e.to_string()))?,
+                QueueId::new(queue).map_err(|e| EngineError::Storage(e.to_string()))?,
+            ));
+        }
         // NOTE: item-id restart-safety is handled by `restore_counters` (it seeds `QueueCounters` past the
         // highest durable id, decoding `(epoch, counter)` straight from the packed id — ADR-009).
         Ok(())
@@ -1190,6 +1205,7 @@ impl Inner {
         let Inner {
             conn,
             queues,
+            grouped_shards,
             live_tokens,
             ..
         } = self;
@@ -1214,6 +1230,7 @@ impl Inner {
         apply_command_sql(
             &tx,
             queues,
+            grouped_shards,
             &mut token_ops,
             shard,
             seq as u64,
@@ -1724,6 +1741,7 @@ fn refresh_group_summary(
 fn apply_command_sql(
     tx: &Transaction<'_>,
     queues: &HashMap<QueueKey, QueueDefinition>,
+    grouped_shards: &mut HashSet<QueueKey>,
     token_ops: &mut Vec<TokenOp>,
     shard: &QueueKey,
     seq: u64,
@@ -1748,6 +1766,9 @@ fn apply_command_sql(
                 {
                     groups.push(g.clone());
                 }
+            }
+            if !groups.is_empty() {
+                grouped_shards.insert(shard.clone());
             }
             for g in &groups {
                 refresh_group_summary(tx, shard, g, now)?;
@@ -1776,8 +1797,10 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
-            for g in groups_of(tx, shard, &c.item_ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
+            if grouped_shards.contains(shard) {
+                for g in groups_of(tx, shard, &c.item_ids)? {
+                    refresh_group_summary(tx, shard, &g, now)?;
+                }
             }
             Ok(())
         }
@@ -1808,8 +1831,10 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
-            for g in groups_of(tx, shard, &c.item_ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
+            if grouped_shards.contains(shard) {
+                for g in groups_of(tx, shard, &c.item_ids)? {
+                    refresh_group_summary(tx, shard, &g, now)?;
+                }
             }
             Ok(())
         }
@@ -2096,8 +2121,10 @@ fn apply_command_sql(
                 )?;
             }
             let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id).collect();
-            for g in groups_of(tx, shard, &ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
+            if grouped_shards.contains(shard) {
+                for g in groups_of(tx, shard, &ids)? {
+                    refresh_group_summary(tx, shard, &g, now)?;
+                }
             }
             Ok(())
         }
@@ -2117,6 +2144,7 @@ fn apply_command_sql(
             apply_command_sql(
                 tx,
                 queues,
+                grouped_shards,
                 token_ops,
                 shard,
                 seq,
@@ -2166,10 +2194,15 @@ fn apply_command_sql(
                 now,
             )?;
             // Refresh both the superseded item's group and the replacement's (often the same).
-            let mut groups = groups_of(tx, shard, std::slice::from_ref(&c.superseded_item_id))?;
+            let mut groups = if grouped_shards.contains(shard) {
+                groups_of(tx, shard, std::slice::from_ref(&c.superseded_item_id))?
+            } else {
+                Vec::new()
+            };
             if let Some(g) = &c.replacement.group_key
                 && !groups.contains(g)
             {
+                grouped_shards.insert(shard.clone());
                 groups.push(g.clone());
             }
             for g in &groups {
@@ -2192,8 +2225,10 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(*id));
             }
-            for g in groups_of(tx, shard, &c.item_ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
+            if grouped_shards.contains(shard) {
+                for g in groups_of(tx, shard, &c.item_ids)? {
+                    refresh_group_summary(tx, shard, &g, now)?;
+                }
             }
             Ok(())
         }
@@ -3192,6 +3227,7 @@ pub struct HybridProjectionStore {
     sqlite: SqliteProjectionStore,
     memory: InMemoryProjection,
     hydrated: HashSet<QueueKey>,
+    memory_next_seq: HashMap<QueueKey, u64>,
     poisoned: Option<String>,
 }
 
@@ -3209,6 +3245,7 @@ impl HybridProjectionStore {
             sqlite,
             memory: InMemoryProjection::new(),
             hydrated: HashSet::new(),
+            memory_next_seq: HashMap::new(),
             poisoned: None,
         }
     }
@@ -3219,6 +3256,7 @@ impl HybridProjectionStore {
             sqlite,
             memory,
             hydrated: HashSet::new(),
+            memory_next_seq: HashMap::new(),
             poisoned: None,
         }
     }
@@ -3288,6 +3326,10 @@ impl HybridProjectionStore {
                 shard.tenant_id, shard.queue_id, sqlite_high_water, expected_high_water
             )));
         }
+        self.memory_next_seq.insert(
+            shard.clone(),
+            expected_high_water.map_or(0, |pos| pos.sequence.saturating_add(1)),
+        );
         self.hydrated.insert(shard);
         Ok(())
     }
@@ -3487,6 +3529,7 @@ fn open_inner(conn: Connection) -> EngineResult<Inner> {
         conn,
         queues: HashMap::new(),
         schemas: HashMap::new(),
+        grouped_shards: HashSet::new(),
         live_tokens: HashMap::new(),
     };
     inner.reload()?;
@@ -3685,6 +3728,7 @@ fn apply_committed_sql(
     let Inner {
         conn,
         queues,
+        grouped_shards,
         live_tokens,
         ..
     } = g;
@@ -3713,6 +3757,7 @@ fn apply_committed_sql(
     apply_command_sql(
         &tx,
         queues,
+        grouped_shards,
         &mut token_ops,
         &position.queue,
         position.sequence,
@@ -3746,6 +3791,7 @@ fn apply_committed_batch_sql(
     let Inner {
         conn,
         queues,
+        grouped_shards,
         live_tokens,
         ..
     } = g;
@@ -3792,6 +3838,7 @@ fn apply_committed_batch_sql(
         apply_command_sql(
             &tx,
             queues,
+            grouped_shards,
             &mut token_ops,
             &pos.queue,
             pos.sequence,
@@ -3871,6 +3918,7 @@ impl LogWriter for RelLogWriter<'_> {
 struct RelProjectionWriter<'a> {
     tx: &'a Transaction<'a>,
     queues: &'a HashMap<QueueKey, QueueDefinition>,
+    grouped_shards: &'a mut HashSet<QueueKey>,
     /// Token mutations accumulate here and are replayed onto the live map by `write` AFTER commit (F4).
     token_ops: &'a mut Vec<TokenOp>,
 }
@@ -3885,6 +3933,7 @@ impl ProjectionWriter for RelProjectionWriter<'_> {
             apply_command_sql(
                 self.tx,
                 self.queues,
+                self.grouped_shards,
                 self.token_ops,
                 &pos.queue,
                 pos.sequence,
@@ -3935,6 +3984,7 @@ impl Backend for SqliteRelationalBackend {
             let Inner {
                 conn,
                 queues,
+                grouped_shards,
                 live_tokens,
                 ..
             } = &mut *guard;
@@ -3945,6 +3995,7 @@ impl Backend for SqliteRelationalBackend {
                 let mut pw = RelProjectionWriter {
                     tx: &tx,
                     queues,
+                    grouped_shards,
                     token_ops: &mut token_ops,
                 };
                 f(&mut lw, &mut pw)?
@@ -4379,6 +4430,7 @@ impl PushPort for SqliteRelationalBackend {
             let Inner {
                 conn,
                 queues,
+                grouped_shards,
                 live_tokens,
                 ..
             } = &mut *g;
@@ -4413,6 +4465,7 @@ impl PushPort for SqliteRelationalBackend {
             apply_command_sql(
                 &tx,
                 queues,
+                grouped_shards,
                 &mut token_ops,
                 shard,
                 seq as u64,
@@ -4499,6 +4552,7 @@ impl ClaimPort for SqliteRelationalBackend {
             let Inner {
                 conn,
                 queues,
+                grouped_shards,
                 live_tokens,
                 ..
             } = &mut *g;
@@ -4577,6 +4631,7 @@ impl ClaimPort for SqliteRelationalBackend {
             apply_command_sql(
                 &tx,
                 queues,
+                grouped_shards,
                 &mut token_ops,
                 &req.shard,
                 seq as u64,
@@ -4769,6 +4824,7 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
             let Inner {
                 conn,
                 queues,
+                grouped_shards,
                 live_tokens,
                 ..
             } = &mut *g;
@@ -4807,7 +4863,16 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
             let mut positions: Vec<CommandPosition> = Vec::new();
             let mut apply =
                 |command: &QueueCommand, token_ops: &mut Vec<TokenOp>| -> EngineResult<()> {
-                    apply_command_sql(&tx, queues, token_ops, shard, seq, now, command)?;
+                    apply_command_sql(
+                        &tx,
+                        queues,
+                        grouped_shards,
+                        token_ops,
+                        shard,
+                        seq,
+                        now,
+                        command,
+                    )?;
                     positions.push(CommandPosition::new(
                         shard.clone(),
                         cursor_epoch as u64,
@@ -6027,23 +6092,28 @@ impl ProjectionStore for HybridProjectionStore {
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
         self.check_healthy()?;
-        let mut cursors = HashMap::new();
-        for pos in positions {
-            cursors
-                .entry(pos.queue.clone())
-                .or_insert(self.sqlite.recovery_high_water(&pos.queue)?.unwrap_or(0));
-        }
         self.sqlite.apply_committed_batch(positions, commands)?;
-        let mut memory_positions = Vec::new();
-        let mut memory_commands = Vec::new();
-        for (pos, env) in positions.iter().zip(commands.iter()) {
-            if pos.sequence >= *cursors.get(&pos.queue).unwrap_or(&0) {
-                memory_positions.push(pos.clone());
-                memory_commands.push(env.clone());
+        let mut advanced: HashMap<QueueKey, u64> = HashMap::new();
+        let apply_result: EngineResult<()> = (|| {
+            for (pos, env) in positions.iter().zip(commands.iter()) {
+                let next_seq = self.memory_next_seq.get(&pos.queue).copied().unwrap_or(0);
+                if pos.sequence >= next_seq {
+                    self.memory
+                        .apply_borrowed(std::slice::from_ref(pos), std::slice::from_ref(env))?;
+                    let candidate = pos.sequence.saturating_add(1);
+                    advanced
+                        .entry(pos.queue.clone())
+                        .and_modify(|next| *next = (*next).max(candidate))
+                        .or_insert(candidate);
+                }
             }
-        }
-        match self.memory.apply(&memory_positions, &memory_commands) {
-            Ok(()) => Ok(()),
+            Ok(())
+        })();
+        match apply_result {
+            Ok(()) => {
+                self.memory_next_seq.extend(advanced);
+                Ok(())
+            }
             Err(err) => self.poison(format!("memory apply failed after sqlite commit: {err}")),
         }
     }

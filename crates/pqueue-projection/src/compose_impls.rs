@@ -149,6 +149,20 @@ impl InMemoryProjection {
         Ok(())
     }
 
+    pub fn apply_borrowed(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        for (pos, cmd) in positions.iter().zip(commands) {
+            self.projections
+                .get_mut(&pos.queue)
+                .ok_or(EngineError::NotFound)?
+                .apply_command(&cmd.command)?;
+        }
+        Ok(())
+    }
+
     fn get(&self, shard: &QueueKey) -> EngineResult<&ProjectionData> {
         self.projections.get(shard).ok_or(EngineError::NotFound)
     }
@@ -175,13 +189,7 @@ impl ProjectionStore for InMemoryProjection {
         positions: &[CommandPosition],
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
-        for (pos, cmd) in positions.iter().zip(commands) {
-            self.projections
-                .get_mut(&pos.queue)
-                .ok_or(EngineError::NotFound)?
-                .apply_command(&cmd.command)?;
-        }
-        Ok(())
+        self.apply_borrowed(positions, commands)
     }
 
     fn eligible_candidates(
