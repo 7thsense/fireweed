@@ -139,7 +139,19 @@ fn spawn_composed_flusher(backend: Arc<HybridBackend>) -> tokio::task::JoinHandl
         let mut tick = tokio::time::interval(Duration::from_millis(
             backend.group_commit_flush_interval_ms(),
         ));
-        let deferred_interval_ms = env_u64("PQUEUE_HYBRID_DEFERRED_FLUSH_INTERVAL_MS", 60_000);
+        // pqueue-e523813a: this used to default to 60_000ms so the background tick could never fire
+        // mid-measurement and perturb the 100k ack-p99 hot-path gate. That reasoning predates
+        // `try_flush_deferred_projection`'s non-blocking `try_lock` (pqueue-8e5e7846): a tick that finds the
+        // composed-backend mutex busy now just skips instead of stalling the ack path, so a short interval no
+        // longer risks ack-p99 regressions. But a 60s interval doesn't just avoid perturbing the measurement —
+        // it never fires at all within a hot path that finishes in well under 60s (true at every resident count
+        // this suite drives), so the deferred backlog is never drained during the run and grows linearly with
+        // resident (unbounded at scale) instead of being bounded by drain rate. Matching production's
+        // `spawn_hybrid_flusher` cadence (250ms, hardcoded in `pqueue-server::lib`) lets the non-blocking tick
+        // actually drain the backlog as it accumulates, keeping bounded-debt apply-lag bounded at 1M+ resident
+        // without reintroducing the pre-8e5e7846 ack-p99 flakiness (that flakiness came from the tick's old
+        // *blocking* flush, not from its frequency).
+        let deferred_interval_ms = env_u64("PQUEUE_HYBRID_DEFERRED_FLUSH_INTERVAL_MS", 250);
         let mut deferred_tick = tokio::time::interval(Duration::from_millis(deferred_interval_ms));
         loop {
             tokio::select! {
