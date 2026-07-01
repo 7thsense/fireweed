@@ -100,8 +100,13 @@ include lineage fields (`manifest_tail`, segment range/checksum,
 `request_id_fingerprint_count`, memory image high-water, SQLite image
 high-water) plus `retention_frontier` inputs for committed snapshots, active
 manifest tail, request_id outcome retention, client item-key retention, and
-async SQLite lag. Future `objectlog/hybrid-async` release evidence must also
-carry the release-lane performance fields used here: resident count,
+async SQLite lag. It must record bounded debt/backpressure metrics:
+`hybrid_async_apply_debt_bytes`, pending logical batches, oldest unapplied
+`batch_sequence`, `sqlite_apply_lag_ms`, replay debt, configured thresholds,
+typed backpressure count/duration, and whether admission, high-water, recovery,
+or retention advancement failed closed while debt was over budget. Future
+`objectlog/hybrid-async` release evidence must also carry the release-lane
+performance fields used here: resident count,
 hybrid/inmemory hot-path ratios, restart hydrate + tail time, restart pending
 count, disk-loss reconstruction wall time, disk-loss pending count, and
 `bars_met`.

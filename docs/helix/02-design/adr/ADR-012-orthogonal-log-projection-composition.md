@@ -154,6 +154,17 @@ request-id replay records, and manifest prefix describe the same committed
 command prefix. If that proof fails, the store remains poisoned and recovery,
 retention, and snapshot promotion stay fail closed.
 
+Async apply debt is part of the contract, not an implementation detail.
+`objectlog/hybrid-async` MUST publish bounded debt/backpressure metrics covering
+oldest unapplied `batch_sequence`, pending logical batches, command and byte
+debt, `sqlite_apply_lag_ms`, memory high-water, `sqlite_high_water`, configured
+debt thresholds, and backpressure duration. When async debt exceeds the
+configured budget, new mutating admission MUST fail closed or return typed
+backpressure before acknowledging additional commands; recovery high-water,
+snapshot promotion, and retention frontier advancement remain disabled until
+ordered batching, lineage validation, and outcome retention are back within
+budget.
+
 ### Robustness is a **checked invariant**, not a per-backend property
 
 Any `L × P × C` is a backend the instant it type-checks, but it is only **correct** once it passes the
