@@ -1025,6 +1025,189 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
     let _ = std::fs::remove_file(&projection_path);
 }
 
+/// The `objectlog/hybrid-async` config used by the crash/chaos tests below: the async spec plus a non-default
+/// threshold set so the profile is exercised end to end (bead pqueue-fed791af).
+fn objectlog_hybrid_async_config(
+    object_root: std::path::PathBuf,
+    projection_path: std::path::PathBuf,
+) -> Config {
+    let mut config = Config::new(
+        objectlog_hybrid_async_spec(object_root, projection_path),
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    );
+    config.segment_config =
+        pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+    config.hybrid_async =
+        pqueue_server::HybridAsyncThresholds::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
+            .expect("valid hybrid-async thresholds");
+    config
+}
+
+/// CHAOS — crash MID-LEASE on the `objectlog/hybrid-async` profile: an item is claimed (XREADGROUP) but never
+/// acked, then the server is dropped. On restart the recovered lease is neither DUPLICATED (a fresh
+/// XREADGROUP does not redeliver it) nor LOST (a subsequently-pushed item is the only thing delivered — the
+/// leased item stays in-flight, not re-queued to pending).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_loses() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-async-chaos-mid-lease");
+    let leased_id = {
+        let server =
+            start(objectlog_hybrid_async_config(object_root.clone(), projection_path.clone()))
+                .await
+                .unwrap();
+        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let _: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(5)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        // Claim (deliver) the item but DO NOT ack it — a crash strikes mid-lease.
+        let reply: StreamReadReply = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg("g")
+            .arg("c")
+            .arg("STREAMS")
+            .arg("t1:q1")
+            .arg(">")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let id = reply.keys[0].ids[0].id.clone();
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+        id
+    };
+
+    let server = start(objectlog_hybrid_async_config(
+        object_root.clone(),
+        projection_path.clone(),
+    ))
+    .await
+    .unwrap();
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+
+    // The recovered lease is still valid, so a fresh read does NOT redeliver it (no duplicate lease).
+    let redelivered: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        redelivered.is_none(),
+        "a still-valid recovered lease must not be redelivered after a mid-lease crash"
+    );
+
+    // The leased item was not lost back to pending: pushing a NEW item and reading yields exactly that new
+    // item (the old one is held in-flight, not re-queued).
+    let fresh: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(9)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_ne!(fresh, leased_id, "post-crash push minted a distinct id");
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.keys[0].ids.len(),
+        1,
+        "exactly the fresh item is delivered; the in-flight lease was neither lost nor duplicated"
+    );
+    assert_eq!(reply.keys[0].ids[0].id, fresh);
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
+/// CHAOS — disk-loss of the SQLite projection image on the `objectlog/hybrid-async` profile: after two pushes
+/// the server is dropped and the projection db is DELETED. Because the object log is the source of truth, a
+/// restart replays the retained log from genesis and both items are delivered exactly once (nothing lost,
+/// nothing duplicated).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-async-chaos-disk-loss");
+    {
+        let server =
+            start(objectlog_hybrid_async_config(object_root.clone(), projection_path.clone()))
+                .await
+                .unwrap();
+        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let first: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(1)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let second: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(2)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_ne!(first, second);
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+    }
+
+    // DISK LOSS: the async SQLite projection image is gone; only the durable object log remains.
+    std::fs::remove_file(&projection_path).unwrap();
+
+    let server = start(objectlog_hybrid_async_config(
+        object_root.clone(),
+        projection_path.clone(),
+    ))
+    .await
+    .unwrap();
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(2)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.keys[0].ids.len(),
+        2,
+        "a fresh hybrid-async projection db replays the retained object log from genesis after disk loss"
+    );
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-disk-loss");
