@@ -12,9 +12,11 @@ mod compose_log;
 mod relational;
 pub use compose_log::SqliteLog;
 pub use relational::{
-    CheckpointLineage, CheckpointProgress, ComposedSqliteRelationalBackend, HybridProjectionStore,
-    SqliteCheckpointStore, SqliteProjectionStore, SqliteRelational, SqliteRelationalBackend,
-    WalCheckpointStats, composed_sqlite_relational, composed_sqlite_relational_in_memory,
+    BackpressureLevel, CheckpointLineage, CheckpointProgress, ComposedSqliteRelationalBackend,
+    HybridAsyncDebt, HybridAsyncMetrics, HybridAsyncMonitor, HybridAsyncThresholds,
+    HybridProjectionStore, SqliteCheckpointStore, SqliteProjectionStore, SqliteRelational,
+    SqliteRelationalBackend, WalCheckpointStats, composed_sqlite_relational,
+    composed_sqlite_relational_in_memory,
 };
 
 use pqueue_engine::{ComposedBackend, EngineResult, InProcessControlPlane};
