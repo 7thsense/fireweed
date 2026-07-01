@@ -1,0 +1,22 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/deployment/container-runtime-contract.md",
+    "docs/deployment/helm-static-validation.md",
+    "docs/deployment/operator-guide.md",
+    "docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md",
+    "docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md",
+    "docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md",
+    "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md",
+      "line": 94,
+      "rule_id": "prose.specificity.actor_action",
+      "severity": "advisory",
+      "rationale": "The sentence says something enables or supports work without naming the actor, action, artifact, or boundary.",
+      "suggested_edit": "Name the actor, action, artifact, or boundary that makes the statement concrete."
+    }
+  ]
+}
