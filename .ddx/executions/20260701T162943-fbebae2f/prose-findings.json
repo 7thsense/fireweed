@@ -1,0 +1,6 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md"
+  ]
+}
