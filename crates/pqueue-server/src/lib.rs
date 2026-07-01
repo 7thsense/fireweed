@@ -1041,7 +1041,7 @@ fn spawn_hybrid_flusher(
                     }
                 }
                 _ = deferred_tick.tick() => {
-                    if let Err(e) = backend.flush_deferred_projection() {
+                    if let Err(e) = backend.try_flush_deferred_projection() {
                         eprintln!("[objectlog/hybrid] deferred projection flush failed: {e}");
                     }
                 }

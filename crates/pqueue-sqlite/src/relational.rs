@@ -3251,8 +3251,8 @@ pub struct SqliteProjectionStore {
 /// pqueue-8e5e7846: the original `2_000` default never actually bound anything at release scale. Each
 /// deferred entry is one committed push/claim/finalize *call* (which may itself batch up to
 /// `PQUEUE_HYBRID_LOAD_BATCH` items), not one item — so the 100k-resident release lane's whole
-/// push+claim+finalize backlog tops out at `3 * (resident / release_default_batch) = 300` deferred entries
-/// (measured peak 155 mid-run at `PQUEUE_HYBRID_RESIDENT=100000`/`load_batch=1000`), comfortably under the
+/// push+claim+finalize backlog tops out at `3 * (resident / release_default_batch) = 600` deferred entries
+/// (with the 500-item release default at `PQUEUE_HYBRID_RESIDENT=100000`), comfortably under the
 /// old chunk. `flush_deferred` therefore always drained the entire backlog in one composed-backend-mutex
 /// hold, exactly the unbounded-batch problem the chunking mechanism was meant to prevent.
 ///
@@ -3264,8 +3264,8 @@ pub struct SqliteProjectionStore {
 /// chunk, the shortfall compounds into the next tick's now-larger backlog (arrivals-since-last-tick PLUS the
 /// undrained remainder), a queueing cascade that grows the number of stalled pushes far faster than any
 /// per-call hold-time savings. `250` sits just above the measured peak per-tick burst (~155) so it almost
-/// never truncates a real accumulation (matching the `2_000` baseline's behavior and tail latency) while
-/// staying below the smallest structural release-scale backlog (300) so it remains a genuine, provable
+/// keeps individual flushes bounded without causing the fixed-cost cascade seen with tiny chunks, while
+/// staying below the smallest structural release-scale backlog (600) so it remains a genuine, provable
 /// bound rather than a no-op. The residual ack-p99-vs-in-memory gate at 100k is dominated by host-fsync
 /// noise unrelated to this parameter (see `docs/perf/evidence/hybrid-scale/` and the bundle evidence for
 /// this bead) — chunk size was ruled out, not confirmed, as the lever for that gate.
@@ -7036,6 +7036,26 @@ impl ProjectionStore for HybridProjectionStore {
         self.apply_memory(positions, commands)?;
         self.deferred
             .extend(positions.iter().cloned().zip(commands.iter().cloned()));
+        self.deferred_commands = self.deferred.len();
+        Ok(())
+    }
+
+    fn apply_live_owned(
+        &mut self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> EngineResult<()> {
+        self.check_healthy()?;
+        if positions.len() != commands.len() {
+            return Err(EngineError::Storage(
+                "hybrid apply_live_owned: positions/commands length mismatch".into(),
+            ));
+        }
+        if positions.is_empty() {
+            return Ok(());
+        }
+        self.apply_memory(&positions, &commands)?;
+        self.deferred.extend(positions.into_iter().zip(commands));
         self.deferred_commands = self.deferred.len();
         Ok(())
     }
