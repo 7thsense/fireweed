@@ -1,0 +1,9 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md",
+    "docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md",
+    "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md",
+    "docs/perf/tp002-objectlog-hybrid-evidence.md"
+  ]
+}
