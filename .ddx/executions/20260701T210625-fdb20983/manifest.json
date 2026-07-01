@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260701T210625-fdb20983",
+  "bead_id": "pqueue-81c5c29e",
+  "base_rev": "98e973ffd2fe49b8ec4bdfade00c6e75823165e4",
+  "created_at": "2026-07-01T21:06:25.741759936Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-81c5c29e",
+    "title": "Emit release-grade hybrid-async evidence and close ACs",
+    "description": "PROBLEM: Once the harness, gates, and hot-path fix land, the release-grade evidence must actually be produced and committed under docs/perf so the parent verification succeeds; the current state is only the smoke row plus a blocker log.\nROOT CAUSE: docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log records that the 10M lane was never run because the hot-path gate failed (claim/finalize p95 1.610x); emit_ledger at crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs:531 writes the JSONL row, and the TP-002 summary docs/perf/tp002-objectlog-hybrid-evidence.md still describes objectlog/hybrid-strict rather than the hybrid-async release lane.\nPROPOSED FIX: run the full release matrix (10k/100k/1M/10M where capacity permits, warm/cold, concurrency/batch sweeps, \u003e=5 reps) with all gates active; write the per-scale JSONL ledgers under docs/perf/evidence and docs/perf/evidence/hybrid-scale; refresh docs/perf/tp002-objectlog-hybrid-evidence.md (or a hybrid-async successor doc) to record the closed 10k gaps (ack 2.836x-\u003e=1.20, claim/finalize 33.359x-\u003e=1.20), the variance/outlier policy, and the bounded-debt/segment-density/object-PUT/attribution gates; remove or supersede the blocker log. Every emitted row must carry bars_met true.\nNON-SCOPE: authoring new harness, gate, attribution, or fix logic (other children); release version bump.\nDEPENDS ON: children 'Hybrid-async perf harness', 'Hybrid-async perf gates + profile attribution', and 'Close hybrid-async hot-path gap'.\nGATE SUBSTITUTION: `cargo test -p pqueue-server` is the test gate; `cargo fmt --check` is the pre-commit gate.",
+    "acceptance": "1. `PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture` passes and emits bars_met true.\n2. `PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture` passes.\n3. `rg -n 'bars_met.*true|hybrid_ack_p99_vs_inmemory_ratio|hybrid_claim_finalize_p95_vs_inmemory_ratio' docs/perf/evidence docs/perf` succeeds.\n4. The prior blocker log docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log is removed or superseded by a passing release-tier JSONL, and docs/perf/tp002-objectlog-hybrid-evidence.md documents the closed 10k ack (2.836x) and claim/finalize (33.359x) gaps now \u003c=1.20.\n5. `cargo fmt --check` passes.",
+    "parent": "pqueue-abebbece",
+    "labels": [
+      "area:performance",
+      "area:pqueue-server",
+      "kind:verification",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"system_unready: All three named prerequisite children are already satisfied in the working tree: the perf harness (crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs) has smoke/release_10m/attribution/bounded_debt_gate/segment_density_gate tests; the gates+attribution doc (docs/perf/tp002-hybrid-async-gates.md, bead pqueue-21d63f09) documents AC1-AC3 folded into bars_met; and the hot-path fix (commit c64dd3f, bead pqueue-8f47d542) already landed, making HybridProjectionStore.flush_deferred actually drain the deferred queue to SQLite instead of being a no-op. Evidence already on disk shows the gate closed: docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl carries bars_met:true with hybrid_ack_p99_vs_inmemory_ratio 1.029 and hybrid_claim_finalize_p95_vs_inmemory_ratio 1.015 (both \\u003c=1.20, matching AC2's exact PQUEUE_HYBRID_RESIDENT=10000 command), and docs/perf/evidence/performance_object_log_hybrid_smoke.jsonl similarly passes (ratios 1.034/0.977). What remains is real but mechanical: docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log is stale (references the pre-fix 1.610x failure) and still needs deletion/superseding, and docs/perf/tp002-objectlog-hybrid-evidence.md still narrates the old hybrid-strict framing without the closed-gap section the AC requires. No architecture or ambiguous-tradeoff judgment is needed; this is verification + doc authoring against already-passing evidence.\",\"fingerprint\":\"6f90c36508ae004cbc3ca7d0e79247fb41fe6f7b205dadfeaf7ada76af50cf15\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"6f90c36508ae004cbc3ca7d0e79247fb41fe6f7b205dadfeaf7ada76af50cf15\"}",
+          "created_at": "2026-07-01T21:06:20.449305821Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T210625-fdb20983",
+    "prompt": ".ddx/executions/20260701T210625-fdb20983/prompt.md",
+    "manifest": ".ddx/executions/20260701T210625-fdb20983/manifest.json",
+    "result": ".ddx/executions/20260701T210625-fdb20983/result.json",
+    "checks": ".ddx/executions/20260701T210625-fdb20983/checks.json",
+    "usage": ".ddx/executions/20260701T210625-fdb20983/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-81c5c29e-20260701T210625-fdb20983"
+  },
+  "prompt_sha": "b6a1e3e158c977416a48722326a00f77e468ba0215b0b316c31924935c7d24dd"
+}
