@@ -1,0 +1,35 @@
+{
+  "attempt_id": "20260701T165051-9a9531ce",
+  "bead_id": "pqueue-921c6ca4",
+  "base_rev": "aa499b8f0c0ca9840e52a8f2d56395ea3acebb36",
+  "created_at": "2026-07-01T16:50:51.506184527Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-921c6ca4",
+    "title": "Specify hybrid-async poison, repair, debt, and backpressure gates in TP-003",
+    "description": "PROBLEM: TP-003 does not yet make the hybrid-async poison, repair, async apply debt, and backpressure gates explicit enough for a worker to implement or verify independently.\n\nROOT CAUSE: `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:211` defines the `objectlog/hybrid-async` success barrier and unknown-outcome replay gate, and `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:334` defines ordered batching evidence, but neither line requires explicit poison, operator repair, async apply debt, or backpressure acceptance gates.\n\nPROPOSED FIX: Update governing artifact `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md` to add or extend hybrid-async verification criteria for poison/fail-closed behavior, operator repair interaction, bounded async apply debt, and backpressure when SQLite lag or replay debt exceeds budget. Keep the criteria tied to `objectlog/hybrid-async`, TD-004, INV-5, INV-10, INV-11, INV-12, and INV-14, and require evidence fields for async lag, high-water advancement, and debt/backpressure thresholds.\n\nNON-SCOPE: Code changes; implementing metrics, repair tools, or performance tests; changing existing evidence results; changes outside the four governing artifact references; altering existing dependency ID `pqueue-b207e65d`; weakening the required verification commands; editing `docs/perf/tp002-objectlog-hybrid-evidence.md` except as a separate child bead.\n\nDEPENDENCY: parent `pqueue-b207e65d`.",
+    "acceptance": "1. TestHybridAsyncPlanPoisonRepairDebtBackpressure: `rg -n 'hybrid-async|poison|repair|backpressure|debt|async apply|SQLite lag|fail closed|operator' docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md` succeeds and shows criteria for poison/fail-closed behavior, operator repair interaction, async apply debt, and backpressure gates.\n2. TestHybridAsyncPlanNoPerfEvidenceMutation: `git diff --name-only` after the bead contains only `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md`.\n3. TestHybridAsyncPlanCargoGate: `cargo test -p pqueue-release ledger_path_honors_env_override_and_default` passes.\n4. TestHybridAsyncPlanFmtGate: `cargo fmt --check` passes.\n5. TestHybridAsyncPlanGoGate: `go test ./...` passes or records a no-Go-module skip with the exact command output.\n6. TestHybridAsyncPlanLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-49574578",
+    "labels": [
+      "area:docs",
+      "area:pqueue-objectlog",
+      "area:pqueue-sqlite",
+      "kind:spec",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T165051-9a9531ce",
+    "prompt": ".ddx/executions/20260701T165051-9a9531ce/prompt.md",
+    "manifest": ".ddx/executions/20260701T165051-9a9531ce/manifest.json",
+    "result": ".ddx/executions/20260701T165051-9a9531ce/result.json",
+    "checks": ".ddx/executions/20260701T165051-9a9531ce/checks.json",
+    "usage": ".ddx/executions/20260701T165051-9a9531ce/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-921c6ca4-20260701T165051-9a9531ce"
+  },
+  "prompt_sha": "33351334c58d7b6e3966d04f79bd8900dfa002a0c9eacb3a088b0b98a9c9abad"
+}
