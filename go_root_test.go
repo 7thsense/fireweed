@@ -11,6 +11,12 @@ import (
 )
 
 func TestGoCompatibilityModules(t *testing.T) {
+	if _, err := os.Stat("crates/pqueue-kafka/tests/compat/producer_oracle"); os.IsNotExist(err) {
+		t.Skip("skipping optional producer_oracle compatibility module: crates/pqueue-kafka/tests/compat/producer_oracle not present")
+	} else if err != nil {
+		t.Fatalf("could not inspect producer oracle go module: %v", err)
+	}
+
 	cmd := exec.Command("go", "test", "./...")
 	cmd.Dir = "crates/pqueue-kafka/tests/compat/producer_oracle"
 	out, err := cmd.CombinedOutput()
@@ -188,22 +194,22 @@ func TestReleaseGateOrderingPreserved(t *testing.T) {
 
 func TestActionsDeploymentMatrixProfiles(t *testing.T) {
 	workflow := readFile(t, ".github/workflows/ci.yml")
-	match := regexp.MustCompile(`(?s)matrix:[ \t]*\n[ \t]+backend:[ \t]*\n(.*?)\n    steps:`).FindStringSubmatch(workflow)
+	match := regexp.MustCompile(`(?s)matrix:[ \t]*\n[ \t]+include:[ \t]*\n(.*?)\n    steps:`).FindStringSubmatch(workflow)
 	if match == nil {
-		t.Fatalf("ci workflow must define the exact deployment backend matrix")
+		t.Fatalf("ci workflow must define the exact deployment storage matrix")
 	}
-	profileMatches := regexp.MustCompile(`(?m)^\s+- ([a-z_]+)\s*$`).FindAllStringSubmatch(match[1], -1)
-	profiles := make([]string, 0, len(profileMatches))
-	for _, profile := range profileMatches {
-		profiles = append(profiles, profile[1])
+	storageMatches := regexp.MustCompile(`(?m)^\s+- storage: ([a-z0-9-]+)\s*\n\s+log_backend: ([a-z0-9]+)\s*\n\s+projection_backend: ([a-z0-9]+)\s*$`).FindAllStringSubmatch(match[1], -1)
+	combinations := make([]string, 0, len(storageMatches))
+	for _, storage := range storageMatches {
+		combinations = append(combinations, storage[1]+":"+storage[2]+":"+storage[3])
 	}
-	want := []string{"postgres_native", "object_log_sqlite_projection"}
-	if len(profiles) != len(want) {
-		t.Fatalf("deployment matrix must contain exactly %v, got %v", want, profiles)
+	want := []string{"objectlog-inmemory:objectlog:inmemory"}
+	if len(combinations) != len(want) {
+		t.Fatalf("deployment matrix must contain exactly %v, got %v", want, combinations)
 	}
 	for i := range want {
-		if profiles[i] != want[i] {
-			t.Fatalf("deployment matrix must contain exactly %v in order, got %v", want, profiles)
+		if combinations[i] != want[i] {
+			t.Fatalf("deployment matrix must contain exactly %v in order, got %v", want, combinations)
 		}
 	}
 }
@@ -213,7 +219,7 @@ func TestActionsHelmStaticValidationIncluded(t *testing.T) {
 	assertWorkflowOrder(t, workflow,
 		"name: Helm static validation gate",
 		"bash scripts/ci/helm-gate.sh",
-		"name: kind Helm integration proof (${{ matrix.backend }})",
+		"name: kind Helm integration proof (${{ matrix.storage }})",
 	)
 }
 
@@ -224,7 +230,7 @@ func TestActionsKindMatrixIsNotSkipped(t *testing.T) {
 		"version: v1.31.0",
 		"curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64",
 		"KIND_NODE_IMAGE: kindest/node:v1.31.0",
-		"bash scripts/ci/kind-helm-test.sh --backend ${{ matrix.backend }}",
+		"bash scripts/ci/kind-helm-test.sh --log-backend ${{ matrix.log_backend }} --projection-backend ${{ matrix.projection_backend }}",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Fatalf("ci deployment workflow missing %q", want)
@@ -273,7 +279,7 @@ func TestDeploymentReleaseGateRunsNonClusterChecks(t *testing.T) {
 		"+++ bash scripts/ci/helm-gate.sh",
 		"+++ bash scripts/release/package-helm-chart.sh",
 		"+++ validate docs/microsite",
-		"SKIPPED kind backend matrix",
+		"SKIPPED kind storage matrix",
 	)
 
 	for _, want := range []string{
@@ -297,8 +303,8 @@ func TestDeploymentReleaseGateLocalKindSkipsAreDocumented(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"SKIPPED kind backend matrix",
-		"skip scope: kind backend matrix only (postgres_native object_log_sqlite_projection)",
+		"SKIPPED kind storage matrix",
+		"skip scope: kind storage matrix only (objectlog:inmemory)",
 		"missing local capability:",
 		"docker daemon not usable: docker info failed",
 		"non-cluster deployment release checks passed before this kind-only skip",
@@ -316,19 +322,17 @@ func TestDeploymentReleaseGateRunsBothBackendsWhenToolsExist(t *testing.T) {
 	}
 
 	assertOutputOrder(t, result.output,
-		"+++ bash scripts/ci/kind-helm-test.sh --backend postgres_native",
-		"+++ bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection",
+		"+++ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory",
 		"=== deployment release gate PASSED ===",
 	)
 	for _, want := range []string{
-		"bash\tscripts/ci/kind-helm-test.sh\t--backend\tpostgres_native",
-		"bash\tscripts/ci/kind-helm-test.sh\t--backend\tobject_log_sqlite_projection",
+		"bash\tscripts/ci/kind-helm-test.sh\t--log-backend\tobjectlog\t--projection-backend\tinmemory",
 	} {
 		if !strings.Contains(result.log, want) {
 			t.Fatalf("deployment gate did not run %q; log:\n%s\noutput:\n%s", want, result.log, result.output)
 		}
 	}
-	if strings.Contains(result.output, "SKIPPED kind backend matrix") {
+	if strings.Contains(result.output, "SKIPPED kind storage matrix") {
 		t.Fatalf("kind matrix must not skip when all local tools are stubbed usable:\n%s", result.output)
 	}
 }
@@ -371,17 +375,18 @@ func TestDeploymentProofLedgerSchema(t *testing.T) {
 		t.Fatalf("proof command list too short: %#v", commands)
 	}
 
-	backends := arrayField(t, proof, "backend_profiles")
-	if len(backends) != 2 {
-		t.Fatalf("proof should record both backend profiles, got %#v", backends)
+	storageCombinations := arrayField(t, proof, "storage_combinations")
+	if len(storageCombinations) != 1 {
+		t.Fatalf("proof should record the storage combination, got %#v", storageCombinations)
 	}
-	for _, entry := range backends {
-		profile := entry.(map[string]any)
-		assertStringField(t, profile, "status", "skipped_local_environment")
+	for _, entry := range storageCombinations {
+		combination := entry.(map[string]any)
+		assertStringField(t, combination, "combination", "objectlog:inmemory")
+		assertStringField(t, combination, "status", "skipped_local_environment")
 	}
 
 	localSkip := objectField(t, proof, "local_environment_skip")
-	assertStringField(t, localSkip, "scope", "kind backend matrix only")
+	assertStringField(t, localSkip, "scope", "kind storage matrix only")
 	if boolField(t, localSkip, "ci_matrix_proof") {
 		t.Fatalf("local Docker/kind skip must not be marked as CI matrix proof: %#v", localSkip)
 	}
@@ -431,19 +436,16 @@ func TestDeploymentProofReleaseNotesReady(t *testing.T) {
 	}
 
 	notes := objectField(t, result.proof, "release_notes")
-	for _, field := range []string{"command_list", "backend_profile_matrix", "artifact_paths"} {
+	for _, field := range []string{"command_list", "storage_matrix", "artifact_paths"} {
 		if len(arrayField(t, notes, field)) == 0 {
 			t.Fatalf("release notes proof missing %s:\n%s", field, mustRead(t, result.proofPath))
 		}
 	}
-	if !proofContainsCommand(result.proof, "bash scripts/ci/kind-helm-test.sh --backend postgres_native", 0) {
-		t.Fatalf("proof missing postgres_native kind command:\n%s", mustRead(t, result.proofPath))
+	if !proofContainsCommand(result.proof, "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory", 0) {
+		t.Fatalf("proof missing objectlog/inmemory kind command:\n%s", mustRead(t, result.proofPath))
 	}
-	if !proofContainsCommand(result.proof, "bash scripts/ci/kind-helm-test.sh --backend object_log_sqlite_projection", 0) {
-		t.Fatalf("proof missing object_log_sqlite_projection kind command:\n%s", mustRead(t, result.proofPath))
-	}
-	if !stringSliceContains(arrayField(t, notes, "backend_profile_matrix"), "postgres_native:tested") {
-		t.Fatalf("release notes matrix missing postgres_native tested: %#v", notes)
+	if !stringSliceContains(arrayField(t, notes, "storage_matrix"), "objectlog:inmemory:tested") {
+		t.Fatalf("release notes matrix missing objectlog:inmemory tested: %#v", notes)
 	}
 }
 
