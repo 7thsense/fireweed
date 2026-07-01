@@ -439,7 +439,8 @@ fn hybrid_projection_poisoned_after_sqlite_commit_memory_apply_failure() {
     );
 
     let err =
-        pqueue_engine::ProjectionStore::apply(&mut store, &[pos(0)], &[push.clone()]).unwrap_err();
+        pqueue_engine::ProjectionStore::apply(&mut store, &[pos(0)], std::slice::from_ref(&push))
+            .unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(ref msg) if msg.contains("hybrid projection poisoned")),
         "unexpected error: {err:?}"
