@@ -16,6 +16,12 @@ SQLite projection apply may lag. Async-mode release evidence MUST report the
 same hot-path fields plus max/p99 SQLite lag, unknown-outcome retry convergence,
 and request_id matrix coverage for push, claim, renew, finalize, retry/release,
 update, purge, and operator-style mutations before it can reuse this lane.
+It must also report ordered batching evidence: sealed batch sequence ranges,
+`sqlite_high_water` after each batch, exactly-once async apply/replay after a
+partial batch restart, and proof that readers/claims/metrics are served from
+memory while SQLite lags. `sqlite_high_water` is a logical high-water for
+applied commands only; SQLite WAL, checkpoint, page-cache, and fsync state are
+local durability details and never authorize object-log trimming.
 
 ## Smoke command
 
@@ -78,7 +84,10 @@ Release gate: `objectlog/hybrid-strict` hot path must be within 20% of
 `objectlog/inmemory`, normal restart recovery must be `<= 60s`, tail must be
 `<= max(10000, 0.1% resident)`, and disk-loss reconstruction must be exact.
 `objectlog/hybrid-async` must additionally prove its async SQLite lag bound and
-unknown-outcome replay contract before being cited as release evidence.
+unknown-outcome replay contract before being cited as release evidence. Its
+ledger must include ordered batching fields (`batch_sequence`, covered command
+range, `sqlite_high_water`, replay count) and must show WAL/fsync/checkpoint
+state is not used as a logical high-water or retention authority.
 
 Blocker and raw command output:
 `docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log`.

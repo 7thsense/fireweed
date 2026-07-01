@@ -322,6 +322,20 @@ apply/render is an unknown-outcome, not a success. Retrying the same
 committed, the retry returns or reconstructs that committed result; if no command
 committed, the retry is a fresh attempt subject to current validation.
 
+#### Ordered batching and SQLite high-water (`objectlog/hybrid-async`, normative)
+
+The async SQLite projection worker applies sealed object-log batches, not
+opportunistic per-command fragments:
+
+| Element | Rule |
+|---------|------|
+| Batch sequence | Each sealed segment batch has a monotonically increasing `batch_sequence` derived from the committed object-log order and covers a contiguous command `sequence` range. The SQLite worker MUST apply batches strictly in `batch_sequence` order; batch N+1 MUST NOT apply or advance visibility until batch N has fully applied. |
+| Exactly-once replay | A batch is replayable from the object log and is idempotent against SQLite's persisted applied position. On restart, the worker resumes at `sqlite_high_water + 1`, skips commands `<= sqlite_high_water`, and applies every later committed command exactly once in `sequence` order. Partially applied batches MUST either roll back as a SQLite transaction or replay to the same final projection state before `sqlite_high_water` advances. |
+| Memory versus SQLite readers | Hot reads, claim selection, pre-commit validation, response rendering, metrics, secondary-index lookup, and live-item lookup MUST read the synchronous in-memory projection. The lagging SQLite projection is visible only to recovery/export/diagnostic paths and MUST NOT answer API reads while its `sqlite_high_water` trails memory. |
+| Logical high-water | `sqlite_high_water` is the highest logical command `sequence` whose effects are reflected in SQLite projection rows after a successful apply transaction. It is a recovery/export marker for the projection image; it is not an object-log durability marker and not a segment-retention authority. |
+| WAL/fsync boundary | SQLite WAL frames, checkpoint state, page-cache contents, and fsync policy are local durability implementation details beneath the projection store. They MUST NOT be reported as `sqlite_high_water`, MUST NOT let recovery skip commands whose logical effects are not applied, and MUST NOT authorize object-log segment trimming. |
+| Lag failure | If the worker cannot advance ordered batching within `hybrid_async_sqlite_apply_lag`, the store MUST keep serving from memory only when the object log proves memory completeness; recovery/high-water claims fail closed until ordered replay catches up or recovery replays from an earlier authoritative source. |
+
 ## Hybrid ProjectionImage Recovery (normative)
 
 Hybrid recovery MUST avoid full-genesis replay on ordinary owner-local restart
@@ -330,10 +344,10 @@ without treating local SQLite as the command authority.
 | Element | Rule |
 |---------|------|
 | Image seam | `pqueue-projection` MUST define a typed `ProjectionImage` export/import contract covering queue definition, item lifecycle, lease state, secondary indexes, side records, instance fences, queue paused state, metrics, request-id replay records, and item-id counters. Partial images that only load pending items are invalid. |
-| SQLite export | `SqliteProjectionStore::export_projection_image(queue)` MUST read the durable SQLite projection at its current applied high-water into `ProjectionImage`. |
+| SQLite export | `SqliteProjectionStore::export_projection_image(queue)` MUST read the durable SQLite projection at its current applied logical high-water (`sqlite_high_water`) into `ProjectionImage`. WAL checkpoint/fsync state is not part of the exported high-water contract. |
 | Memory hydrate | `InMemoryProjection::hydrate_shard(definition, image)` MUST build memory to the exact same logical state before any hot read or validation method is served. |
 | High-water barrier | `HybridProjectionStore::recovery_high_water` MUST return SQLite's high-water only after the in-memory shard has been hydrated from that image. If hydration fails, is incomplete, or has not run, it MUST return `None` or fail closed so `ComposedBackend::recover` replays from genesis rather than skipping log history. |
-| Tail replay | After hydration, recovery replays only object-log commands beyond SQLite high-water through the normal hybrid apply path. |
+| Tail replay | After hydration, recovery replays only object-log commands beyond SQLite logical high-water through the normal hybrid apply path. For `objectlog/hybrid-async`, replay starts after the last ordered batch whose complete command range is covered by `sqlite_high_water`; any later committed commands are replayed from the object log even if local WAL or page-cache state contains partial effects. |
 
 ## Hybrid Snapshot Authority and Segment Retention (normative)
 
@@ -466,7 +480,7 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 | Element | Rule |
 |---------|------|
 | Segment expiry | A segment MAY be deleted only after a committed snapshot fully covers its `sequence` range AND `log_recovery_window_ms` has elapsed past that snapshot's `committed_at` (ADR-001 step 8). |
-| Hybrid local SQLite high-water | For `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the local SQLite high-water is sufficient to skip historical log replay only on owner-local restart after `ProjectionImage` hydration succeeds and, for async mode, after lag has caught up to the advertised high-water. It is NOT sufficient by itself to expire object-log segments. |
+| Hybrid local SQLite high-water | For `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the local `sqlite_high_water` is a logical applied-command marker sufficient to skip historical log replay only on owner-local restart after `ProjectionImage` hydration succeeds and, for async mode, after ordered batching has caught up to the advertised high-water. It is NOT sufficient by itself to expire object-log segments, and SQLite WAL/fsync/checkpoint state never upgrades it into segment-expiry authority. |
 | Idempotency retention | Request-idempotency and item-key convergence records expire per `request_id_retention_ms` / `client_item_key_retention_ms` (API-001), enforced in the SQLite projection; expired records MUST NOT be required for any non-expired segment's replay. |
 | Manifest retention | Manifest entries (including epoch fence records) for expired segments MAY be compacted, but the manifest MUST retain enough tail to validate the active recovery window and the monotonic `sequence`/epoch invariants. |
 | Snapshot retention | At least the most recent committed snapshot whose recovery window has not expired MUST be retained at all times so recovery is always possible. |
