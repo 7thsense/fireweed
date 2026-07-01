@@ -115,6 +115,19 @@ different-body retry returns `request-id-conflict`. In `objectlog/hybrid-async`,
 unknown-outcome handling is mandatory for every mutating command because success
 can return before SQLite contains the replay record.
 
+`objectlog/hybrid-async` release is blocked until the implementation proves one
+combined lineage, idempotency, and retention frontier contract. The manifest
+entry, segment sequence range, per-command `request_id` replay record,
+in-memory projection image, SQLite `ProjectionImage`, and `sqlite_high_water`
+MUST all describe the same committed command prefix before recovery or retention
+can trust them. Async outcome retention MUST keep replayable `request_id`
+results for every committed-but-unreturned or response-lost mutation through the
+longer of API request-id retention and the active object-log recovery window.
+Object-log expiry MUST use the minimum safe frontier across committed snapshots,
+active manifest tail, request-id replay retention, client item-key retention,
+and async SQLite lag; local SQLite high-water alone is never a retention
+authority.
+
 ### Robustness is a **checked invariant**, not a per-backend property
 
 Any `L × P × C` is a backend the instant it type-checks, but it is only **correct** once it passes the
