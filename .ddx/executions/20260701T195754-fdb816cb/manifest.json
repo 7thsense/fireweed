@@ -1,0 +1,47 @@
+{
+  "attempt_id": "20260701T195754-fdb816cb",
+  "bead_id": "pqueue-3d5bb3df",
+  "base_rev": "cb45448a5e0c32fe85d58f4333d642480233cea6",
+  "created_at": "2026-07-01T19:57:55.480753823Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-3d5bb3df",
+    "title": "Hybrid-async perf harness: pinned distributions, cache states, sweeps, scale matrix, reps",
+    "description": "PROBLEM: The hybrid-async perf suite pushes one uniform payload string through a single sequential producer/consumer at one resident count and one repetition, so it cannot emit release-grade evidence across scale, cache state, concurrency, or workload shape.\nROOT CAUSE: spec() at crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs:92 hardcodes the payload with no size/key/retry/error distribution; exercise_profile at crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs:183 is a single sequential loop with no concurrency or cache-state control; run_suite at crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs:669 reads one PQUEUE_HYBRID_RESIDENT and runs each backend once with no repetitions.\nPROPOSED FIX: (a) add a deterministic seeded workload generator (seed=0, documented in docs/perf) driving spec() with pinned payload-size, client_item_key cardinality, retry-injection, and error-injection distributions; (b) add warm-cache (projection pre-touched) vs cold-cache (fresh backend open) run variants; (c) sweep concurrency via N tokio producer/consumer tasks (new PQUEUE_HYBRID_CONCURRENCY) and load/claim batch via existing *_BATCH env vars, emitting one ProfileRun per (cache,concurrency,batch) cell; (d) parametrize resident across {10000,100000,1000000,10000000} gated by an RSS/capacity guard that skips-with-log any scale exceeding the machine budget; (e) run \u003e=5 repetitions per release cell and record median plus coefficient-of-variation with a documented outlier-trim policy.\nNON-SCOPE: the hot-path performance fix (child 'Close hybrid-async hot-path gap'); bounded-debt/segment/attribution gates (child 'Hybrid-async perf gates + profile attribution'); running the release matrix and emitting final docs (child 'Emit release-grade hybrid-async evidence'); release version bump.\nGATE SUBSTITUTION: this is a Rust/cargo crate with no go.mod or lefthook; the 'go test' gate is `cargo test -p pqueue-server` and the 'lefthook' pre-commit gate is `cargo fmt --check`.",
+    "acceptance": "1. New Test performance_object_log_hybrid_distribution_pins asserts the seeded generator produces identical payload-size/key/retry/error sequences across two runs and non-uniform payload sizes: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_distribution_pins -- --nocapture`.\n2. New Test performance_object_log_hybrid_cache_matrix_smoke runs warm and cold cache variants plus a \u003e=2-way concurrency/batch sweep at resident\u003c=1000 and emits one ledger cell per (cache,concurrency,batch): `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_cache_matrix_smoke -- --nocapture`.\n3. New Test performance_object_log_hybrid_scale_matrix parametrizes resident over {10k,100k,1M,10M}, skips-with-log any scale over the capacity guard, and runs \u003e=5 reps per release cell recording median+CoV+outlier-trim fields: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_scale_matrix -- --nocapture`.\n4. Existing Test performance_object_log_hybrid_smoke still passes: `PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture`.\n5. `cargo fmt --check` passes.",
+    "parent": "pqueue-abebbece",
+    "labels": [
+      "area:performance",
+      "area:pqueue-server",
+      "kind:verification",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"New Test performance_object_log_hybrid_distribution_pins asserts the seeded generator produces identical payload-size/key/retry/error sequences across two runs and non-uniform payload sizes: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_distribution_pins -- --nocapture`.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"New Test performance_object_log_hybrid_cache_matrix_smoke runs warm and cold cache variants plus a \\u003e=2-way concurrency/batch sweep at resident\\u003c=1000 and emits one ledger cell per (cache,concurrency,batch): `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_cache_matrix_smoke -- --nocapture`.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"New Test performance_object_log_hybrid_scale_matrix parametrizes resident over {10k,100k,1M,10M}, skips-with-log any scale over the capacity guard, and runs \\u003e=5 reps per release cell recording median+CoV+outlier-trim fields: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_scale_matrix -- --nocapture`.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":4,\"text\":\"Existing Test performance_object_log_hybrid_smoke still passes: `PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture`.\",\"kind\":\"mechanical\",\"verifiable\":true},{\"ac\":5,\"text\":\"`cargo fmt --check` passes.\",\"kind\":\"command\",\"verifiable\":true}]",
+          "created_at": "2026-07-01T19:55:47.812416877Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.40 threshold=0.50 verifiable=2/5"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T195754-fdb816cb",
+    "prompt": ".ddx/executions/20260701T195754-fdb816cb/prompt.md",
+    "manifest": ".ddx/executions/20260701T195754-fdb816cb/manifest.json",
+    "result": ".ddx/executions/20260701T195754-fdb816cb/result.json",
+    "checks": ".ddx/executions/20260701T195754-fdb816cb/checks.json",
+    "usage": ".ddx/executions/20260701T195754-fdb816cb/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-3d5bb3df-20260701T195754-fdb816cb"
+  },
+  "prompt_sha": "581609c6a221e0828c625bb6a1cf6f5b8aff20054935d99f0de1cbbeb4aa9870"
+}
