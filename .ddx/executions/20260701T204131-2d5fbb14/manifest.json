@@ -1,0 +1,36 @@
+{
+  "attempt_id": "20260701T204131-2d5fbb14",
+  "bead_id": "pqueue-8f47d542",
+  "base_rev": "426d0412e3010d90fd5b117bb7ca83104c6251d7",
+  "created_at": "2026-07-01T20:41:32.11706082Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-8f47d542",
+    "title": "Close hybrid-async hot-path gap to \u003c=1.20x inmemory",
+    "description": "PROBLEM: At 10k resident the objectlog/hybrid-async hot path is 2.836x inmemory for ack p99 and 33.359x for claim/finalize p95 (smoke is still 1.610x claim/finalize), far above the \u003c=1.20x release gate, so the 10M release lane is blocked (docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log).\nROOT CAUSE: hybrid-async is supposed to declare success after object-log manifest commit plus synchronous in-memory apply while SQLite projection apply lags, but the claim/finalize hot path currently blocks on the durable SQLite projection apply / group-commit fsync instead of returning after the memory apply. The durable projection apply is the WAL/synchronous group-commit path at crates/pqueue-sqlite/src/relational.rs:4344; the composed flush cadence is crates/pqueue-objectlog/src/segmented.rs:703 and commit_locked at crates/pqueue-objectlog/src/lib.rs:403; the measured hot-path loop is exercise_profile at crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs:227.\nPROPOSED FIX: make claim/finalize/ack return once the object-log manifest is committed and the in-memory ProjectionImage is applied, deferring SQLite projection apply to the async batch; serve readers/claims/metrics from memory while SQLite lags; preserve exactly-once async apply/replay after a partial-batch restart. Bring hybrid_ack_p99_vs_inmemory_ratio and hybrid_claim_finalize_p95_vs_inmemory_ratio to \u003c=1.20 at the smoke and 10k cells.\nNON-SCOPE: harness/scale/distribution work and gate/attribution work (other children); running the full 10M release matrix and emitting final docs (child 'Emit release-grade hybrid-async evidence'); release version bump.\nGATE SUBSTITUTION: `cargo test -p pqueue-server` (and `cargo test --workspace` for regression) is the test gate; `cargo fmt --check` is the pre-commit gate.",
+    "acceptance": "1. performance_object_log_hybrid_smoke reports hybrid_ack_p99_vs_inmemory_ratio\u003c=1.20 AND hybrid_claim_finalize_p95_vs_inmemory_ratio\u003c=1.20 with bars_met true: `PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture`.\n2. performance_object_log_hybrid_release_10m at PQUEUE_HYBRID_RESIDENT=10000 into docs/perf/evidence/hybrid-scale asserts bars_met (both ratios \u003c=1.20): `PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture`.\n3. New Test performance_object_log_hybrid_async_apply_exactly_once asserts memory-served claim/metrics while SQLite lags and exactly-once async apply after a partial-batch restart: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_async_apply_exactly_once -- --nocapture`.\n4. No regression in the objectlog/inmemory or objectlog/sqlite baselines produced in the same run: `cargo test --workspace` passes.\n5. `cargo fmt --check` passes.",
+    "parent": "pqueue-abebbece",
+    "labels": [
+      "area:performance",
+      "area:pqueue-server",
+      "area:pqueue-sqlite",
+      "area:pqueue-objectlog",
+      "kind:fix",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T204131-2d5fbb14",
+    "prompt": ".ddx/executions/20260701T204131-2d5fbb14/prompt.md",
+    "manifest": ".ddx/executions/20260701T204131-2d5fbb14/manifest.json",
+    "result": ".ddx/executions/20260701T204131-2d5fbb14/result.json",
+    "checks": ".ddx/executions/20260701T204131-2d5fbb14/checks.json",
+    "usage": ".ddx/executions/20260701T204131-2d5fbb14/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-8f47d542-20260701T204131-2d5fbb14"
+  },
+  "prompt_sha": "3b06224aecdafafa2a436717cd485b9a4bff33f94697484748e9b5abe84ec3c4"
+}
