@@ -46,21 +46,36 @@ per-backend re-implementation of the orchestration ports — those live once, ge
 | **`ProjectionStore`** | the materialized read model: the full `ProjectionRead` surface (`select_eligible`/`peek`/`pending`/`claimed_view`/`live_items`/`metrics`) + index queries + the pre-commit **validation** helpers + `apply(batch)` + snapshot/recovery | InMemory (`ProjectionData`), Sqlite, Postgres, Hybrid (in-mem + sqlite spill) |
 | **`ControlPlane`** | queue **definitions** + placement (`create_queue`/`queue_definition`/`list_queues`) | InMemory, Postgres |
 
-### `objectlog/hybrid` projection contract
+### `objectlog/hybrid-*` projection contracts
 
-`PQUEUE_LOG_BACKEND=objectlog` with `PQUEUE_PROJECTION_BACKEND=hybrid` is the
-normative hybrid target. It composes the generic segmented object-log group
-commit runtime with a `HybridProjectionStore`:
+`PQUEUE_LOG_BACKEND=objectlog` with a hybrid projection has two named contracts.
+The old unqualified `objectlog/hybrid` spelling is not precise enough for
+governing requirements:
+
+- `objectlog/hybrid-strict` is the synchronous hybrid contract. A successful
+  response is legal only after manifest commit, durable SQLite projection apply,
+  and hot in-memory apply/render for the operation's own result.
+- `objectlog/hybrid-async` is the async-projection contract. A successful
+  response is legal only after manifest commit plus synchronous in-memory
+  apply/render for the operation's own result; SQLite projection apply MAY lag.
+  SQLite lag is bounded and replayable, but it is not part of the success
+  barrier.
+
+Both modes compose the generic segmented object-log group commit runtime with a
+`HybridProjectionStore`:
 
 ```
 ComposedBackend<pqueue_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
 ```
 
 The hybrid projection is one `ProjectionStore` axis, not a new backend monolith.
-Its read and validation surface is served from `InMemoryProjection`; every
-committed batch is durably applied to `SqliteProjectionStore` first, then applied
-to memory. A successful response is legal only after both applies have completed
-or the response has otherwise been reconstructed from committed log state.
+Its read and validation surface is served from `InMemoryProjection`.
+`objectlog/hybrid-strict` applies every committed batch to
+`SqliteProjectionStore` first, then memory. `objectlog/hybrid-async` applies the
+committed batch to memory on the response path and applies SQLite asynchronously
+from the committed object log. In both modes a returned success means the
+operation is manifest-committed and visible in the hot projection; in async mode
+SQLite is a lagging recovery accelerator, not the acknowledged-command barrier.
 
 For recovery, the local SQLite projection is a restart accelerator and
 high-water source, never the command authority. The object log remains the
@@ -73,18 +88,22 @@ item lifecycle, leases, secondary indexes, side records, instance fences, queue
 pause state, metrics, request-id replay records, and counters needed to resume
 item-id allocation.
 
-If SQLite apply fails, the operation is not acknowledged and recovery replays
-the object-log tail. If SQLite commits and the subsequent memory apply fails in
-the same process, the hybrid projection MUST enter a poisoned state: the current
-operation returns storage failure, all later reads, validation, and writes fail
-closed, and only process restart plus memory hydration from SQLite may resume
-service.
+For `objectlog/hybrid-strict`, SQLite apply failure prevents success and recovery
+replays the object-log tail; if SQLite commits and subsequent memory apply fails,
+the projection MUST enter a poisoned state. For `objectlog/hybrid-async`, SQLite
+apply failure after success is recorded as projection lag and retried from the
+object log; memory apply failure before success prevents the response and leaves
+the operation in unknown-outcome state for `request_id` replay. If async SQLite
+lag cannot be replayed within its configured bound, the store fails closed for
+recovery/high-water claims rather than treating SQLite as authoritative.
 
-`objectlog/hybrid` MUST also preserve replay-response idempotency for
-committed-but-unreturned pushes. During recovery, committed push commands with
+Both hybrid modes MUST preserve replay-response idempotency for
+committed-but-unreturned mutations. During recovery, committed commands with
 `request_id` MUST repopulate the generic idempotency cache or an equivalent
-durable SQLite record so a same-body retry returns the original item ids and a
-different-body retry returns `request-id-conflict`.
+durable replay record so a same-body retry returns the original result and a
+different-body retry returns `request-id-conflict`. In `objectlog/hybrid-async`,
+unknown-outcome handling is mandatory for every mutating command because success
+can return before SQLite contains the replay record.
 
 ### Robustness is a **checked invariant**, not a per-backend property
 

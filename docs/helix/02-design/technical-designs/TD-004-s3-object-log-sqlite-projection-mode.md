@@ -42,9 +42,12 @@ a local in-memory, SQLite, or hybrid projection serves hot queue operations, the
 same object store holds periodic projection snapshots where configured, and
 Postgres remains the control plane. `object_log_inmemory_projection` is the fast
 local replay profile; `object_log_sqlite_projection` is the larger rebuildable
-local-index profile; `object_log_hybrid_projection` / runtime
-`objectlog/hybrid` is the SQLite-first plus hot-memory projection profile. Per
-ADR-008 the queue is the unit of sharding:
+local-index profile; `object_log_hybrid_projection_strict` / runtime
+`objectlog/hybrid-strict` is the SQLite-first plus hot-memory projection
+profile; and `object_log_hybrid_projection_async` / runtime
+`objectlog/hybrid-async` is the manifest-committed plus hot-memory
+success-barrier profile whose SQLite projection may lag. Per ADR-008 the queue
+is the unit of sharding:
 a whole queue is owned by exactly one node, so the object log, the manifest, and
 the local projection are all **per-`(tenant, queue)`**, and there is no
 intra-queue sharding or cross-shard command machinery.
@@ -71,9 +74,11 @@ In scope:
   structured rejection has no committed effect for the rejected scope, and
   unknown outcomes resolve by `request_id`.
 - SQLite projection schema mapping from TD-001 logical projection records and TD-002 column semantics.
-- Hybrid projection semantics: SQLite-first apply, hot in-memory reads and
-  validation, `ProjectionImage` hydration before returning SQLite high-water,
-  poison-on-memory-apply failure, and durable request-id replay.
+- Hybrid projection semantics for `objectlog/hybrid-strict` and
+  `objectlog/hybrid-async`: hot in-memory reads and validation, explicit success
+  barriers, `ProjectionImage` hydration before returning SQLite high-water,
+  strict-mode poison-on-memory-apply failure, async-mode projection lag, and
+  durable request-id replay.
 - Periodic SQLite snapshot to object storage at a committed log position.
 - Bounded replay and recovery: snapshot + log-tail, with safe segment expiry.
 - Manifest-commit epoch fencing **validated against the current control-plane epoch**, bound to the
@@ -150,16 +155,18 @@ It follows TD-001's capability boundaries unchanged:
   state; in-flight claim reservations are a separate, non-authoritative bookkeeping table that holds no
   acknowledged state (see "Claim Reservation"). Acknowledged state survives via object-store segments +
   snapshots, never via local disk alone (ADR-001 Option 4 rejection).
-- **Hybrid is SQLite-first, then memory apply.** In `objectlog/hybrid`,
+- **Hybrid mode is explicit.** In `objectlog/hybrid-strict`,
   `HybridProjectionStore::apply` MUST call SQLite batch apply first and then
-  apply the same positions and commands to `InMemoryProjection`. All hot reads
-  and pre-commit validation delegate to memory. If memory apply fails after a
-  successful SQLite commit, the process-local hybrid store is poisoned and fails
-  closed until restart and rehydration.
+  apply the same positions and commands to `InMemoryProjection`. In
+  `objectlog/hybrid-async`, manifest commit plus synchronous memory apply/render
+  is the success barrier and SQLite apply may lag. All hot reads and pre-commit
+  validation delegate to memory. Strict mode poisons on SQLite-commit then memory
+  apply failure; async mode resolves pre-memory-render failures as
+  unknown-outcome by `request_id` and retries lagging SQLite apply from the log.
 - **Object log remains the authority.** Local SQLite under
-  `objectlog/hybrid` is a restart accelerator and durable projection image, not
-  a command authority and not, by itself, permission to expire object-log
-  segments.
+  `objectlog/hybrid-strict` or `objectlog/hybrid-async` is a restart
+  accelerator and durable projection image, not a command authority and not, by
+  itself, permission to expire object-log segments.
 - **Reject one-object-per-command.** Production configurations MUST seal multiple commands per segment;
   a 1-command-per-object configuration MUST be rejected at queue/backend configuration time. It remains
   available only behind an explicit development/test fallback flag.
@@ -262,11 +269,24 @@ This section states exactly what a caller may observe so API-001 holds once a re
 | Recovery / new owner | After reassignment, the new owner serves reads only after it has replayed the committed log tail (Recovery), so a read served by the new owner reflects all acknowledged commands. There is no window in which an acknowledged command is invisible to the authoritative owner. |
 | No FR-9/FR-12 weakening | Progress age accrues from `eligible_since`/`eligible_at`, which is set when a push command commits and applies; an item is not eligible until then. Commit batching delays *when an item becomes eligible*, not the *rate* at which eligible age accrues, so the queue-global progress bound is unaffected. |
 
-## Hybrid Projection Apply and Poisoning (normative)
+## Hybrid Mode Taxonomy, Success Barriers, and Poisoning (normative)
 
-`objectlog/hybrid` uses the same manifest ack boundary and group-commit pipeline
-as the other object-log profiles, but the projection apply barrier has two
-ordered phases:
+`objectlog/hybrid` is a taxonomy prefix, not a complete contract. Implementations
+MUST select one of the named modes below and surface that mode in configuration,
+telemetry, verification ledgers, and release notes.
+
+| Mode | Success barrier | SQLite projection role | Failure semantics |
+|------|-----------------|------------------------|-------------------|
+| `objectlog/hybrid-strict` | Manifest commit + durable SQLite apply + synchronous memory apply/render for the operation's own result | SQLite is on the response path and is the owner-local restart accelerator/high-water source | SQLite apply failure returns no success; SQLite commit followed by memory apply failure poisons the store |
+| `objectlog/hybrid-async` | Manifest commit + synchronous memory apply/render for the operation's own result | SQLite is an asynchronous projection fed from the committed object log and MAY lag behind memory | SQLite lag/failure after success is retried from the object log; memory apply/render failure before success produces an unknown-outcome retry path |
+
+Both modes use the same manifest ack boundary and group-commit pipeline as the
+other object-log profiles. The difference is which projection applies are inside
+the success barrier.
+
+### `objectlog/hybrid-strict` apply path
+
+`objectlog/hybrid-strict` has two ordered projection phases:
 
 | Element | Rule |
 |---------|------|
@@ -275,6 +295,32 @@ ordered phases:
 | SQLite failure | If SQLite apply fails, no success response is returned. Recovery replays the object-log tail beyond the prior SQLite high-water. |
 | Poisoned gap | If SQLite commits and the memory apply fails, the store MUST mark itself poisoned. The current operation returns `EngineError::Storage`; subsequent reads, validation, and writes fail closed with storage error; and the process must restart to hydrate memory from SQLite before serving. |
 | No lazy divergence | A poisoned hybrid store MUST NOT continue serving with memory behind SQLite, even for read-only methods. |
+
+### `objectlog/hybrid-async` apply path
+
+`objectlog/hybrid-async` keeps the API success path hot without weakening the
+durable-ack contract. Success is legal only after:
+
+1. the command's object-log segment manifest entry is durably committed;
+2. the command is synchronously applied to `InMemoryProjection`; and
+3. the response is rendered from the in-memory projection or reconstructed from
+   the committed command state.
+
+SQLite apply MAY lag after success, but it MUST consume the committed object-log
+sequence in order, exactly once, and persist its applied high-water. Reads, claim
+selection, metrics, secondary-index lookup, live-item lookup, pre-commit
+validation, and response rendering MUST use memory, not the lagging SQLite
+projection. SQLite lag MUST be observable and bounded by the configured
+`hybrid_async_sqlite_apply_lag` budget. If lag exceeds that bound or SQLite apply
+cannot make progress, the implementation MUST fail recovery/high-water claims
+closed and continue serving only when the object-log replay path can prove the
+hot memory image is complete.
+
+For `objectlog/hybrid-async`, a crash after manifest commit but before memory
+apply/render is an unknown-outcome, not a success. Retrying the same
+`request_id` resolves against the committed log: if the original command
+committed, the retry returns or reconstructs that committed result; if no command
+committed, the retry is a fresh attempt subject to current validation.
 
 ## Hybrid ProjectionImage Recovery (normative)
 
@@ -291,7 +337,8 @@ without treating local SQLite as the command authority.
 
 ## Hybrid Snapshot Authority and Segment Retention (normative)
 
-`objectlog/hybrid` has two supported recovery modes:
+`objectlog/hybrid-strict` and `objectlog/hybrid-async` have two supported
+recovery modes:
 
 | Mode | Rule |
 |------|------|
@@ -313,19 +360,38 @@ specialize TD-001 §"Durable Ack and Response Replay" for object-log timing.
 | Condition | Rule |
 |-----------|------|
 | Ack timing | A mutating operation MUST NOT return success before its segment's manifest entry is committed (pipeline step 5). Until then the operation is in-flight, not acknowledged. |
-| Commit-but-unreturned | If the manifest commits but projection apply, response persistence, or response delivery fails, the operation is committed-but-unreturned. Retrying the same `request_id` MUST converge by locating the committed command (by `command_id`/`request_fingerprint` in the replayed log or projection) and returning the recorded or reconstructed response. |
+| Commit-but-unreturned / unknown-outcome | If the manifest commits but the mode-specific success barrier, response persistence, or response delivery fails, the operation is committed-but-unreturned and the caller observes an unknown-outcome. Retrying the same `request_id` MUST converge by locating the committed command (by `command_id`/`request_fingerprint` in the replayed log, memory projection, or durable replay record) and returning the recorded or reconstructed response. |
 | Request-id conflict | Retrying the same `request_id` with a different request fingerprint MUST fail with `request-id-conflict` (API-001). The fingerprint is carried in the committed `CommandEnvelope`, so this holds even if the projection has not yet applied the command. |
 | Claim replay | `BatchClaim` retry MUST return the same claimed set while leases are active and MUST fail with `request-expired` once all returned leases are no longer active (API-001 claim idempotency). The claim command and its lease assignments are reproduced from the committed log; an un-committed (reserved-only) original claim is not a replay (see "Claim Reservation"). |
 | Commit timeout | If the manifest commit cannot complete before the configured commit deadline, the operation MUST return envelope `commit-timeout` (or per-item `unavailable`), and its reservations MUST be rolled back; the caller retries with the same `request_id` and item keys, and accepted items converge (API-001). |
 
-For `objectlog/hybrid`, durable request-id replay for pushes is mandatory. The
-committed `CommandEnvelope::request_id` and pushed command body MUST be enough to
-reconstruct the push fingerprint and response item ids after restart. Recovery
-MUST either repopulate the generic idempotency cache from replayed committed
-pushes or persist equivalent SQLite request-id rows during apply. A same-body
-retry returns the original ids without a second append; a different-body retry
-returns `request-id-conflict`. This is required for crashes after manifest
-commit, after SQLite commit before memory apply, and before response delivery.
+For both `objectlog/hybrid-strict` and `objectlog/hybrid-async`, durable
+request-id replay is mandatory for every mutating command, not only pushes. The
+committed `CommandEnvelope::request_id` and command body MUST be enough to
+reconstruct the request fingerprint and response after restart. Recovery MUST
+either repopulate the generic idempotency cache from replayed committed commands
+or persist equivalent request-id rows during apply. A same-body retry returns the
+original result without a second append; a different-body retry returns
+`request-id-conflict`. This is required for crashes after manifest commit, after
+the mode-specific success barrier partially completes, and before response
+delivery.
+
+### Request-id coverage matrix (normative)
+
+Every operation listed below MUST carry a stable `request_id` in the command
+envelope, persist enough fingerprint/result material for replay-response
+idempotency, and use the unknown-outcome rules above in both hybrid modes.
+
+| Operation family | Covered mutations | Same `request_id` retry | Different fingerprint retry | Hybrid-async SQLite-lag note |
+|------------------|-------------------|-------------------------|-----------------------------|------------------------------|
+| Push | `BatchPush`, duplicate `client_item_key` convergence | Returns original item ids and accepted/rejected per-item results | `request-id-conflict` | SQLite may not yet contain `pqueue_request_idempotency`; replay MUST consult committed log or memory replay record |
+| Claim | `BatchClaim` including group/cohort claims | Returns same active lease set, or `request-expired` after all leases are inactive | `request-id-conflict` | Reservation-only attempts are not committed; committed claims replay from log even if SQLite lags |
+| Renew | `BatchRenewLeases` | Returns the same renewed lease expiry/version effects | `request-id-conflict` | Memory is authoritative for visible active lease state after success |
+| Finalize | `BatchFinalize` success/failure terminal transitions | Returns the original terminal result and item versions | `request-id-conflict` | SQLite lag MUST NOT allow a finalized item to be claimed again from memory |
+| Retry/release | retry scheduling, release/rearm of leased or recurring items | Returns the same retry/release/rearm result and next eligibility fields | `request-id-conflict` | `eligible_since`/`not_before` are read from memory until SQLite catches up |
+| Update | `BatchUpdate`, priority/not-before/payload/metadata updates, `SetGates` queue-scoped updates | Returns the original update/gate result | `request-id-conflict` | Gate flips and secondary indexes are visible from memory before success |
+| Purge | `PurgeItems` and bounded purge batches | Returns the original purged/not-found/conflict result and tombstone effects | `request-id-conflict` | Memory tombstones prevent resurrection while SQLite applies asynchronously |
+| Operator-style mutations | repair, redrive, archive, pause/resume, cancel operation, retention/inspection mutations that change state | Returns the same `operation_id` or mutation result; committed batches are not rolled back by retry/cancel | `request-id-conflict` | Async operation progress records MUST replay from log/memory even before SQLite projection rows catch up |
 
 ## Queue-Scoped Commands (single owner, normative)
 
@@ -400,7 +466,7 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 | Element | Rule |
 |---------|------|
 | Segment expiry | A segment MAY be deleted only after a committed snapshot fully covers its `sequence` range AND `log_recovery_window_ms` has elapsed past that snapshot's `committed_at` (ADR-001 step 8). |
-| Hybrid local SQLite high-water | For `objectlog/hybrid`, the local SQLite high-water is sufficient to skip historical log replay only on owner-local restart after `ProjectionImage` hydration succeeds. It is NOT sufficient by itself to expire object-log segments. |
+| Hybrid local SQLite high-water | For `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the local SQLite high-water is sufficient to skip historical log replay only on owner-local restart after `ProjectionImage` hydration succeeds and, for async mode, after lag has caught up to the advertised high-water. It is NOT sufficient by itself to expire object-log segments. |
 | Idempotency retention | Request-idempotency and item-key convergence records expire per `request_id_retention_ms` / `client_item_key_retention_ms` (API-001), enforced in the SQLite projection; expired records MUST NOT be required for any non-expired segment's replay. |
 | Manifest retention | Manifest entries (including epoch fence records) for expired segments MAY be compacted, but the manifest MUST retain enough tail to validate the active recovery window and the monotonic `sequence`/epoch invariants. |
 | Snapshot retention | At least the most recent committed snapshot whose recovery window has not expired MUST be retained at all times so recovery is always possible. |
@@ -413,11 +479,12 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 | Reject missing CAS | If the configured object store lacks a usable conditional-write primitive and the deployment has not selected the Postgres-manifest-pointer fallback, queue/backend configuration MUST be rejected with `invalid-request` (see "Object-Store Capability Requirements"). |
 | Window sanity | `segment_max_latency_ms` MUST be `> 0`; it is the implementation of the profile's `max_commit_latency_ms` / commit-latency-bound knob. The effective claim/ack latency budget MUST be documented to callers because it bounds API-001 commit latency for this profile. |
 | Snapshot vs recovery window | `log_recovery_window_ms` MUST be `>= snapshot_interval_ms` so an unexpired snapshot always exists before its covered segments can expire. |
-| Hybrid pairing | `PQUEUE_PROJECTION_BACKEND=hybrid` is supported only with `PQUEUE_LOG_BACKEND=objectlog` until other pairings are intentionally implemented and tested. `memory/hybrid`, `sqlite/hybrid`, and `postgres/hybrid` MUST fail closed at startup. |
+| Hybrid pairing | `PQUEUE_PROJECTION_BACKEND=hybrid-strict` and `PQUEUE_PROJECTION_BACKEND=hybrid-async` are supported only with `PQUEUE_LOG_BACKEND=objectlog` until other pairings are intentionally implemented and tested. `memory/hybrid-*`, `sqlite/hybrid-*`, and `postgres/hybrid-*` MUST fail closed at startup. |
 
 ## Runtime Wiring (normative)
 
-`objectlog/hybrid` MUST use the generic object-log group-commit composition:
+`objectlog/hybrid-strict` and `objectlog/hybrid-async` MUST use the generic
+object-log group-commit composition:
 
 ```
 ComposedBackend<pqueue_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
@@ -475,20 +542,23 @@ eligibility, FR-10).
   metrics.
 - Snapshot + log-tail replay time at 10M-item queue scale MUST be measured (Testing) and MUST bound
   recovery time; `snapshot_interval_*` is tuned against the measured replay rate.
-- `objectlog/hybrid` performance gates are concrete and release-blocking: push
-  throughput and p50/p95/p99 acknowledgement latency MUST be within 20% of
-  `objectlog/inmemory` under the same segment settings; claim/finalize p95
-  latency MUST be within 20% of `objectlog/inmemory` for hot reads after SQLite
-  apply cost is amortized; evidence MUST report segment batch density, object PUT
-  count, recovery elapsed time, replayed tail length, and maximum memory
-  rehydrate time from SQLite `ProjectionImage`.
-- `objectlog/hybrid` recovery gates: smoke restart with 100k resident items and
-  local SQLite present MUST complete hydrate plus tail replay in <= 5 seconds and
-  replay <= 1,000 object-log commands; release-tier restart with 10M resident
-  items and local SQLite present MUST complete in <= 60 seconds and replay <=
-  max(10,000 commands, 0.1% of resident items); disk-loss recovery from retained
-  object log MUST reconstruct exact metrics, indexes, leases, and request-id
-  replay state with zero invariant violations.
+- `objectlog/hybrid-strict` and `objectlog/hybrid-async` performance gates are
+  concrete and release-blocking: push throughput and p50/p95/p99
+  acknowledgement latency MUST be within 20% of `objectlog/inmemory` under the
+  same segment settings; claim/finalize p95 latency MUST be within 20% of
+  `objectlog/inmemory` for hot reads. Strict evidence reports SQLite apply
+  amortization; async evidence reports max/p99 SQLite lag and request_id
+  unknown-outcome replay convergence. Both modes report segment batch density,
+  object PUT count, recovery elapsed time, replayed tail length, and maximum
+  memory rehydrate time from SQLite `ProjectionImage`.
+- `objectlog/hybrid-strict` and `objectlog/hybrid-async` recovery gates: smoke
+  restart with 100k resident items and local SQLite present MUST complete hydrate
+  plus tail replay in <= 5 seconds and replay <= 1,000 object-log commands;
+  release-tier restart with 10M resident items and local SQLite present MUST
+  complete in <= 60 seconds and replay <= max(10,000 commands, 0.1% of resident
+  items); disk-loss recovery from retained object log MUST reconstruct exact
+  metrics, indexes, leases, and request-id replay state with zero invariant
+  violations.
 - Telemetry overhead MUST be included in performance tests.
 
 ## Testing
@@ -564,10 +634,10 @@ The following cases define the required evidence surface:
 - Hybrid `ProjectionImage` hydration: export SQLite image, hydrate memory, then
   return SQLite high-water; include queue pause, metrics, secondary indexes,
   leases, side records, instance fences, counters, and request-id replay records.
-- Hybrid durable push request-id replay: crash after manifest commit, after
-  SQLite commit before memory apply, and before response delivery; same-body
-  retry returns original item ids without append, different-body retry returns
-  `request-id-conflict`.
+- Hybrid request-id replay matrix: crash/retry around each mode's success
+  barrier for push, claim, renew, finalize, retry/release, update, purge, and
+  operator-style mutations; same-body retry returns the original result without
+  append, different-body retry returns `request-id-conflict`.
 - Hybrid segment retention: prove local SQLite high-water alone never authorizes
   object-log segment expiry; disk-loss recovery succeeds from retained log.
 - Response / apply ordering: an operation's own committed effect is visible to the same caller's
