@@ -1,0 +1,7 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/deployment/container-runtime-contract.md",
+    "docs/deployment/operator-guide.md"
+  ]
+}
