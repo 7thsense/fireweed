@@ -76,6 +76,11 @@ committed batch to memory on the response path and applies SQLite asynchronously
 from the committed object log. In both modes a returned success means the
 operation is manifest-committed and visible in the hot projection; in async mode
 SQLite is a lagging recovery accelerator, not the acknowledged-command barrier.
+The async SQLite worker consumes sealed object-log batches in monotonically
+increasing batch sequence order, never applies batch N+1 before batch N, and
+advances `sqlite_high_water` only after every command in the sealed batch has
+been applied exactly once. Readers, claim selection, validation, metrics, and
+response rendering observe memory, not the lagging SQLite projection.
 
 For recovery, the local SQLite projection is a restart accelerator and
 high-water source, never the command authority. The object log remains the
@@ -96,6 +101,11 @@ object log; memory apply failure before success prevents the response and leaves
 the operation in unknown-outcome state for `request_id` replay. If async SQLite
 lag cannot be replayed within its configured bound, the store fails closed for
 recovery/high-water claims rather than treating SQLite as authoritative.
+`sqlite_high_water` is a logical applied-command marker, not proof that object
+log history is removable. SQLite WAL checkpoints, fsync mode, and page-cache
+state are local durability implementation details; they may affect restart cost
+on the same host, but they never authorize object-log trimming or replace the
+manifest/snapshot retention rules.
 
 Both hybrid modes MUST preserve replay-response idempotency for
 committed-but-unreturned mutations. During recovery, committed commands with
