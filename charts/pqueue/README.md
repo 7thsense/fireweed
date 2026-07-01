@@ -18,8 +18,8 @@ Projection backend:
 - `postgres`
 
 The current `pqueue-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
-`objectlog/inmemory`, and `objectlog/sqlite` unconditionally. `postgres/inmemory`
-is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
+`objectlog/inmemory`, `objectlog/sqlite`, and `objectlog/hybrid`
+unconditionally. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
 via the `PostgresNativeBackend` wrapper, never on a reactor worker — but only when
 the binary is built with the `postgres` cargo feature (`--features postgres`, or
 `--features postgres,tls` for native-tls). The default release image does **not**
@@ -28,8 +28,8 @@ startup with a message naming the required feature build. Other unsupported
 combinations also fail loudly at startup instead of being hidden behind a synthetic
 combined backend name.
 
-`PQUEUE_PROJECTION_BACKEND=hybrid` is reserved for the normative
-`objectlog/hybrid` profile. It uses the same `PQUEUE_SQLITE_PROJECTION_PATH` as
+`PQUEUE_PROJECTION_BACKEND=hybrid` selects the normative `objectlog/hybrid`
+profile. It uses the same `PQUEUE_SQLITE_PROJECTION_PATH` as
 `sqlite`, applies committed object-log batches to SQLite first, hydrates the hot
 in-memory projection from a SQLite `ProjectionImage` before returning SQLite
 high-water on recovery, and fails closed if memory apply fails after a SQLite

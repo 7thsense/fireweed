@@ -117,12 +117,12 @@ spec:
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") }}
+          {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") }}
           volumeMounts:
             - name: storage
               mountPath: {{ .Values.storage.volume.mountPath | quote }}
           {{- end }}
-      {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") }}
+      {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") }}
       volumes:
         - name: storage
           {{- if .Values.persistence.enabled }}

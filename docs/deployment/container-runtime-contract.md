@@ -24,9 +24,9 @@ The release image entrypoint is `pqueue-service`, the RESP server built from
 | `PQUEUE_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
 
 The current server composition root wires `memory/inmemory`, `sqlite/inmemory`,
-`objectlog/inmemory`, and `objectlog/sqlite` unconditionally. The normative next
-object-log target is `PQUEUE_LOG_BACKEND=objectlog` with
-`PQUEUE_PROJECTION_BACKEND=hybrid`; once wired, it uses the same
+`objectlog/inmemory`, `objectlog/sqlite`, and `objectlog/hybrid`
+unconditionally. `PQUEUE_LOG_BACKEND=objectlog` with
+`PQUEUE_PROJECTION_BACKEND=hybrid` uses the same
 `PQUEUE_SQLITE_PROJECTION_PATH` as `sqlite` and the generic segmented
 object-log group-commit runtime. `postgres/inmemory`
 is wired through the blocking-safe `PostgresNativeBackend` wrapper — the sync

@@ -141,11 +141,20 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
                 "/var/lib/pqueue/pqueue-projection.db",
             )),
         },
+        "hybrid" => ProjectionSpec::Hybrid {
+            path: PathBuf::from(env_or(
+                env,
+                "PQUEUE_SQLITE_PROJECTION_PATH",
+                "/var/lib/pqueue/pqueue-projection.db",
+            )),
+        },
         other => {
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                &format!("unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite"),
+                &format!(
+                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid"
+                ),
             ));
         }
     };
@@ -157,6 +166,7 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
         (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog { .. }, ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog { .. }, ProjectionSpec::Sqlite { .. }) => true,
+        (LogSpec::ObjectLog { .. }, ProjectionSpec::Hybrid { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
         _ => false,
@@ -359,6 +369,28 @@ mod tests {
     }
 
     #[test]
+    fn objectlog_hybrid_projection_carries_sqlite_path_and_segment_config() {
+        let config = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "objectlog"),
+            ("PQUEUE_PROJECTION_BACKEND", "hybrid"),
+            ("PQUEUE_OBJECT_LOG_ROOT", "/data/olog"),
+            ("PQUEUE_SQLITE_PROJECTION_PATH", "/data/hybrid.db"),
+            ("PQUEUE_SEGMENT_TARGET_BYTES", "65536"),
+            ("PQUEUE_SEGMENT_MAX_LATENCY_MS", "7"),
+        ]))
+        .expect("valid hybrid env");
+        assert_eq!(config.segment_config.target_bytes, 65_536);
+        assert_eq!(config.segment_config.max_latency_ms, 7);
+        match (config.backend.log, config.backend.projection) {
+            (LogSpec::ObjectLog { root }, ProjectionSpec::Hybrid { path }) => {
+                assert_eq!(root, PathBuf::from("/data/olog"));
+                assert_eq!(path, PathBuf::from("/data/hybrid.db"));
+            }
+            _ => panic!("expected objectlog log × hybrid projection"),
+        }
+    }
+
+    #[test]
     fn unknown_log_backend_is_rejected() {
         let result = Config::from_env(&map(&[("PQUEUE_LOG_BACKEND", "bogus")]));
         let Err(err) = result else {
@@ -375,6 +407,23 @@ mod tests {
             ("PQUEUE_PROJECTION_BACKEND", "sqlite"),
         ]));
         assert!(result.is_err(), "sqlite/sqlite is not wired");
+    }
+
+    #[test]
+    fn non_objectlog_hybrid_pairing_is_rejected() {
+        let result = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "sqlite"),
+            ("PQUEUE_PROJECTION_BACKEND", "hybrid"),
+        ]));
+        let Err(err) = result else {
+            panic!("sqlite/hybrid is not wired");
+        };
+        assert!(
+            err.0
+                .contains("PQUEUE_LOG_BACKEND=sqlite PQUEUE_PROJECTION_BACKEND=hybrid"),
+            "{}",
+            err.0
+        );
     }
 
     #[test]

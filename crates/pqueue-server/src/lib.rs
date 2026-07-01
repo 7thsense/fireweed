@@ -17,15 +17,17 @@ use std::time::Duration;
 
 use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, AuthContext, Clock, EngineError, EngineResult, InMemoryControlPlane,
-    LeaseState, OwnedSession, QueueControlPlane, QueueKey,
+    AcquireOutcome, AuthContext, Clock, ComposedBackend, EngineError, EngineResult,
+    InMemoryControlPlane, InProcessControlPlane, LeaseState, OwnedSession, QueueControlPlane,
+    QueueKey,
 };
 use pqueue_memory::composed_memory_backend;
+use pqueue_objectlog::ObjectLog;
 use pqueue_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
 };
-use pqueue_sqlite::composed_sqlite_backend;
+use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -92,6 +94,8 @@ pub enum ProjectionSpec {
     InMemory,
     /// Derived relational sqlite projection (`pqueue_items` is the read model) at `path`.
     Sqlite { path: PathBuf },
+    /// SQLite-first durable projection image plus hot in-memory serving at `path`.
+    Hybrid { path: PathBuf },
 }
 
 impl ProjectionSpec {
@@ -99,9 +103,13 @@ impl ProjectionSpec {
         match self {
             ProjectionSpec::InMemory => "inmemory",
             ProjectionSpec::Sqlite { .. } => "sqlite",
+            ProjectionSpec::Hybrid { .. } => "hybrid",
         }
     }
 }
+
+type ObjectLogHybridBackend =
+    ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
 
 /// The control-plane axis (queue definitions + placement). The in-process plane is the only wired one.
 pub enum ControlPlaneSpec {
@@ -121,7 +129,7 @@ pub enum ControlPlaneSpec {
 /// (`ObjectLog × {InMemory, Sqlite}`) still run on the segmented group-commit backends because their
 /// production env contract — concurrent segment co-buffering + the latency-seal flusher + segment-config /
 /// debug-segments / recovery-tail knobs — is not yet expressed by the per-append-seal composed `ObjectLog`
-/// axis; folding that contract into the axis (then deleting the segmented backends) is the remaining step.
+/// axis; `objectlog/hybrid` is the first runtime that uses that generic group-commit axis directly.
 pub struct BackendSpec {
     pub log: LogSpec,
     pub projection: ProjectionSpec,
@@ -885,6 +893,24 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             backend.spawn_flusher();
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
+        (LogSpec::ObjectLog { root }, ProjectionSpec::Hybrid { path }) => {
+            let p = path
+                .to_str()
+                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+            let backend = Arc::new(
+                ComposedBackend::new(
+                    ObjectLog::open_group_commit(root, segment_config)?,
+                    HybridProjectionStore::open(p)?,
+                    InProcessControlPlane::new(),
+                )
+                .with_group_commit(true)
+                .with_recovery_max_tail(recovery_max_tail)
+                .recover()?
+                .with_node_id(node_id),
+            );
+            spawn_hybrid_flusher(backend.clone(), debug_segments);
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+        }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
             // ADR-012 P2: the composed postgres backend (`ComposedBackend<PostgresLog, InMemoryProjection,
@@ -916,6 +942,39 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             projection.label()
         ))),
     }
+}
+
+fn spawn_hybrid_flusher(
+    backend: Arc<ObjectLogHybridBackend>,
+    debug_segments: bool,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval_ms = backend.group_commit_flush_interval_ms();
+        let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
+        let mut dbg_last = std::time::Instant::now();
+        loop {
+            tick.tick().await;
+            let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
+                Err(_) => 0,
+            };
+            if let Err(e) = backend.flush_tick(now_ms) {
+                eprintln!("[objectlog/hybrid] group-commit flush failed: {e}");
+            }
+            if debug_segments && dbg_last.elapsed() >= Duration::from_secs(1) {
+                dbg_last = std::time::Instant::now();
+                let c = backend.with_log(|log| log.counters());
+                eprintln!(
+                    "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={}",
+                    c.segments_sealed,
+                    c.commands_committed,
+                    c.mean_batch_size(),
+                    c.max_batch_size(),
+                    c.objects_put
+                );
+            }
+        }
+    })
 }
 
 /// Wrap an already-`Arc`-shared backend in the single-node ownership runtime and run it: a per-node

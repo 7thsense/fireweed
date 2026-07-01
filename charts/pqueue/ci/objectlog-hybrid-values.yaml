@@ -1,0 +1,8 @@
+# Static render values: objectlog log with hybrid SQLite-plus-memory projection axis selected.
+storage:
+  log:
+    backend: objectlog
+  projection:
+    backend: hybrid
+image:
+  tag: ci

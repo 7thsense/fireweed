@@ -3275,7 +3275,14 @@ impl HybridProjectionStore {
         let sqlite_high_water = self.sqlite.recovery_high_water(&shard)?;
         let sqlite_high_water = sqlite_high_water
             .and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1)));
-        if sqlite_high_water != expected_high_water {
+        let high_water_matches = match (&sqlite_high_water, &expected_high_water) {
+            (Some(cursor), Some(image)) => {
+                cursor.queue == image.queue && cursor.sequence == image.sequence
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !high_water_matches {
             return Err(EngineError::Storage(format!(
                 "hybrid projection hydration high-water mismatch for {}/{}: cursor {:?}, image {:?}",
                 shard.tenant_id, shard.queue_id, sqlite_high_water, expected_high_water

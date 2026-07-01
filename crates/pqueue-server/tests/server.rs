@@ -29,6 +29,14 @@ fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBu
         control_plane: ControlPlaneSpec::InProcess,
     }
 }
+
+fn objectlog_hybrid_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
+    BackendSpec {
+        log: LogSpec::ObjectLog { root },
+        projection: ProjectionSpec::Hybrid { path: projection },
+        control_plane: ControlPlaneSpec::InProcess,
+    }
+}
 use redis::streams::StreamReadReply;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -790,6 +798,96 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
     assert_ne!(
         next_id, first_id,
         "post-reopen push must not remint an existing item id"
+    );
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid");
+    let first_id = {
+        let mut config = Config::new(
+            objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        );
+        config.segment_config =
+            pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+        let server = start(config).await.unwrap();
+        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+
+        let produced: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(7)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let reply: StreamReadReply = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg("g")
+            .arg("c")
+            .arg("STREAMS")
+            .arg("t1:q1")
+            .arg(">")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(reply.keys[0].ids[0].id, produced);
+        let acked: i64 = redis::cmd("XACK")
+            .arg("t1:q1")
+            .arg("g")
+            .arg(&produced)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(acked, 1);
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+        produced
+    };
+
+    let server = start(Config::new(
+        objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
+    .await
+    .unwrap();
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        empty.is_none(),
+        "acked item was redelivered after objectlog/hybrid recovery"
+    );
+    let next_id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(9)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_ne!(
+        next_id, first_id,
+        "post-reopen hybrid push must not remint an existing item id"
     );
     server.shutdown_and_drain(Duration::from_secs(5)).await;
     let _ = std::fs::remove_dir_all(&object_root);

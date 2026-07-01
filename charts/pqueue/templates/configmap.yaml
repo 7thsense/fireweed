@@ -16,6 +16,6 @@ data:
   {{- if eq .Values.storage.log.backend "objectlog" }}
   PQUEUE_OBJECT_LOG_ROOT: {{ .Values.storage.log.objectLog.root | quote }}
   {{- end }}
-  {{- if eq .Values.storage.projection.backend "sqlite" }}
+  {{- if or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") }}
   PQUEUE_SQLITE_PROJECTION_PATH: {{ .Values.storage.projection.sqlite.path | quote }}
   {{- end }}
