@@ -1,0 +1,65 @@
+{
+  "attempt_id": "20260701T031734-c3e61342",
+  "bead_id": "pqueue-1ee5b44d",
+  "base_rev": "4670850e073941d533c027e7ee67e8f9c05ffd17",
+  "created_at": "2026-07-01T03:17:34.853161369Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-1ee5b44d",
+    "title": "Add hybrid chaos and conformance coverage",
+    "description": "Add aggressive correctness coverage for objectlog/hybrid. Cover SQLite commit before memory failure and poison behavior, recovery from SQLite high-water plus object-log tail, disk-loss full replay from retained object log, replay overlap/idempotent prefix skip, force-seal before claim, stale epoch/fenced writer, request-id replay after committed-but-unreturned pushes, secondary-index parity, and metrics parity. Run the shared eventual-apply conformance and transaction-contract scenarios against hybrid. Out of scope: long release-tier 10M performance runs; keep default tests CI-feasible.",
+    "acceptance": "1. cargo test -p pqueue-sqlite hybrid_chaos -- --nocapture passes.\\n2. cargo test -p pqueue-server --test server objectlog_hybrid -- --nocapture passes.\\n3. cargo test -p pqueue-conformance -- --nocapture passes.\\n4. cargo test --workspace --all-features passes.\\n5. cargo fmt --check passes.",
+    "parent": "pqueue-6f4881ef",
+    "labels": [
+      "area:tests",
+      "area:pqueue-conformance",
+      "area:pqueue-server",
+      "kind:verification",
+      "plan-2026-06-30",
+      "backend:objectlog-hybrid",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"cargo test -p pqueue-sqlite hybrid_chaos -- --nocapture passes.\\\\n2. cargo test -p pqueue-server --test server objectlog_hybrid -- --nocapture passes.\\\\n3. cargo test -p pqueue-conformance -- --nocapture passes.\\\\n4. cargo test --workspace --all-features passes.\\\\n5. cargo fmt --check passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-01T03:17:32.112535608Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/1"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-01T03:17:34.368315408Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "plan-hybrid-sqlite-inmemory-projection"
+    }
+  },
+  "governing": [
+    {
+      "id": "plan-hybrid-sqlite-inmemory-projection",
+      "path": "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md",
+      "title": "Hybrid SQLite + In-Memory Projection Implementation Plan"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260701T031734-c3e61342",
+    "prompt": ".ddx/executions/20260701T031734-c3e61342/prompt.md",
+    "manifest": ".ddx/executions/20260701T031734-c3e61342/manifest.json",
+    "result": ".ddx/executions/20260701T031734-c3e61342/result.json",
+    "checks": ".ddx/executions/20260701T031734-c3e61342/checks.json",
+    "usage": ".ddx/executions/20260701T031734-c3e61342/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-1ee5b44d-20260701T031734-c3e61342"
+  },
+  "prompt_sha": "6e064734b13fe84b3417e3e66cecb5c3e66397df9087f3c4c0e8c22df2a8012d"
+}
