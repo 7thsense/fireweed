@@ -1738,6 +1738,7 @@ fn refresh_group_summary(
 /// only errors here are storage/`NotFound` faults, never behavioral rejections. Live-token mutations are
 /// appended to `token_ops` (applied post-commit by the caller), never mutated in place. Grouped-item
 /// mutations also refresh `pqueue_group_summary` for the affected group(s) in this same transaction.
+#[allow(clippy::too_many_arguments)]
 fn apply_command_sql(
     tx: &Transaction<'_>,
     queues: &HashMap<QueueKey, QueueDefinition>,
