@@ -1,0 +1,38 @@
+{
+  "attempt_id": "20260701T184645-0f2c50ed",
+  "bead_id": "pqueue-fe6bc225",
+  "base_rev": "03255bf5cebc5c3a945672962ad2e0b5b184ca60",
+  "created_at": "2026-07-01T18:46:46.048421065Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-fe6bc225",
+    "title": "Expose hybrid async runtime profile",
+    "description": "Wire runtime configuration for objectlog/hybrid-async while preserving existing strict behavior. In-scope files: crates/pqueue-server/src/env_config.rs, crates/pqueue-server/src/lib.rs, crates/pqueue-server/src/bin/pqueue-service.rs, charts/pqueue/*, docs/deployment/*. Reject unsupported backend pairings fail-closed. Add Helm values/schema/static validation for hybrid-async settings and document env vars. Out of scope: load evidence.",
+    "acceptance": "1. cargo test -p pqueue-server env_config hybrid_async -- --nocapture passes.\\n2. cargo test -p pqueue-server --test server objectlog_hybrid_async -- --nocapture passes.\\n3. bash scripts/ci/helm-gate.sh passes.\\n4. cargo fmt --check passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:pqueue-server",
+      "area:helm",
+      "area:deployment",
+      "kind:task",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "spec-id": "plan-hybrid-async-checkpoint"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T184645-0f2c50ed",
+    "prompt": ".ddx/executions/20260701T184645-0f2c50ed/prompt.md",
+    "manifest": ".ddx/executions/20260701T184645-0f2c50ed/manifest.json",
+    "result": ".ddx/executions/20260701T184645-0f2c50ed/result.json",
+    "checks": ".ddx/executions/20260701T184645-0f2c50ed/checks.json",
+    "usage": ".ddx/executions/20260701T184645-0f2c50ed/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-fe6bc225-20260701T184645-0f2c50ed"
+  },
+  "prompt_sha": "dca57f3dd86011f9ac56cbc233c8199f733890f0d293b492725d3a22b50577fb"
+}

@@ -193,12 +193,22 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
                 "/var/lib/pqueue/pqueue-projection.db",
             )),
         },
+        // The `objectlog/hybrid-async` profile (TD-004): same hot-memory-over-durable-SQLite substrate as
+        // `hybrid`, selected under its canonical name so the deployment carries the async-apply threshold
+        // config (`PQUEUE_HYBRID_ASYNC_*`, already parsed into `Config::hybrid_async`).
+        "hybrid-async" => ProjectionSpec::HybridAsync {
+            path: PathBuf::from(env_or(
+                env,
+                "PQUEUE_SQLITE_PROJECTION_PATH",
+                "/var/lib/pqueue/pqueue-projection.db",
+            )),
+        },
         other => {
             return Err(unsupported_storage(
                 &log,
                 &projection,
                 &format!(
-                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid"
+                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid|hybrid-async"
                 ),
             ));
         }
@@ -212,6 +222,7 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
         (LogSpec::ObjectLog { .. }, ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog { .. }, ProjectionSpec::Sqlite { .. }) => true,
         (LogSpec::ObjectLog { .. }, ProjectionSpec::Hybrid { .. }) => true,
+        (LogSpec::ObjectLog { .. }, ProjectionSpec::HybridAsync { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
         _ => false,
@@ -433,6 +444,49 @@ mod tests {
                 assert_eq!(path, PathBuf::from("/data/hybrid.db"));
             }
             _ => panic!("expected objectlog log × hybrid projection"),
+        }
+    }
+
+    #[test]
+    fn objectlog_hybrid_async_projection_selects_profile_and_carries_paths_and_thresholds() {
+        // The canonical `objectlog/hybrid-async` runtime profile: the object-log log axis paired with the
+        // hybrid-async projection, carrying both the sqlite checkpoint path and the async-apply thresholds.
+        let config = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "objectlog"),
+            ("PQUEUE_PROJECTION_BACKEND", "hybrid-async"),
+            ("PQUEUE_OBJECT_LOG_ROOT", "/data/olog"),
+            ("PQUEUE_SQLITE_PROJECTION_PATH", "/data/hybrid-async.db"),
+            ("PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS", "4096"),
+            ("PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD", "9"),
+        ]))
+        .expect("valid hybrid-async env");
+        assert_eq!(config.hybrid_async.apply_lag_max_commands, 4096);
+        assert_eq!(config.hybrid_async.apply_poison_retry_threshold, 9);
+        match (config.backend.log, config.backend.projection) {
+            (LogSpec::ObjectLog { root }, ProjectionSpec::HybridAsync { path }) => {
+                assert_eq!(root, PathBuf::from("/data/olog"));
+                assert_eq!(path, PathBuf::from("/data/hybrid-async.db"));
+            }
+            _ => panic!("expected objectlog log × hybrid-async projection"),
+        }
+    }
+
+    #[test]
+    fn non_objectlog_hybrid_async_pairing_is_rejected() {
+        // Only the object-log log axis pairs with hybrid-async; any other log backend fails closed.
+        for log in ["memory", "sqlite"] {
+            let result = Config::from_env(&map(&[
+                ("PQUEUE_LOG_BACKEND", log),
+                ("PQUEUE_PROJECTION_BACKEND", "hybrid-async"),
+            ]));
+            let Err(err) = result else {
+                panic!("{log}/hybrid-async must not be wired");
+            };
+            assert!(
+                err.0.contains("PQUEUE_PROJECTION_BACKEND=hybrid-async"),
+                "{}",
+                err.0
+            );
         }
     }
 

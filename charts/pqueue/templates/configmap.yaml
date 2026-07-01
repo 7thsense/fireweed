@@ -16,6 +16,13 @@ data:
   {{- if eq .Values.storage.log.backend "objectlog" }}
   PQUEUE_OBJECT_LOG_ROOT: {{ .Values.storage.log.objectLog.root | quote }}
   {{- end }}
-  {{- if or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") }}
+  {{- if or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") }}
   PQUEUE_SQLITE_PROJECTION_PATH: {{ .Values.storage.projection.sqlite.path | quote }}
+  {{- end }}
+  {{- if eq .Values.storage.projection.backend "hybrid-async" }}
+  PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS: {{ .Values.storage.projection.hybridAsync.applyLagMaxCommands | int64 | quote }}
+  PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES: {{ .Values.storage.projection.hybridAsync.applyDebtMaxBytes | int64 | quote }}
+  PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX: {{ .Values.storage.projection.hybridAsync.applyQueueDepthMax | int64 | quote }}
+  PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS: {{ .Values.storage.projection.hybridAsync.oldestUnappliedMaxMs | int64 | quote }}
+  PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD: {{ .Values.storage.projection.hybridAsync.applyPoisonRetryThreshold | int64 | quote }}
   {{- end }}
