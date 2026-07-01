@@ -39,8 +39,9 @@ use crate::command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
     FinalizeCommand, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand,
     PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
-    ReplacePendingCommand, ScheduleUpdate, UpdateFieldsCommand, WriteSideRecordsCommand,
-    build_push_items, validate_gate_command, validate_gate_push,
+    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, UpdateFieldsCommand,
+    WriteSideRecordsCommand, build_push_items, validate_gate_command, validate_gate_push,
+    validate_request_replay_metadata,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
@@ -791,6 +792,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
         validate_gate_command(false, &env.command)?;
+        validate_request_replay_metadata(&env)?;
         let now_ms = ts_to_ms(env.created_at);
         let seal_epoch = match expected_epoch {
             Some(e) => e,
@@ -976,12 +978,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 let QueueCommand::Push(push) = &env.command else {
                     continue;
                 };
-                let fingerprint = push_item_body_hash(&push.items)?;
+                let fingerprint = env
+                    .request_fingerprint
+                    .map(BodyHash)
+                    .unwrap_or(push_item_body_hash(&push.items)?);
                 let expires_at = request_expires_at(env.created_at, retention_ms);
                 idempotency.entry(shard.clone()).or_default().record(
                     request_id.clone(),
                     fingerprint,
-                    env.item_ids.clone(),
+                    match &env.request_outcome {
+                        Some(RequestOutcome::Push { item_ids }) => item_ids.clone(),
+                        None => env.item_ids.clone(),
+                    },
                     expires_at,
                 );
             }
@@ -1022,6 +1030,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         CommandEnvelope {
             command_id,
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -1441,6 +1451,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let env = CommandEnvelope {
                 command_id,
                 request_id: Some(request_id.clone()),
+                request_fingerprint: Some(fingerprint.0),
+                request_outcome: Some(RequestOutcome::Push {
+                    item_ids: ids.clone(),
+                }),
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),
@@ -2342,6 +2356,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     CommandEnvelope {
                         command_id,
                         request_id: request_id.clone(),
+                        request_fingerprint: None,
+                        request_outcome: None,
                         item_ids,
                         command,
                         checksum: CommandChecksum(0),

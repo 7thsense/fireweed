@@ -50,9 +50,10 @@ pub use command::{
     CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
     LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
-    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, ScheduleUpdate,
-    SetGatesCommand, SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
-    build_push_items, validate_gate_command, validate_gate_push,
+    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome,
+    ScheduleUpdate, SetGatesCommand, SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand,
+    WriteSideRecordsCommand, build_push_items, validate_gate_command, validate_gate_push,
+    validate_request_replay_metadata,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{

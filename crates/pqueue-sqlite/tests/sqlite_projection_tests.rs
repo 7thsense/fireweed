@@ -23,6 +23,8 @@ fn envelope(
     CommandEnvelope {
         command_id: CommandId::new(id),
         request_id: None,
+        request_fingerprint: None,
+        request_outcome: None,
         item_ids,
         command,
         checksum: CommandChecksum(0),

@@ -56,6 +56,8 @@ async fn fence(backend: &ComposedMemoryBackend, id: &str) {
     let env = CommandEnvelope {
         command_id: CommandId::new("fence"),
         request_id: None,
+        request_fingerprint: None,
+        request_outcome: None,
         item_ids: vec![item],
         command: QueueCommand::FenceLease(FenceLeaseCommand {
             item_ids: vec![item],

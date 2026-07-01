@@ -6,8 +6,8 @@ use pqueue_core::{
     RetryPolicy, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane, ProjectionRead,
-    PushPort, PushSpec, QueueKey,
+    ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane, LogStore,
+    ProjectionRead, PushPort, PushSpec, QueueKey, RequestOutcome,
 };
 use pqueue_objectlog::{ObjectLog, SegmentConfig};
 use pqueue_sqlite::HybridProjectionStore;
@@ -98,6 +98,18 @@ async fn hybrid_request_id_push_replays_after_restart_and_conflicts_on_body_chan
             .await
             .unwrap();
         assert_eq!(backend.metrics(&queue).await.unwrap().pending, 1);
+        let page = backend
+            .with_log(|log| log.read_from(&queue, None, 10))
+            .expect("read committed log");
+        let env = &page.entries[0].1;
+        assert_eq!(env.request_id.as_ref(), Some(&request_id));
+        assert!(env.request_fingerprint.is_some());
+        assert_eq!(
+            env.request_outcome,
+            Some(RequestOutcome::Push {
+                item_ids: ids.clone()
+            })
+        );
         ids
     };
 

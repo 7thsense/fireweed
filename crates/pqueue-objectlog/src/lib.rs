@@ -50,9 +50,10 @@ use pqueue_engine::{
     ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
     PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey,
     QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim,
-    validate_entity, validate_gate_command, validate_gate_push, validate_purge_force,
+    RenewLeaseCommand, RenewLeasePort, RequestOutcome, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
+    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
+    validate_purge_force,
 };
 use pqueue_projection::ProjectionData;
 
@@ -389,6 +390,8 @@ impl Inner {
         CommandEnvelope {
             command_id: CommandId::new(format!("obj-{n}")),
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -953,6 +956,8 @@ impl PushPort for ObjectLogBackend {
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("obj-{}-{n}", self.node_id)),
                 request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),
@@ -1014,6 +1019,10 @@ impl PushPort for ObjectLogBackend {
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("obj-{}-{n}", self.node_id)),
                 request_id: Some(request_id.clone()),
+                request_fingerprint: Some(fingerprint.0),
+                request_outcome: Some(RequestOutcome::Push {
+                    item_ids: ids.clone(),
+                }),
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),
