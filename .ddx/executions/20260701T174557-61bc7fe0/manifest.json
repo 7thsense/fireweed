@@ -1,0 +1,37 @@
+{
+  "attempt_id": "20260701T174557-61bc7fe0",
+  "bead_id": "pqueue-16b85e28",
+  "base_rev": "f0a7ba511360acdf660280a3e8907619acb8886c",
+  "created_at": "2026-07-01T17:45:58.061344707Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-16b85e28",
+    "title": "Build async SQLite checkpoint store",
+    "description": "Add the async SQLite logical checkpoint implementation. In-scope files: crates/pqueue-sqlite/src/relational.rs, crates/pqueue-projection/src/lib.rs, focused sqlite tests. The worker consumes committed object-log entries in order, applies a batch to SQLite in one transaction, writes logical high-water last in the same transaction, persists idempotency/outcome rows through that high-water, and records object-log lineage metadata. Distinguish logical high-water from SQLite WAL checkpointing. Out of scope: server runtime configuration.",
+    "acceptance": "1. `cargo test -p pqueue-sqlite hybrid_async_checkpoint -- --nocapture` passes.\n2. `cargo test -p pqueue-projection projection_image -- --nocapture` passes.\n3. `cargo test -p pqueue-sqlite sqlite_projection_image -- --nocapture` passes.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:pqueue-sqlite",
+      "area:pqueue-projection",
+      "kind:task",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "spec-id": "plan-hybrid-async-checkpoint"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T174557-61bc7fe0",
+    "prompt": ".ddx/executions/20260701T174557-61bc7fe0/prompt.md",
+    "manifest": ".ddx/executions/20260701T174557-61bc7fe0/manifest.json",
+    "result": ".ddx/executions/20260701T174557-61bc7fe0/result.json",
+    "checks": ".ddx/executions/20260701T174557-61bc7fe0/checks.json",
+    "usage": ".ddx/executions/20260701T174557-61bc7fe0/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-16b85e28-20260701T174557-61bc7fe0"
+  },
+  "prompt_sha": "59c49d083789bc8555d69474e3d416e8997b1a8080de2366e1f8af6efd536b40"
+}
