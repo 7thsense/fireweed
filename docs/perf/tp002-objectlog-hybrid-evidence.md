@@ -100,7 +100,11 @@ include lineage fields (`manifest_tail`, segment range/checksum,
 `request_id_fingerprint_count`, memory image high-water, SQLite image
 high-water) plus `retention_frontier` inputs for committed snapshots, active
 manifest tail, request_id outcome retention, client item-key retention, and
-async SQLite lag.
+async SQLite lag. Future `objectlog/hybrid-async` release evidence must also
+carry the release-lane performance fields used here: resident count,
+hybrid/inmemory hot-path ratios, restart hydrate + tail time, restart pending
+count, disk-loss reconstruction wall time, disk-loss pending count, and
+`bars_met`.
 
 Blocker and raw command output:
 `docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log`.
