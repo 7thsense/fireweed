@@ -1,12 +1,21 @@
-# TP-002 objectlog/hybrid smoke evidence and 10M release lane
+# TP-002 objectlog/hybrid-strict smoke evidence and 10M release lane
 
 **Bead:** `pqueue-1363098f`. **Date:** 2026-07-01.
 **Suite:** `crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs`.
 
-This suite compares `objectlog/hybrid` with `objectlog/inmemory` and
-`objectlog/sqlite` under the same local segmented object-log config. The smoke
-lane is release-safe by default and writes a strict JSONL ledger row when
-`PQUEUE_LEDGER_DIR` points at `docs/perf/evidence`.
+This evidence covers the strict hybrid contract:
+`objectlog/hybrid-strict` (the historical `objectlog/hybrid` spelling in the
+test binary at the time this row was produced). It compares strict hybrid with
+`objectlog/inmemory` and `objectlog/sqlite` under the same local segmented
+object-log config. The smoke lane is release-safe by default and writes a strict
+JSONL ledger row when `PQUEUE_LEDGER_DIR` points at `docs/perf/evidence`.
+
+`objectlog/hybrid-async` has a different success barrier: success is legal only
+after object-log manifest commit plus synchronous memory apply/render, while
+SQLite projection apply may lag. Async-mode release evidence MUST report the
+same hot-path fields plus max/p99 SQLite lag, unknown-outcome retry convergence,
+and request_id matrix coverage for push, claim, renew, finalize, retry/release,
+update, purge, and operator-style mutations before it can reuse this lane.
 
 ## Smoke command
 
@@ -23,7 +32,7 @@ Result: **pass**, emitted
 
 | profile | push/s | ack p50 | ack p95 | ack p99 | claim/finalize p95 | segments | objects PUT | mean commands/segment |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| objectlog/hybrid | 47,003.927 | 2.107 ms | 3.985 ms | 3.985 ms | 2.137 ms | 30 | 60 | 1.0 |
+| objectlog/hybrid-strict | 47,003.927 | 2.107 ms | 3.985 ms | 3.985 ms | 2.137 ms | 30 | 60 | 1.0 |
 | objectlog/inmemory | 41,771.761 | 2.111 ms | 3.887 ms | 3.887 ms | 2.355 ms | 30 | 60 | 1.0 |
 | objectlog/sqlite | 66,857.371 | 1.862 ms | 2.251 ms | 2.251 ms | 2.986 ms | 30 | 60 | 1.0 |
 
@@ -65,9 +74,11 @@ PQUEUE_LEDGER_DIR="$PWD/docs/perf/evidence" PQUEUE_PERF_ENV=1 \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
-Release gate: `objectlog/hybrid` hot path must be within 20% of
+Release gate: `objectlog/hybrid-strict` hot path must be within 20% of
 `objectlog/inmemory`, normal restart recovery must be `<= 60s`, tail must be
 `<= max(10000, 0.1% resident)`, and disk-loss reconstruction must be exact.
+`objectlog/hybrid-async` must additionally prove its async SQLite lag bound and
+unknown-outcome replay contract before being cited as release evidence.
 
 Blocker and raw command output:
 `docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log`.
