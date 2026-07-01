@@ -787,3 +787,12 @@
 {"event":"release","lock_name":"index.lock","operation":"index.commit","holder_pid":1423071,"acquired_at":"2026-07-01T15:15:46.937946358Z","released_at":"2026-07-01T15:15:46.967134025Z","duration_ms":29}
 {"event":"release","lock_name":"tracker.lock","operation":"pre_dispatch_commits","holder_pid":1423071,"acquired_at":"2026-07-01T15:15:46.913758149Z","released_at":"2026-07-01T15:15:46.967238609Z","duration_ms":53}
 {"event":"acquire","lock_name":"tracker.lock","operation":"pre_dispatch_checkpoint","holder_pid":1423071,"acquired_at":"2026-07-01T15:15:46.976546734Z"}
+{"event":"acquire","lock_name":"index.lock","operation":"index.read-tree","holder_pid":1423071,"acquired_at":"2026-07-01T15:15:47.042864069Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.read-tree","holder_pid":1423071,"acquired_at":"2026-07-01T15:15:47.042864069Z","released_at":"2026-07-01T15:15:47.046661361Z","duration_ms":3}
+{"event":"release","lock_name":"tracker.lock","operation":"pre_dispatch_checkpoint","holder_pid":1423071,"acquired_at":"2026-07-01T15:15:46.976546734Z","released_at":"2026-07-01T15:15:47.046817527Z","duration_ms":70}
+{"event":"acquire","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.285302109Z"}
+{"event":"release","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.285302109Z","released_at":"2026-07-01T15:27:38.285407151Z"}
+{"event":"acquire","lock_name":"index.lock","operation":"index.add","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.295154193Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.add","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.295154193Z","released_at":"2026-07-01T15:27:38.307751901Z","duration_ms":12}
+{"event":"acquire","lock_name":"index.lock","operation":"index.commit","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.313615276Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.commit","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.313615276Z","released_at":"2026-07-01T15:27:38.341809527Z","duration_ms":28}
