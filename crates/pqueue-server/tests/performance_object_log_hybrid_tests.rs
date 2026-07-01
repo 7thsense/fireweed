@@ -388,7 +388,7 @@ async fn run_hybrid(
                     committed.saturating_sub(applied)
                 });
                 series.lock().expect("lag series").push(lag);
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
     };
@@ -1230,16 +1230,15 @@ async fn run_suite_named(suite: &str, command: &str, release: bool) -> HybridGat
         "PQUEUE_HYBRID_RESIDENT",
         if release { RELEASE_RESIDENT } else { 1_000 },
     );
-    let load_batch = env_u64(
-        "PQUEUE_HYBRID_LOAD_BATCH",
-        if release { 1_000 } else { 100 },
-    )
-    .max(1);
-    let claim_batch = env_u64(
-        "PQUEUE_HYBRID_CLAIM_BATCH",
-        if release { 1_000 } else { 100 },
-    )
-    .max(1) as usize;
+    let default_batch = if release && resident <= 10_000 {
+        100
+    } else if release {
+        1_000
+    } else {
+        100
+    };
+    let load_batch = env_u64("PQUEUE_HYBRID_LOAD_BATCH", default_batch).max(1);
+    let claim_batch = env_u64("PQUEUE_HYBRID_CLAIM_BATCH", default_batch).max(1) as usize;
     let target_bytes = env_u64("PQUEUE_HYBRID_SEGMENT_TARGET_BYTES", 262_144) as usize;
     let max_latency_ms = env_u64("PQUEUE_HYBRID_SEGMENT_MAX_LATENCY_MS", 5);
     let cfg = SegmentConfig::new(target_bytes, max_latency_ms).expect("valid segment config");
@@ -2363,6 +2362,127 @@ async fn performance_object_log_hybrid_scale_matrix() {
     if ran > 0 {
         pqueue_release::verify_ledger(&path, true).expect("strict scale-matrix ledger validates");
         println!("emitted {ran} scale cells -> {}", path.display());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn performance_object_log_hybrid_async_apply_exactly_once() {
+    let root = scratch("hybrid-async-exactly-once-obj");
+    let projection = scratch("hybrid-async-exactly-once.db");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&projection);
+    let cfg = SegmentConfig::new(1, 60_000).expect("valid segment config");
+    let def = qdef("hybrid-async-exactly-once", 8);
+    let test_shard = shard(&def);
+
+    let backend = Arc::new(
+        ComposedBackend::new(
+            ObjectLog::open_group_commit(&root, cfg).expect("open object log"),
+            HybridProjectionStore::open(projection.to_str().unwrap()).expect("open projection"),
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true)
+        .recover()
+        .expect("recover fresh backend"),
+    );
+    backend
+        .create_queue(def.clone())
+        .await
+        .expect("create queue");
+
+    let ids = backend
+        .push(
+            &test_shard,
+            (0..4).map(|i| spec(format!("async-{i}"))).collect(),
+            ts(0),
+            None,
+        )
+        .await
+        .expect("push");
+    assert_eq!(ids.len(), 4);
+    assert_eq!(
+        backend
+            .metrics(&test_shard)
+            .await
+            .expect("memory metrics")
+            .pending,
+        4,
+        "metrics must be served from memory before SQLite checkpoint catch-up"
+    );
+    assert_eq!(
+        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(0),
+        "SQLite high-water should lag the memory-served push"
+    );
+    assert!(
+        backend.with_projection(|p| p.deferred_command_count()) >= 1,
+        "hybrid projection should have deferred SQLite work"
+    );
+
+    let claimed = backend
+        .claim(ClaimRequest {
+            shard: test_shard.clone(),
+            worker_id: WorkerId::new("w").unwrap(),
+            max_items: 4,
+            lease_token: LeaseToken::new("lt-async-exactly-once").unwrap(),
+            lease_expires_at: ts(60_000),
+            now: ts(1),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        })
+        .await
+        .expect("claim");
+    assert_eq!(
+        claimed.items.len(),
+        4,
+        "claim must read the memory projection while SQLite lags"
+    );
+    let outcomes: Vec<FinalizeOutcome> = claimed
+        .items
+        .iter()
+        .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+        .collect();
+    backend
+        .finalize(&test_shard, outcomes, ts(2), None)
+        .await
+        .expect("finalize");
+    let before_reopen = backend
+        .metrics(&test_shard)
+        .await
+        .expect("memory metrics after finalize");
+    assert_eq!(before_reopen.pending, 0);
+    assert_eq!(before_reopen.complete, 4);
+    assert_eq!(
+        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(0),
+        "SQLite remains behind before the simulated partial-batch restart"
+    );
+    drop(backend);
+
+    let reopened = ComposedBackend::new(
+        ObjectLog::open_group_commit(&root, cfg).expect("reopen object log"),
+        HybridProjectionStore::open(projection.to_str().unwrap()).expect("reopen projection"),
+        InProcessControlPlane::new(),
+    )
+    .with_group_commit(true)
+    .recover()
+    .expect("recover from object log tail");
+    let after_reopen = reopened
+        .metrics(&test_shard)
+        .await
+        .expect("metrics after recovery");
+    assert_eq!(after_reopen.pending, 0);
+    assert_eq!(after_reopen.complete, 4);
+    assert_eq!(
+        reopened.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(3),
+        "recovery should durably apply each of push, claim, finalize exactly once"
+    );
+    assert_eq!(reopened.with_projection(|p| p.deferred_command_count()), 0);
+
+    let _ = std::fs::remove_dir_all(&root);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", projection.display()));
     }
 }
 

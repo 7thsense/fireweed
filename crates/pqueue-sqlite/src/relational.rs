@@ -3247,6 +3247,7 @@ pub struct HybridProjectionStore {
     memory: InMemoryProjection,
     hydrated: HashSet<QueueKey>,
     memory_next_seq: HashMap<QueueKey, u64>,
+    deferred_commands: usize,
     poisoned: Option<String>,
 }
 
@@ -3265,6 +3266,7 @@ impl HybridProjectionStore {
             memory: InMemoryProjection::new(),
             hydrated: HashSet::new(),
             memory_next_seq: HashMap::new(),
+            deferred_commands: 0,
             poisoned: None,
         }
     }
@@ -3276,6 +3278,7 @@ impl HybridProjectionStore {
             memory,
             hydrated: HashSet::new(),
             memory_next_seq: HashMap::new(),
+            deferred_commands: 0,
             poisoned: None,
         }
     }
@@ -3367,6 +3370,53 @@ impl HybridProjectionStore {
         );
         self.hydrated.insert(shard);
         Ok(())
+    }
+
+    fn apply_memory(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        let mut advanced: HashMap<QueueKey, u64> = HashMap::new();
+        let apply_result: EngineResult<()> = (|| {
+            for (pos, env) in positions.iter().zip(commands.iter()) {
+                let next_seq = self.memory_next_seq.get(&pos.queue).copied().unwrap_or(0);
+                if pos.sequence >= next_seq {
+                    self.memory
+                        .apply_borrowed(std::slice::from_ref(pos), std::slice::from_ref(env))?;
+                    let candidate = pos.sequence.saturating_add(1);
+                    advanced
+                        .entry(pos.queue.clone())
+                        .and_modify(|next| *next = (*next).max(candidate))
+                        .or_insert(candidate);
+                }
+            }
+            Ok(())
+        })();
+        match apply_result {
+            Ok(()) => {
+                self.memory_next_seq.extend(advanced);
+                Ok(())
+            }
+            Err(err) => self.poison(format!(
+                "memory apply failed after object-log commit: {err}"
+            )),
+        }
+    }
+
+    fn apply_durable_then_memory(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.check_healthy()?;
+        self.sqlite.apply_committed_batch(positions, commands)?;
+        self.apply_memory(positions, commands)
+    }
+
+    /// Number of committed commands waiting for SQLite checkpoint apply. Test/observability seam.
+    pub fn deferred_command_count(&self) -> usize {
+        self.deferred_commands
     }
 }
 
@@ -6923,31 +6973,39 @@ impl ProjectionStore for HybridProjectionStore {
         positions: &[CommandPosition],
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
+        self.apply_durable_then_memory(positions, commands)
+    }
+
+    fn apply_live(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
         self.check_healthy()?;
-        self.sqlite.apply_committed_batch(positions, commands)?;
-        let mut advanced: HashMap<QueueKey, u64> = HashMap::new();
-        let apply_result: EngineResult<()> = (|| {
-            for (pos, env) in positions.iter().zip(commands.iter()) {
-                let next_seq = self.memory_next_seq.get(&pos.queue).copied().unwrap_or(0);
-                if pos.sequence >= next_seq {
-                    self.memory
-                        .apply_borrowed(std::slice::from_ref(pos), std::slice::from_ref(env))?;
-                    let candidate = pos.sequence.saturating_add(1);
-                    advanced
-                        .entry(pos.queue.clone())
-                        .and_modify(|next| *next = (*next).max(candidate))
-                        .or_insert(candidate);
-                }
-            }
-            Ok(())
-        })();
-        match apply_result {
-            Ok(()) => {
-                self.memory_next_seq.extend(advanced);
-                Ok(())
-            }
-            Err(err) => self.poison(format!("memory apply failed after sqlite commit: {err}")),
+        if positions.len() != commands.len() {
+            return Err(EngineError::Storage(
+                "hybrid apply_live: positions/commands length mismatch".into(),
+            ));
         }
+        if positions.is_empty() {
+            return Ok(());
+        }
+        self.apply_memory(positions, commands)?;
+        self.deferred_commands = self.deferred_commands.saturating_add(positions.len());
+        Ok(())
+    }
+
+    fn apply_recovery(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.apply_durable_then_memory(positions, commands)
+    }
+
+    fn flush_deferred(&mut self) -> EngineResult<()> {
+        self.check_healthy()?;
+        Ok(())
     }
 
     fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
