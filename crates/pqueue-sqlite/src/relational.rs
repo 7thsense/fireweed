@@ -45,7 +45,7 @@
 //! which is why the relational-reconnect conformance scenario asserts only pending-item state. BQ-11d
 //! must keep its reconnect assertions within this contract (no post-reopen token claims).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use axon_esf::CompiledSchema;
@@ -3247,6 +3247,7 @@ pub struct HybridProjectionStore {
     memory: InMemoryProjection,
     hydrated: HashSet<QueueKey>,
     memory_next_seq: HashMap<QueueKey, u64>,
+    deferred: VecDeque<(CommandPosition, CommandEnvelope)>,
     deferred_commands: usize,
     poisoned: Option<String>,
 }
@@ -3266,6 +3267,7 @@ impl HybridProjectionStore {
             memory: InMemoryProjection::new(),
             hydrated: HashSet::new(),
             memory_next_seq: HashMap::new(),
+            deferred: VecDeque::new(),
             deferred_commands: 0,
             poisoned: None,
         }
@@ -3278,6 +3280,7 @@ impl HybridProjectionStore {
             memory,
             hydrated: HashSet::new(),
             memory_next_seq: HashMap::new(),
+            deferred: VecDeque::new(),
             deferred_commands: 0,
             poisoned: None,
         }
@@ -6991,7 +6994,9 @@ impl ProjectionStore for HybridProjectionStore {
             return Ok(());
         }
         self.apply_memory(positions, commands)?;
-        self.deferred_commands = self.deferred_commands.saturating_add(positions.len());
+        self.deferred
+            .extend(positions.iter().cloned().zip(commands.iter().cloned()));
+        self.deferred_commands = self.deferred.len();
         Ok(())
     }
 
@@ -7005,6 +7010,17 @@ impl ProjectionStore for HybridProjectionStore {
 
     fn flush_deferred(&mut self) -> EngineResult<()> {
         self.check_healthy()?;
+        if self.deferred.is_empty() {
+            return Ok(());
+        }
+
+        let positions: Vec<CommandPosition> =
+            self.deferred.iter().map(|(pos, _)| pos.clone()).collect();
+        let commands: Vec<CommandEnvelope> =
+            self.deferred.iter().map(|(_, env)| env.clone()).collect();
+        self.sqlite.apply_committed_batch(&positions, &commands)?;
+        self.deferred.clear();
+        self.deferred_commands = 0;
         Ok(())
     }
 

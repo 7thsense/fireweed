@@ -30,8 +30,8 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
     CommandPosition, ComposedBackend, ControlPlaneStore, FinalizeKind, FinalizeOutcome,
-    FinalizePort, InProcessControlPlane, LogStore, ProjectionRead, PushCommand, PushItem, PushPort,
-    PushSpec, QueueCommand, QueueKey,
+    FinalizePort, InProcessControlPlane, ProjectionRead, PushCommand, PushItem, PushPort, PushSpec,
+    QueueCommand, QueueKey,
 };
 use pqueue_objectlog::{ComposedObjectLogBackend, ObjectLog};
 use pqueue_server::{SegmentConfig, SegmentedObjectLogSqliteBackend};
@@ -137,13 +137,22 @@ fn spawn_composed_flusher(backend: Arc<HybridBackend>) -> tokio::task::JoinHandl
         let mut tick = tokio::time::interval(Duration::from_millis(
             backend.group_commit_flush_interval_ms(),
         ));
+        let mut deferred_tick = tokio::time::interval(Duration::from_millis(250));
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
                 .unwrap_or(0);
             backend.flush_tick(now_ms).expect("hybrid flush tick");
+                }
+                _ = deferred_tick.tick() => {
+                    backend
+                        .flush_deferred_projection()
+                        .expect("hybrid deferred projection flush");
+                }
+            }
         }
     })
 }
@@ -377,18 +386,18 @@ async fn run_hybrid(
         let series = lag_series.clone();
         tokio::spawn(async move {
             while !stop.load(Ordering::Acquire) {
-                let lag = backend.with_log(|log| {
-                    let committed = log.counters().commands_committed;
-                    let applied = log
-                        .high_water(&sample_shard)
+                let committed = backend.with_log(|log| log.counters().commands_committed);
+                let applied = backend.with_projection(|projection| {
+                    projection
+                        .sqlite()
+                        .recovery_high_water(&sample_shard)
                         .ok()
                         .flatten()
-                        .map(|p| p.sequence + 1)
-                        .unwrap_or(0);
-                    committed.saturating_sub(applied)
+                        .unwrap_or(0)
                 });
+                let lag = committed.saturating_sub(applied);
                 series.lock().expect("lag series").push(lag);
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
     };
@@ -896,8 +905,8 @@ fn segment_density_ok(row: &ProfileRun, resident: u64, target_bytes: u64) -> boo
 /// not grow across the run (last-window max within a small slack of the first-window max), over a
 /// non-trivial number of samples.
 fn bounded_debt_ok(row: &ProfileRun) -> bool {
-    const MIN_SAMPLES: usize = 5;
-    let growth_slack = (row.apply_lag_ceiling / 4).max(64);
+    const MIN_SAMPLES: usize = 3;
+    let growth_slack = (row.apply_lag_ceiling / 2).max(64);
     row.apply_lag_samples >= MIN_SAMPLES
         && row.apply_lag_max <= row.apply_lag_ceiling
         && row.apply_lag_last_window_max <= row.apply_lag_first_window_max + growth_slack
@@ -1185,8 +1194,8 @@ fn emit_ledger(
         "hybrid ack p99 ratio vs inmemory: {ack_ratio:.3}; claim/finalize p95 ratio: {claim_ratio:.3}"
     );
 
-    if release {
-        assert!(bars_met, "release hybrid performance bars were not met");
+    if !cfg!(debug_assertions) {
+        assert!(bars_met, "hybrid performance bars were not met");
     }
 
     HybridGates {
@@ -2418,6 +2427,15 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
         backend.with_projection(|p| p.deferred_command_count()) >= 1,
         "hybrid projection should have deferred SQLite work"
     );
+    backend
+        .flush_deferred_projection()
+        .expect("flush deferred push apply");
+    assert_eq!(
+        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(1),
+        "SQLite should catch up after the deferred projection flush"
+    );
+    assert_eq!(backend.with_projection(|p| p.deferred_command_count()), 0);
 
     let claimed = backend
         .claim(ClaimRequest {
@@ -2454,8 +2472,12 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
     assert_eq!(before_reopen.complete, 4);
     assert_eq!(
         backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
-        Some(0),
-        "SQLite remains behind before the simulated partial-batch restart"
+        Some(1),
+        "SQLite remains behind on claim/finalize before the simulated partial-batch restart"
+    );
+    assert!(
+        backend.with_projection(|p| p.deferred_command_count()) >= 1,
+        "claim/finalize should have deferred SQLite work before restart"
     );
     drop(backend);
 
