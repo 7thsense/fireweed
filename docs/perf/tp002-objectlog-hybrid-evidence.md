@@ -1,7 +1,9 @@
 # TP-002 objectlog/hybrid-async smoke evidence and release lane
 
 **Beads:** `pqueue-1363098f` (original smoke + blocker), `pqueue-81c5c29e`
-(release-grade evidence, closed gaps). **Date:** 2026-07-01.
+(release-grade evidence, closed gaps), `pqueue-8e5e7846` (100k ack p99 fix),
+`pqueue-d6453cdd` (100k/1M/10M release evidence run), `pqueue-864b1c74`
+(1M+ recovery-replay-gap bug, filed by `pqueue-d6453cdd`). **Date:** 2026-07-01.
 **Suite:** `crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs`.
 
 This evidence covers the hybrid-async contract: the `objectlog/hybrid` profile
@@ -205,3 +207,64 @@ This lane proves the hybrid hot path, restart recovery, and disk-loss
 reconstruction at 10k resident with every gate green. The full 10M run remains
 the target for a provisioned perf host; the command above with
 `PQUEUE_HYBRID_RESIDENT=10000000` drives it unchanged.
+
+## 100k / 1M / 10M release evidence (`pqueue-d6453cdd`)
+
+Run on this shared execution-worktree host (12 cores, 94G RAM, TMPDIR on a
+287G-free volume) — not a provisioned perf host, but large enough to exercise
+real release scale.
+
+### 100k — PASS
+
+```text
+PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=100000 \
+  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+  performance_object_log_hybrid_release_10m -- --ignored --nocapture
+```
+
+Result: **pass**, `bars_met=true`, ack p99 ratio **0.625** / claim-finalize p95
+ratio **0.918** (gate `<=1.20` each), finished in 11.98s. This confirms the
+`pqueue-8e5e7846` fix (non-blocking deferred projection flush +
+`apply_live_owned` avoiding an ack-path clone) resolved the prior flakiness at
+100k documented above (1/5-pass rate before the fix); this run and
+`pqueue-8e5e7846`'s own closing evidence both pass with comfortable margin.
+Snapshot: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_100k.jsonl`.
+
+### 1M — FAIL: reproducible correctness bug, not a host/hardware limit
+
+```text
+PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 \
+  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+  performance_object_log_hybrid_release_10m -- --ignored --nocapture
+```
+
+Fails deterministically (3/3 runs, byte-for-byte identical) during the
+normal-restart recovery reopen:
+
+```text
+recover hybrid normal restart: Storage("sqlite projection replay gap for
+tp002:hybrid-recovery: expected sequence 256, got 257")
+```
+
+This is a real data-durability defect in the hybrid-async object log's
+recovery-replay pagination — it only manifests once the resident push volume
+is large enough (1M+) for the background periodic deferred-flush tick to land
+at least one partial SQLite high-water advance before the recovery push loop
+completes; at 100k the push finishes too fast for that to happen, so recovery
+replays from genesis and never exercises the buggy tail-resume path. Full
+investigation, root-cause lead, and code pointers:
+`.ddx/executions/20260701T224118-e73883ca/hybrid-scale-1m-recovery-gap.md`.
+Filed as `pqueue-864b1c74` (blocks this evidence gate), depended on by
+`pqueue-d6453cdd`.
+
+### 10M — blocked on the same defect
+
+`PQUEUE_HYBRID_RESIDENT=10000000` was attempted; see
+`.ddx/executions/20260701T224118-e73883ca/hybrid-scale-1m-recovery-gap.md`
+for the outcome. This tier is blocked on the same `pqueue-864b1c74` fix
+regardless of its own result, since the recovery path it exercises is
+identical.
+
+The 100k pass demonstrates the hybrid-async performance bars hold at that
+scale on this host; 1M/10M release evidence cannot be produced until
+`pqueue-864b1c74` lands.
