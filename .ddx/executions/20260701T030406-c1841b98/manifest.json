@@ -1,0 +1,56 @@
+{
+  "attempt_id": "20260701T030406-c1841b98",
+  "bead_id": "pqueue-be281fb2",
+  "base_rev": "5081f6cf64881d262182bb2585917a56be1bdd43",
+  "created_at": "2026-07-01T03:04:07.180801812Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-be281fb2",
+    "title": "Persist hybrid request-id replay across restart",
+    "description": "Close the committed-but-unreturned request-id gap for objectlog/hybrid. Current generic ComposedBackend keeps push request-id replay in an in-memory QueueIdempotencyCache, while SqliteProjectionStore has durable request-id tables that are not populated by object-log apply. Implement durable recovery for request-id pushes under hybrid: either persist equivalent idempotency rows during HybridProjectionStore::apply from CommandEnvelope::request_id and PushCommand body, or rebuild the generic cache during recovery by scanning retained object-log entries and queue definitions. Same request_id and same body must replay original item ids after restart; same request_id with a different body must return RequestIdConflict; uncommitted requests must be fresh. Out of scope: vectorized commit-transition idempotency beyond existing supported surfaces.",
+    "acceptance": "1. cargo test -p pqueue-sqlite hybrid_request_id -- --nocapture passes.\\n2. cargo test -p pqueue-objectlog hybrid_request_id -- --nocapture passes if the tests live there, otherwise cargo test -p pqueue-server hybrid_request_id -- --nocapture passes.\\n3. cargo test -p pqueue-conformance request_id -- --nocapture passes.\\n4. cargo fmt --check passes.",
+    "parent": "pqueue-6f4881ef",
+    "labels": [
+      "area:pqueue-engine",
+      "area:pqueue-sqlite",
+      "area:pqueue-objectlog",
+      "kind:implementation",
+      "plan-2026-06-30",
+      "backend:objectlog-hybrid"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-01T03:04:06.666672728Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "plan-hybrid-sqlite-inmemory-projection"
+    }
+  },
+  "governing": [
+    {
+      "id": "plan-hybrid-sqlite-inmemory-projection",
+      "path": "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md",
+      "title": "Hybrid SQLite + In-Memory Projection Implementation Plan"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260701T030406-c1841b98",
+    "prompt": ".ddx/executions/20260701T030406-c1841b98/prompt.md",
+    "manifest": ".ddx/executions/20260701T030406-c1841b98/manifest.json",
+    "result": ".ddx/executions/20260701T030406-c1841b98/result.json",
+    "checks": ".ddx/executions/20260701T030406-c1841b98/checks.json",
+    "usage": ".ddx/executions/20260701T030406-c1841b98/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-be281fb2-20260701T030406-c1841b98"
+  },
+  "prompt_sha": "dfbbe72128952568cebd6c8a9b61bcdf9cf2a60c96c1f913bd5bce261465f186"
+}
