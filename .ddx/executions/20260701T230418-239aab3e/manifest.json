@@ -1,0 +1,33 @@
+{
+  "attempt_id": "20260701T230418-239aab3e",
+  "bead_id": "pqueue-864b1c74",
+  "base_rev": "de68e1a5790388e60d104cfd00bfb69df1fa1e75",
+  "created_at": "2026-07-01T23:04:18.867191409Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-864b1c74",
+    "title": "Fix hybrid-async recovery replay gap at release scale (1M+)",
+    "description": "The hybrid-async normal-restart recovery path deterministically fails at 1M+ resident scale with:\n\n    recover hybrid normal restart: Storage(\"sqlite projection replay gap for tp002:hybrid-recovery: expected sequence 256, got 257\")\n\nReproduced 3/3 runs at PQUEUE_HYBRID_RESIDENT=1000000 (byte-for-byte identical panic each time). Full investigation: .ddx/executions/20260701T224118-e73883ca/hybrid-scale-1m-recovery-gap.md (bead pqueue-d6453cdd).\n\nRoot-cause lead (not yet proven with an isolated repro): SegmentedObjectLog::read_manifest sorts manifest entries by manifest `index` (crates/pqueue-objectlog/src/segmented.rs:605), and ObjectLog::read_from paginates that index-ordered stream by truncating to `limit` and computing the next resume cursor from the last entry's sequence (crates/pqueue-objectlog/src/compose_log.rs:121-139). If manifest index order and command sequence order can diverge under group-commit sealing (background flusher tick racing the foreground push path), truncating index-ordered entries can silently skip a sequence and/or advance the pagination cursor past a record that was never returned. The compose.rs recovery loop pages with limit=256 (crates/pqueue-engine/src/compose.rs:1102) — matching the exact gap boundary observed.\n\nThe bug only manifests once the resident push volume is large enough (1M+) for the background periodic flusher (added by pqueue-8e5e7846, commit 9d15873) to land at least one partial SQLite high-water advance before the push loop completes; at 100k the push finishes too fast for this to happen, so recovery replays from genesis instead and never exercises the buggy tail-resume path.\n\nThis blocks pqueue-d6453cdd's AC2 (1M) and AC3 (10M) release evidence gates, both of which require performance_object_log_hybrid_release_10m to pass with bars_met=true at those resident counts.\n\nIn scope: root-cause and fix the manifest/sequence ordering or pagination bug in the segmented object log's read_from/read_manifest path (or wherever the actual defect is proven to be); add a regression test that exercises the tail-resume-after-partial-high-water recovery path without needing a full 1M-item run. Out of scope: performance tuning unrelated to this correctness gap.",
+    "acceptance": "1. `cargo test -p pqueue-server --test performance_object_log_hybrid_tests performance_object_log_hybrid_tail_replay_after_partial_sqlite_high_water -- --nocapture` passes and covers partial SQLite high-water followed by object-log tail-resume replay.\n2. `PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture` passes with bars_met=true.\n3. `cargo fmt --check` passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:correctness",
+      "area:performance",
+      "kind:bug",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T230418-239aab3e",
+    "prompt": ".ddx/executions/20260701T230418-239aab3e/prompt.md",
+    "manifest": ".ddx/executions/20260701T230418-239aab3e/manifest.json",
+    "result": ".ddx/executions/20260701T230418-239aab3e/result.json",
+    "checks": ".ddx/executions/20260701T230418-239aab3e/checks.json",
+    "usage": ".ddx/executions/20260701T230418-239aab3e/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-864b1c74-20260701T230418-239aab3e"
+  },
+  "prompt_sha": "bef3f747a36faa23bae79c1320edcba2fa88be766823f99eb58dbedb2820fa33"
+}
