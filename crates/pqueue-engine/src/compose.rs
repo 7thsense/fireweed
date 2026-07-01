@@ -892,12 +892,23 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             self.control.create_queue(def.clone())?;
             let mut g = self.inner.lock().expect("composed backend poisoned");
             let Inner {
-                log, projection, ..
+                log,
+                projection,
+                idempotency,
+                ..
             } = &mut *g;
             log.ensure_shard(&key)?;
             projection.ensure_shard(&def)?;
             // Seed counters from the durable projection snapshot (no-op for the in-memory projection).
             projection.restore_counters(&key, &self.counters)?;
+            if self.durability == DurabilityClass::EventualApply {
+                Self::rebuild_push_idempotency_from_log(
+                    log,
+                    idempotency,
+                    &key,
+                    def.request_id_retention_ms,
+                )?;
+            }
             // Replay the durable log tail from the projection's recovery high-water (genesis when `None`).
             let mut from = projection.recovery_high_water(&key)?;
             let mut tail: u64 = 0;
@@ -945,6 +956,39 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         if let Some(m) = max_cmd_seq {
             let mut g = self.inner.lock().expect("composed backend poisoned");
             g.cmd_seq = g.cmd_seq.max(m + 1);
+        }
+        Ok(())
+    }
+
+    fn rebuild_push_idempotency_from_log(
+        log: &L,
+        idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+        shard: &QueueKey,
+        retention_ms: u64,
+    ) -> EngineResult<()> {
+        let mut from = None;
+        loop {
+            let page = log.read_from(shard, from.clone(), 256)?;
+            for (_, env) in &page.entries {
+                let Some(request_id) = &env.request_id else {
+                    continue;
+                };
+                let QueueCommand::Push(push) = &env.command else {
+                    continue;
+                };
+                let fingerprint = push_item_body_hash(&push.items)?;
+                let expires_at = request_expires_at(env.created_at, retention_ms);
+                idempotency.entry(shard.clone()).or_default().record(
+                    request_id.clone(),
+                    fingerprint,
+                    env.item_ids.clone(),
+                    expires_at,
+                );
+            }
+            match page.next {
+                Some(next) => from = Some(next),
+                None => break,
+            }
         }
         Ok(())
     }
@@ -1023,6 +1067,75 @@ fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp {
 /// Stable body fingerprint for request-id conflict detection (non-cryptographic hash over the serialized
 /// push specs — determinism + collision-safety, not cryptographic strength).
 fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
+    #[derive(serde::Serialize)]
+    struct CanonicalPushSpec<'a> {
+        client_item_key: Option<&'a ClientItemKey>,
+        priority: &'a Option<PriorityValue>,
+        not_before: &'a Option<UtcTimestamp>,
+        group_key: &'a Option<GroupKey>,
+        payload: &'a Option<Bytes>,
+        fields: &'a BTreeMap<String, Bytes>,
+        metadata: &'a Metadata,
+        cohort_size: &'a Option<u64>,
+        gate_keys: &'a Vec<String>,
+        entity: &'a Option<serde_json::Value>,
+    }
+    let canonical: Vec<_> = items
+        .iter()
+        .map(|item| CanonicalPushSpec {
+            client_item_key: item.client_item_key.as_ref(),
+            priority: &item.priority,
+            not_before: &item.not_before,
+            group_key: &item.group_key,
+            payload: &item.payload,
+            fields: &item.fields,
+            metadata: &item.metadata,
+            cohort_size: &item.cohort_size,
+            gate_keys: &item.gate_keys,
+            entity: &item.entity,
+        })
+        .collect();
+    push_body_hash_canonical(&canonical)
+}
+
+/// The recovery twin of [`push_body_hash`]. Committed log entries contain [`PushItem`]s, not the caller's
+/// original [`PushSpec`]s: assigned `item_id` and `max_attempts` are excluded, and a defaulted
+/// `client_item_key == item_id` is normalized back to `None` so same-body retries with omitted keys replay
+/// after restart.
+fn push_item_body_hash(items: &[PushItem]) -> EngineResult<BodyHash> {
+    #[derive(serde::Serialize)]
+    struct CanonicalPushItem<'a> {
+        client_item_key: Option<&'a ClientItemKey>,
+        priority: &'a Option<PriorityValue>,
+        not_before: &'a Option<UtcTimestamp>,
+        group_key: &'a Option<GroupKey>,
+        payload: &'a Option<Bytes>,
+        fields: &'a BTreeMap<String, Bytes>,
+        metadata: &'a Metadata,
+        cohort_size: &'a Option<u64>,
+        gate_keys: &'a Vec<String>,
+        entity: &'a Option<serde_json::Value>,
+    }
+    let canonical: Vec<_> = items
+        .iter()
+        .map(|item| CanonicalPushItem {
+            client_item_key: (item.client_item_key.as_str() != item.item_id.to_string())
+                .then_some(&item.client_item_key),
+            priority: &item.priority,
+            not_before: &item.not_before,
+            group_key: &item.group_key,
+            payload: &item.payload,
+            fields: &item.fields,
+            metadata: &item.metadata,
+            cohort_size: &item.cohort_size,
+            gate_keys: &item.gate_keys,
+            entity: &item.entity_document,
+        })
+        .collect();
+    push_body_hash_canonical(&canonical)
+}
+
+fn push_body_hash_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<BodyHash> {
     use std::hash::{Hash, Hasher};
     let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
