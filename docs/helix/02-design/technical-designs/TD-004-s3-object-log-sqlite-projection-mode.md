@@ -322,6 +322,41 @@ apply/render is an unknown-outcome, not a success. Retrying the same
 committed, the retry returns or reconstructs that committed result; if no command
 committed, the retry is a fresh attempt subject to current validation.
 
+#### Async apply debt, backpressure, and poison thresholds (`objectlog/hybrid-async`, normative)
+
+Async SQLite apply debt is a bounded runtime condition, not an unbounded
+implementation detail. The implementation MUST expose the following metrics per
+`(tenant_id, queue_id)` and MUST include max and p99 values in release evidence:
+
+| Metric | Definition | Gate |
+|--------|------------|------|
+| `hybrid_async_sqlite_apply_lag` | Number of committed command sequences covered by the manifest and memory image but not yet covered by `sqlite_high_water`. | MUST remain `<= hybrid_async_sqlite_apply_lag_max_commands` and `<= hybrid_async_sqlite_apply_lag_max_ms` under steady load. |
+| `hybrid_async_apply_debt_bytes` | Approximate retained object-log bytes that cannot be trimmed because async apply has not advanced `sqlite_high_water` or lineage validation is incomplete. | MUST remain below the configured per-queue debt budget; exceeding it enters backpressure. |
+| `hybrid_async_apply_queue_depth` | Number of sealed segment batches waiting for async SQLite apply in `batch_sequence` order. | MUST remain bounded by the configured batch backlog budget. |
+| `hybrid_async_oldest_unapplied_age_ms` | Age of the oldest committed command whose sequence is greater than `sqlite_high_water`. | MUST remain within the configured apply-lag time budget. |
+| `hybrid_async_apply_retry_count` | Consecutive failed SQLite apply attempts for the same batch or command range. | MUST trip poison after the configured poison threshold. |
+
+Backpressure MUST be applied before async apply debt can invalidate recovery or
+retention assumptions:
+
+| Condition | Required behavior |
+|-----------|-------------------|
+| Soft debt threshold | When `hybrid_async_sqlite_apply_lag`, `hybrid_async_apply_debt_bytes`, queue depth, or oldest-unapplied age crosses 75% of its configured limit, the backend MUST emit warning telemetry and prefer flushing/apply work over accepting more group-commit backlog. |
+| Hard debt threshold | When any debt metric reaches its configured limit, the backend MUST fail new mutating operations for that queue with a retryable storage/backpressure error until ordered SQLite apply reduces debt below the clear threshold. Reads may continue only from memory while lineage proves memory completeness. |
+| Recovery/high-water backpressure | While hard debt is active, `recovery_high_water` MUST NOT advertise the lagging `sqlite_high_water` as a safe replay skip point. Owner-local restart MUST replay from the last validated authoritative source. |
+| Retention backpressure | Segment expiry MUST stop advancing whenever async apply debt is over budget, lineage validation is incomplete, or the SQLite worker is failed; local `sqlite_high_water` alone never authorizes deletion. |
+| Clear threshold | Backpressure clears only after all debt metrics are below 50% of their configured limits and the SQLite worker has completed at least one ordered batch without retry. |
+
+Poison is reserved for states that cannot be repaired by simply waiting for the
+async worker:
+
+| Poison threshold | Required behavior |
+|------------------|-------------------|
+| Repeated apply failure | If `hybrid_async_apply_retry_count` reaches the configured poison threshold for the same batch, the local projection MUST be marked poisoned; new reads, validation, writes, export, and high-water claims fail closed until repair or restart replays from an authoritative object-log source. |
+| Non-contiguous apply | A gap, overlap, checksum mismatch, divergent `request_id` fingerprint, or attempt to advance `sqlite_high_water` past an unapplied sequence MUST poison the local projection. |
+| Memory/SQLite divergence | Any mismatch between memory and SQLite over their shared validated prefix MUST poison the local projection, as defined by async lineage validation. |
+| Repair failure | A repair pass that cannot reconstruct a contiguous prefix through manifest, segment, memory image, and SQLite image MUST leave the queue poisoned and MUST NOT advertise recovery readiness. |
+
 #### Ordered batching and SQLite high-water (`objectlog/hybrid-async`, normative)
 
 The async SQLite projection worker applies sealed object-log batches, not
@@ -350,6 +385,22 @@ projection images:
 | Command sequence to SQLite | SQLite `ProjectionImage` export MUST include `sqlite_high_water`, the covered batch sequence range, projection schema version, and source manifest tail. It is valid only if its applied command prefix is contiguous from the retained recovery base through `sqlite_high_water`. |
 | Cross-image equality | For a shared prefix, memory and SQLite images MUST agree on queue definition, item lifecycle, leases, secondary indexes, side records, instance fences, pause/gate state, metrics, request-id replay records, client item-key retention records, and counters. A mismatch poisons the local projection and requires replay from an authoritative object-log source. |
 | Release evidence | The release ledger for `objectlog/hybrid-async` MUST record the manifest tail, segment sequence ranges, applied `batch_sequence` values, `sqlite_high_water`, memory image high-water, idempotency replay record count, item-key retention record count, and the computed retention frontier. |
+
+#### Crash matrix and perf matrix (`objectlog/hybrid-async`, normative)
+
+The release gate for `objectlog/hybrid-async` MUST include a crash matrix and
+perf matrix that prove the async contract across manifest, memory, SQLite
+high-water, repair, and release-lane load boundaries:
+
+| Row | Scenario | Required proof |
+|-----|----------|----------------|
+| Crash before manifest commit | Kill the writer after segment write or local reservation but before manifest commit; prove no success was returned, no durable lease or mutation is visible, reservations are cleared, and retry by `request_id` is a fresh attempt unless a committed command exists. |
+| Crash after manifest before memory render | Kill after manifest commit but before memory apply/render; prove retry observes an unknown-outcome, replays the committed command, returns/reconstructs the original response, and does not append a duplicate command for the same `request_id`. |
+| Crash after memory render before response delivery | Kill after memory render but before response delivery; prove the command is committed, memory is reconstructed from log/SQLite plus tail replay, retry by `request_id` returns the original response, and no second lease/item transition is produced. |
+| Crash during async SQLite apply | Kill while applying a sealed batch to SQLite; prove the partial batch rolls back or replays idempotently, `sqlite_high_water` does not advance past unapplied effects, and ordered batching resumes at `sqlite_high_water + 1`. |
+| Crash after SQLite high-water advancement | Kill immediately after advancing `sqlite_high_water`; prove owner-local restart hydrates memory from the matching `ProjectionImage`, replays only commands beyond that high-water, and validates memory/SQLite equality over the shared prefix before serving. |
+| Crash during repair | Kill during a repair pass; prove repair is restartable, leaves no advertised recovery readiness until lineage is complete, and keeps the queue poisoned/backpressured if manifest, segment, memory render, SQLite apply, or high-water evidence is incomplete. |
+| Perf matrix under release-lane load | Run the release-lane scale/cost workload with async apply enabled; prove p50/p95/p99 ack latency, max/p99 `hybrid_async_sqlite_apply_lag`, `hybrid_async_apply_debt_bytes`, `hybrid_async_apply_queue_depth`, poison count, backpressure duration, segment batch density, object PUT count, recovery elapsed time, replayed tail length, and request-id replay convergence stay within the configured release gates. |
 
 ## Hybrid ProjectionImage Recovery (normative)
 
