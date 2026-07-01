@@ -1,0 +1,47 @@
+{
+  "attempt_id": "20260701T162943-fbebae2f",
+  "bead_id": "pqueue-799c8a93",
+  "base_rev": "827aa33797392b226e237c70f4b8872af86f433e",
+  "created_at": "2026-07-01T16:29:43.6808868Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-799c8a93",
+    "title": "Specify hybrid-async poison and repair contract",
+    "description": "PROBLEM: The ADR defines the hybrid-async acknowledgement boundary and SQLite lag, but it does not say when async apply enters a poisoned state, what remains authoritative while poisoned, or how repair returns the projection to service.\n\nROOT CAUSE: `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md:73` through `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md:83` define strict versus async apply ordering and SQLite high-water behavior, while `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md:85` through `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md:94` define recovery hydration, but neither section defines async poison triggers, repair authority, or fail-closed behavior during repair.\n\nPROPOSED FIX: Update governing artifact `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md` to specify `hybrid-async` poison and repair rules. Define poison triggers for async SQLite apply gaps, high-water mismatch, hydration/image mismatch, checksum or segment replay failure, and repeated repair failure. State that the object log and hot memory projection remain authoritative for acknowledged commands, SQLite is not a response barrier, poisoned SQLite cannot authorize retention or recovery, and repair must replay from a trusted object-log/snapshot frontier before clearing poison.\n\nNON-SCOPE: Code changes; implementing metrics, repair tools, or performance tests; changing existing evidence results; changes outside the four governing artifact references; altering existing dependency ID `pqueue-b207e65d`; weakening the required verification commands.\n\nDEPENDENCY: parent `pqueue-b207e65d`.",
+    "acceptance": "1. TestHybridAsyncPoisonRepairAdrSpec: `rg -n 'hybrid-async|poison|repair|sqlite_high_water|object log|fail closed|replay' docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md` succeeds and shows explicit async poison triggers, repair authority, fail-closed behavior, and object-log authority rules.\n2. TestHybridAsyncPoisonRepairNoCodeScope: `git diff --name-only` after the bead contains only `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md`.\n3. TestHybridAsyncPoisonRepairCargoGate: `cargo test -p pqueue-release ledger_path_honors_env_override_and_default` passes.\n4. TestHybridAsyncPoisonRepairFmtGate: `cargo fmt --check` passes.\n5. TestHybridAsyncPoisonRepairGoGate: `go test ./...` passes or records a no-Go-module skip with the exact command output.\n6. TestHybridAsyncPoisonRepairLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-ee92bedd",
+    "labels": [
+      "area:docs",
+      "area:pqueue-objectlog",
+      "area:pqueue-sqlite",
+      "kind:spec",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness check timed out after 5m0s (pqueue-799c8a93)\",\"fingerprint\":\"573ec93b4d0f92ea31c8d394ae056a3edf59e6393522e9675f3587f5cd992e87\",\"policy_mode\":\"warn-only\",\"reason\":\"timeout\",\"rule_id\":\"pre_claim_intake.timeout\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"573ec93b4d0f92ea31c8d394ae056a3edf59e6393522e9675f3587f5cd992e87\"}",
+          "created_at": "2026-07-01T16:29:38.326706165Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "timeout"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T162943-fbebae2f",
+    "prompt": ".ddx/executions/20260701T162943-fbebae2f/prompt.md",
+    "manifest": ".ddx/executions/20260701T162943-fbebae2f/manifest.json",
+    "result": ".ddx/executions/20260701T162943-fbebae2f/result.json",
+    "checks": ".ddx/executions/20260701T162943-fbebae2f/checks.json",
+    "usage": ".ddx/executions/20260701T162943-fbebae2f/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-799c8a93-20260701T162943-fbebae2f"
+  },
+  "prompt_sha": "0c19c4e681ae525c6d6d2c8ff50eb260ca1d9afa058ffab03657107f58c9b4d9"
+}

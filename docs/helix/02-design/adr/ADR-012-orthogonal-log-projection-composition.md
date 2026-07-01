@@ -128,6 +128,32 @@ active manifest tail, request-id replay retention, client item-key retention,
 and async SQLite lag; local SQLite high-water alone is never a retention
 authority.
 
+`objectlog/hybrid-async` MUST enter a poisoned SQLite state whenever async apply
+cannot prove that SQLite represents a contiguous, trusted prefix of the object
+log. Poison triggers include an apply gap or out-of-order sealed batch, a
+`sqlite_high_water` value that does not match the manifest/segment command
+prefix, a hydrated `ProjectionImage` that disagrees with the hot in-memory image
+for the same frontier, checksum or segment replay failure while rebuilding the
+SQLite projection, or repeated repair failure after the configured repair retry
+budget. While poisoned, the object log and hot in-memory projection remain
+authoritative for already acknowledged commands: readers, validation, response
+rendering, idempotency replay, and request outcome decisions continue to use the
+hot projection when it is present and still tied to a trusted object-log prefix.
+SQLite is never a response barrier in `hybrid-async`; a poisoned SQLite
+projection also cannot authorize retention, recovery high-water claims, replay
+truncation, object-log expiry, or promotion of a local snapshot.
+
+Repair MUST fail closed for any path that would rely on poisoned SQLite state.
+The repair authority is the trusted object-log/snapshot frontier, selected from
+the manifest, retained segments, committed snapshots, and replay-retention
+requirements, not from the poisoned `sqlite_high_water`. Repair clears poison
+only after rebuilding or replaying SQLite from that trusted frontier, verifying
+checksums and segment continuity, hydrating a complete `ProjectionImage`, and
+proving that the rebuilt SQLite image, `sqlite_high_water`, hot memory image,
+request-id replay records, and manifest prefix describe the same committed
+command prefix. If that proof fails, the store remains poisoned and recovery,
+retention, and snapshot promotion stay fail closed.
+
 ### Robustness is a **checked invariant**, not a per-backend property
 
 Any `L × P × C` is a backend the instant it type-checks, but it is only **correct** once it passes the
