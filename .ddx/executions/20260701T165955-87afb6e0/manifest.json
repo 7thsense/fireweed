@@ -1,0 +1,47 @@
+{
+  "attempt_id": "20260701T165955-87afb6e0",
+  "bead_id": "pqueue-95d2f443",
+  "base_rev": "020e66134977a93a5fc1f5f292b1903404a11b45",
+  "created_at": "2026-07-01T16:59:55.954265058Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-95d2f443",
+    "title": "Add hybrid-async crash and perf matrix gates to TP-003",
+    "description": "PROBLEM: TP-003 has hybrid-async success-barrier coverage, but the release gate still lacks an explicit crash matrix and perf matrix acceptance set for hybrid-async.\n\nROOT CAUSE: `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:209` defines the general object-log crash-point matrix, `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:211` defines hybrid-async success-barrier replay, and `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:332` defines hot-read performance, but the artifact does not require a named hybrid-async crash matrix and perf matrix that combine ordered batching, lag, lineage, retention-frontier, and release-lane hot-path evidence.\n\nPROPOSED FIX: Update governing artifact `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md` to add or extend acceptance criteria for the hybrid-async crash matrix and perf matrix. Require crash coverage around manifest commit, memory apply/render, async SQLite apply, partial SQLite batch transactions, restart, replay, and high-water recovery. Require perf-matrix fields for ordered batching, high-water, lineage, retention frontier, async lag, replay contract, release-lane hot-path comparison, and evidence that WAL/fsync/checkpoint state is not treated as logical high-water or retention authority.\n\nNON-SCOPE: Code changes; implementing metrics, repair tools, or performance tests; changing existing evidence results; changes outside the four governing artifact references; altering existing dependency ID `pqueue-b207e65d`; weakening the required verification commands; editing `docs/perf/tp002-objectlog-hybrid-evidence.md` except as a separate child bead.\n\nDEPENDENCY: parent `pqueue-b207e65d`.",
+    "acceptance": "1. TestHybridAsyncPlanCrashPerfMatrix: `rg -n 'hybrid-async|crash matrix|perf matrix|ordered batching|sqlite_high_water|lineage|retention_frontier|async SQLite lag|replay contract|release-lane|hot path' docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md` succeeds and shows hybrid-async crash matrix and perf matrix gates with the required evidence fields.\n2. TestHybridAsyncPlanCrashPerfNoEvidenceMutation: `git diff --name-only` after the bead contains only `docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md`.\n3. TestHybridAsyncPlanCrashPerfCargoGate: `cargo test -p pqueue-release ledger_path_honors_env_override_and_default` passes.\n4. TestHybridAsyncPlanCrashPerfFmtGate: `cargo fmt --check` passes.\n5. TestHybridAsyncPlanCrashPerfGoGate: `go test ./...` passes or records a no-Go-module skip with the exact command output.\n6. TestHybridAsyncPlanCrashPerfLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-49574578",
+    "labels": [
+      "area:docs",
+      "area:pqueue-objectlog",
+      "area:pqueue-sqlite",
+      "kind:spec",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"description supplied without changed_fields\",\"fingerprint\":\"95264d3cb9fd69a6c9f452cd76df0e00d0ba9aeae5be0c59a4877d846c3d1616\",\"policy_mode\":\"warn-only\",\"reason\":\"rewrite_rejected\",\"rule_id\":\"pre_claim_intake.rewrite_rejected\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"95264d3cb9fd69a6c9f452cd76df0e00d0ba9aeae5be0c59a4877d846c3d1616\"}",
+          "created_at": "2026-07-01T16:59:50.741456081Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "rewrite_rejected"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T165955-87afb6e0",
+    "prompt": ".ddx/executions/20260701T165955-87afb6e0/prompt.md",
+    "manifest": ".ddx/executions/20260701T165955-87afb6e0/manifest.json",
+    "result": ".ddx/executions/20260701T165955-87afb6e0/result.json",
+    "checks": ".ddx/executions/20260701T165955-87afb6e0/checks.json",
+    "usage": ".ddx/executions/20260701T165955-87afb6e0/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-95d2f443-20260701T165955-87afb6e0"
+  },
+  "prompt_sha": "a3ee5caf48b4622fce994111fa73a5f83fc304f652224161fa2384a94d6e9470"
+}
