@@ -1,0 +1,47 @@
+{
+  "attempt_id": "20260701T201256-303a70ac",
+  "bead_id": "pqueue-21d63f09",
+  "base_rev": "c72f835b45fccbbb3eb788307377972c4b1cd344",
+  "created_at": "2026-07-01T20:12:57.39027296Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-21d63f09",
+    "title": "Hybrid-async perf gates + profile attribution",
+    "description": "PROBLEM: The suite gates only the ack/claim ratio, recovery, and disk-loss; it never gates segment density or object PUT volume, never bounds async SQLite apply-debt over time, and never attributes where hot-path time is spent (SQLite, locks, fsync, scheduler, serialization), so a passing row cannot prove the hybrid-async success barrier.\nROOT CAUSE: emit_ledger at crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs:560 computes bars_met from only ack_ratio\u003c=1.20 \u0026\u0026 claim_ratio\u003c=1.20 \u0026\u0026 recovery \u0026\u0026 disk_loss; the segment-density fields (segments_sealed/objects_put/mean_commands_per_segment/max_commands_per_segment) are emitted around crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs:596 but are ungated; there is no attribution timer for serialization, lock-wait, fsync/commit, SQLite apply, or scheduler yield, and no time-series of SQLite apply lag / sqlite_high_water.\nPROPOSED FIX: (a) add per-phase attribution timers surfaced as ledger fields hybrid_attr_{serialize,lock_wait,fsync,sqlite_apply,scheduler}_ms, drawing on the WAL/synchronous=NORMAL group-commit projection documented at crates/pqueue-sqlite/src/relational.rs:4344 and the composed flush at crates/pqueue-objectlog/src/segmented.rs:703; (b) add a bounded-debt time-series gate that samples SQLite apply-lag / sqlite_high_water across the run and fails if lag grows unbounded or exceeds a documented ceiling; (c) add segment-density and object-PUT gates (mean/max commands-per-segment within a documented bound; objects_put within expected range for resident); (d) fold all new gates into bars_met.\nNON-SCOPE: the workload/scale harness (child 'Hybrid-async perf harness'); the hot-path fix (child 'Close hybrid-async hot-path gap'); running the release matrix and emitting final docs (child 'Emit release-grade hybrid-async evidence'); release version bump.\nDEPENDS ON: child 'Hybrid-async perf harness' (gates operate on its cells).\nGATE SUBSTITUTION: `cargo test -p pqueue-server` is the test gate; `cargo fmt --check` is the pre-commit gate.",
+    "acceptance": "1. New Test performance_object_log_hybrid_attribution asserts each hybrid_attr_*_ms field is emitted, non-negative, and sums to within tolerance of measured hot-path wall time: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_attribution -- --nocapture`.\n2. New Test performance_object_log_hybrid_bounded_debt_gate asserts the SQLite apply-lag time-series is bounded and non-growing and that the gate is a bars_met input: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_bounded_debt_gate -- --nocapture`.\n3. New Test performance_object_log_hybrid_segment_density_gate asserts the mean/max commands-per-segment and objects_put gates feed bars_met: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_segment_density_gate -- --nocapture`.\n4. `rg -n 'hybrid_attr_|bounded_debt|segment_density' crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs` succeeds and the emitted ledger keeps hybrid_ack_p99_vs_inmemory_ratio and hybrid_claim_finalize_p95_vs_inmemory_ratio.\n5. Existing performance_object_log_hybrid_smoke still passes and `cargo fmt --check` passes.",
+    "parent": "pqueue-abebbece",
+    "labels": [
+      "area:performance",
+      "area:pqueue-server",
+      "kind:verification",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"New Test performance_object_log_hybrid_attribution asserts each hybrid_attr_*_ms field is emitted, non-negative, and sums to within tolerance of measured hot-path wall time: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_attribution -- --nocapture`.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"New Test performance_object_log_hybrid_bounded_debt_gate asserts the SQLite apply-lag time-series is bounded and non-growing and that the gate is a bars_met input: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_bounded_debt_gate -- --nocapture`.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"New Test performance_object_log_hybrid_segment_density_gate asserts the mean/max commands-per-segment and objects_put gates feed bars_met: `cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_segment_density_gate -- --nocapture`.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":4,\"text\":\"`rg -n 'hybrid_attr_|bounded_debt|segment_density' crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs` succeeds and the emitted ledger keeps hybrid_ack_p99_vs_inmemory_ratio and hybrid_claim_finalize_p95_vs_inmemory_ratio.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":5,\"text\":\"Existing performance_object_log_hybrid_smoke still passes and `cargo fmt --check` passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-01T20:11:12.128333429Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/5"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T201256-303a70ac",
+    "prompt": ".ddx/executions/20260701T201256-303a70ac/prompt.md",
+    "manifest": ".ddx/executions/20260701T201256-303a70ac/manifest.json",
+    "result": ".ddx/executions/20260701T201256-303a70ac/result.json",
+    "checks": ".ddx/executions/20260701T201256-303a70ac/checks.json",
+    "usage": ".ddx/executions/20260701T201256-303a70ac/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-21d63f09-20260701T201256-303a70ac"
+  },
+  "prompt_sha": "ba7540b53dfb38f812b99c501b1cc746404f8eb329875848f192de03cdaf18a6"
+}
