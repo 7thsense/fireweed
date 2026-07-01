@@ -1,0 +1,56 @@
+{
+  "attempt_id": "20260701T034509-6bd4eba0",
+  "bead_id": "pqueue-e22eacf1",
+  "base_rev": "13adf05dea6ef56f7af2e553e27dbbf2f2680c92",
+  "created_at": "2026-07-01T03:45:09.492814784Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-e22eacf1",
+    "title": "Reduce hybrid claim/finalize hot-path latency",
+    "description": "The hybrid performance evidence bead pqueue-1363098f closed with a release blocker: docs/perf/evidence/performance_object_log_hybrid_smoke.jsonl reports bars_met=false because objectlog/hybrid claim/finalize p95 was 1.610x objectlog/inmemory, above the 1.200x gate. Do not cut a release over this. Diagnose and reduce hybrid claim/finalize hot-path latency while preserving SQLite-first durability, memory hot reads, poison-on-memory-failure, and request-id replay. Likely areas: HybridProjectionStore apply path, forced-seal read-modify-write path, unnecessary SQLite/memory double work, benchmark config artifacts, or missing batching in claim/finalize measurement. Out of scope: weakening the performance gate or removing the SQLite durable apply requirement.",
+    "acceptance": "1. PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture passes and writes a row with measurements.bars_met=true.\\n2. rg -n '\"bars_met\":true|hybrid_claim_finalize_p95_vs_inmemory_ratio' docs/perf/evidence/performance_object_log_hybrid_smoke.jsonl docs/perf/tp002-objectlog-hybrid-evidence.md shows the passing ratio is \u003c=1.20.\\n3. cargo test -p pqueue-sqlite hybrid_chaos -- --nocapture passes.\\n4. cargo test --workspace --all-features passes.\\n5. cargo fmt --check passes.",
+    "parent": "pqueue-6f4881ef",
+    "labels": [
+      "area:pqueue-engine",
+      "area:pqueue-sqlite",
+      "area:performance",
+      "kind:bug",
+      "plan-2026-06-30",
+      "backend:objectlog-hybrid"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-01T03:45:08.963566358Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "plan-hybrid-sqlite-inmemory-projection"
+    }
+  },
+  "governing": [
+    {
+      "id": "plan-hybrid-sqlite-inmemory-projection",
+      "path": "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md",
+      "title": "Hybrid SQLite + In-Memory Projection Implementation Plan"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260701T034509-6bd4eba0",
+    "prompt": ".ddx/executions/20260701T034509-6bd4eba0/prompt.md",
+    "manifest": ".ddx/executions/20260701T034509-6bd4eba0/manifest.json",
+    "result": ".ddx/executions/20260701T034509-6bd4eba0/result.json",
+    "checks": ".ddx/executions/20260701T034509-6bd4eba0/checks.json",
+    "usage": ".ddx/executions/20260701T034509-6bd4eba0/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-e22eacf1-20260701T034509-6bd4eba0"
+  },
+  "prompt_sha": "fd9b702f5e418de57cd00e27434e3556d2a19fe1d2fc96f86f3b4ae6d9c91f1f"
+}
