@@ -129,9 +129,13 @@ impl LogStore for ObjectLog {
         let has_more = entries.len() > limit;
         entries.truncate(limit);
         let next = if has_more {
+            // `from`'s contract is "last consumed sequence" (the caller re-adds +1 above), so the
+            // resume cursor must carry the LAST RETURNED entry's own sequence, not one past it —
+            // otherwise every page boundary silently skips exactly one record (the caller's +1
+            // compounds with an extra +1 baked in here).
             entries
                 .last()
-                .map(|(p, _)| CommandPosition::new(shard.clone(), p.backend_epoch, p.sequence + 1))
+                .map(|(p, _)| CommandPosition::new(shard.clone(), p.backend_epoch, p.sequence))
         } else {
             None
         };

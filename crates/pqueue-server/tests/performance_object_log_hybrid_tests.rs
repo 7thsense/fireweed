@@ -2654,6 +2654,106 @@ async fn performance_object_log_hybrid_deferred_flush_chunking() {
     );
 }
 
+/// pqueue-864b1c74 regression: a normal-restart recovery that must replay MORE THAN ONE
+/// `LogStore::read_from` page (`limit=256`, `compose.rs:1102`/`1157`) from a partial SQLite high-water.
+/// `ObjectLog::read_from` (crates/pqueue-objectlog/src/compose_log.rs) used to advance its resume cursor one
+/// sequence past the last record it actually returned, so the recovery loop's SECOND page always skipped
+/// exactly one record and `apply_recovery` failed closed with a projection replay-gap error — the release-scale
+/// (1M+) bug from `.ddx/executions/20260701T224118-e73883ca/hybrid-scale-1m-recovery-gap.md`. Reproduced here
+/// fast and deterministically: `flush_deferred_projection` chunking (not a background timer) produces the
+/// partial high-water, so no 1M-item push loop is needed to hit the multi-page tail-resume path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn performance_object_log_hybrid_tail_replay_after_partial_sqlite_high_water() {
+    const TOTAL: usize = 300;
+    const CHUNK: usize = 10;
+
+    let root = scratch("hybrid-tail-replay-obj");
+    let projection = scratch("hybrid-tail-replay.db");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&projection);
+    let cfg = SegmentConfig::new(1, 60_000).expect("valid segment config");
+    let def = qdef("hybrid-tail-replay", 8);
+    let test_shard = shard(&def);
+
+    let backend = Arc::new(
+        ComposedBackend::new(
+            ObjectLog::open_group_commit(&root, cfg).expect("open object log"),
+            HybridProjectionStore::open(projection.to_str().unwrap())
+                .expect("open projection")
+                .with_deferred_flush_chunk(CHUNK),
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true)
+        .recover()
+        .expect("recover fresh backend"),
+    );
+    backend
+        .create_queue(def.clone())
+        .await
+        .expect("create queue");
+
+    // Each push seals its own segment (target_bytes=1) and applies to the in-memory projection
+    // synchronously, deferring exactly one SQLite checkpoint command per push (TD-003/hybrid design) — so
+    // TOTAL pushes commit TOTAL records to the durable object log while SQLite's durable view lags behind.
+    for i in 0..TOTAL {
+        backend
+            .push(
+                &test_shard,
+                vec![spec(format!("tail-replay-{i}"))],
+                ts(i as i64),
+                None,
+            )
+            .await
+            .expect("push");
+    }
+
+    // Advance SQLite by exactly ONE partial chunk, leaving a durable tail (TOTAL - CHUNK = 290 records)
+    // far larger than the recovery loop's page size — this is what forces a second `LogStore::read_from`
+    // page on reopen, the path the bug lived on.
+    backend
+        .flush_deferred_projection()
+        .expect("partial deferred flush");
+    assert_eq!(
+        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(CHUNK as u64),
+        "sqlite high-water must have advanced by exactly one partial chunk before the restart"
+    );
+    assert!(
+        (TOTAL - CHUNK) > 256,
+        "the un-flushed tail must exceed the recovery loop's page size to exercise a second page"
+    );
+
+    drop(backend);
+
+    // Normal-restart recovery must replay the whole (>256-record, multi-page) durable tail from the partial
+    // SQLite high-water without a projection replay-gap error, landing on the exact resident count.
+    let reopened = ComposedBackend::new(
+        ObjectLog::open_group_commit(&root, cfg).expect("reopen object log"),
+        HybridProjectionStore::open(projection.to_str().unwrap())
+            .expect("reopen projection")
+            .with_deferred_flush_chunk(CHUNK),
+        InProcessControlPlane::new(),
+    )
+    .with_group_commit(true)
+    .recover()
+    .expect("recover hybrid normal restart across a multi-page tail");
+
+    assert_eq!(
+        reopened
+            .metrics(&test_shard)
+            .await
+            .expect("metrics")
+            .pending,
+        TOTAL as u64,
+        "every pushed item must survive a multi-page tail-resume recovery"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", projection.display()));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "10M resident release-tier evidence; run explicitly in a provisioned perf lane"]
 async fn performance_object_log_hybrid_release_10m() {
