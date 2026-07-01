@@ -15,11 +15,12 @@ Projection backend:
 - `inmemory`
 - `sqlite`
 - `hybrid`
+- `hybrid-async`
 - `postgres`
 
 The current `pqueue-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
-`objectlog/inmemory`, `objectlog/sqlite`, and `objectlog/hybrid`
-unconditionally. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
+`objectlog/inmemory`, `objectlog/sqlite`, `objectlog/hybrid`, and
+`objectlog/hybrid-async` unconditionally. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
 via the `PostgresNativeBackend` wrapper, never on a reactor worker — but only when
 the binary is built with the `postgres` cargo feature (`--features postgres`, or
 `--features postgres,tls` for native-tls). The default release image does **not**
@@ -35,6 +36,18 @@ in-memory projection from a SQLite `ProjectionImage` before returning SQLite
 high-water on recovery, and fails closed if memory apply fails after a SQLite
 commit. Until other pairings are explicitly implemented and tested,
 `memory/hybrid`, `sqlite/hybrid`, and `postgres/hybrid` must fail at startup.
+
+`PQUEUE_PROJECTION_BACKEND=hybrid-async` selects the `objectlog/hybrid-async`
+profile (TD-004): the same hot-in-memory serving over a durable SQLite checkpoint
+image as `hybrid` and the same `PQUEUE_SQLITE_PROJECTION_PATH`, but manifest commit
+plus synchronous in-memory apply/render is the success barrier and the durable
+SQLite image is an asynchronous checkpoint that MAY lag (caught up by object-log
+tail replay on recovery). The deployment carries the async-apply
+debt/backpressure/poison thresholds, rendered as `PQUEUE_HYBRID_ASYNC_*` from
+`storage.projection.hybridAsync`; each bound MUST be `> 0` (a zero bound is
+instantly backpressured) and the server fails closed at startup otherwise. Only
+the object-log log axis pairs with `hybrid-async`; `memory/hybrid-async`,
+`sqlite/hybrid-async`, and `postgres/hybrid-async` fail at startup.
 
 ### Databricks Lakebase (postgres over TLS)
 
@@ -62,8 +75,14 @@ The chart renders:
 - `PQUEUE_LOG_BACKEND`
 - `PQUEUE_PROJECTION_BACKEND`
 - `PQUEUE_OBJECT_LOG_ROOT` when `storage.log.backend=objectlog`
-- `PQUEUE_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite` or
-  `hybrid`
+- `PQUEUE_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite`,
+  `hybrid`, or `hybrid-async`
+- `PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS`,
+  `PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES`,
+  `PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX`,
+  `PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS`, and
+  `PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD` (from
+  `storage.projection.hybridAsync`) when `storage.projection.backend=hybrid-async`
 - Postgres log/projection database URL Secret refs when the corresponding axis
   uses `postgres`
 

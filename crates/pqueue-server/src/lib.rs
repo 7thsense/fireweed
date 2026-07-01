@@ -27,7 +27,10 @@ use pqueue_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
 };
-use pqueue_sqlite::{HybridAsyncThresholds, HybridProjectionStore, composed_sqlite_backend};
+use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend};
+// Re-exported: it is the type of the public `Config::hybrid_async` field, so composition-root callers and
+// tests that construct a `Config` directly can name the async-apply threshold config.
+pub use pqueue_sqlite::HybridAsyncThresholds;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -96,6 +99,13 @@ pub enum ProjectionSpec {
     Sqlite { path: PathBuf },
     /// SQLite-first durable projection image plus hot in-memory serving at `path`.
     Hybrid { path: PathBuf },
+    /// The `objectlog/hybrid-async` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
+    /// projection image at `path` as [`Self::Hybrid`], selected under its canonical `hybrid-async` name so
+    /// the deployment carries the async-apply debt/backpressure/poison threshold config
+    /// ([`Config::hybrid_async`]). Manifest commit + synchronous in-memory apply/render is the success
+    /// barrier; the durable SQLite image is an asynchronous checkpoint that MAY lag and is caught up by
+    /// object-log tail replay on recovery.
+    HybridAsync { path: PathBuf },
 }
 
 impl ProjectionSpec {
@@ -104,6 +114,7 @@ impl ProjectionSpec {
             ProjectionSpec::InMemory => "inmemory",
             ProjectionSpec::Sqlite { .. } => "sqlite",
             ProjectionSpec::Hybrid { .. } => "hybrid",
+            ProjectionSpec::HybridAsync { .. } => "hybrid-async",
         }
     }
 }
@@ -846,6 +857,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let segment_config = config.segment_config;
     let recovery_max_tail = config.recovery_max_tail;
     let debug_segments = config.debug_segments;
+    let hybrid_async = config.hybrid_async;
     let BackendSpec {
         log,
         projection,
@@ -900,20 +912,38 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         (LogSpec::ObjectLog { root }, ProjectionSpec::Hybrid { path }) => {
-            let p = path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = Arc::new(
-                ComposedBackend::new(
-                    ObjectLog::open_group_commit(root, segment_config)?,
-                    HybridProjectionStore::open(p)?,
-                    InProcessControlPlane::new(),
-                )
-                .with_group_commit(true)
-                .with_recovery_max_tail(recovery_max_tail)
-                .recover()?
-                .with_node_id(node_id),
+            let backend = open_objectlog_hybrid_backend(
+                &root,
+                &path,
+                segment_config,
+                recovery_max_tail,
+                node_id,
+            )?;
+            spawn_hybrid_flusher(backend.clone(), debug_segments);
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+        }
+        (LogSpec::ObjectLog { root }, ProjectionSpec::HybridAsync { path }) => {
+            // The `objectlog/hybrid-async` profile runs the same object-log + hybrid (hot-memory serving,
+            // durable SQLite checkpoint) substrate as `objectlog/hybrid`; the distinction is the profile's
+            // async-apply debt/backpressure/poison threshold config, validated fail-closed at config time
+            // (see `Config::hybrid_async` / `HybridAsyncThresholds`). Log the resolved thresholds so the
+            // operator can confirm the async debt bounds the queue admits before backpressure/poison.
+            eprintln!(
+                "[objectlog/hybrid-async] async-apply thresholds: lag_max_commands={} debt_max_bytes={} \
+                 queue_depth_max={} oldest_unapplied_max_ms={} poison_retry_threshold={}",
+                hybrid_async.apply_lag_max_commands,
+                hybrid_async.apply_debt_max_bytes,
+                hybrid_async.apply_queue_depth_max,
+                hybrid_async.oldest_unapplied_max_ms,
+                hybrid_async.apply_poison_retry_threshold,
             );
+            let backend = open_objectlog_hybrid_backend(
+                &root,
+                &path,
+                segment_config,
+                recovery_max_tail,
+                node_id,
+            )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
@@ -948,6 +978,33 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             projection.label()
         ))),
     }
+}
+
+/// Assemble the object-log + hybrid (hot-memory serving over a durable SQLite checkpoint image) composed
+/// backend shared by the `objectlog/hybrid` and `objectlog/hybrid-async` profiles: open the group-commit
+/// object log at `root` + the hybrid projection store at `path`, run the ack-after-seal group-commit write
+/// path, and recover-on-open (hydrate memory from the validated SQLite image + replay the object-log tail).
+fn open_objectlog_hybrid_backend(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    segment_config: SegmentConfig,
+    recovery_max_tail: u64,
+    node_id: u8,
+) -> EngineResult<Arc<ObjectLogHybridBackend>> {
+    let p = path
+        .to_str()
+        .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+    Ok(Arc::new(
+        ComposedBackend::new(
+            ObjectLog::open_group_commit(root, segment_config)?,
+            HybridProjectionStore::open(p)?,
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true)
+        .with_recovery_max_tail(recovery_max_tail)
+        .recover()?
+        .with_node_id(node_id),
+    ))
 }
 
 fn spawn_hybrid_flusher(

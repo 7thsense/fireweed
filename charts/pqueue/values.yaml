@@ -92,6 +92,15 @@ storage:
     backend: inmemory
     sqlite:
       path: /var/lib/pqueue/projection/projection.db
+    # Async-apply debt/backpressure/poison thresholds for the objectlog/hybrid-async profile. Rendered as
+    # PQUEUE_HYBRID_ASYNC_* env only when projection.backend is "hybrid-async". Defaults mirror the server's
+    # HybridAsyncThresholds::default(); every bound must be > 0 (a zero bound is instantly backpressured).
+    hybridAsync:
+      applyLagMaxCommands: 100000
+      applyDebtMaxBytes: 536870912
+      applyQueueDepthMax: 1024
+      oldestUnappliedMaxMs: 60000
+      applyPoisonRetryThreshold: 3
     postgres:
       existingSecret: ""
       databaseUrlKey: database-url

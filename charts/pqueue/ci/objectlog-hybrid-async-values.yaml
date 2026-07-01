@@ -1,0 +1,15 @@
+# Static render values: objectlog log with the hybrid-async projection profile (hot in-memory serving over
+# an asynchronous durable SQLite checkpoint), including the async-apply debt/backpressure/poison thresholds.
+storage:
+  log:
+    backend: objectlog
+  projection:
+    backend: hybrid-async
+    hybridAsync:
+      applyLagMaxCommands: 100000
+      applyDebtMaxBytes: 536870912
+      applyQueueDepthMax: 1024
+      oldestUnappliedMaxMs: 60000
+      applyPoisonRetryThreshold: 3
+image:
+  tag: ci

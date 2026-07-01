@@ -6,13 +6,23 @@ cluster.
 The chart storage contract is expressed as axes:
 
 - `storage.log.backend`: `objectlog` or `postgres`
-- `storage.projection.backend`: `inmemory`, `sqlite`, `hybrid`, or `postgres`
+- `storage.projection.backend`: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or `postgres`
 
 `hybrid` is the projection value for the normative `objectlog/hybrid` contract:
 the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid`, uses
 `PQUEUE_SQLITE_PROJECTION_PATH`, applies SQLite first and then memory, and must
 fail closed for unsupported non-objectlog pairings until they are implemented and
 tested.
+
+`hybrid-async` is the projection value for the `objectlog/hybrid-async` profile:
+the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid-async`, the same
+`PQUEUE_SQLITE_PROJECTION_PATH`, and the async-apply threshold env
+`PQUEUE_HYBRID_ASYNC_*` from `storage.projection.hybridAsync`. The chart schema
+constrains every threshold to `>= 1`; a checked-in CI values profile,
+`charts/pqueue/ci/objectlog-hybrid-async-values.yaml`, renders the combination and
+is validated by `helm lint --strict` against `values.schema.json`. Only the
+object-log log axis pairs with `hybrid-async`; other pairings fail closed at
+startup.
 
 The gate runs `helm lint --strict`, renders checked-in CI values for selected
 axis combinations, asserts the rendered environment variables, and validates the
