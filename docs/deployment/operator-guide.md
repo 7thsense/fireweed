@@ -19,11 +19,18 @@ storage as separate log and projection axes.
 | Axis | Helm value | Values |
 |------|------------|--------|
 | Log backend | `storage.log.backend` | `objectlog`, `postgres` |
-| Projection backend | `storage.projection.backend` | `inmemory`, `sqlite`, `postgres` |
+| Projection backend | `storage.projection.backend` | `inmemory`, `sqlite`, `hybrid`, `postgres` |
 
 The current `pqueue-server` release smoke path is `objectlog` plus `inmemory`.
 Other chart combinations render statically and fail loudly at server startup
 until their composition roots are wired.
+
+`objectlog/hybrid` is the planned SQLite-first plus hot-memory object-log
+profile. It uses `PQUEUE_SQLITE_PROJECTION_PATH`, treats the object log as the
+authority, hydrates memory from SQLite `ProjectionImage` before serving from a
+SQLite high-water, and fails closed on memory-apply poisoning. Non-objectlog
+hybrid pairings are unsupported unless a future release explicitly documents and
+tests them.
 
 ## Install
 

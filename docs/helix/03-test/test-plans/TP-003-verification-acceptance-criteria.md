@@ -196,9 +196,9 @@ scale/density/horizontal magnitude is TP-002 E0–E3; these are the per-op gates
 These criteria are the release gate for API-001's backend-independent mutation
 contract. They run against every implemented profile combination, including
 memory/dev where present, SQLite, `postgres_native`, `object_log_inmemory_projection`,
-`object_log_sqlite_projection`, and segmented object-log variants. A profile that
-does not pass this section is not selectable outside the explicitly documented
-test/dev scope.
+`object_log_sqlite_projection`, `object_log_hybrid_projection`, and segmented
+object-log variants. A profile that does not pass this section is not selectable
+outside the explicitly documented test/dev scope.
 
 | AC | Setup | Assertion | Pass bar |
 |----|-------|-----------|----------|
@@ -206,8 +206,9 @@ test/dev scope.
 | AC-TXN-2 rejection no-effect | Generate envelope-invalid batches, per-item invalid/conflict/stale cases, capacity/unavailable paths, and commit-timeout paths; restart and replay from durable state | INV-13 | 0 durable effects for rejected envelopes or rejected items; accepted siblings in partial batches retain normal success semantics |
 | AC-TXN-3 unknown outcome replay | Drop responses, time out clients, kill service processes, and duplicate retry each mutating `request_id` across before-append, after-append-before-commit, after-commit-before-apply, after-apply-before-response, and after-response cut points | INV-5 and INV-14 | same `request_id` resolves to exactly one committed result or a fresh execution when no original commit exists; 0 duplicate state transitions |
 | AC-TXN-4 object-log crash-point matrix | For object-log profiles and each commit-latency-bound setting from TP-002 E3, inject failures before segment write, after segment write before manifest, after manifest before projection apply, during projection apply, after projection apply before response, during snapshot write, during owner reassignment, and during manifest CAS/fallback commit | INV-1, INV-2, INV-10, INV-12, INV-14 | 0 lost accepted items; 0 duplicate active leases; committed commands replay exactly once; orphan segments ignored or reconciled per TD-004; stale-epoch commits rejected |
-| AC-TXN-5 implementation-combination parity | Run the same generated operation history and failure schedule across all profile combinations, then compare final visible queue state, idempotency records, terminal outcomes, active leases, and metrics exact fields | backend-independent API semantics | no semantic divergence except documented latency/cost/recovery metadata; pqueue callers need no backend-specific repair path |
-| AC-TXN-6 latency-bound is not a correctness knob | Repeat AC-TXN-1..5 across the TP-002 E3 commit-latency-bound sweep | invariants unchanged by latency/cost setting | 0 invariant deltas across lower-latency vs cost-optimized settings |
+| AC-TXN-5 objectlog/hybrid poison + replay | Run `PQUEUE_LOG_BACKEND=objectlog PQUEUE_PROJECTION_BACKEND=hybrid` with injected failures after manifest commit, after SQLite commit before memory apply, during memory apply, and before response delivery; include push requests with `request_id` and a conflicting retry body | TD-004 hybrid apply/poison contract, INV-5, INV-10, INV-12, INV-14 | SQLite failure returns no success and replays tail; SQLite-commit/memory-fail poisons the store so all later reads/validation/writes fail closed until restart; restart hydrates memory from SQLite `ProjectionImage`; same-body push retry returns original item ids without a second append; conflicting body returns `request-id-conflict` |
+| AC-TXN-6 implementation-combination parity | Run the same generated operation history and failure schedule across all profile combinations, then compare final visible queue state, idempotency records, terminal outcomes, active leases, and metrics exact fields | backend-independent API semantics | no semantic divergence except documented latency/cost/recovery metadata; pqueue callers need no backend-specific repair path |
+| AC-TXN-7 latency-bound is not a correctness knob | Repeat AC-TXN-1..6 across the TP-002 E3 commit-latency-bound sweep | invariants unchanged by latency/cost setting | 0 invariant deltas across lower-latency vs cost-optimized settings |
 
 ### 3.11 Product end-to-end workflow validation
 
@@ -306,10 +307,26 @@ selectable by backend profile (the core / transaction contract / log /
 relational-reconnect conformance classes per ADR-008). A backend at <100%
 conformance is not v1-eligible. The committed profiles
 (`postgres_native`, `object_log_inmemory_projection`, and
-`object_log_sqlite_projection`) run the identical transaction-contract suite;
+`object_log_sqlite_projection`) and any release-candidate
+`object_log_hybrid_projection` run the identical transaction-contract suite;
 profile-specific suites add only substrate obligations such as reconnect
-durability, replay, snapshots, segment/manifest fencing, and latency-bound cost
-evidence.
+durability, replay, snapshots, segment/manifest fencing, hybrid
+`ProjectionImage` hydration, poison-on-memory-apply failure, durable request-id
+replay, and latency-bound cost evidence.
+
+### 4.1 `objectlog/hybrid` projection gates
+
+These gates are mandatory before `PQUEUE_PROJECTION_BACKEND=hybrid` can be
+advertised outside experimental builds.
+
+| AC | Setup | Assertion | Pass bar |
+|----|-------|-----------|----------|
+| AC-HYB-1 ProjectionImage completeness | Export SQLite `ProjectionImage` from a queue containing pending, leased, terminal, delayed, paused, gated, indexed, cohort, recurring, side-record, instance-fence, metrics, counter, and request-id replay state; hydrate memory from it | Memory-visible state equals SQLite-visible state before returning recovery high-water | 0 field mismatches; recovery refuses to return high-water on partial or failed hydration |
+| AC-HYB-2 SQLite-first poison | Inject deterministic memory-apply failure after SQLite batch commit | TD-004 poison contract | Current op returns storage failure; all subsequent reads, validation, and writes fail closed; restart hydrates memory from SQLite and resumes with no acknowledged-state loss |
+| AC-HYB-3 Request-id push replay | Crash after manifest commit, after SQLite commit before memory apply, and before response delivery for push requests with `request_id`; retry same and different bodies after restart | Durable committed-but-unreturned replay | Same-body retry returns original item ids without second append; different-body retry returns `request-id-conflict`; 0 duplicate state transitions |
+| AC-HYB-4 Authority and retention | Remove the local SQLite file and recover from retained object log; separately attempt retention using only local SQLite high-water | Object log remains authority | Disk-loss recovery reconstructs exact metrics, indexes, leases, and request-id replay state with 0 invariant violations; local SQLite high-water alone never authorizes segment expiry |
+| AC-HYB-5 Hot-read performance | Compare `objectlog/hybrid` with `objectlog/inmemory` and `objectlog/sqlite` under identical segment settings, telemetry enabled | TD-004 performance model | Push throughput and p50/p95/p99 ack latency within 20% of `objectlog/inmemory`; claim/finalize p95 within 20% of `objectlog/inmemory` after SQLite apply amortization; report segment batch density, object PUT count, recovery elapsed time, replayed tail length, and max rehydrate time |
+| AC-HYB-6 Recovery gates | Smoke: 100k resident items, local SQLite present. Release: 10M resident items, local SQLite present. Disk-loss: SQLite removed, retained object log present | Bounded owner-local restart and exact disk-loss reconstruction | Smoke hydrate + tail replay <= 5 s and <= 1,000 replayed commands; release <= 60 s and <= max(10,000 commands, 0.1% of resident items); disk-loss exact reconstruction with 0 invariant violations |
 
 ## 5. CI Quality Gates (the green set)
 

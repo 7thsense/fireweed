@@ -36,13 +36,15 @@ ddx:
 
 ## Scope
 
-This technical design defines the second committed v1 storage backend for pqueue:
-the object-log local-projection profile. In this mode an S3-compatible object
-store is the durable command log, a local in-memory or SQLite projection serves
-hot queue operations, the same object store holds periodic projection snapshots,
-and Postgres remains the control plane. `object_log_inmemory_projection` is the
-fast local replay profile; `object_log_sqlite_projection` is the larger
-rebuildable local-index profile. Per ADR-008 the queue is the unit of sharding:
+This technical design defines the object-log local-projection profiles for
+pqueue. In these modes an S3-compatible object store is the durable command log,
+a local in-memory, SQLite, or hybrid projection serves hot queue operations, the
+same object store holds periodic projection snapshots where configured, and
+Postgres remains the control plane. `object_log_inmemory_projection` is the fast
+local replay profile; `object_log_sqlite_projection` is the larger rebuildable
+local-index profile; `object_log_hybrid_projection` / runtime
+`objectlog/hybrid` is the SQLite-first plus hot-memory projection profile. Per
+ADR-008 the queue is the unit of sharding:
 a whole queue is owned by exactly one node, so the object log, the manifest, and
 the local projection are all **per-`(tenant, queue)`**, and there is no
 intra-queue sharding or cross-shard command machinery.
@@ -69,6 +71,9 @@ In scope:
   structured rejection has no committed effect for the rejected scope, and
   unknown outcomes resolve by `request_id`.
 - SQLite projection schema mapping from TD-001 logical projection records and TD-002 column semantics.
+- Hybrid projection semantics: SQLite-first apply, hot in-memory reads and
+  validation, `ProjectionImage` hydration before returning SQLite high-water,
+  poison-on-memory-apply failure, and durable request-id replay.
 - Periodic SQLite snapshot to object storage at a committed log position.
 - Bounded replay and recovery: snapshot + log-tail, with safe segment expiry.
 - Manifest-commit epoch fencing **validated against the current control-plane epoch**, bound to the
@@ -145,6 +150,16 @@ It follows TD-001's capability boundaries unchanged:
   state; in-flight claim reservations are a separate, non-authoritative bookkeeping table that holds no
   acknowledged state (see "Claim Reservation"). Acknowledged state survives via object-store segments +
   snapshots, never via local disk alone (ADR-001 Option 4 rejection).
+- **Hybrid is SQLite-first, then memory apply.** In `objectlog/hybrid`,
+  `HybridProjectionStore::apply` MUST call SQLite batch apply first and then
+  apply the same positions and commands to `InMemoryProjection`. All hot reads
+  and pre-commit validation delegate to memory. If memory apply fails after a
+  successful SQLite commit, the process-local hybrid store is poisoned and fails
+  closed until restart and rehydration.
+- **Object log remains the authority.** Local SQLite under
+  `objectlog/hybrid` is a restart accelerator and durable projection image, not
+  a command authority and not, by itself, permission to expire object-log
+  segments.
 - **Reject one-object-per-command.** Production configurations MUST seal multiple commands per segment;
   a 1-command-per-object configuration MUST be rejected at queue/backend configuration time. It remains
   available only behind an explicit development/test fallback flag.
@@ -247,6 +262,49 @@ This section states exactly what a caller may observe so API-001 holds once a re
 | Recovery / new owner | After reassignment, the new owner serves reads only after it has replayed the committed log tail (Recovery), so a read served by the new owner reflects all acknowledged commands. There is no window in which an acknowledged command is invisible to the authoritative owner. |
 | No FR-9/FR-12 weakening | Progress age accrues from `eligible_since`/`eligible_at`, which is set when a push command commits and applies; an item is not eligible until then. Commit batching delays *when an item becomes eligible*, not the *rate* at which eligible age accrues, so the queue-global progress bound is unaffected. |
 
+## Hybrid Projection Apply and Poisoning (normative)
+
+`objectlog/hybrid` uses the same manifest ack boundary and group-commit pipeline
+as the other object-log profiles, but the projection apply barrier has two
+ordered phases:
+
+| Element | Rule |
+|---------|------|
+| SQLite-first apply | `HybridProjectionStore::apply` MUST durably apply the complete sealed batch to `SqliteProjectionStore::apply_committed_batch` before touching memory. Memory is never ahead of SQLite for an acknowledged command. |
+| Memory apply | The same positions and command envelopes MUST then be applied to `InMemoryProjection` before the operation returns success. Reads, claim selection, metrics, secondary-index lookup, live-item lookup, and pre-commit validation MUST use the in-memory projection. |
+| SQLite failure | If SQLite apply fails, no success response is returned. Recovery replays the object-log tail beyond the prior SQLite high-water. |
+| Poisoned gap | If SQLite commits and the memory apply fails, the store MUST mark itself poisoned. The current operation returns `EngineError::Storage`; subsequent reads, validation, and writes fail closed with storage error; and the process must restart to hydrate memory from SQLite before serving. |
+| No lazy divergence | A poisoned hybrid store MUST NOT continue serving with memory behind SQLite, even for read-only methods. |
+
+## Hybrid ProjectionImage Recovery (normative)
+
+Hybrid recovery MUST avoid full-genesis replay on ordinary owner-local restart
+without treating local SQLite as the command authority.
+
+| Element | Rule |
+|---------|------|
+| Image seam | `pqueue-projection` MUST define a typed `ProjectionImage` export/import contract covering queue definition, item lifecycle, lease state, secondary indexes, side records, instance fences, queue paused state, metrics, request-id replay records, and item-id counters. Partial images that only load pending items are invalid. |
+| SQLite export | `SqliteProjectionStore::export_projection_image(queue)` MUST read the durable SQLite projection at its current applied high-water into `ProjectionImage`. |
+| Memory hydrate | `InMemoryProjection::hydrate_shard(definition, image)` MUST build memory to the exact same logical state before any hot read or validation method is served. |
+| High-water barrier | `HybridProjectionStore::recovery_high_water` MUST return SQLite's high-water only after the in-memory shard has been hydrated from that image. If hydration fails, is incomplete, or has not run, it MUST return `None` or fail closed so `ComposedBackend::recover` replays from genesis rather than skipping log history. |
+| Tail replay | After hydration, recovery replays only object-log commands beyond SQLite high-water through the normal hybrid apply path. |
+
+## Hybrid Snapshot Authority and Segment Retention (normative)
+
+`objectlog/hybrid` has two supported recovery modes:
+
+| Mode | Rule |
+|------|------|
+| Owner-local restart | With the local SQLite projection file present, hydrate memory from SQLite `ProjectionImage`, then replay only the object-log tail beyond SQLite high-water. |
+| Disk loss / new owner without SQLite | Recreate SQLite and memory by replaying the retained object log from genesis, unless a separately committed object-store snapshot is present and validated. |
+
+For the first hybrid release, segment expiry MUST NOT be based only on the local
+SQLite file. Segments MAY be expired only under the existing committed
+object-store snapshot plus recovery-window rule, or a later object-store
+SQLite/ProjectionImage snapshot feature with its own recovery tests. A local
+SQLite high-water alone is insufficient because local disk can be lost with the
+owner.
+
 ## Replay-Response Idempotency Model (normative)
 
 This backend uses TD-001's **replay-response** option (not transactional response). The rules below
@@ -259,6 +317,15 @@ specialize TD-001 §"Durable Ack and Response Replay" for object-log timing.
 | Request-id conflict | Retrying the same `request_id` with a different request fingerprint MUST fail with `request-id-conflict` (API-001). The fingerprint is carried in the committed `CommandEnvelope`, so this holds even if the projection has not yet applied the command. |
 | Claim replay | `BatchClaim` retry MUST return the same claimed set while leases are active and MUST fail with `request-expired` once all returned leases are no longer active (API-001 claim idempotency). The claim command and its lease assignments are reproduced from the committed log; an un-committed (reserved-only) original claim is not a replay (see "Claim Reservation"). |
 | Commit timeout | If the manifest commit cannot complete before the configured commit deadline, the operation MUST return envelope `commit-timeout` (or per-item `unavailable`), and its reservations MUST be rolled back; the caller retries with the same `request_id` and item keys, and accepted items converge (API-001). |
+
+For `objectlog/hybrid`, durable request-id replay for pushes is mandatory. The
+committed `CommandEnvelope::request_id` and pushed command body MUST be enough to
+reconstruct the push fingerprint and response item ids after restart. Recovery
+MUST either repopulate the generic idempotency cache from replayed committed
+pushes or persist equivalent SQLite request-id rows during apply. A same-body
+retry returns the original ids without a second append; a different-body retry
+returns `request-id-conflict`. This is required for crashes after manifest
+commit, after SQLite commit before memory apply, and before response delivery.
 
 ## Queue-Scoped Commands (single owner, normative)
 
@@ -333,6 +400,7 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 | Element | Rule |
 |---------|------|
 | Segment expiry | A segment MAY be deleted only after a committed snapshot fully covers its `sequence` range AND `log_recovery_window_ms` has elapsed past that snapshot's `committed_at` (ADR-001 step 8). |
+| Hybrid local SQLite high-water | For `objectlog/hybrid`, the local SQLite high-water is sufficient to skip historical log replay only on owner-local restart after `ProjectionImage` hydration succeeds. It is NOT sufficient by itself to expire object-log segments. |
 | Idempotency retention | Request-idempotency and item-key convergence records expire per `request_id_retention_ms` / `client_item_key_retention_ms` (API-001), enforced in the SQLite projection; expired records MUST NOT be required for any non-expired segment's replay. |
 | Manifest retention | Manifest entries (including epoch fence records) for expired segments MAY be compacted, but the manifest MUST retain enough tail to validate the active recovery window and the monotonic `sequence`/epoch invariants. |
 | Snapshot retention | At least the most recent committed snapshot whose recovery window has not expired MUST be retained at all times so recovery is always possible. |
@@ -345,6 +413,23 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 | Reject missing CAS | If the configured object store lacks a usable conditional-write primitive and the deployment has not selected the Postgres-manifest-pointer fallback, queue/backend configuration MUST be rejected with `invalid-request` (see "Object-Store Capability Requirements"). |
 | Window sanity | `segment_max_latency_ms` MUST be `> 0`; it is the implementation of the profile's `max_commit_latency_ms` / commit-latency-bound knob. The effective claim/ack latency budget MUST be documented to callers because it bounds API-001 commit latency for this profile. |
 | Snapshot vs recovery window | `log_recovery_window_ms` MUST be `>= snapshot_interval_ms` so an unexpired snapshot always exists before its covered segments can expire. |
+| Hybrid pairing | `PQUEUE_PROJECTION_BACKEND=hybrid` is supported only with `PQUEUE_LOG_BACKEND=objectlog` until other pairings are intentionally implemented and tested. `memory/hybrid`, `sqlite/hybrid`, and `postgres/hybrid` MUST fail closed at startup. |
+
+## Runtime Wiring (normative)
+
+`objectlog/hybrid` MUST use the generic object-log group-commit composition:
+
+```
+ComposedBackend<pqueue_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
+```
+
+The server composition root MUST open the segmented object-log axis through the
+same `ObjectLog::open_group_commit` path used by other object-log profiles, not a
+third segmented backend monolith. Runtime wiring MUST plumb segment
+configuration, recovery-tail configuration, debug segment/counter visibility,
+and a bounded flusher task that calls `flush_tick` at
+`group_commit_flush_interval_ms()`. The flusher and counters are profile
+infrastructure; they MUST NOT change the transaction contract above.
 
 ## Commit-Latency / Cost Tradeoff (normative statement)
 
@@ -390,6 +475,20 @@ eligibility, FR-10).
   metrics.
 - Snapshot + log-tail replay time at 10M-item queue scale MUST be measured (Testing) and MUST bound
   recovery time; `snapshot_interval_*` is tuned against the measured replay rate.
+- `objectlog/hybrid` performance gates are concrete and release-blocking: push
+  throughput and p50/p95/p99 acknowledgement latency MUST be within 20% of
+  `objectlog/inmemory` under the same segment settings; claim/finalize p95
+  latency MUST be within 20% of `objectlog/inmemory` for hot reads after SQLite
+  apply cost is amortized; evidence MUST report segment batch density, object PUT
+  count, recovery elapsed time, replayed tail length, and maximum memory
+  rehydrate time from SQLite `ProjectionImage`.
+- `objectlog/hybrid` recovery gates: smoke restart with 100k resident items and
+  local SQLite present MUST complete hydrate plus tail replay in <= 5 seconds and
+  replay <= 1,000 object-log commands; release-tier restart with 10M resident
+  items and local SQLite present MUST complete in <= 60 seconds and replay <=
+  max(10,000 commands, 0.1% of resident items); disk-loss recovery from retained
+  object log MUST reconstruct exact metrics, indexes, leases, and request-id
+  replay state with zero invariant violations.
 - Telemetry overhead MUST be included in performance tests.
 
 ## Testing
@@ -458,6 +557,19 @@ The following cases define the required evidence surface:
   prove no expired segment is ever required for an in-window recovery.
 - Replay-response idempotency: same `request_id` converges to the recorded/reconstructed response;
   different fingerprint → `request-id-conflict`; claim replay returns same lease set, then `request-expired`.
+- Hybrid poisoning: inject failure after SQLite commit and before memory apply;
+  assert the operation returns storage failure, all subsequent reads,
+  validation, and writes fail closed, and restart hydrates memory from SQLite
+  before serving.
+- Hybrid `ProjectionImage` hydration: export SQLite image, hydrate memory, then
+  return SQLite high-water; include queue pause, metrics, secondary indexes,
+  leases, side records, instance fences, counters, and request-id replay records.
+- Hybrid durable push request-id replay: crash after manifest commit, after
+  SQLite commit before memory apply, and before response delivery; same-body
+  retry returns original item ids without append, different-body retry returns
+  `request-id-conflict`.
+- Hybrid segment retention: prove local SQLite high-water alone never authorizes
+  object-log segment expiry; disk-loss recovery succeeds from retained log.
 - Response / apply ordering: an operation's own committed effect is visible to the same caller's
   immediate follow-up read (self read-after-write); an unrelated reader's apply-lag for a concurrent
   command is bounded by the configured budget; a new owner serves reads only after replaying the log tail.

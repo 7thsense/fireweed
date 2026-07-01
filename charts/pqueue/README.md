@@ -14,6 +14,7 @@ Projection backend:
 
 - `inmemory`
 - `sqlite`
+- `hybrid`
 - `postgres`
 
 The current `pqueue-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
@@ -26,6 +27,14 @@ build that feature, so selecting `postgres` against the stock image fails loudly
 startup with a message naming the required feature build. Other unsupported
 combinations also fail loudly at startup instead of being hidden behind a synthetic
 combined backend name.
+
+`PQUEUE_PROJECTION_BACKEND=hybrid` is reserved for the normative
+`objectlog/hybrid` profile. It uses the same `PQUEUE_SQLITE_PROJECTION_PATH` as
+`sqlite`, applies committed object-log batches to SQLite first, hydrates the hot
+in-memory projection from a SQLite `ProjectionImage` before returning SQLite
+high-water on recovery, and fails closed if memory apply fails after a SQLite
+commit. Until other pairings are explicitly implemented and tested,
+`memory/hybrid`, `sqlite/hybrid`, and `postgres/hybrid` must fail at startup.
 
 ### Databricks Lakebase (postgres over TLS)
 
@@ -53,7 +62,8 @@ The chart renders:
 - `PQUEUE_LOG_BACKEND`
 - `PQUEUE_PROJECTION_BACKEND`
 - `PQUEUE_OBJECT_LOG_ROOT` when `storage.log.backend=objectlog`
-- `PQUEUE_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite`
+- `PQUEUE_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite` or
+  `hybrid`
 - Postgres log/projection database URL Secret refs when the corresponding axis
   uses `postgres`
 

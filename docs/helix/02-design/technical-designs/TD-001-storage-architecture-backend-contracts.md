@@ -178,6 +178,7 @@ and projection in one transactional backend.
 | `postgres_native` | Postgres | Postgres (relational family) | Optional Postgres/object storage | Postgres |
 | `object_log_inmemory_projection` | S3-compatible object log | In-memory local/rebuildable (log-replay family) | S3-compatible object storage | Postgres |
 | `object_log_sqlite_projection` | S3-compatible object log | SQLite local/rebuildable (relational family) | S3-compatible object storage | Postgres |
+| `object_log_hybrid_projection` | S3-compatible object log | Hybrid: hot in-memory + durable local SQLite projection image | S3-compatible object storage | Postgres |
 | `kafka_log_sqlite_projection` | Kafka/Redpanda partition log | SQLite local/rebuildable | Object storage or Postgres checkpoint | Postgres |
 | `dynamodb_authority` | DynamoDB transaction/log table | DynamoDB query tables or local projection | DynamoDB/object storage | Postgres |
 
@@ -186,7 +187,10 @@ implemented first; it delivers the single-deployment envelope.
 The object-log profiles are the committed high-scale path for v1. The in-memory
 projection variant is the low-latency serving reference for object-log replay;
 the SQLite projection variant is the durable local-index profile for larger hot
-sets and process restarts. TD-004 owns their shared object-log semantics and
+sets and process restarts. `object_log_hybrid_projection` combines those
+properties: SQLite is applied first as the local durable projection image, then
+the same committed batch is applied to the in-memory hot model used for reads and
+pre-commit validation. TD-004 owns their shared object-log semantics and
 projection-specific recovery requirements. The remaining profiles
 (`kafka_log_sqlite_projection`, `dynamodb_authority`) define design targets and
 conformance expectations only. Every profile, including committed ones, becomes
@@ -449,6 +453,16 @@ Object-log and Kafka-style profiles are expected to use replay response
 semantics. Postgres-native mode should use transactional response semantics
 unless TD-002 proves that a split model is needed for scale.
 
+For `objectlog/hybrid`, replay response includes durable push request-id replay:
+after a manifest commit but before response delivery, restart and retry of the
+same `request_id` MUST converge by reading the committed command envelope and
+the recorded or reconstructed push item ids. A same-body retry returns the
+original ids without a second append; a different-body retry returns
+`request-id-conflict`. The implementation may repopulate the generic
+idempotency cache from replayed envelopes or persist equivalent SQLite rows
+during apply, but it MUST NOT rely only on a transient in-memory cache for
+committed pushes.
+
 `rearm` and `purge` are covered by these rules: replay returns the recorded
 effective values (`not_before`, `eligible_since`, `priority`, `item_version`)
 and MUST NOT recompute them; purge replay returns the recorded queue-local
@@ -699,6 +713,17 @@ duplicated here; they come from the single `pqueue_group_summary`.
 - **Response Target**: API-001 core batch operations target sub-second p95/p99
   under representative workloads, except object-log profiles where configured
   batch windows may intentionally trade acknowledgement latency for cost.
+- **`objectlog/hybrid` hot-read target**: claim selection, `peek`, `pending`,
+  metrics, live-item lookup, secondary-index lookup, and pre-commit validation
+  MUST be served from the in-memory projection. SQLite work is amortized on
+  sealed-segment apply and recovery image export, not on hot reads. Release-tier
+  hybrid evidence MUST compare against `objectlog/inmemory` and
+  `objectlog/sqlite` with the same segment settings: push throughput and
+  p50/p95/p99 acknowledgement latency within 20% of `objectlog/inmemory`;
+  claim/finalize p95 latency within 20% of `objectlog/inmemory` after initial
+  SQLite apply cost is amortized; segment batch density and object PUT count;
+  owner-local recovery elapsed time and object-log tail length; and maximum
+  memory rehydrate time from the SQLite `ProjectionImage`.
 - **Delivered envelopes**: these figures define two delivered v1 envelopes. The
   single-deployment envelope is delivered by `postgres_native` and validated
   against the per-queue throughput floor (TP-002 E0: >=10M items/hr per queue;
@@ -763,6 +788,9 @@ duplicated here; they come from the single `pqueue_group_summary`.
 | Current-epoch manifest fencing | A writer whose queue was reassigned (control-plane epoch advanced) before the new owner wrote any data manifest entry MUST fail its commit; manifest-recorded-epoch-only validation is insufficient and MUST NOT pass. New epoch holder reproduces acknowledged state. |
 | In-flight claim reservation safety | Concurrent claims cannot both reserve the same candidate while a segment is pending; CAS failure / timeout / fence / writer crash rolls back reservations with no durable lease; retry converges. |
 | Snapshot + log-tail recovery | Restore latest snapshot, replay segments after the snapshot position, validate checksums, reproduce projection state. |
+| Hybrid ProjectionImage hydration | For `objectlog/hybrid`, export the durable SQLite `ProjectionImage`, hydrate the in-memory projection, and only then return SQLite recovery high-water; failed or partial hydration fails closed or replays from genesis. |
+| Hybrid poisoned-memory apply | Inject failure after SQLite commit but before memory apply; the operation returns storage failure, all subsequent reads/validation/writes fail closed, and restart hydrates memory from SQLite before serving. |
+| Hybrid durable request-id replay | Crash after manifest commit and after SQLite commit before memory apply for push requests with `request_id`; same-body retry returns original ids without another append, different-body retry returns `request-id-conflict`. |
 | Queue-scoped command convergence | A queue-scoped command (`SetGates`) applies to the queue's owner before ack, all-or-nothing; retry by `request_id` converges with no double-apply. |
 | Safe log-segment expiry | A log segment is deletable only after a covering committed snapshot plus recovery window; no expired segment is required for an in-window recovery. |
 | Reject one-object-per-command | A production configuration that seals one command per durable object is rejected; only an explicit dev/test flag permits it. |

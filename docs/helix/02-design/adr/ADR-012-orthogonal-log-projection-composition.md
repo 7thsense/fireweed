@@ -46,6 +46,46 @@ per-backend re-implementation of the orchestration ports — those live once, ge
 | **`ProjectionStore`** | the materialized read model: the full `ProjectionRead` surface (`select_eligible`/`peek`/`pending`/`claimed_view`/`live_items`/`metrics`) + index queries + the pre-commit **validation** helpers + `apply(batch)` + snapshot/recovery | InMemory (`ProjectionData`), Sqlite, Postgres, Hybrid (in-mem + sqlite spill) |
 | **`ControlPlane`** | queue **definitions** + placement (`create_queue`/`queue_definition`/`list_queues`) | InMemory, Postgres |
 
+### `objectlog/hybrid` projection contract
+
+`PQUEUE_LOG_BACKEND=objectlog` with `PQUEUE_PROJECTION_BACKEND=hybrid` is the
+normative hybrid target. It composes the generic segmented object-log group
+commit runtime with a `HybridProjectionStore`:
+
+```
+ComposedBackend<pqueue_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
+```
+
+The hybrid projection is one `ProjectionStore` axis, not a new backend monolith.
+Its read and validation surface is served from `InMemoryProjection`; every
+committed batch is durably applied to `SqliteProjectionStore` first, then applied
+to memory. A successful response is legal only after both applies have completed
+or the response has otherwise been reconstructed from committed log state.
+
+For recovery, the local SQLite projection is a restart accelerator and
+high-water source, never the command authority. The object log remains the
+authority for acknowledged commands. `HybridProjectionStore` MUST hydrate a
+complete `ProjectionImage` into memory before returning SQLite's recovery
+high-water to `ComposedBackend::recover`; if image hydration fails or has not
+run, recovery MUST fail closed or replay from genesis rather than serving an
+empty hot projection. The `ProjectionImage` contract includes queue definition,
+item lifecycle, leases, secondary indexes, side records, instance fences, queue
+pause state, metrics, request-id replay records, and counters needed to resume
+item-id allocation.
+
+If SQLite apply fails, the operation is not acknowledged and recovery replays
+the object-log tail. If SQLite commits and the subsequent memory apply fails in
+the same process, the hybrid projection MUST enter a poisoned state: the current
+operation returns storage failure, all later reads, validation, and writes fail
+closed, and only process restart plus memory hydration from SQLite may resume
+service.
+
+`objectlog/hybrid` MUST also preserve replay-response idempotency for
+committed-but-unreturned pushes. During recovery, committed push commands with
+`request_id` MUST repopulate the generic idempotency cache or an equivalent
+durable SQLite record so a same-body retry returns the original item ids and a
+different-body retry returns `request-id-conflict`.
+
 ### Robustness is a **checked invariant**, not a per-backend property
 
 Any `L × P × C` is a backend the instant it type-checks, but it is only **correct** once it passes the
