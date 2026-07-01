@@ -796,3 +796,12 @@
 {"event":"release","lock_name":"index.lock","operation":"index.add","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.295154193Z","released_at":"2026-07-01T15:27:38.307751901Z","duration_ms":12}
 {"event":"acquire","lock_name":"index.lock","operation":"index.commit","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.313615276Z"}
 {"event":"release","lock_name":"index.lock","operation":"index.commit","holder_pid":1423071,"acquired_at":"2026-07-01T15:27:38.313615276Z","released_at":"2026-07-01T15:27:38.341809527Z","duration_ms":28}
+{"event":"acquire","lock_name":"index.lock","operation":"index.read-tree","holder_pid":843036,"acquired_at":"2026-07-01T03:59:55.754731908Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.read-tree","holder_pid":843036,"acquired_at":"2026-07-01T03:59:55.754731908Z","released_at":"2026-07-01T03:59:55.760319259Z","duration_ms":5}
+{"event":"release","lock_name":"tracker.lock","operation":"pre_dispatch_checkpoint","holder_pid":843036,"acquired_at":"2026-07-01T03:59:55.695745595Z","released_at":"2026-07-01T03:59:55.760587635Z","duration_ms":64}
+{"event":"acquire","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":843036,"acquired_at":"2026-07-01T05:13:14.420660794Z"}
+{"event":"release","lock_name":"tracker.lock","operation":"durable_audit","holder_pid":843036,"acquired_at":"2026-07-01T05:13:14.420660794Z","released_at":"2026-07-01T05:13:14.420797384Z"}
+{"event":"acquire","lock_name":"index.lock","operation":"index.add","holder_pid":843036,"acquired_at":"2026-07-01T05:13:14.432176709Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.add","holder_pid":843036,"acquired_at":"2026-07-01T05:13:14.432176709Z","released_at":"2026-07-01T05:13:14.44185592Z","duration_ms":9}
+{"event":"acquire","lock_name":"index.lock","operation":"index.commit","holder_pid":843036,"acquired_at":"2026-07-01T05:13:14.447152732Z"}
+{"event":"release","lock_name":"index.lock","operation":"index.commit","holder_pid":843036,"acquired_at":"2026-07-01T05:13:14.447152732Z","released_at":"2026-07-01T05:13:14.474578752Z","duration_ms":27}

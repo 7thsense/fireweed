@@ -1,0 +1,63 @@
+{
+  "attempt_id": "20260701T035955-eab93484",
+  "bead_id": "pqueue-967fcf12",
+  "base_rev": "fd313cfd0572cc66753d60a173c15b0ed86a16af",
+  "created_at": "2026-07-01T03:59:56.008176175Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-967fcf12",
+    "title": "Release hybrid projection profile",
+    "description": "Finish the release after all hybrid implementation and evidence beads close. Update version metadata/release notes for the new objectlog/hybrid profile, run the full release gate, merge to main using DDx merge policy (no squash/rebase of DDx audit trails), push main and tags, publish the next release after v0.5.0, and verify the GitHub release and CI are green. Do not close unrelated Lakebase beads unless their acceptance criteria are actually met. Out of scope: adding new features beyond release fixes required by validation.",
+    "acceptance": "1. git status --short is clean on main after merge.\\n2. cargo fmt --check passes.\\n3. cargo clippy --workspace --all-targets --all-features -- -D warnings passes.\\n4. cargo test --workspace --all-features passes.\\n5. scripts/ci/release-gate.sh passes.\\n6. gh release view for the new version succeeds and shows published assets/notes.\\n7. git ls-remote --tags origin contains the new tag.",
+    "parent": "pqueue-6f4881ef",
+    "labels": [
+      "area:release",
+      "kind:release",
+      "plan-2026-06-30",
+      "backend:objectlog-hybrid",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"git status --short is clean on main after merge.\\\\n2. cargo fmt --check passes.\\\\n3. cargo clippy --workspace --all-targets --all-features -- -D warnings passes.\\\\n4. cargo test --workspace --all-features passes.\\\\n5. scripts/ci/release-gate.sh passes.\\\\n6. gh release view for the new version succeeds and shows published assets/notes.\\\\n7. git ls-remote --tags origin contains the new tag.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-01T03:59:53.200364552Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/1"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-01T03:59:55.482140039Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "plan-hybrid-sqlite-inmemory-projection"
+    }
+  },
+  "governing": [
+    {
+      "id": "plan-hybrid-sqlite-inmemory-projection",
+      "path": "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md",
+      "title": "Hybrid SQLite + In-Memory Projection Implementation Plan"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260701T035955-eab93484",
+    "prompt": ".ddx/executions/20260701T035955-eab93484/prompt.md",
+    "manifest": ".ddx/executions/20260701T035955-eab93484/manifest.json",
+    "result": ".ddx/executions/20260701T035955-eab93484/result.json",
+    "checks": ".ddx/executions/20260701T035955-eab93484/checks.json",
+    "usage": ".ddx/executions/20260701T035955-eab93484/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-967fcf12-20260701T035955-eab93484"
+  },
+  "prompt_sha": "c632b946684ecbef152907f39d9634fd0b466a0163daa22457de38830fdb74d8"
+}
