@@ -389,6 +389,31 @@ pub trait ProjectionStore: Send {
         commands: &[CommandEnvelope],
     ) -> EngineResult<()>;
 
+    /// Apply committed commands to the live serving image. Durable projections use the same implementation
+    /// by default; hybrid async projections may return after memory apply and queue durable checkpoint work.
+    fn apply_live(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.apply(positions, commands)
+    }
+
+    /// Apply committed commands during recovery. Defaults to the durable apply path so restart catch-up
+    /// leaves the projection's persisted high-water exactly at the replayed log prefix.
+    fn apply_recovery(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.apply(positions, commands)
+    }
+
+    /// Drain any deferred durable projection work. Default is a no-op for synchronous projections.
+    fn flush_deferred(&mut self) -> EngineResult<()> {
+        Ok(())
+    }
+
     // -- claim / orchestration reads ----------------------------------------
 
     fn eligible_candidates(
@@ -757,6 +782,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         f(&self.inner.lock().expect("poisoned").log)
     }
 
+    /// Observability/test seam: run `f` against the projection axis under the unit-of-work lock.
+    pub fn with_projection<R>(&self, f: impl FnOnce(&P) -> R) -> R {
+        f(&self.inner.lock().expect("poisoned").projection)
+    }
+
     // -- group-commit write-path helpers (ADR-012 P2) -----------------------
 
     /// Buffer `env` into the group-commit coordinator + substrate and return its [`SealSlot`] (the
@@ -834,7 +864,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             if let Some(last) = positions.last() {
                 log.gc_advance_high_water(shard, last.clone())?;
             }
-            projection.apply(positions, &envelopes)
+            projection.apply_live(positions, &envelopes)
         })();
         for w in waiters {
             w.complete(result.clone());
@@ -902,7 +932,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         }
         inner
             .projection
-            .apply(&positions, std::slice::from_ref(&env))
+            .apply_live(&positions, std::slice::from_ref(&env))
     }
 
     /// Whether the group-commit write path is active for this composition (the builder flag AND a capable
@@ -935,6 +965,16 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             }
         }
         Ok(())
+    }
+
+    /// Drain deferred projection work, if the projection supports it. This is separate from `flush_tick` so
+    /// latency-sensitive manifest sealing does not wait on a durable projection checkpoint.
+    pub fn flush_deferred_projection(&self) -> EngineResult<()> {
+        self.inner
+            .lock()
+            .expect("composed backend poisoned")
+            .projection
+            .flush_deferred()
     }
 
     /// Recovery-on-open (ADR-012 P2): rebuild the in-memory derived state from the durable substrates so a
@@ -1055,7 +1095,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                         }
                     }
                     tail += positions.len() as u64;
-                    projection.apply(&positions, &envelopes)?;
+                    projection.apply_recovery(&positions, &envelopes)?;
                 }
                 match page.next {
                     Some(next) => from = Some(next),
@@ -1175,7 +1215,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         let positions = inner.log.append(shard, std::slice::from_ref(&env), epoch)?;
         inner
             .projection
-            .apply(&positions, std::slice::from_ref(&env))
+            .apply_live(&positions, std::slice::from_ref(&env))
     }
 }
 
@@ -1328,7 +1368,7 @@ impl<P: ProjectionStore> ProjectionWriter for ProjectionWriterView<'_, P> {
         positions: &[CommandPosition],
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
-        self.projection.apply(positions, commands)
+        self.projection.apply_live(positions, commands)
     }
 }
 

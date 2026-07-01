@@ -1014,15 +1014,24 @@ fn spawn_hybrid_flusher(
     tokio::spawn(async move {
         let interval_ms = backend.group_commit_flush_interval_ms();
         let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
+        let mut deferred_tick = tokio::time::interval(Duration::from_millis(250));
         let mut dbg_last = std::time::Instant::now();
         loop {
-            tick.tick().await;
-            let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
-                Err(_) => 0,
-            };
-            if let Err(e) = backend.flush_tick(now_ms) {
-                eprintln!("[objectlog/hybrid] group-commit flush failed: {e}");
+            tokio::select! {
+                _ = tick.tick() => {
+                    let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                        Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
+                        Err(_) => 0,
+                    };
+                    if let Err(e) = backend.flush_tick(now_ms) {
+                        eprintln!("[objectlog/hybrid] group-commit flush failed: {e}");
+                    }
+                }
+                _ = deferred_tick.tick() => {
+                    if let Err(e) = backend.flush_deferred_projection() {
+                        eprintln!("[objectlog/hybrid] deferred projection flush failed: {e}");
+                    }
+                }
             }
             if debug_segments && dbg_last.elapsed() >= Duration::from_secs(1) {
                 dbg_last = std::time::Instant::now();
