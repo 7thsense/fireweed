@@ -7107,6 +7107,8 @@ mod group_summary_tests {
         let env = CommandEnvelope {
             command_id: CommandId::new("ce"),
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids: vec![],
             command: QueueCommand::CohortExpired(pqueue_engine::CohortExpiredCommand {
                 group_key: GroupKey::new(group).unwrap(),

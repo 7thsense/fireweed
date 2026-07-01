@@ -189,6 +189,8 @@ impl Inner {
         CommandEnvelope {
             command_id: CommandId::new(format!("pg-{n}")),
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -730,6 +732,8 @@ impl UpsertPort for PostgresBackend {
             let mk = |command: QueueCommand| CommandEnvelope {
                 command_id: CommandId::new(format!("pg-{}-{n}", self.node_id)),
                 request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
                 item_ids: vec![new_item_id],
                 command,
                 checksum: CommandChecksum(0),
@@ -827,6 +831,8 @@ impl PushPort for PostgresBackend {
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("pg-{}-{n}", self.node_id)),
                 request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
                 item_ids: ids.clone(),
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),
@@ -872,6 +878,8 @@ impl PushPort for PostgresBackend {
             let env = CommandEnvelope {
                 command_id: CommandId::new(format!("pg-{}-{n}", self.node_id)),
                 request_id: Some(request_id.clone()),
+                request_fingerprint: None,
+                request_outcome: None,
                 item_ids: ids,
                 command: QueueCommand::Push(PushCommand { items: push_items }),
                 checksum: CommandChecksum(0),

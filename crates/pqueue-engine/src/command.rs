@@ -445,10 +445,41 @@ pub struct SetGatesCommand {
 pub struct CommandEnvelope {
     pub command_id: CommandId,
     pub request_id: Option<RequestId>,
+    /// Stable fingerprint of the request body for `request_id` replay/conflict decisions.
+    ///
+    /// This is durable log metadata, not projection state. Hybrid object-log modes can rebuild
+    /// replay-response idempotency from committed envelopes even when the SQLite projection has not yet
+    /// applied the request-id row. `None` is allowed for legacy log entries and for commands with no
+    /// `request_id`.
+    #[serde(default)]
+    pub request_fingerprint: Option<u64>,
+    /// Replayable response material for the request-id-bearing command. The first supported family is push:
+    /// after an unknown outcome, a retry must return the originally assigned item ids without appending a
+    /// second push.
+    #[serde(default)]
+    pub request_outcome: Option<RequestOutcome>,
     pub item_ids: Vec<ItemId>,
     pub command: QueueCommand,
     pub checksum: CommandChecksum,
     pub created_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RequestOutcome {
+    Push { item_ids: Vec<ItemId> },
+}
+
+/// Fail closed when a hybrid/object-log request-id command is missing the metadata required to replay a
+/// committed-but-unreturned outcome. Callers use this on hybrid-async admission paths where the protocol
+/// must not accept a request-id-bearing mutation unless the committed envelope can reconstruct both the
+/// fingerprint and the response.
+pub fn validate_request_replay_metadata(env: &CommandEnvelope) -> EngineResult<()> {
+    if env.request_id.is_some()
+        && (env.request_fingerprint.is_none() || env.request_outcome.is_none())
+    {
+        return Err(EngineError::Unavailable);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -492,6 +523,8 @@ mod serde_tests {
         CommandEnvelope {
             command_id: CommandId::new("c1"),
             request_id: Some(RequestId::new("r1").unwrap()),
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids: vec![iid("a")],
             command,
             checksum: CommandChecksum(42),
@@ -591,5 +624,33 @@ mod serde_tests {
         };
         assert_eq!(p.items[0].payload.as_deref(), Some(&b"payload"[..]));
         assert_eq!(p.items[0].priority, Some(PriorityValue::Int64(7)));
+    }
+
+    #[test]
+    fn legacy_envelope_defaults_request_replay_metadata() {
+        let json = r#"{
+            "command_id":"c1",
+            "request_id":"r1",
+            "item_ids":[],
+            "command":{"PauseQueue":null},
+            "checksum":42,
+            "created_at":{"seconds":1,"nanoseconds":0}
+        }"#;
+        let decoded: CommandEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.request_fingerprint, None);
+        assert_eq!(decoded.request_outcome, None);
+    }
+
+    #[test]
+    fn hybrid_request_id_envelopes_require_replay_metadata() {
+        let mut env = envelope(QueueCommand::PauseQueue);
+        assert_eq!(
+            validate_request_replay_metadata(&env),
+            Err(EngineError::Unavailable)
+        );
+
+        env.request_fingerprint = Some(7);
+        env.request_outcome = Some(RequestOutcome::Push { item_ids: vec![] });
+        assert_eq!(validate_request_replay_metadata(&env), Ok(()));
     }
 }

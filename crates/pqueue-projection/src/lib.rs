@@ -1742,6 +1742,8 @@ mod tests {
         CommandEnvelope {
             command_id: CommandId::new("c"),
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids: vec![],
             command,
             checksum: CommandChecksum(0),

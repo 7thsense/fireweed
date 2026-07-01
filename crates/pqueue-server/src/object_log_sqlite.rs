@@ -160,6 +160,8 @@ impl ObjectLogSqliteBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("olsqlite-{}-{n}", self.node_id)),
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -178,6 +180,8 @@ impl ObjectLogSqliteBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("olsqlite-{}-{n}", self.node_id)),
             request_id: Some(request_id),
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -896,6 +900,8 @@ impl SegmentedObjectLogSqliteBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("segolsqlite-{}-{n}", self.node_id)),
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -916,6 +922,8 @@ impl SegmentedObjectLogSqliteBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("segolsqlite-{}-{n}", self.node_id)),
             request_id: Some(request_id),
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -1671,6 +1679,8 @@ impl SegmentedObjectLogInMemoryBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("seginmem-{}-{n}", self.node_id)),
             request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
@@ -1691,6 +1701,8 @@ impl SegmentedObjectLogInMemoryBackend {
         CommandEnvelope {
             command_id: CommandId::new(format!("seginmem-{}-{n}", self.node_id)),
             request_id: Some(request_id),
+            request_fingerprint: None,
+            request_outcome: None,
             item_ids,
             command,
             checksum: CommandChecksum(0),
