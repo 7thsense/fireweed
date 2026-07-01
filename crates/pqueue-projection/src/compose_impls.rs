@@ -20,7 +20,7 @@ use pqueue_engine::{
     ProjectionSnapshot, ProjectionStore, PushItem, QueueKey, QueueMetrics, SnapshotRef,
 };
 
-use crate::{LogData, ProjectionData};
+use crate::{LogData, ProjectionData, ProjectionImage};
 
 // ---------------------------------------------------------------------------
 // MemoryLog — the in-process command-log axis
@@ -135,6 +135,18 @@ pub struct InMemoryProjection {
 impl InMemoryProjection {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replace one in-memory shard with a fully materialized projection image.
+    pub fn hydrate_shard(
+        &mut self,
+        definition: &QueueDefinition,
+        image: ProjectionImage,
+    ) -> EngineResult<()> {
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let projection = ProjectionData::from_image(definition, image)?;
+        self.projections.insert(key, projection);
+        Ok(())
     }
 
     fn get(&self, shard: &QueueKey) -> EngineResult<&ProjectionData> {

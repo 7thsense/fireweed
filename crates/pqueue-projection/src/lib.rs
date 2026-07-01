@@ -27,8 +27,8 @@ pub use compose_impls::{InMemoryProjection, MemoryLog};
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, IndexDeclaration, IndexSpec, IndexType, ItemEvent, ItemId, ItemState,
-    LeaseToken, Metadata, OrderingMode, PriorityModel, PriorityValue, QueueIndex, RecurrenceMode,
-    RecurrencePolicy, UtcTimestamp, apply_transition, failure_event, priority_sort,
+    LeaseToken, Metadata, OrderingMode, PriorityModel, PriorityValue, QueueDefinition, QueueIndex,
+    RecurrenceMode, RecurrencePolicy, UtcTimestamp, apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
@@ -68,6 +68,97 @@ struct ItemRecord {
     lease_expires_at: Option<UtcTimestamp>,
     fenced: bool,
     superseded: bool,
+}
+
+/// Portable, typed representation of one item in a [`ProjectionImage`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionImageItem {
+    pub item_id: ItemId,
+    pub client_item_key: ClientItemKey,
+    pub priority: Option<PriorityValue>,
+    pub not_before: Option<UtcTimestamp>,
+    pub group_key: Option<GroupKey>,
+    pub payload: Option<Bytes>,
+    pub fields: BTreeMap<String, Bytes>,
+    pub metadata: Metadata,
+    pub gate_keys: Vec<String>,
+    pub entity_document: Option<serde_json::Value>,
+    pub state: ItemState,
+    pub item_version: u64,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+    pub created_seq: u64,
+    pub lease_token: Option<LeaseToken>,
+    pub lease_expires_at: Option<UtcTimestamp>,
+    pub fenced: bool,
+    pub superseded: bool,
+}
+
+impl From<&ItemRecord> for ProjectionImageItem {
+    fn from(rec: &ItemRecord) -> Self {
+        Self {
+            item_id: rec.item_id,
+            client_item_key: rec.client_item_key.clone(),
+            priority: rec.priority.clone(),
+            not_before: rec.not_before,
+            group_key: rec.group_key.clone(),
+            payload: rec.payload.clone(),
+            fields: rec.fields.clone(),
+            metadata: rec.metadata.clone(),
+            gate_keys: rec.gate_keys.clone(),
+            entity_document: rec.entity_document.clone(),
+            state: rec.state,
+            item_version: rec.item_version,
+            attempt_count: rec.attempt_count,
+            max_attempts: rec.max_attempts,
+            created_seq: rec.created_seq,
+            lease_token: rec.lease_token.clone(),
+            lease_expires_at: rec.lease_expires_at,
+            fenced: rec.fenced,
+            superseded: rec.superseded,
+        }
+    }
+}
+
+impl From<ProjectionImageItem> for ItemRecord {
+    fn from(item: ProjectionImageItem) -> Self {
+        Self {
+            item_id: item.item_id,
+            client_item_key: item.client_item_key,
+            priority: item.priority,
+            not_before: item.not_before,
+            group_key: item.group_key,
+            payload: item.payload,
+            fields: item.fields,
+            metadata: item.metadata,
+            gate_keys: item.gate_keys,
+            entity_document: item.entity_document,
+            state: item.state,
+            item_version: item.item_version,
+            attempt_count: item.attempt_count,
+            max_attempts: item.max_attempts,
+            created_seq: item.created_seq,
+            lease_token: item.lease_token,
+            lease_expires_at: item.lease_expires_at,
+            fenced: item.fenced,
+            superseded: item.superseded,
+        }
+    }
+}
+
+/// Complete queue projection image at a durable high-water.
+///
+/// The item list is the source of truth for lifecycle, ordering, fields, payloads, metadata, gates,
+/// entity documents, lease state, secondary indexes, and metrics. Derived maps are rebuilt on import.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionImage {
+    pub high_water: Option<CommandPosition>,
+    pub paused: bool,
+    pub next_seq: u64,
+    pub items: Vec<ProjectionImageItem>,
+    pub side_records: BTreeMap<Vec<u8>, Bytes>,
+    pub instance_fences: BTreeMap<Vec<u8>, u64>,
+    pub metrics: QueueMetrics,
 }
 
 impl ItemRecord {
@@ -529,6 +620,61 @@ impl ProjectionData {
         }
         self.typed_index_specs = specs.to_vec();
         self
+    }
+
+    /// Export the complete materialized queue state. `high_water` is supplied by the durable projection
+    /// owner because `ProjectionData` itself is log-position agnostic.
+    pub fn to_image(&self, high_water: Option<CommandPosition>) -> ProjectionImage {
+        let mut items: Vec<ProjectionImageItem> =
+            self.items.values().map(ProjectionImageItem::from).collect();
+        items.sort_by_key(|item| (item.created_seq, item.item_id));
+        ProjectionImage {
+            high_water,
+            paused: self.paused,
+            next_seq: self.next_seq,
+            items,
+            side_records: self.side_records.clone(),
+            instance_fences: self.instance_fences.clone(),
+            metrics: self.metrics(),
+        }
+    }
+
+    /// Rebuild a projection from a portable image, reconstructing all derived lookup, eligibility, and
+    /// secondary-index state from the item records.
+    pub fn from_image(definition: &QueueDefinition, image: ProjectionImage) -> EngineResult<Self> {
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        )
+        .with_typed_indexes(&definition.typed_indexes);
+        projection.paused = image.paused;
+        projection.next_seq = image.next_seq;
+        projection.side_records = image.side_records;
+        projection.instance_fences = image.instance_fences;
+
+        for item in image.items {
+            let rec = ItemRecord::from(item);
+            if !rec.superseded {
+                projection
+                    .by_key
+                    .insert(rec.client_item_key.clone(), rec.item_id);
+                let keys =
+                    projection.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+                projection.index_insert_keys(rec.item_id, &keys);
+            }
+            if rec.state == ItemState::Pending {
+                projection
+                    .eligible
+                    .insert(elig_key(&rec, &projection.priority_model));
+            }
+            projection.next_seq = projection.next_seq.max(rec.created_seq.saturating_add(1));
+            projection.items.insert(rec.item_id, rec);
+        }
+
+        Ok(projection)
     }
 
     /// Add `(item_id, keys)` to every covering index (Unique: set/replace the holder; NonUnique: add to
@@ -1506,11 +1652,13 @@ mod tests {
     //! port-level conformance is exercised against the backends in `pqueue-conformance`.
     use super::*;
     use pqueue_core::{
-        PriorityDirection, PriorityModelKind, PriorityTieBreaker, QueueId, TenantId,
+        CohortPolicy, EligibilityPolicy, IndexSpec, MetadataValue, PriorityDirection,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RetryPolicy, TenantId,
     };
     use pqueue_engine::{
-        ClaimCommand, CommandChecksum, CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-        PushCommand, RenewLeaseCommand,
+        AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandId, FinalizeCommand,
+        FinalizeKind, FinalizeOutcome, PushCommand, RenewLeaseCommand, SideRecord,
+        WriteSideRecordsCommand,
     };
 
     fn shard() -> QueueKey {
@@ -1529,6 +1677,34 @@ mod tests {
     fn iid(s: &str) -> ItemId {
         ItemId::new(s).unwrap()
     }
+    fn qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: shard().tenant_id,
+            queue_id: shard().queue_id,
+            priority_model: model(),
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 10_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: Some(CohortPolicy::disabled()),
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![IndexSpec {
+                name: "by_color".to_string(),
+                fields: vec!["color".to_string()],
+                unique: false,
+            }],
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+        }
+    }
     fn push_item(id: &str, key: &str, priority: i64) -> PushItem {
         PushItem {
             client_item_key: ClientItemKey::new(key).unwrap(),
@@ -1543,6 +1719,23 @@ mod tests {
             cohort_size: None,
             gate_keys: Vec::new(),
             entity_document: None,
+        }
+    }
+    fn rich_push_item(id: &str, key: &str, priority: i64) -> PushItem {
+        let mut fields = BTreeMap::new();
+        fields.insert("color".to_string(), Bytes::from_static(b"red"));
+        let mut metadata = Metadata::new();
+        metadata.insert(
+            "origin",
+            MetadataValue::String("projection-image".to_string()),
+        );
+        PushItem {
+            payload: Some(Bytes::from_static(b"payload")),
+            fields,
+            metadata,
+            gate_keys: vec!["gate-a".to_string()],
+            entity_document: Some(serde_json::json!({"kind":"job","rank":7})),
+            ..push_item(id, key, priority)
         }
     }
     fn env(command: QueueCommand) -> CommandEnvelope {
@@ -1564,6 +1757,77 @@ mod tests {
             group_key: Some(GroupKey::new(group).unwrap()),
             ..push_item(id, key, priority)
         }
+    }
+
+    #[test]
+    fn projection_image_roundtrips_full_projection_state() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let item_id = iid("1");
+        let lease_token = LeaseToken::new("lease-1").unwrap();
+
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![rich_push_item("1", "k1", 10)],
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![item_id],
+                lease_token: lease_token.clone(),
+                lease_expires_at: ts(60),
+            }))
+            .unwrap();
+        projection.apply_command(&QueueCommand::PauseQueue).unwrap();
+        projection
+            .apply_command(&QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: vec![SideRecord {
+                    key: b"side-key".to_vec(),
+                    payload: Bytes::from_static(b"side-payload"),
+                }],
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::AdvanceInstanceFence(
+                AdvanceInstanceFenceCommand {
+                    instance_key: b"instance".to_vec(),
+                    expected: 0,
+                    next: 9,
+                },
+            ))
+            .unwrap();
+
+        let high_water = Some(CommandPosition::new(shard(), 2, 42));
+        let image = projection.to_image(high_water.clone());
+        let restored = ProjectionData::from_image(&definition, image.clone()).unwrap();
+
+        assert_eq!(image.high_water, high_water);
+        assert_eq!(restored.to_image(high_water.clone()), image);
+        assert!(restored.is_paused());
+        assert_eq!(restored.metrics().leased, 1);
+        assert_eq!(restored.pending_leases()[0].lease_token, lease_token);
+        assert_eq!(
+            restored.side_record(b"side-key"),
+            Some(&Bytes::from_static(b"side-payload"))
+        );
+        assert_eq!(restored.instance_fence(b"instance"), Some(9));
+        assert_eq!(
+            restored
+                .index_lookup("by_color", &[b"red".to_vec()])
+                .unwrap()[0]
+                .item_id,
+            item_id
+        );
+        let live = restored.live_items_by_key(&[ClientItemKey::new("k1").unwrap()]);
+        let item = live[0].as_ref().unwrap();
+        assert_eq!(item.fields["color"], Bytes::from_static(b"red"));
+        assert_eq!(item.payload, Some(Bytes::from_static(b"payload")));
     }
 
     /// Bounded-relaxed claim selection (TP-003 INV-6 + INV-4). A deterministic eligible set with

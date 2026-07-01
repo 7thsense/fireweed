@@ -78,6 +78,7 @@ use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
     ProjectionStore, SnapshotRef,
 };
+use pqueue_projection::{ProjectionImage, ProjectionImageItem};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde_json::Value as JsonValue;
@@ -112,6 +113,7 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
     payload BLOB,
     fields TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}',
+    entity_document TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0,
     item_version INTEGER NOT NULL,
     lease_token_hash BLOB,
@@ -756,6 +758,21 @@ fn ensure_item_metadata_column(conn: &Connection) -> EngineResult<()> {
     ensure_item_text_column(conn, "metadata", "{}")
 }
 
+fn ensure_item_entity_document_column(conn: &Connection) -> EngineResult<()> {
+    match conn.execute(
+        "ALTER TABLE pqueue_items ADD COLUMN entity_document TEXT",
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(EngineError::Storage(e.to_string())),
+    }
+}
+
 fn ensure_cohort_column(conn: &Connection, column: &str, definition: &str) -> EngineResult<()> {
     if !column
         .chars()
@@ -1280,6 +1297,7 @@ fn insert_items(
             opt_blob(item.payload.as_ref().map(|b| b.to_vec())),
             Value::Text(fields_to_json(&item.fields)?),
             Value::Text(metadata_to_json(&item.metadata)?),
+            opt_text(item.entity_document.as_ref().map(to_json).transpose()?),
             Value::Integer(seqi),
             Value::Integer(now_n),
             Value::Integer(now_n),
@@ -1288,13 +1306,13 @@ fn insert_items(
         ]);
     }
     const ROW_PH: &str =
-        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,0,0,?,?)";
+        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,0,0,?,?)";
     for chunk in rows.chunks(SQLITE_BATCH) {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO pqueue_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,retry_count,\
+              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
@@ -1914,6 +1932,13 @@ fn apply_command_sql(
                             ],
                         ))?;
                     }
+                }
+                if let Some(ref doc) = c.set_entity_document {
+                    st(tx.execute(
+                        "UPDATE pqueue_items SET entity_document=?4 \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        params![t, q, c.item_id.to_string(), to_json(doc)?],
+                    ))?;
                 }
                 // ADR-011: if a new entity document was supplied, re-index this item. Delete the
                 // old rows first so the unique slot is freed before the conflict check fires.
@@ -3298,6 +3323,12 @@ impl SqliteProjectionStore {
         Ok(next_seq.map(|n| n as u64))
     }
 
+    /// Export the durable SQLite projection rows for `shard` as a typed in-memory projection image.
+    pub fn export_projection_image(&self, shard: &QueueKey) -> EngineResult<ProjectionImage> {
+        let g = self.inner.lock().expect("projection store poisoned");
+        export_projection_image_sql(&g.conn, shard)
+    }
+
     /// Restart recovery for the object-log backends' item-id mint counter: seed `counters` past every item
     /// id already materialized in the snapshot (`pqueue_items`), so a push after a snapshot-tail reopen never
     /// re-mints an id that the full-genesis replay would have observed. Safe because the object_log_sqlite
@@ -3338,6 +3369,7 @@ fn open_inner(conn: Connection) -> EngineResult<Inner> {
     st(conn.execute_batch(RELATIONAL_SCHEMA))?;
     ensure_item_fields_column(&conn)?;
     ensure_item_metadata_column(&conn)?;
+    ensure_item_entity_document_column(&conn)?;
     ensure_cohort_lifecycle_columns(&conn)?;
     let mut inner = Inner {
         conn,
@@ -3389,6 +3421,144 @@ fn create_queue_sql(
     Ok(CreateQueueOutcome {
         created: true,
         definition,
+    })
+}
+
+fn export_projection_image_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<ProjectionImage> {
+    let (t, q) = parts(shard);
+    let cursor: Option<(i64, i64, i64)> = st(conn
+        .query_row(
+            "SELECT next_seq,next_item_seq,assignment_epoch FROM relational_cursor \
+             WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional())?;
+    let (next_seq, next_item_seq, assignment_epoch) = cursor.ok_or(EngineError::NotFound)?;
+    let paused: i64 = st(conn.query_row(
+        "SELECT paused FROM queues WHERE tenant=?1 AND queue=?2",
+        params![t, q],
+        |row| row.get(0),
+    ))?;
+
+    let mut stmt = st(conn.prepare(
+        "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,group_key,payload,\
+         fields,metadata,entity_document,retry_count,item_version,lease_expires_at,fenced,\
+         superseded,max_attempts,created_seq \
+         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<Vec<u8>>>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, i64>(10)?,
+            row.get::<_, i64>(11)?,
+            row.get::<_, Option<i64>>(12)?,
+            row.get::<_, i64>(13)?,
+            row.get::<_, i64>(14)?,
+            row.get::<_, i64>(15)?,
+            row.get::<_, i64>(16)?,
+        ))
+    }))?;
+    let mut items = Vec::new();
+    for row in rows {
+        let (
+            item_id,
+            client_item_key,
+            lifecycle_state,
+            priority,
+            not_before,
+            group_key,
+            payload,
+            fields,
+            metadata,
+            entity_document,
+            retry_count,
+            item_version,
+            lease_expires_at,
+            fenced,
+            superseded,
+            max_attempts,
+            created_seq,
+        ) = st(row)?;
+        let item_id = ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
+        let entity_document = entity_document
+            .map(|raw| serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string())))
+            .transpose()?;
+        items.push(ProjectionImageItem {
+            item_id,
+            client_item_key: ClientItemKey::new(client_item_key)
+                .map_err(|e| EngineError::Storage(e.to_string()))?,
+            priority: parse_priority(priority)?,
+            not_before: not_before.map(nanos_ts),
+            group_key: group_key
+                .map(GroupKey::new)
+                .transpose()
+                .map_err(|e| EngineError::Storage(e.to_string()))?,
+            payload: payload.map(Bytes::from),
+            fields: fields_from_json(fields)?,
+            metadata: metadata_from_json(metadata)?,
+            gate_keys: item_gate_keys(conn, shard, &item_id)?,
+            entity_document,
+            state: parse_state(&lifecycle_state)?,
+            item_version: item_version as u64,
+            attempt_count: retry_count as u32,
+            max_attempts: max_attempts as u32,
+            created_seq: created_seq as u64,
+            lease_token: None,
+            lease_expires_at: lease_expires_at.map(nanos_ts),
+            fenced: fenced != 0,
+            superseded: superseded != 0,
+        });
+    }
+
+    let mut side_records = BTreeMap::new();
+    let mut stmt = st(conn.prepare(
+        "SELECT key,payload FROM pqueue_side_records \
+         WHERE tenant_id=?1 AND queue_id=?2 ORDER BY key",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+    }))?;
+    for row in rows {
+        let (key, payload) = st(row)?;
+        side_records.insert(key, Bytes::from(payload));
+    }
+
+    let mut instance_fences = BTreeMap::new();
+    let mut stmt = st(conn.prepare(
+        "SELECT instance_key,fence FROM pqueue_instance_fences \
+         WHERE tenant_id=?1 AND queue_id=?2 ORDER BY instance_key",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+    }))?;
+    for row in rows {
+        let (key, fence) = st(row)?;
+        instance_fences.insert(key, fence as u64);
+    }
+
+    let high_water = (next_seq > 0)
+        .then(|| CommandPosition::new(shard.clone(), assignment_epoch as u64, next_seq as u64 - 1));
+    Ok(ProjectionImage {
+        high_water,
+        paused: paused != 0,
+        next_seq: next_item_seq as u64,
+        items,
+        side_records,
+        instance_fences,
+        metrics: metrics_sql(conn, shard)?,
     })
 }
 
