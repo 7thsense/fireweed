@@ -1,0 +1,38 @@
+{
+  "attempt_id": "20260701T191234-ab18980f",
+  "bead_id": "pqueue-fed791af",
+  "base_rev": "e85cd919f03b52ea0343093cc33095b035bd8684",
+  "created_at": "2026-07-01T19:12:34.945774636Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-fed791af",
+    "title": "Add hybrid async crash chaos coverage",
+    "description": "Add crash/chaos coverage for the converged plan. In-scope files: crates/pqueue-sqlite/tests/*, crates/pqueue-objectlog/tests/*, crates/pqueue-server/tests/server.rs or new focused tests. Cover crash after object-log commit before memory apply, after memory apply before SQLite apply, during SQLite transaction before high-water, after high-water commit, before response delivery, disk-loss, disk-full if reasonably simulatable, async backlog/backpressure, and request_id replay after each relevant window. Assert no lost/duplicate leases, no orphaned in-flight records, and no high-water advance past poison. Out of scope: 10M performance run.",
+    "acceptance": "1. `cargo test -p pqueue-sqlite hybrid_async_chaos -- --nocapture` passes.\n2. `cargo test -p pqueue-objectlog hybrid_async_chaos -- --nocapture` passes.\n3. `cargo test -p pqueue-server --test server objectlog_hybrid_async -- --nocapture` passes.\n4. `cargo test --workspace --all-features` passes.\n5. `cargo fmt --check` passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:testing",
+      "area:pqueue-sqlite",
+      "area:pqueue-objectlog",
+      "kind:verification",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "spec-id": "plan-hybrid-async-checkpoint"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T191234-ab18980f",
+    "prompt": ".ddx/executions/20260701T191234-ab18980f/prompt.md",
+    "manifest": ".ddx/executions/20260701T191234-ab18980f/manifest.json",
+    "result": ".ddx/executions/20260701T191234-ab18980f/result.json",
+    "checks": ".ddx/executions/20260701T191234-ab18980f/checks.json",
+    "usage": ".ddx/executions/20260701T191234-ab18980f/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-fed791af-20260701T191234-ab18980f"
+  },
+  "prompt_sha": "dc473839fef3f8f8352e5440104a42aa0a7c56aeaefa55cee319db987a44b0de"
+}

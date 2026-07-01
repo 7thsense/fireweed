@@ -1,0 +1,61 @@
+{
+  "bead_id": "pqueue-fed791af",
+  "attempt_id": "20260701T191234-ab18980f",
+  "base_rev": "e85cd919f03b52ea0343093cc33095b035bd8684",
+  "result_rev": "722708d7355c12a84bd0c7d5a344d60b33808b14",
+  "implementation_rev": "626809f60971ce9a3e8a2bd06330e8c8fbaddeb9",
+  "landed_rev": "722708d7355c12a84bd0c7d5a344d60b33808b14",
+  "landed_branch": "hybrid-async-work",
+  "evidence_rev": "722708d7355c12a84bd0c7d5a344d60b33808b14",
+  "outcome": "merged",
+  "status": "success",
+  "detail": "success",
+  "orchestrator_status": "success",
+  "candidate_ref": "refs/ddx/iterations/20260701T191234-ab18980f/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260701T191234-ab18980f",
+      "result_rev": "626809f60971ce9a3e8a2bd06330e8c8fbaddeb9",
+      "implementer_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "requested_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "actual_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "claude-tui",
+  "model": "opus-4.7",
+  "predicted_power": 10,
+  "predicted_cost_usd_per_1k_tokens": 0.045,
+  "predicted_cost_source": "subscription",
+  "session_id": "eb-79889cdc",
+  "duration_ms": 1914623,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260701T191234-ab18980f",
+  "prompt_file": ".ddx/executions/20260701T191234-ab18980f/prompt.md",
+  "manifest_file": ".ddx/executions/20260701T191234-ab18980f/manifest.json",
+  "result_file": ".ddx/executions/20260701T191234-ab18980f/result.json",
+  "usage_file": ".ddx/executions/20260701T191234-ab18980f/usage.json",
+  "rate_limit_budget": 300000000000,
+  "started_at": "2026-07-01T19:12:34.951697868Z",
+  "finished_at": "2026-07-01T19:44:29.575042283Z"
+}
