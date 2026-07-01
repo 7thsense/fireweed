@@ -246,6 +246,14 @@ pub struct Config {
     /// fail-closed poison (TD-004 §"Async apply debt, backpressure, and poison thresholds"). The typed form
     /// of the `PQUEUE_HYBRID_ASYNC_*` env names; applied by the hybrid-async projection's apply pipeline.
     pub hybrid_async: HybridAsyncThresholds,
+    /// Cap on how many deferred SQLite-checkpoint commands one `objectlog/hybrid` or
+    /// `objectlog/hybrid-async` deferred-flush call applies (bead pqueue-8e5e7846). `flush_deferred` runs
+    /// under the composed backend's unit-of-work mutex, so bounding this bounds the worst-case time one
+    /// call can block concurrent push/claim callers; the periodic flusher's 250ms cadence drains a larger
+    /// backlog over several calls instead of one unbounded transaction. The typed form of
+    /// `PQUEUE_HYBRID_DEFERRED_FLUSH_CHUNK`, defaulting to
+    /// [`pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK`]; applied to the hybrid projection store on open.
+    pub deferred_flush_chunk: usize,
 }
 
 impl Config {
@@ -270,6 +278,7 @@ impl Config {
             debug_segments: false,
             worker_threads: None,
             hybrid_async: HybridAsyncThresholds::default(),
+            deferred_flush_chunk: pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
         }
     }
 }
@@ -858,6 +867,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let recovery_max_tail = config.recovery_max_tail;
     let debug_segments = config.debug_segments;
     let hybrid_async = config.hybrid_async;
+    let deferred_flush_chunk = config.deferred_flush_chunk;
     let BackendSpec {
         log,
         projection,
@@ -918,6 +928,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 segment_config,
                 recovery_max_tail,
                 node_id,
+                deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
@@ -943,6 +954,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 segment_config,
                 recovery_max_tail,
                 node_id,
+                deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
@@ -990,6 +1002,7 @@ fn open_objectlog_hybrid_backend(
     segment_config: SegmentConfig,
     recovery_max_tail: u64,
     node_id: u8,
+    deferred_flush_chunk: usize,
 ) -> EngineResult<Arc<ObjectLogHybridBackend>> {
     let p = path
         .to_str()
@@ -997,7 +1010,7 @@ fn open_objectlog_hybrid_backend(
     Ok(Arc::new(
         ComposedBackend::new(
             ObjectLog::open_group_commit(root, segment_config)?,
-            HybridProjectionStore::open(p)?,
+            HybridProjectionStore::open(p)?.with_deferred_flush_chunk(deferred_flush_chunk),
             InProcessControlPlane::new(),
         )
         .with_group_commit(true)
@@ -1028,7 +1041,7 @@ fn spawn_hybrid_flusher(
                     }
                 }
                 _ = deferred_tick.tick() => {
-                    if let Err(e) = backend.flush_deferred_projection() {
+                    if let Err(e) = backend.try_flush_deferred_projection() {
                         eprintln!("[objectlog/hybrid] deferred projection flush failed: {e}");
                     }
                 }

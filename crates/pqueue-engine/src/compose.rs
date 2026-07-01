@@ -399,6 +399,17 @@ pub trait ProjectionStore: Send {
         self.apply(positions, commands)
     }
 
+    /// Owned variant of [`Self::apply_live`] for group-commit paths that already own the sealed envelopes.
+    /// Most projections can borrow and drop the owned values; hybrid async projections override this to move
+    /// envelopes into their deferred durable-apply queue without cloning large push batches on the ack path.
+    fn apply_live_owned(
+        &mut self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> EngineResult<()> {
+        self.apply_live(&positions, &commands)
+    }
+
     /// Apply committed commands during recovery. Defaults to the durable apply path so restart catch-up
     /// leaves the projection's persisted high-water exactly at the replayed log prefix.
     fn apply_recovery(
@@ -860,11 +871,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         let envelopes: Vec<CommandEnvelope> = coord.pending.drain(..n).collect();
         let waiters: Vec<Arc<SealSlot>> = coord.waiters.drain(..n).collect();
         let result = (|| {
-            let positions = &positions[..n];
+            let positions: Vec<CommandPosition> = positions.into_iter().take(n).collect();
             if let Some(last) = positions.last() {
                 log.gc_advance_high_water(shard, last.clone())?;
             }
-            projection.apply_live(positions, &envelopes)
+            projection.apply_live_owned(positions, envelopes)
         })();
         for w in waiters {
             w.complete(result.clone());
@@ -930,9 +941,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         if let Some(last) = positions.last() {
             inner.log.gc_advance_high_water(shard, last.clone())?;
         }
-        inner
-            .projection
-            .apply_live(&positions, std::slice::from_ref(&env))
+        inner.projection.apply_live_owned(positions, vec![env])
     }
 
     /// Whether the group-commit write path is active for this composition (the builder flag AND a capable
@@ -975,6 +984,24 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             .expect("composed backend poisoned")
             .projection
             .flush_deferred()
+    }
+
+    /// Best-effort deferred projection drain for background flusher tasks.
+    ///
+    /// Unlike [`Self::flush_deferred_projection`], this never waits for the composed backend mutex. If a
+    /// push/claim/finalize is active, the background checkpoint simply skips this tick and tries again on the
+    /// next cadence. Explicit catch-up/recovery tests can still call the blocking method above.
+    pub fn try_flush_deferred_projection(&self) -> EngineResult<bool> {
+        match self.inner.try_lock() {
+            Ok(mut g) => {
+                g.projection.flush_deferred()?;
+                Ok(true)
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(EngineError::Storage("composed backend poisoned".into()))
+            }
+        }
     }
 
     /// Recovery-on-open (ADR-012 P2): rebuild the in-memory derived state from the durable substrates so a

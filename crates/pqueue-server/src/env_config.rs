@@ -17,7 +17,7 @@ use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use pqueue_sqlite::HybridAsyncThresholds;
+use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 
 use crate::{
     BackendSpec, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL, LogSpec, ProjectionSpec,
@@ -321,6 +321,11 @@ impl Config {
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n > 0),
             hybrid_async: hybrid_async_thresholds(env)?,
+            deferred_flush_chunk: parse_usize(
+                env,
+                "PQUEUE_HYBRID_DEFERRED_FLUSH_CHUNK",
+                DEFAULT_DEFERRED_FLUSH_CHUNK,
+            ),
         })
     }
 }
