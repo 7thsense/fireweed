@@ -11,7 +11,7 @@ use pqueue_engine::{
     PushCommand, PushItem, QueueCommand, SideRecord, WriteSideRecordsCommand,
 };
 use pqueue_projection::InMemoryProjection;
-use pqueue_sqlite::SqliteProjectionStore;
+use pqueue_sqlite::{HybridProjectionStore, SqliteProjectionStore};
 
 fn envelope(
     id: &str,
@@ -298,4 +298,134 @@ async fn sqlite_projection_image_exports_hydratable_recovery_image() {
         live[0].as_ref().unwrap().payload,
         Some(Bytes::from_static(b"payload"))
     );
+}
+
+#[test]
+fn hybrid_projection_applies_sqlite_first_and_serves_memory_parity() {
+    let mut store = HybridProjectionStore::in_memory().unwrap();
+    let definition = qdef();
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &definition).unwrap();
+    let item_id = ItemId::new("1").unwrap();
+    let lease_token = LeaseToken::new("lease-1").unwrap();
+
+    let commands = vec![
+        envelope(
+            "push-1",
+            QueueCommand::Push(PushCommand {
+                items: vec![rich_item("1", "k1")],
+            }),
+            vec![item_id],
+            0,
+        ),
+        envelope(
+            "claim-1",
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![item_id],
+                lease_token,
+                lease_expires_at: ts(60),
+            }),
+            vec![item_id],
+            1,
+        ),
+    ];
+    let positions = vec![pos(0), pos(1)];
+
+    pqueue_engine::ProjectionStore::apply(&mut store, &positions, &commands).unwrap();
+
+    let sqlite_image = store.sqlite().export_projection_image(&shard()).unwrap();
+    let memory_metrics = pqueue_engine::ProjectionStore::metrics(&store, &shard()).unwrap();
+    assert_eq!(sqlite_image.high_water, Some(pos(1)));
+    assert_eq!(sqlite_image.metrics, memory_metrics);
+    assert_eq!(memory_metrics.leased, 1);
+    assert!(
+        pqueue_engine::ProjectionStore::select_eligible(&store, &shard(), ts(10), 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        pqueue_engine::ProjectionStore::live_items(
+            &store,
+            &shard(),
+            &[ClientItemKey::new("k1").unwrap()]
+        )
+        .unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .payload,
+        Some(Bytes::from_static(b"payload"))
+    );
+}
+
+#[test]
+fn hybrid_projection_hydrates_from_sqlite_before_returning_high_water() {
+    let sqlite = SqliteProjectionStore::in_memory().unwrap();
+    let definition = qdef();
+    sqlite.create_queue_projection(definition.clone()).unwrap();
+    let item_id = ItemId::new("1").unwrap();
+    let push = envelope(
+        "push-1",
+        QueueCommand::Push(PushCommand {
+            items: vec![item("1", "k1", 10)],
+        }),
+        vec![item_id],
+        0,
+    );
+    sqlite.apply_committed_batch(&[pos(0)], &[push]).unwrap();
+
+    let mut store = HybridProjectionStore::new(sqlite);
+    assert!(
+        pqueue_engine::ProjectionStore::recovery_high_water(&store, &shard()).is_err(),
+        "unhydrated hybrid must not expose sqlite high-water"
+    );
+
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &definition).unwrap();
+
+    assert_eq!(
+        pqueue_engine::ProjectionStore::recovery_high_water(&store, &shard()).unwrap(),
+        Some(pos(0))
+    );
+    assert_eq!(
+        pqueue_engine::ProjectionStore::metrics(&store, &shard())
+            .unwrap()
+            .pending,
+        1
+    );
+    assert_eq!(
+        pqueue_engine::ProjectionStore::select_eligible(&store, &shard(), ts(0), 10).unwrap(),
+        vec![item_id]
+    );
+}
+
+#[test]
+fn hybrid_projection_poisoned_after_sqlite_commit_memory_apply_failure() {
+    let sqlite = SqliteProjectionStore::in_memory().unwrap();
+    sqlite.create_queue_projection(qdef()).unwrap();
+    let mut store = HybridProjectionStore::from_parts(sqlite, InMemoryProjection::new());
+    let item_id = ItemId::new("1").unwrap();
+    let push = envelope(
+        "push-1",
+        QueueCommand::Push(PushCommand {
+            items: vec![item("1", "k1", 10)],
+        }),
+        vec![item_id],
+        0,
+    );
+
+    let err =
+        pqueue_engine::ProjectionStore::apply(&mut store, &[pos(0)], &[push.clone()]).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("hybrid projection poisoned")),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        store.sqlite().recovery_high_water(&shard()).unwrap(),
+        Some(1)
+    );
+
+    let read_err = pqueue_engine::ProjectionStore::metrics(&store, &shard()).unwrap_err();
+    assert!(matches!(read_err, EngineError::Storage(ref msg) if msg.contains("poisoned")));
+
+    let write_err =
+        pqueue_engine::ProjectionStore::apply(&mut store, &[pos(1)], &[push]).unwrap_err();
+    assert!(matches!(write_err, EngineError::Storage(ref msg) if msg.contains("poisoned")));
 }

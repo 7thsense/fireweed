@@ -45,7 +45,7 @@
 //! which is why the relational-reconnect conformance scenario asserts only pending-item state. BQ-11d
 //! must keep its reconnect assertions within this contract (no post-reopen token claims).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use axon_esf::CompiledSchema;
@@ -78,7 +78,7 @@ use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
     ProjectionStore, SnapshotRef,
 };
-use pqueue_projection::{ProjectionImage, ProjectionImageItem};
+use pqueue_projection::{InMemoryProjection, ProjectionImage, ProjectionImageItem};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde_json::Value as JsonValue;
@@ -3181,6 +3181,111 @@ pub struct SqliteProjectionStore {
     inner: Mutex<Inner>,
 }
 
+/// Durable SQLite projection plus hot in-memory serving projection.
+///
+/// `HybridProjectionStore` is the object-log/hybrid projection axis: every committed batch is durably
+/// absorbed by [`SqliteProjectionStore`] first, then applied to [`InMemoryProjection`]. Reads and
+/// pre-commit validation use only the in-memory projection after `ensure_shard` has hydrated it from
+/// SQLite's exported image. If SQLite advances but memory rejects the same batch, the store is poisoned so
+/// the current process cannot serve or mutate from a memory image that is behind the durable cursor.
+pub struct HybridProjectionStore {
+    sqlite: SqliteProjectionStore,
+    memory: InMemoryProjection,
+    hydrated: HashSet<QueueKey>,
+    poisoned: Option<String>,
+}
+
+impl HybridProjectionStore {
+    pub fn open(path: &str) -> EngineResult<Self> {
+        Ok(Self::new(SqliteProjectionStore::open(path)?))
+    }
+
+    pub fn in_memory() -> EngineResult<Self> {
+        Ok(Self::new(SqliteProjectionStore::in_memory()?))
+    }
+
+    pub fn new(sqlite: SqliteProjectionStore) -> Self {
+        Self {
+            sqlite,
+            memory: InMemoryProjection::new(),
+            hydrated: HashSet::new(),
+            poisoned: None,
+        }
+    }
+
+    /// Support constructor for recovery and fail-closed tests that need explicit parts.
+    pub fn from_parts(sqlite: SqliteProjectionStore, memory: InMemoryProjection) -> Self {
+        Self {
+            sqlite,
+            memory,
+            hydrated: HashSet::new(),
+            poisoned: None,
+        }
+    }
+
+    pub fn sqlite(&self) -> &SqliteProjectionStore {
+        &self.sqlite
+    }
+
+    fn shard_for(definition: &QueueDefinition) -> QueueKey {
+        QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone())
+    }
+
+    fn poison_error(reason: &str) -> EngineError {
+        EngineError::Storage(format!("hybrid projection poisoned: {reason}"))
+    }
+
+    fn check_healthy(&self) -> EngineResult<()> {
+        match &self.poisoned {
+            Some(reason) => Err(Self::poison_error(reason)),
+            None => Ok(()),
+        }
+    }
+
+    fn poison<T>(&mut self, reason: String) -> EngineResult<T> {
+        self.poisoned = Some(reason.clone());
+        Err(Self::poison_error(&reason))
+    }
+
+    fn require_hydrated(&self, shard: &QueueKey) -> EngineResult<()> {
+        self.check_healthy()?;
+        if self.hydrated.contains(shard) {
+            Ok(())
+        } else {
+            Err(EngineError::Storage(format!(
+                "hybrid projection shard {}/{} is not hydrated",
+                shard.tenant_id, shard.queue_id
+            )))
+        }
+    }
+
+    fn hydrate_from_sqlite(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
+        let shard = Self::shard_for(definition);
+        let image = self.sqlite.export_projection_image(&shard)?;
+        let expected_metrics = image.metrics.clone();
+        let expected_high_water = image.high_water.clone();
+        self.memory.hydrate_shard(definition, image)?;
+        let actual_metrics = ProjectionStore::metrics(&self.memory, &shard)?;
+        if actual_metrics != expected_metrics {
+            return Err(EngineError::Storage(format!(
+                "hybrid projection hydration parity failed for {}/{}: sqlite metrics {:?}, memory metrics {:?}",
+                shard.tenant_id, shard.queue_id, expected_metrics, actual_metrics
+            )));
+        }
+        let sqlite_high_water = self.sqlite.recovery_high_water(&shard)?;
+        let sqlite_high_water = sqlite_high_water
+            .and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1)));
+        if sqlite_high_water != expected_high_water {
+            return Err(EngineError::Storage(format!(
+                "hybrid projection hydration high-water mismatch for {}/{}: cursor {:?}, image {:?}",
+                shard.tenant_id, shard.queue_id, sqlite_high_water, expected_high_water
+            )));
+        }
+        self.hydrated.insert(shard);
+        Ok(())
+    }
+}
+
 impl SqliteRelationalBackend {
     /// Open (or create) the relational store at `path` and load the queue-definition cache. The item
     /// projection is already durable in `pqueue_items`; there is no log to replay.
@@ -5899,6 +6004,237 @@ impl ProjectionStore for SqliteRelational {
 impl SqliteProjectionStore {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("projection store poisoned")
+    }
+}
+
+impl ProjectionStore for HybridProjectionStore {
+    fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
+        self.check_healthy()?;
+        self.sqlite.create_queue_projection(definition.clone())?;
+        self.hydrate_from_sqlite(definition)
+    }
+
+    fn apply(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.check_healthy()?;
+        self.sqlite.apply_committed_batch(positions, commands)?;
+        match self.memory.apply(positions, commands) {
+            Ok(()) => Ok(()),
+            Err(err) => self.poison(format!("memory apply failed after sqlite commit: {err}")),
+        }
+    }
+
+    fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        self.require_hydrated(shard)?;
+        let next = self.sqlite.recovery_high_water(shard)?;
+        Ok(next.and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1))))
+    }
+
+    fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        self.check_healthy()?;
+        Ok(self.sqlite.lock().queues.values().cloned().collect())
+    }
+
+    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.sqlite.observe_item_counters(shard, counters)
+    }
+
+    fn eligible_candidates(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        self.require_hydrated(shard)?;
+        self.memory.eligible_candidates(shard, now, max)
+    }
+
+    fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
+        self.require_hydrated(shard)?;
+        self.memory.render_claimed(shard, ids)
+    }
+
+    fn lookup_by_key(
+        &self,
+        shard: &QueueKey,
+        client_item_key: &ClientItemKey,
+    ) -> EngineResult<Option<ItemId>> {
+        self.require_hydrated(shard)?;
+        self.memory.lookup_by_key(shard, client_item_key)
+    }
+
+    fn item_state(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<ItemState>> {
+        self.require_hydrated(shard)?;
+        self.memory.item_state(shard, id)
+    }
+
+    fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
+        self.require_hydrated(shard)?;
+        self.memory.item_version(shard, id)
+    }
+
+    fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
+        self.require_hydrated(shard)?;
+        self.memory.expired_leases(shard, now)
+    }
+
+    fn all_expired_leases(&self, now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)> {
+        if self.poisoned.is_some() {
+            return Vec::new();
+        }
+        self.memory.all_expired_leases(now)
+    }
+
+    fn finalize_validate(
+        &self,
+        shard: &QueueKey,
+        outcomes: &[FinalizeOutcome],
+    ) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory.finalize_validate(shard, outcomes)
+    }
+
+    fn renew_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory.renew_validate(shard, ids)
+    }
+
+    fn reassign_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory.reassign_validate(shard, ids)
+    }
+
+    fn update_fields_validate(
+        &self,
+        shard: &QueueKey,
+        id: &ItemId,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory
+            .update_fields_validate(shard, id, expected_item_version)
+    }
+
+    fn index_validate(
+        &self,
+        shard: &QueueKey,
+        item_id: &ItemId,
+        fields: &BTreeMap<String, Bytes>,
+        entity: Option<&serde_json::Value>,
+        exclude: Option<&ItemId>,
+    ) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory
+            .index_validate(shard, item_id, fields, entity, exclude)
+    }
+
+    fn index_validate_push(&self, shard: &QueueKey, items: &[PushItem]) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory.index_validate_push(shard, items)
+    }
+
+    fn index_validate_replace(
+        &self,
+        shard: &QueueKey,
+        existing_id: &ItemId,
+        item: &PushItem,
+    ) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory.index_validate_replace(shard, existing_id, item)
+    }
+
+    fn index_validate_update(
+        &self,
+        shard: &QueueKey,
+        id: &ItemId,
+        field_ops: &BTreeMap<String, Option<Bytes>>,
+        entity: Option<&serde_json::Value>,
+    ) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory
+            .index_validate_update(shard, id, field_ops, entity)
+    }
+
+    fn supports_commit_transition(&self) -> bool {
+        self.poisoned.is_none() && self.memory.supports_commit_transition()
+    }
+
+    fn commit_validate(
+        &self,
+        shard: &QueueKey,
+        refs: &[ClaimRef],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.require_hydrated(shard)?;
+        self.memory.commit_validate(shard, refs, now)
+    }
+
+    fn instance_fence(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<u64>> {
+        self.require_hydrated(shard)?;
+        self.memory.instance_fence(shard, key)
+    }
+
+    fn side_record(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
+        self.require_hydrated(shard)?;
+        self.memory.side_record(shard, key)
+    }
+
+    fn select_eligible(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        limit: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        self.require_hydrated(shard)?;
+        self.memory.select_eligible(shard, now, limit)
+    }
+
+    fn peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
+        self.require_hydrated(shard)?;
+        self.memory.peek(shard, limit)
+    }
+
+    fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+        self.require_hydrated(shard)?;
+        self.memory.pending(shard)
+    }
+
+    fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        self.require_hydrated(shard)?;
+        self.memory.metrics(shard)
+    }
+
+    fn live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        self.require_hydrated(shard)?;
+        self.memory.live_items(shard, keys)
+    }
+
+    fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> EngineResult<Option<IndexHit>> {
+        self.require_hydrated(shard)?;
+        self.memory.index_get_unique(shard, index, key)
+    }
+
+    fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> EngineResult<Vec<IndexHit>> {
+        self.require_hydrated(shard)?;
+        self.memory.index_lookup(shard, index, key)
     }
 }
 

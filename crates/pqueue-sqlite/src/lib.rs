@@ -12,8 +12,9 @@ mod compose_log;
 mod relational;
 pub use compose_log::SqliteLog;
 pub use relational::{
-    ComposedSqliteRelationalBackend, SqliteProjectionStore, SqliteRelational,
-    SqliteRelationalBackend, composed_sqlite_relational, composed_sqlite_relational_in_memory,
+    ComposedSqliteRelationalBackend, HybridProjectionStore, SqliteProjectionStore,
+    SqliteRelational, SqliteRelationalBackend, composed_sqlite_relational,
+    composed_sqlite_relational_in_memory,
 };
 
 use pqueue_engine::{ComposedBackend, EngineResult, InProcessControlPlane};
