@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{
     EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy,
-    RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
+    RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, ComposedBackend, ControlPlaneStore, EngineError,
@@ -139,17 +139,29 @@ async fn hybrid_async_chaos_crash_after_commit_replays_pushes_on_reopen() {
     let (first, second) = {
         let backend = open_hybrid(&root, &sqlite_path);
         backend.create_queue(qdef()).await.unwrap();
-        let a = backend.push(&shard(), vec![spec()], ts(1), None).await.unwrap();
-        let b = backend.push(&shard(), vec![spec()], ts(2), None).await.unwrap();
+        let a = backend
+            .push(&shard(), vec![spec()], ts(1), None)
+            .await
+            .unwrap();
+        let b = backend
+            .push(&shard(), vec![spec()], ts(2), None)
+            .await
+            .unwrap();
         assert_eq!(backend.metrics(&shard()).await.unwrap().pending, 2);
         (a, b)
     }; // crash
 
     let reopened = open_hybrid(&root, &sqlite_path);
     let m = reopened.metrics(&shard()).await.unwrap();
-    assert_eq!(m.pending, 2, "both committed pushes replayed from the object log");
+    assert_eq!(
+        m.pending, 2,
+        "both committed pushes replayed from the object log"
+    );
     assert_eq!(m.leased, 0);
-    assert_ne!(first, second, "distinct ids minted, none duplicated on replay");
+    assert_ne!(
+        first, second,
+        "distinct ids minted, none duplicated on replay"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -167,7 +179,10 @@ async fn hybrid_async_chaos_crash_mid_lease_neither_loses_nor_duplicates_the_lea
     let claimed_id = {
         let backend = open_hybrid(&root, &sqlite_path);
         backend.create_queue(qdef()).await.unwrap();
-        backend.push(&shard(), vec![spec()], ts(1), None).await.unwrap();
+        backend
+            .push(&shard(), vec![spec()], ts(1), None)
+            .await
+            .unwrap();
         let claimed = backend.claim(claim_one("w1", "lease-1", 2)).await.unwrap();
         assert_eq!(claimed.items.len(), 1);
         let m = backend.metrics(&shard()).await.unwrap();
@@ -219,7 +234,10 @@ async fn hybrid_async_chaos_crash_after_finalize_does_not_redeliver() {
     {
         let backend = open_hybrid(&root, &sqlite_path);
         backend.create_queue(qdef()).await.unwrap();
-        backend.push(&shard(), vec![spec()], ts(1), None).await.unwrap();
+        backend
+            .push(&shard(), vec![spec()], ts(1), None)
+            .await
+            .unwrap();
         let claimed = backend.claim(claim_one("w1", "lease-1", 2)).await.unwrap();
         let id = claimed.items[0].item_id;
         backend
@@ -236,7 +254,10 @@ async fn hybrid_async_chaos_crash_after_finalize_does_not_redeliver() {
 
     let reopened = open_hybrid(&root, &sqlite_path);
     let m = reopened.metrics(&shard()).await.unwrap();
-    assert_eq!(m.complete, 1, "the acked item remained terminal after recovery");
+    assert_eq!(
+        m.complete, 1,
+        "the acked item remained terminal after recovery"
+    );
     let claim = reopened.claim(claim_one("w2", "lease-2", 4)).await.unwrap();
     assert!(
         claim.items.is_empty(),
@@ -259,8 +280,14 @@ async fn hybrid_async_chaos_disk_loss_of_sqlite_replays_object_log_from_genesis(
     {
         let backend = open_hybrid(&root, &sqlite_path);
         backend.create_queue(qdef()).await.unwrap();
-        backend.push(&shard(), vec![spec()], ts(1), None).await.unwrap();
-        backend.push(&shard(), vec![spec()], ts(2), None).await.unwrap();
+        backend
+            .push(&shard(), vec![spec()], ts(1), None)
+            .await
+            .unwrap();
+        backend
+            .push(&shard(), vec![spec()], ts(2), None)
+            .await
+            .unwrap();
         // Claim one → one leased, one pending.
         backend.claim(claim_one("w1", "lease-1", 3)).await.unwrap();
         let m = backend.metrics(&shard()).await.unwrap();
@@ -311,7 +338,10 @@ async fn hybrid_async_chaos_request_id_replay_converges_and_claims_once() {
         .push_with_request_id(&shard(), request.clone(), body, ts(2), None)
         .await
         .unwrap();
-    assert_eq!(replayed, first, "same request/body converges to the original ids");
+    assert_eq!(
+        replayed, first,
+        "same request/body converges to the original ids"
+    );
     assert_eq!(
         reopened.metrics(&shard()).await.unwrap().pending,
         1,
@@ -338,6 +368,9 @@ async fn hybrid_async_chaos_request_id_replay_converges_and_claims_once() {
     assert_eq!(claimed.items.len(), 1);
     assert_eq!(claimed.items[0].item_id, first[0]);
     let empty = reopened.claim(claim_one("w2", "lease-2", 5)).await.unwrap();
-    assert!(empty.items.is_empty(), "no duplicate work after request-id replay");
+    assert!(
+        empty.items.is_empty(),
+        "no duplicate work after request-id replay"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

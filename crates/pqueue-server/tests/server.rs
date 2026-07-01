@@ -1052,12 +1052,15 @@ fn objectlog_hybrid_async_config(
 /// leased item stays in-flight, not re-queued to pending).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_loses() {
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-async-chaos-mid-lease");
+    let (object_root, projection_path) =
+        tmp_runtime_paths("objectlog-hybrid-async-chaos-mid-lease");
     let leased_id = {
-        let server =
-            start(objectlog_hybrid_async_config(object_root.clone(), projection_path.clone()))
-                .await
-                .unwrap();
+        let server = start(objectlog_hybrid_async_config(
+            object_root.clone(),
+            projection_path.clone(),
+        ))
+        .await
+        .unwrap();
         let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
         let mut con = client.get_multiplexed_async_connection().await.unwrap();
         let _: String = redis::cmd("XADD")
@@ -1147,12 +1150,15 @@ async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_los
 /// nothing duplicated).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-async-chaos-disk-loss");
+    let (object_root, projection_path) =
+        tmp_runtime_paths("objectlog-hybrid-async-chaos-disk-loss");
     {
-        let server =
-            start(objectlog_hybrid_async_config(object_root.clone(), projection_path.clone()))
-                .await
-                .unwrap();
+        let server = start(objectlog_hybrid_async_config(
+            object_root.clone(),
+            projection_path.clone(),
+        ))
+        .await
+        .unwrap();
         let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
         let mut con = client.get_multiplexed_async_connection().await.unwrap();
         let first: String = redis::cmd("XADD")

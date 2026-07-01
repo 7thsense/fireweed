@@ -63,7 +63,13 @@ fn envelope(
     }
 }
 
-fn push_env(id: &str, item_id: ItemId, key: &str, priority: i64, created_at: i64) -> CommandEnvelope {
+fn push_env(
+    id: &str,
+    item_id: ItemId,
+    key: &str,
+    priority: i64,
+    created_at: i64,
+) -> CommandEnvelope {
     envelope(
         id,
         QueueCommand::Push(PushCommand {
@@ -359,7 +365,11 @@ async fn hybrid_async_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_o
         1,
         "the failed claim left no orphaned in-flight lease (still exactly the clean prefix's lease)"
     );
-    assert_eq!(pending(&store), 0, "the gapped push was not partially applied");
+    assert_eq!(
+        pending(&store),
+        0,
+        "the gapped push was not partially applied"
+    );
 
     // The correct contiguous batch then applies normally — the item is not lost, no duplicate lease.
     store
@@ -604,7 +614,9 @@ fn hybrid_async_chaos_projection_poison_withholds_advanced_high_water() {
                 .checkpoint(
                     &shard(),
                     std::slice::from_ref(&pos_epoch(5, 0)),
-                    &[push_with_request("p1", "req-1", 0xAAAA, item_id, "k1", 10, 0)],
+                    &[push_with_request(
+                        "p1", "req-1", 0xAAAA, item_id, "k1", 10, 0,
+                    )],
                     &lineage(5, "s3://log/seg-00000005-0000"),
                 )
                 .await
@@ -727,7 +739,11 @@ async fn hybrid_async_chaos_rolled_back_finalize_keeps_recoverable_inflight_leas
             .unwrap_err();
         assert!(matches!(err, EngineError::Storage(_)));
         assert_eq!(store.logical_high_water(&shard()).unwrap(), Some(2));
-        assert_eq!(leased(&store), 1, "the in-flight lease survived the failed finalize");
+        assert_eq!(
+            leased(&store),
+            1,
+            "the in-flight lease survived the failed finalize"
+        );
     }
 
     // Restart: the leased record is recoverable from the durable image (not orphaned, not lost).
@@ -755,6 +771,10 @@ async fn hybrid_async_chaos_rolled_back_finalize_keeps_recoverable_inflight_leas
         .unwrap();
     assert_eq!(reopened.logical_high_water(&shard()).unwrap(), Some(3));
     assert_eq!(leased(&reopened), 0);
-    assert_eq!(complete(&reopened), 1, "finalized exactly once after recovery");
+    assert_eq!(
+        complete(&reopened),
+        1,
+        "finalized exactly once after recovery"
+    );
     cleanup(&path);
 }
