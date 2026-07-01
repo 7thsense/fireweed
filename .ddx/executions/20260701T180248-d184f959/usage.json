@@ -1,0 +1,10 @@
+{
+  "attempt_id": "20260701T180248-d184f959",
+  "harness": "claude-tui",
+  "model": "opus-4.7",
+  "tokens": 0,
+  "input_tokens": 2,
+  "cached_tokens": 177000,
+  "cache_hit_rate": 0.9999887006926476,
+  "output_tokens": 660
+}

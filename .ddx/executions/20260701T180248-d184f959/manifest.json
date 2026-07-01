@@ -1,0 +1,38 @@
+{
+  "attempt_id": "20260701T180248-d184f959",
+  "bead_id": "pqueue-45cbb98e",
+  "base_rev": "6710e53976614249a97e829b706918a35fb8c127",
+  "created_at": "2026-07-01T18:02:49.271655184Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-45cbb98e",
+    "title": "Wire hybrid async recovery and lineage validation",
+    "description": "Implement recovery for objectlog/hybrid-async. In-scope files: crates/pqueue-sqlite/src/relational.rs, crates/pqueue-engine/src/compose.rs, crates/pqueue-objectlog tests. Recovery must validate SQLite lineage against object-log namespace/manifest generation/segment chain/high-water identity, hydrate memory from the validated SQLite image, replay retained object-log tail greater than sqlite_high_water, rebuild request_id outcomes before serving, and fail closed on mismatch. Out of scope: Helm/runtime env surface.",
+    "acceptance": "1. `cargo test -p pqueue-sqlite hybrid_async_recovery -- --nocapture` passes.\n2. `cargo test -p pqueue-objectlog hybrid_request_id -- --nocapture` passes.\n3. `cargo test -p pqueue-conformance objectlog_hybrid -- --nocapture` passes.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:pqueue-sqlite",
+      "area:pqueue-objectlog",
+      "area:pqueue-engine",
+      "kind:task",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "spec-id": "plan-hybrid-async-checkpoint"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T180248-d184f959",
+    "prompt": ".ddx/executions/20260701T180248-d184f959/prompt.md",
+    "manifest": ".ddx/executions/20260701T180248-d184f959/manifest.json",
+    "result": ".ddx/executions/20260701T180248-d184f959/result.json",
+    "checks": ".ddx/executions/20260701T180248-d184f959/checks.json",
+    "usage": ".ddx/executions/20260701T180248-d184f959/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-45cbb98e-20260701T180248-d184f959"
+  },
+  "prompt_sha": "b51f286ec6e40618f62eb4dbf994edba66dedb8f35ae0b870de313e9bbcb4be2"
+}
