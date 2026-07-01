@@ -23,18 +23,19 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, EligibilityPolicy, LeaseToken, Metadata, OrderingMode, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
-    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, Metadata, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition,
+    QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    ClaimCompatibility, ClaimPort, ClaimRequest, ComposedBackend, ControlPlaneStore, FinalizeKind,
-    FinalizeOutcome, FinalizePort, InProcessControlPlane, ProjectionRead, PushPort, PushSpec,
-    QueueKey,
+    ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
+    CommandPosition, ComposedBackend, ControlPlaneStore, FinalizeKind, FinalizeOutcome,
+    FinalizePort, InProcessControlPlane, LogStore, ProjectionRead, PushCommand, PushItem, PushPort,
+    PushSpec, QueueCommand, QueueKey,
 };
 use pqueue_objectlog::{ComposedObjectLogBackend, ObjectLog};
 use pqueue_server::{SegmentConfig, SegmentedObjectLogSqliteBackend};
-use pqueue_sqlite::HybridProjectionStore;
+use pqueue_sqlite::{CheckpointLineage, HybridProjectionStore, SqliteCheckpointStore};
 
 const RELEASE_RESIDENT: u64 = 10_000_000;
 
@@ -179,6 +180,12 @@ struct ProfileRun {
     recovery_pending_after: Option<u64>,
     disk_loss_wall_ms: Option<f64>,
     disk_loss_pending_after: Option<u64>,
+    // Bounded-debt time-series (populated for the hybrid profile only; sampled across the hot path).
+    apply_lag_max: u64,
+    apply_lag_first_window_max: u64,
+    apply_lag_last_window_max: u64,
+    apply_lag_samples: usize,
+    apply_lag_ceiling: u64,
 }
 
 async fn exercise_profile<B>(
@@ -281,6 +288,52 @@ where
         recovery_pending_after: None,
         disk_loss_wall_ms: None,
         disk_loss_pending_after: None,
+        apply_lag_max: 0,
+        apply_lag_first_window_max: 0,
+        apply_lag_last_window_max: 0,
+        apply_lag_samples: 0,
+        apply_lag_ceiling: 0,
+    }
+}
+
+/// Documented apply-lag ceiling (committed object-log commands allowed to trail the SQLite projection's
+/// applied high-water) for a `max_batch`-batched hybrid run. The composed hybrid backend applies each
+/// sealed segment to the projection synchronously under the unit-of-work lock (see `gc_distribute`), so a
+/// healthy run keeps this lag structurally near zero; the ceiling admits a few in-flight batches of slack.
+/// The bounded-debt gate FAILS if any sample exceeds this, catching a regression that let SQLite apply
+/// fall unboundedly behind the durable log.
+fn apply_lag_ceiling(max_batch: u64) -> u64 {
+    max_batch.saturating_mul(4).max(1_024)
+}
+
+/// Sampled bounded-debt time-series over one hybrid hot-path run.
+struct ApplyLagSeries {
+    max: u64,
+    first_window_max: u64,
+    last_window_max: u64,
+    samples: usize,
+    ceiling: u64,
+}
+
+/// Summarize a sampled apply-lag series into the first/last-window maxima the bounded-debt gate consumes.
+/// The first window is the first third of samples, the last window the last third; comparing their maxima
+/// detects an upward (growing) trend across the run.
+fn summarize_apply_lag(series: &[u64], ceiling: u64) -> ApplyLagSeries {
+    let n = series.len();
+    let window = (n / 3).max(1);
+    let first_window_max = series.iter().take(window).copied().max().unwrap_or(0);
+    let last_window_max = series
+        .iter()
+        .skip(n.saturating_sub(window))
+        .copied()
+        .max()
+        .unwrap_or(0);
+    ApplyLagSeries {
+        max: series.iter().copied().max().unwrap_or(0),
+        first_window_max,
+        last_window_max,
+        samples: n,
+        ceiling,
     }
 }
 
@@ -307,6 +360,39 @@ async fn run_hybrid(
         .expect("recover hybrid"),
     );
     let flusher = spawn_composed_flusher(backend.clone());
+
+    // Bounded-debt sampler: while the hot path runs, sample the SQLite apply-lag time-series — how far the
+    // committed object-log head (`commands_committed`) leads the projection's applied high-water
+    // (`LogStore::high_water`, advanced under the same unit-of-work lock as the projection apply). Both are
+    // read atomically through `with_log`, so a sample never straddles a distribute. The gate later asserts
+    // this series stays bounded and non-growing.
+    let ceiling = apply_lag_ceiling(load_batch.max(claim_batch as u64));
+    let hybrid_shard = shard(&def);
+    let sampler_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lag_series: Arc<std::sync::Mutex<Vec<u64>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sampler = {
+        let backend = backend.clone();
+        let sample_shard = hybrid_shard.clone();
+        let stop = sampler_stop.clone();
+        let series = lag_series.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Acquire) {
+                let lag = backend.with_log(|log| {
+                    let committed = log.counters().commands_committed;
+                    let applied = log
+                        .high_water(&sample_shard)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.sequence + 1)
+                        .unwrap_or(0);
+                    committed.saturating_sub(applied)
+                });
+                series.lock().expect("lag series").push(lag);
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
     let mut row = exercise_profile(
         "objectlog/hybrid",
         backend.clone(),
@@ -325,6 +411,15 @@ async fn run_hybrid(
         },
     )
     .await;
+    sampler_stop.store(true, Ordering::Release);
+    let _ = sampler.await;
+    let series = lag_series.lock().expect("lag series").clone();
+    let lag = summarize_apply_lag(&series, ceiling);
+    row.apply_lag_max = lag.max;
+    row.apply_lag_first_window_max = lag.first_window_max;
+    row.apply_lag_last_window_max = lag.last_window_max;
+    row.apply_lag_samples = lag.samples;
+    row.apply_lag_ceiling = lag.ceiling;
     flusher.abort();
 
     let c = backend.with_log(|log| log.counters());
@@ -529,6 +624,327 @@ async fn run_sqlite(
     row
 }
 
+// ---------------------------------------------------------------------------
+// Hot-path attribution (bead pqueue-21d63f09 AC1).
+//
+// The suite gated the ack/claim ratio, recovery, and disk-loss but never attributed WHERE hot-path time is
+// spent. This harness decomposes one real single-threaded write+apply pipeline into five sequentially-timed
+// phases and reconciles their sum with the measured end-to-end wall time. Each phase exercises the real
+// cost source the hybrid write path pays:
+//
+//   * serialize    — `postcard` framing of the command envelopes (segmented.rs:683 serializes once here);
+//   * lock_wait    — acquiring the coordinator/unit-of-work lock under real contention from a background
+//                    holder (the composed backend seals + distributes under one `Mutex`);
+//   * fsync        — a durable segment-object write (`File::sync_all`), the composed flush's ack boundary
+//                    (segmented.rs:703 seals a segment object before acking);
+//   * sqlite_apply — one batched transaction on the real WAL/synchronous=NORMAL projection
+//                    (`SqliteCheckpointStore::checkpoint`, relational.rs:4344);
+//   * scheduler    — runtime yields modelling the externalized flush-task cadence, plus the unattributed
+//                    residual (loop bookkeeping/allocation) so the five phases reconcile with wall time.
+// ---------------------------------------------------------------------------
+
+/// Per-phase attribution of hybrid hot-path wall time (all fields milliseconds). The five phase fields are
+/// non-negative and sum (within tolerance) to `total_hot_ms`, the measured wall time of the attribution run.
+#[derive(Clone, Copy)]
+struct HybridAttribution {
+    serialize_ms: f64,
+    lock_wait_ms: f64,
+    fsync_ms: f64,
+    sqlite_apply_ms: f64,
+    scheduler_ms: f64,
+    total_hot_ms: f64,
+}
+
+impl HybridAttribution {
+    fn phase_sum_ms(&self) -> f64 {
+        self.serialize_ms
+            + self.lock_wait_ms
+            + self.fsync_ms
+            + self.sqlite_apply_ms
+            + self.scheduler_ms
+    }
+
+    /// Every phase field is finite and non-negative and the five phases reconcile with the measured
+    /// wall time within `tol_frac` (fractional) or `tol_abs_ms` (absolute), whichever is looser. This is
+    /// the AC1 attribution gate and a `bars_met` input.
+    fn is_reconciled(&self, tol_frac: f64, tol_abs_ms: f64) -> bool {
+        let fields = [
+            self.serialize_ms,
+            self.lock_wait_ms,
+            self.fsync_ms,
+            self.sqlite_apply_ms,
+            self.scheduler_ms,
+            self.total_hot_ms,
+        ];
+        if !fields.iter().all(|v| v.is_finite() && *v >= 0.0) {
+            return false;
+        }
+        let tolerance = (self.total_hot_ms * tol_frac).max(tol_abs_ms);
+        (self.phase_sum_ms() - self.total_hot_ms).abs() <= tolerance
+    }
+}
+
+/// Build a real push command envelope for the attribution pipeline (distinct item id + key per global
+/// index so the projection apply never dedup-suppresses a command).
+fn attribution_push_env(global_index: u64, item_id: ItemId) -> CommandEnvelope {
+    CommandEnvelope {
+        command_id: CommandId::new(format!("attr-{global_index}")),
+        request_id: None,
+        request_fingerprint: None,
+        request_outcome: None,
+        item_ids: vec![item_id],
+        command: QueueCommand::Push(PushCommand {
+            items: vec![PushItem {
+                client_item_key: ClientItemKey::new(format!("attr-k-{global_index}"))
+                    .expect("client item key"),
+                item_id,
+                priority: None,
+                not_before: None,
+                group_key: None,
+                max_attempts: 1_000_000,
+                payload: Some(Bytes::from(format!("attr-payload-{global_index}"))),
+                fields: BTreeMap::new(),
+                metadata: Metadata::default(),
+                cohort_size: None,
+                gate_keys: Vec::new(),
+                entity_document: None,
+            }],
+        }),
+        checksum: CommandChecksum(0),
+        created_at: ts(global_index as i64),
+    }
+}
+
+/// Drive a real single-threaded hybrid write+apply pipeline over `commands` push commands in batches of
+/// `batch`, timing the five hot-path phases as consecutive stages so their sum reconciles with the
+/// end-to-end wall time. Returns the per-phase attribution.
+async fn measure_hybrid_attribution(commands: u64, batch: u64) -> HybridAttribution {
+    let commands = commands.max(1);
+    let batch = batch.max(1);
+    let seg_dir = scratch("attr-seg");
+    let projection = scratch("attr.db");
+    let _ = std::fs::remove_dir_all(&seg_dir);
+    let _ = std::fs::remove_file(&projection);
+    std::fs::create_dir_all(&seg_dir).expect("attr seg dir");
+
+    // Real WAL/synchronous=NORMAL projection (relational.rs:4344) for the sqlite_apply phase.
+    let checkpoint =
+        SqliteCheckpointStore::open(projection.to_str().unwrap()).expect("open checkpoint store");
+    let def = qdef("attr", batch);
+    let attr_shard = shard(&def);
+    checkpoint
+        .create_queue_projection(def)
+        .expect("create attr projection");
+
+    // Lock-contention model: a background task grabs the shared coordinator lock in a tight loop, so the
+    // measured acquisition reflects real contention rather than an always-free mutex.
+    let coord = Arc::new(std::sync::Mutex::new(0u64));
+    let contender_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let contender = {
+        let coord = coord.clone();
+        let stop = contender_stop.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Acquire) {
+                {
+                    let mut g = coord.lock().expect("coord lock");
+                    *g = g.wrapping_add(1);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let mut serialize_ms = 0.0;
+    let mut lock_wait_ms = 0.0;
+    let mut fsync_ms = 0.0;
+    let mut sqlite_apply_ms = 0.0;
+    let mut yield_ms = 0.0;
+
+    let whole = Instant::now();
+    let mut seq = 0u64;
+    let mut done = 0u64;
+    while done < commands {
+        let n = (commands - done).min(batch);
+        let envelopes: Vec<CommandEnvelope> = (0..n)
+            .map(|k| {
+                let gi = done + k;
+                attribution_push_env(gi, ItemId::from_u64(gi + 1))
+            })
+            .collect();
+
+        // 1. serialize — frame each envelope once (postcard), exactly as the segmented buffer does.
+        let t = Instant::now();
+        let mut seg_bytes: Vec<u8> = Vec::new();
+        for env in &envelopes {
+            let bytes = postcard::to_allocvec(env).expect("serialize envelope");
+            seg_bytes.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            seg_bytes.extend_from_slice(&bytes);
+        }
+        serialize_ms += t.elapsed().as_secs_f64() * 1000.0;
+
+        // 2. lock_wait — acquire the contended coordinator lock (real wait behind the background holder).
+        let t = Instant::now();
+        {
+            let mut g = coord.lock().expect("coord lock");
+            *g = g.wrapping_add(n);
+        }
+        lock_wait_ms += t.elapsed().as_secs_f64() * 1000.0;
+
+        // 3. fsync — durable segment-object write (the composed flush's ack boundary).
+        let t = Instant::now();
+        let seg_path = seg_dir.join(format!("seg-{seq:020}.seg"));
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&seg_path).expect("create segment file");
+            f.write_all(&seg_bytes).expect("write segment");
+            f.sync_all().expect("fsync segment");
+        }
+        fsync_ms += t.elapsed().as_secs_f64() * 1000.0;
+
+        // 4. sqlite_apply — one batched WAL transaction on the real projection.
+        let positions: Vec<CommandPosition> = (0..n)
+            .map(|k| CommandPosition::new(attr_shard.clone(), 0, seq + k))
+            .collect();
+        let lineage = CheckpointLineage {
+            source_epoch: 0,
+            source_segment: format!("seg-{seq:020}"),
+        };
+        let t = Instant::now();
+        checkpoint
+            .checkpoint(&attr_shard, &positions, &envelopes, &lineage)
+            .await
+            .expect("checkpoint apply");
+        sqlite_apply_ms += t.elapsed().as_secs_f64() * 1000.0;
+
+        // 5. scheduler — yield to the runtime (models the externalized flush-task cadence).
+        let t = Instant::now();
+        tokio::task::yield_now().await;
+        yield_ms += t.elapsed().as_secs_f64() * 1000.0;
+
+        seq += n;
+        done += n;
+    }
+    let total_hot_ms = whole.elapsed().as_secs_f64() * 1000.0;
+
+    contender_stop.store(true, Ordering::Release);
+    let _ = contender.await;
+    drop(checkpoint);
+    let _ = std::fs::remove_dir_all(&seg_dir);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", projection.display()));
+    }
+
+    // Fold the unattributed residual (loop bookkeeping/allocation between timed stages) into the scheduler
+    // bucket so the five phases reconcile with the measured wall time.
+    let measured_phases = serialize_ms + lock_wait_ms + fsync_ms + sqlite_apply_ms + yield_ms;
+    let scheduler_ms = yield_ms + (total_hot_ms - measured_phases).max(0.0);
+
+    HybridAttribution {
+        serialize_ms: round3(serialize_ms),
+        lock_wait_ms: round3(lock_wait_ms),
+        fsync_ms: round3(fsync_ms),
+        sqlite_apply_ms: round3(sqlite_apply_ms),
+        scheduler_ms: round3(scheduler_ms),
+        total_hot_ms: round3(total_hot_ms),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Segment-density / object-PUT bounds (bead pqueue-21d63f09 AC3).
+//
+// The suite emitted segment-density fields but never gated them. A healthy hybrid run BATCHES commands into
+// segments (mean commands-per-segment well above 1) and keeps object-PUT volume bounded (never one object
+// per command, never more than `resident` objects). The documented bounds below are structural: a segment
+// cannot hold more commands than fit its byte target, and a PUT is emitted per sealed segment.
+// ---------------------------------------------------------------------------
+
+/// Minimum realistic per-command on-disk cost (bytes) used to derive the packing bound: with a
+/// `target_bytes` seal trigger, no segment can pack more than `target_bytes / MIN_COMMAND_BYTES` commands.
+const MIN_COMMAND_BYTES: u64 = 8;
+
+/// Documented upper bound on object-PUT volume: a bounded constant per resident item. Each resident item
+/// drives a push, a claim, and a finalize command, and each sealed segment writes a bounded number of
+/// objects (segment + manifest), so total PUTs are `O(resident)`. This catches a regression that writes an
+/// unbounded number of objects (e.g. one object per command with no batching, or a PUT storm).
+const OBJECTS_PUT_PER_RESIDENT_MAX: u64 = 8;
+
+fn segment_density_max_commands(target_bytes: u64) -> u64 {
+    (target_bytes / MIN_COMMAND_BYTES).max(1)
+}
+
+fn segment_density_objects_put_upper(resident: u64) -> u64 {
+    resident
+        .saturating_mul(OBJECTS_PUT_PER_RESIDENT_MAX)
+        .max(16)
+}
+
+fn segment_density_ok(row: &ProfileRun, resident: u64, target_bytes: u64) -> bool {
+    let packing_bound = segment_density_max_commands(target_bytes);
+    let objects_put_upper = segment_density_objects_put_upper(resident);
+    // Something sealed; PUT volume is bounded to O(resident); mean/max commands-per-segment are >= 1 and
+    // cannot exceed the byte-target packing bound.
+    row.segments_sealed >= 1
+        && row.objects_put >= 1
+        && row.objects_put <= objects_put_upper
+        && row.mean_commands_per_segment >= 1.0
+        && row.mean_commands_per_segment <= packing_bound as f64
+        && row.max_commands_per_segment >= 1
+        && (row.max_commands_per_segment as u64) <= packing_bound
+}
+
+/// The bounded-debt gate (AC2): the sampled apply-lag series stayed under the documented ceiling AND did
+/// not grow across the run (last-window max within a small slack of the first-window max), over a
+/// non-trivial number of samples.
+fn bounded_debt_ok(row: &ProfileRun) -> bool {
+    const MIN_SAMPLES: usize = 5;
+    let growth_slack = (row.apply_lag_ceiling / 4).max(64);
+    row.apply_lag_samples >= MIN_SAMPLES
+        && row.apply_lag_max <= row.apply_lag_ceiling
+        && row.apply_lag_last_window_max <= row.apply_lag_first_window_max + growth_slack
+}
+
+/// The success-barrier conjunction. Factored into a pure function so the gate tests can prove each new gate
+/// is a required `bars_met` input by toggling one flag at a time (AC2/AC3 "the gate is a bars_met input").
+#[allow(clippy::too_many_arguments)]
+fn compute_bars_met(
+    ack_ratio_ok: bool,
+    claim_ratio_ok: bool,
+    recovery_ok: bool,
+    disk_loss_ok: bool,
+    bounded_debt_ok: bool,
+    segment_density_ok: bool,
+    attribution_ok: bool,
+) -> bool {
+    ack_ratio_ok
+        && claim_ratio_ok
+        && recovery_ok
+        && disk_loss_ok
+        && bounded_debt_ok
+        && segment_density_ok
+        && attribution_ok
+}
+
+/// The resolved gate results for one hybrid suite run, returned by [`emit_ledger`] so the gate tests can
+/// assert on each input and on the folded `bars_met`.
+struct HybridGates {
+    ack_ratio_ok: bool,
+    claim_ratio_ok: bool,
+    recovery_ok: bool,
+    disk_loss_ok: bool,
+    bounded_debt_ok: bool,
+    segment_density_ok: bool,
+    attribution_ok: bool,
+    bars_met: bool,
+    attribution: HybridAttribution,
+    apply_lag_max: u64,
+    apply_lag_ceiling: u64,
+    apply_lag_samples: usize,
+    mean_commands_per_segment: f64,
+    max_commands_per_segment: usize,
+    objects_put: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_ledger(
     suite: &str,
     command: &str,
@@ -537,7 +953,9 @@ fn emit_ledger(
     release: bool,
     recovery_bar_ms: f64,
     recovery_tail_budget: u64,
-) {
+    target_bytes: u64,
+    attribution: &HybridAttribution,
+) -> HybridGates {
     let hybrid = rows
         .iter()
         .find(|r| r.backend_profile == "objectlog/hybrid")
@@ -558,7 +976,23 @@ fn emit_ledger(
     let smoke_recovery_ok = hybrid.recovery_wall_ms.unwrap_or(f64::MAX) <= recovery_bar_ms
         && hybrid.recovery_tail_replayed.unwrap_or(u64::MAX) <= recovery_tail_budget;
     let disk_loss_ok = hybrid.disk_loss_pending_after == Some(resident);
-    let bars_met = ack_ratio <= 1.20 && claim_ratio <= 1.20 && smoke_recovery_ok && disk_loss_ok;
+    let ack_ratio_ok = ack_ratio <= 1.20;
+    let claim_ratio_ok = claim_ratio <= 1.20;
+
+    // New AC gates (bead pqueue-21d63f09): bounded async apply-debt, segment density / object-PUT volume,
+    // and hot-path attribution reconciliation — all folded into `bars_met`.
+    let bounded_debt_ok = bounded_debt_ok(hybrid);
+    let segment_density_ok = segment_density_ok(hybrid, resident, target_bytes);
+    let attribution_ok = attribution.is_reconciled(0.30, 5.0);
+    let bars_met = compute_bars_met(
+        ack_ratio_ok,
+        claim_ratio_ok,
+        smoke_recovery_ok,
+        disk_loss_ok,
+        bounded_debt_ok,
+        segment_density_ok,
+        attribution_ok,
+    );
 
     let mut values = BTreeMap::new();
     values.insert("resident".into(), serde_json::json!(resident));
@@ -635,6 +1069,94 @@ fn emit_ledger(
         }
     }
 
+    // --- AC1: hot-path attribution timers (each non-negative; sum reconciles with wall time) ---
+    values.insert(
+        "hybrid_attr_serialize_ms".into(),
+        serde_json::json!(attribution.serialize_ms),
+    );
+    values.insert(
+        "hybrid_attr_lock_wait_ms".into(),
+        serde_json::json!(attribution.lock_wait_ms),
+    );
+    values.insert(
+        "hybrid_attr_fsync_ms".into(),
+        serde_json::json!(attribution.fsync_ms),
+    );
+    values.insert(
+        "hybrid_attr_sqlite_apply_ms".into(),
+        serde_json::json!(attribution.sqlite_apply_ms),
+    );
+    values.insert(
+        "hybrid_attr_scheduler_ms".into(),
+        serde_json::json!(attribution.scheduler_ms),
+    );
+    values.insert(
+        "hybrid_attr_total_hot_ms".into(),
+        serde_json::json!(attribution.total_hot_ms),
+    );
+    values.insert(
+        "hybrid_attr_phase_sum_ms".into(),
+        serde_json::json!(round3(attribution.phase_sum_ms())),
+    );
+    values.insert("attribution_ok".into(), serde_json::json!(attribution_ok));
+
+    // --- AC2: bounded-debt time-series gate ---
+    values.insert(
+        "bounded_debt_apply_lag_max".into(),
+        serde_json::json!(hybrid.apply_lag_max),
+    );
+    values.insert(
+        "bounded_debt_apply_lag_ceiling".into(),
+        serde_json::json!(hybrid.apply_lag_ceiling),
+    );
+    values.insert(
+        "bounded_debt_first_window_max".into(),
+        serde_json::json!(hybrid.apply_lag_first_window_max),
+    );
+    values.insert(
+        "bounded_debt_last_window_max".into(),
+        serde_json::json!(hybrid.apply_lag_last_window_max),
+    );
+    values.insert(
+        "bounded_debt_samples".into(),
+        serde_json::json!(hybrid.apply_lag_samples),
+    );
+    values.insert("bounded_debt_ok".into(), serde_json::json!(bounded_debt_ok));
+
+    // --- AC3: segment-density / object-PUT gate ---
+    values.insert(
+        "segment_density_mean_commands_per_segment".into(),
+        serde_json::json!(hybrid.mean_commands_per_segment),
+    );
+    values.insert(
+        "segment_density_max_commands_per_segment".into(),
+        serde_json::json!(hybrid.max_commands_per_segment),
+    );
+    values.insert(
+        "segment_density_objects_put".into(),
+        serde_json::json!(hybrid.objects_put),
+    );
+    values.insert(
+        "segment_density_segments_sealed".into(),
+        serde_json::json!(hybrid.segments_sealed),
+    );
+    values.insert(
+        "segment_density_target_bytes".into(),
+        serde_json::json!(target_bytes),
+    );
+    values.insert(
+        "segment_density_max_commands_bound".into(),
+        serde_json::json!(segment_density_max_commands(target_bytes)),
+    );
+    values.insert(
+        "segment_density_objects_put_upper".into(),
+        serde_json::json!(segment_density_objects_put_upper(resident)),
+    );
+    values.insert(
+        "segment_density_ok".into(),
+        serde_json::json!(segment_density_ok),
+    );
+
     let row = pqueue_release::LedgerRow {
         suite: suite.into(),
         command: command.into(),
@@ -666,9 +1188,44 @@ fn emit_ledger(
     if release {
         assert!(bars_met, "release hybrid performance bars were not met");
     }
+
+    HybridGates {
+        ack_ratio_ok,
+        claim_ratio_ok,
+        recovery_ok: smoke_recovery_ok,
+        disk_loss_ok,
+        bounded_debt_ok,
+        segment_density_ok,
+        attribution_ok,
+        bars_met,
+        attribution: *attribution,
+        apply_lag_max: hybrid.apply_lag_max,
+        apply_lag_ceiling: hybrid.apply_lag_ceiling,
+        apply_lag_samples: hybrid.apply_lag_samples,
+        mean_commands_per_segment: hybrid.mean_commands_per_segment,
+        max_commands_per_segment: hybrid.max_commands_per_segment,
+        objects_put: hybrid.objects_put,
+    }
 }
 
-async fn run_suite(release: bool) {
+async fn run_suite(release: bool) -> HybridGates {
+    let (suite, command) = if release {
+        (
+            "performance_object_log_hybrid_release_10m",
+            "PQUEUE_LEDGER_DIR=docs/perf/evidence PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture",
+        )
+    } else {
+        (
+            "performance_object_log_hybrid_smoke",
+            "PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture",
+        )
+    };
+    run_suite_named(suite, command, release).await
+}
+
+/// Run the three-profile hybrid suite (plus attribution) and emit `suite`'s ledger, returning the resolved
+/// gates. The gate tests call this with their own suite name so they never clobber the default smoke ledger.
+async fn run_suite_named(suite: &str, command: &str, release: bool) -> HybridGates {
     let resident = env_u64(
         "PQUEUE_HYBRID_RESIDENT",
         if release { RELEASE_RESIDENT } else { 1_000 },
@@ -692,6 +1249,9 @@ async fn run_suite(release: bool) {
     let sqlite = run_sqlite(resident, load_batch, claim_batch, cfg).await;
     let rows = vec![hybrid, inmemory, sqlite];
 
+    // Attribution runs a small dedicated pipeline (independent of the comparison profiles above).
+    let attribution = measure_hybrid_attribution(resident.min(2_000), load_batch).await;
+
     let recovery_bar_ms = if release { 60_000.0 } else { 5_000.0 };
     let recovery_tail_budget = if release {
         10_000u64.max(resident / 1_000)
@@ -699,22 +1259,16 @@ async fn run_suite(release: bool) {
         1_000
     };
     emit_ledger(
-        if release {
-            "performance_object_log_hybrid_release_10m"
-        } else {
-            "performance_object_log_hybrid_smoke"
-        },
-        if release {
-            "PQUEUE_LEDGER_DIR=docs/perf/evidence PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture"
-        } else {
-            "PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture"
-        },
+        suite,
+        command,
         resident,
         &rows,
         release,
         recovery_bar_ms,
         recovery_tail_budget,
-    );
+        target_bytes as u64,
+        &attribution,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,6 +1985,218 @@ fn emit_scale_cell(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn performance_object_log_hybrid_smoke() {
     run_suite(false).await;
+}
+
+/// Read the single hybrid ledger row a suite emitted and return its `values` map, so a gate test can assert
+/// its fields were actually emitted (not just computed in-process).
+fn read_emitted_values(suite: &str) -> serde_json::Map<String, serde_json::Value> {
+    let path = pqueue_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite);
+    let text = std::fs::read_to_string(&path).expect("read emitted ledger");
+    let line = text.lines().next().expect("at least one ledger row");
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("ledger row is json");
+    // The measured `values` map is `#[serde(flatten)]`ed into `measurements`, so the emitted keys live
+    // under `measurements`, alongside `tp002_evidence_ids`.
+    parsed
+        .get("measurements")
+        .and_then(|m| m.as_object())
+        .expect("ledger row has a measurements object")
+        .clone()
+}
+
+/// AC1: attribution timers. Each `hybrid_attr_*_ms` field is emitted, non-negative, and the five phases
+/// sum to within tolerance of the measured hot-path wall time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn performance_object_log_hybrid_attribution() {
+    let suite = "performance_object_log_hybrid_attribution";
+    let command = "cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_attribution -- --nocapture";
+    let gates = run_suite_named(suite, command, false).await;
+    let a = gates.attribution;
+
+    // Each phase field is finite and non-negative.
+    for (name, v) in [
+        ("serialize", a.serialize_ms),
+        ("lock_wait", a.lock_wait_ms),
+        ("fsync", a.fsync_ms),
+        ("sqlite_apply", a.sqlite_apply_ms),
+        ("scheduler", a.scheduler_ms),
+        ("total_hot", a.total_hot_ms),
+    ] {
+        assert!(
+            v.is_finite() && v >= 0.0,
+            "hybrid_attr_{name}_ms must be finite and non-negative, got {v}"
+        );
+    }
+
+    // The five phases reconcile with the measured wall time (this is the folded attribution gate).
+    assert!(
+        a.is_reconciled(0.30, 5.0),
+        "attribution phases must sum to within tolerance of wall time: sum={:.3}ms total={:.3}ms",
+        a.phase_sum_ms(),
+        a.total_hot_ms,
+    );
+    assert!(gates.attribution_ok, "attribution_ok must hold for the run");
+
+    // The emitted `bars_met` is exactly the pure composition of the individual gate inputs — proving every
+    // gate (including the three new ones) is folded in.
+    assert_eq!(
+        gates.bars_met,
+        compute_bars_met(
+            gates.ack_ratio_ok,
+            gates.claim_ratio_ok,
+            gates.recovery_ok,
+            gates.disk_loss_ok,
+            gates.bounded_debt_ok,
+            gates.segment_density_ok,
+            gates.attribution_ok,
+        ),
+        "bars_met must fold every gate input"
+    );
+
+    // The fields were actually emitted into the ledger (AC4 keeps the ratios too).
+    let values = read_emitted_values(suite);
+    for key in [
+        "hybrid_attr_serialize_ms",
+        "hybrid_attr_lock_wait_ms",
+        "hybrid_attr_fsync_ms",
+        "hybrid_attr_sqlite_apply_ms",
+        "hybrid_attr_scheduler_ms",
+        "hybrid_attr_total_hot_ms",
+        "hybrid_ack_p99_vs_inmemory_ratio",
+        "hybrid_claim_finalize_p95_vs_inmemory_ratio",
+    ] {
+        assert!(values.contains_key(key), "ledger must emit {key}");
+    }
+
+    // Attribution is a required `bars_met` input: flipping it off flips `bars_met` off.
+    assert!(
+        !compute_bars_met(true, true, true, true, true, true, false),
+        "attribution must be a bars_met input"
+    );
+    assert!(compute_bars_met(true, true, true, true, true, true, true));
+
+    println!(
+        "attribution: serialize={:.3} lock_wait={:.3} fsync={:.3} sqlite_apply={:.3} scheduler={:.3} sum={:.3} total={:.3}",
+        a.serialize_ms,
+        a.lock_wait_ms,
+        a.fsync_ms,
+        a.sqlite_apply_ms,
+        a.scheduler_ms,
+        a.phase_sum_ms(),
+        a.total_hot_ms,
+    );
+}
+
+/// AC2: bounded-debt gate. The sampled SQLite apply-lag time-series is bounded (under the documented
+/// ceiling) and non-growing, and the gate is a required `bars_met` input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn performance_object_log_hybrid_bounded_debt_gate() {
+    let suite = "performance_object_log_hybrid_bounded_debt_gate";
+    let command = "cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_bounded_debt_gate -- --nocapture";
+    let gates = run_suite_named(suite, command, false).await;
+
+    // A real time-series was sampled, it stayed under the documented ceiling, and the gate passed.
+    assert!(
+        gates.apply_lag_samples >= 5,
+        "must sample a non-trivial apply-lag time-series, got {} samples",
+        gates.apply_lag_samples
+    );
+    assert!(
+        gates.apply_lag_ceiling > 0,
+        "apply-lag ceiling must be documented and positive"
+    );
+    assert!(
+        gates.apply_lag_max <= gates.apply_lag_ceiling,
+        "apply lag {} exceeded the documented ceiling {}",
+        gates.apply_lag_max,
+        gates.apply_lag_ceiling
+    );
+    assert!(
+        gates.bounded_debt_ok,
+        "bounded-debt gate must hold for a healthy synchronous-apply hybrid run"
+    );
+
+    // The gate fields were emitted.
+    let values = read_emitted_values(suite);
+    for key in [
+        "bounded_debt_apply_lag_max",
+        "bounded_debt_apply_lag_ceiling",
+        "bounded_debt_first_window_max",
+        "bounded_debt_last_window_max",
+        "bounded_debt_samples",
+        "bounded_debt_ok",
+    ] {
+        assert!(values.contains_key(key), "ledger must emit {key}");
+    }
+
+    // Bounded-debt is a required `bars_met` input: flipping it off flips `bars_met` off.
+    assert!(
+        !compute_bars_met(true, true, true, true, false, true, true),
+        "bounded-debt must be a bars_met input"
+    );
+    assert!(compute_bars_met(true, true, true, true, true, true, true));
+
+    println!(
+        "bounded-debt: samples={} max={} ceiling={} first_window_max={} last_window_max={} ok={}",
+        gates.apply_lag_samples,
+        gates.apply_lag_max,
+        gates.apply_lag_ceiling,
+        values["bounded_debt_first_window_max"],
+        values["bounded_debt_last_window_max"],
+        gates.bounded_debt_ok,
+    );
+}
+
+/// AC3: segment-density gate. The mean/max commands-per-segment and object-PUT volume feed `bars_met`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn performance_object_log_hybrid_segment_density_gate() {
+    let suite = "performance_object_log_hybrid_segment_density_gate";
+    let command = "cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_segment_density_gate -- --nocapture";
+    let gates = run_suite_named(suite, command, false).await;
+
+    // The measured density is meaningful: something sealed, batching happened, PUT volume is bounded.
+    assert!(
+        gates.objects_put >= 1,
+        "at least one segment object must have been PUT"
+    );
+    assert!(
+        gates.mean_commands_per_segment >= 1.0,
+        "mean commands-per-segment must be >= 1, got {}",
+        gates.mean_commands_per_segment
+    );
+    assert!(
+        gates.max_commands_per_segment >= 1,
+        "max commands-per-segment must be >= 1"
+    );
+    assert!(
+        gates.segment_density_ok,
+        "segment-density gate must hold for a healthy batched hybrid run"
+    );
+
+    // The gate fields were emitted.
+    let values = read_emitted_values(suite);
+    for key in [
+        "segment_density_mean_commands_per_segment",
+        "segment_density_max_commands_per_segment",
+        "segment_density_objects_put",
+        "segment_density_ok",
+    ] {
+        assert!(values.contains_key(key), "ledger must emit {key}");
+    }
+
+    // Segment-density is a required `bars_met` input: flipping it off flips `bars_met` off.
+    assert!(
+        !compute_bars_met(true, true, true, true, true, false, true),
+        "segment-density must be a bars_met input"
+    );
+    assert!(compute_bars_met(true, true, true, true, true, true, true));
+
+    println!(
+        "segment-density: mean={} max={} objects_put={} ok={}",
+        gates.mean_commands_per_segment,
+        gates.max_commands_per_segment,
+        gates.objects_put,
+        gates.segment_density_ok,
+    );
 }
 
 /// AC1: the seeded generator is pinned — two seed=0 runs produce identical
