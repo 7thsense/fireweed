@@ -1,0 +1,37 @@
+{
+  "attempt_id": "20260701T172302-3eacd926",
+  "bead_id": "pqueue-44a2e07d",
+  "base_rev": "250554f530969a59747f71e02585028bfd84d755",
+  "created_at": "2026-07-01T17:23:02.872380526Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-44a2e07d",
+    "title": "Add hybrid async request outcome contract",
+    "description": "Implement the idempotency/outcome contract needed before async checkpointing. In-scope files: crates/pqueue-engine/src/idempotency.rs, crates/pqueue-engine/src/compose.rs, crates/pqueue-engine/src/command.rs, crates/pqueue-objectlog tests as needed. Add or extend durable per-command outcome metadata so hybrid-async can replay committed results for request_id-bearing client mutations after unknown outcome. Define missing-request_id rejection hooks for hybrid-async where protocol support is absent. Out of scope: SQLite checkpoint worker and server runtime wiring.",
+    "acceptance": "1. `cargo test -p pqueue-engine idempotency -- --nocapture` passes.\n2. `cargo test -p pqueue-objectlog hybrid_request_id -- --nocapture` passes.\n3. `cargo test -p pqueue-conformance request_id -- --nocapture` passes.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:pqueue-engine",
+      "area:pqueue-objectlog",
+      "kind:task",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "spec-id": "plan-hybrid-async-checkpoint"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T172302-3eacd926",
+    "prompt": ".ddx/executions/20260701T172302-3eacd926/prompt.md",
+    "manifest": ".ddx/executions/20260701T172302-3eacd926/manifest.json",
+    "result": ".ddx/executions/20260701T172302-3eacd926/result.json",
+    "checks": ".ddx/executions/20260701T172302-3eacd926/checks.json",
+    "usage": ".ddx/executions/20260701T172302-3eacd926/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-44a2e07d-20260701T172302-3eacd926"
+  },
+  "prompt_sha": "97574792438301d7e5e2d8ea0c2c2a62f487bf42a048a2baf741b8a6c8f159d3"
+}
