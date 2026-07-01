@@ -1,0 +1,64 @@
+{
+  "attempt_id": "20260701T025803-1807a6d6",
+  "bead_id": "pqueue-b3793d6a",
+  "base_rev": "10b8473156bf6c913370d10eac58ba24bb346d6b",
+  "created_at": "2026-07-01T02:58:03.447958287Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-b3793d6a",
+    "title": "Implement HybridProjectionStore core",
+    "description": "Implement HybridProjectionStore, preferably exported from pqueue-sqlite. It wraps SqliteProjectionStore plus InMemoryProjection. ensure_shard must create/validate SQLite, hydrate memory from SqliteProjectionStore::export_projection_image before returning SQLite high-water, and fail closed if hydration cannot establish parity. apply must write the full batch to SQLite first and then to memory. If SQLite succeeds but memory apply fails, set a poisoned state so subsequent reads, validations, and writes return storage errors until restart. All hot reads and pre-commit validation delegate to memory after hydration. Add parity helpers/tests comparing memory and SQLite after apply and recovery. Out of scope: PQUEUE_PROJECTION_BACKEND env parsing and Helm.",
+    "acceptance": "1. cargo test -p pqueue-sqlite hybrid_projection -- --nocapture passes.\\n2. cargo test -p pqueue-sqlite --test sqlite_projection_tests -- --nocapture passes.\\n3. cargo test -p pqueue-projection passes.\\n4. cargo fmt --check passes.",
+    "parent": "pqueue-6f4881ef",
+    "labels": [
+      "area:pqueue-sqlite",
+      "area:pqueue-projection",
+      "kind:implementation",
+      "plan-2026-06-30",
+      "backend:objectlog-hybrid",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"cargo test -p pqueue-sqlite hybrid_projection -- --nocapture passes.\\\\n2. cargo test -p pqueue-sqlite --test sqlite_projection_tests -- --nocapture passes.\\\\n3. cargo test -p pqueue-projection passes.\\\\n4. cargo fmt --check passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-01T02:58:00.778702938Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/1"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-01T02:58:02.975578456Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "plan-hybrid-sqlite-inmemory-projection"
+    }
+  },
+  "governing": [
+    {
+      "id": "plan-hybrid-sqlite-inmemory-projection",
+      "path": "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md",
+      "title": "Hybrid SQLite + In-Memory Projection Implementation Plan"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260701T025803-1807a6d6",
+    "prompt": ".ddx/executions/20260701T025803-1807a6d6/prompt.md",
+    "manifest": ".ddx/executions/20260701T025803-1807a6d6/manifest.json",
+    "result": ".ddx/executions/20260701T025803-1807a6d6/result.json",
+    "checks": ".ddx/executions/20260701T025803-1807a6d6/checks.json",
+    "usage": ".ddx/executions/20260701T025803-1807a6d6/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b3793d6a-20260701T025803-1807a6d6"
+  },
+  "prompt_sha": "88fc48dc2310ada963c916a6682644b9318eb5bd0d06cc2605466f95ee70958a"
+}
