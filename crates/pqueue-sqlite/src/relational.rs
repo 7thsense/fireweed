@@ -6027,8 +6027,22 @@ impl ProjectionStore for HybridProjectionStore {
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
         self.check_healthy()?;
+        let mut cursors = HashMap::new();
+        for pos in positions {
+            cursors
+                .entry(pos.queue.clone())
+                .or_insert(self.sqlite.recovery_high_water(&pos.queue)?.unwrap_or(0));
+        }
         self.sqlite.apply_committed_batch(positions, commands)?;
-        match self.memory.apply(positions, commands) {
+        let mut memory_positions = Vec::new();
+        let mut memory_commands = Vec::new();
+        for (pos, env) in positions.iter().zip(commands.iter()) {
+            if pos.sequence >= *cursors.get(&pos.queue).unwrap_or(&0) {
+                memory_positions.push(pos.clone());
+                memory_commands.push(env.clone());
+            }
+        }
+        match self.memory.apply(&memory_positions, &memory_commands) {
             Ok(()) => Ok(()),
             Err(err) => self.poison(format!("memory apply failed after sqlite commit: {err}")),
         }

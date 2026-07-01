@@ -1,24 +1,28 @@
 //! Composition-root integration: the background ReclaimDriver task recovers orphaned leases with no
 //! client traffic, and the wired server is drivable by an off-the-shelf Redis client.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pqueue_core::{
     EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
-    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, Clock, ControlPlaneStore, EngineError, InMemoryControlPlane,
-    ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
+    ClaimPort, ClaimRequest, Clock, ComposedBackend, ControlPlaneStore, EngineError,
+    InMemoryControlPlane, InProcessControlPlane, ProjectionRead, PushPort, PushSpec,
+    QueueControlPlane, QueueKey,
 };
 use pqueue_memory::{ManualClock, composed_memory_backend};
+use pqueue_objectlog::ObjectLog;
 use pqueue_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
 use pqueue_server::{
     BackendSpec, Config, ControlPlaneSpec, LogSpec, OwnershipRuntime, ProjectionSpec, start,
     start_with,
 };
+use pqueue_sqlite::HybridProjectionStore;
 
 /// The composed objectlog-LOG + sqlite-PROJECTION spec (replaces the retired `Backend::ObjectLogSqlite` /
 /// `Backend::SegmentedObjectLogSqlite` variants — both are now this one composition).
@@ -97,6 +101,25 @@ fn tmp_runtime_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&projection);
     (root, projection)
+}
+
+fn open_direct_objectlog_hybrid(
+    root: &std::path::Path,
+    projection: &std::path::Path,
+) -> ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane> {
+    ComposedBackend::new(
+        ObjectLog::open_group_commit(
+            root,
+            pqueue_server::SegmentConfig::new(1024 * 1024, 5).unwrap(),
+        )
+        .expect("open object log"),
+        HybridProjectionStore::open(projection.to_str().expect("utf8 projection path"))
+            .expect("open hybrid projection"),
+        InProcessControlPlane::new(),
+    )
+    .with_group_commit(true)
+    .recover()
+    .expect("recover objectlog/hybrid")
 }
 
 async fn raw_resp(addr: std::net::SocketAddr, parts: &[&str]) -> String {
@@ -890,6 +913,193 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
         "post-reopen hybrid push must not remint an existing item id"
     );
     server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-disk-loss");
+    {
+        let mut config = Config::new(
+            objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        );
+        config.segment_config =
+            pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+        let server = start(config).await.unwrap();
+        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let first: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(1)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let second: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(2)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_ne!(first, second);
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+    }
+
+    std::fs::remove_file(&projection_path).unwrap();
+    let server = start(Config::new(
+        objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
+    .await
+    .unwrap();
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(2)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.keys[0].ids.len(),
+        2,
+        "fresh projection db replays retained object log from genesis"
+    );
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-force-seal");
+    let backend = Arc::new(open_direct_objectlog_hybrid(&object_root, &projection_path));
+    backend.create_queue(qdef()).await.unwrap();
+    let queue = shard();
+    let e0 = backend.current_epoch(&queue).await.unwrap();
+    let mut push = Box::pin(backend.push(
+        &queue,
+        vec![PushSpec {
+            priority: Some(PriorityValue::Int64(1)),
+            ..Default::default()
+        }],
+        ts(0),
+        Some(e0),
+    ));
+    struct NoopWake;
+    impl std::task::Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+    let waker = std::task::Waker::from(Arc::new(NoopWake));
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        matches!(push.as_mut().poll(&mut cx), std::task::Poll::Pending),
+        "large-segment push must buffer until a seal"
+    );
+    let claimed = backend
+        .claim(ClaimRequest {
+            shard: queue.clone(),
+            worker_id: WorkerId::new("claimer").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-force-seal").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: pqueue_engine::ClaimCompatibility::default(),
+            expected_epoch: Some(e0),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "claim must see the force-sealed pending push"
+    );
+    let ids = tokio::time::timeout(Duration::from_secs(1), push)
+        .await
+        .expect("force-sealed push acked")
+        .unwrap();
+    assert_eq!(
+        claimed.items[0].item_id, ids[0],
+        "claim saw force-sealed push"
+    );
+
+    let e1 = backend.acquire_epoch(&queue).await.unwrap();
+    assert!(e1 > e0);
+    let stale = backend
+        .push_with_request_id(
+            &queue,
+            RequestId::new("stale-writer").unwrap(),
+            vec![PushSpec {
+                priority: Some(PriorityValue::Int64(2)),
+                ..Default::default()
+            }],
+            ts(2),
+            Some(e0),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale, EngineError::EpochFenced);
+
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn objectlog_hybrid_request_id_replays_after_reopen() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-request-id");
+    let request_id = RequestId::new("hybrid-request-1").unwrap();
+    let body = vec![PushSpec {
+        priority: Some(PriorityValue::Int64(5)),
+        ..Default::default()
+    }];
+    let first = {
+        let backend = open_direct_objectlog_hybrid(&object_root, &projection_path);
+        backend.create_queue(qdef()).await.unwrap();
+        backend
+            .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
+            .await
+            .unwrap()
+    };
+
+    let reopened = open_direct_objectlog_hybrid(&object_root, &projection_path);
+    let replayed = reopened
+        .push_with_request_id(&shard(), request_id.clone(), body, ts(1), None)
+        .await
+        .unwrap();
+    assert_eq!(replayed, first);
+    assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
+    let err = reopened
+        .push_with_request_id(
+            &shard(),
+            request_id,
+            vec![PushSpec {
+                priority: Some(PriorityValue::Int64(6)),
+                ..Default::default()
+            }],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::RequestIdConflict);
+
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
 }
