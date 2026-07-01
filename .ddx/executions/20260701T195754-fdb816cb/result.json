@@ -1,0 +1,57 @@
+{
+  "bead_id": "pqueue-3d5bb3df",
+  "attempt_id": "20260701T195754-fdb816cb",
+  "base_rev": "cb45448a5e0c32fe85d58f4333d642480233cea6",
+  "result_rev": "55cf52218c81511a497d903348d8da3b261b6e69",
+  "implementation_rev": "55cf52218c81511a497d903348d8da3b261b6e69",
+  "outcome": "task_succeeded",
+  "status": "success",
+  "detail": "success",
+  "candidate_ref": "refs/ddx/iterations/20260701T195754-fdb816cb/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260701T195754-fdb816cb",
+      "result_rev": "55cf52218c81511a497d903348d8da3b261b6e69",
+      "implementer_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "requested_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "actual_route": {
+        "harness": "claude-tui",
+        "model": "opus-4.7"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "claude-tui",
+  "model": "opus-4.7",
+  "predicted_power": 10,
+  "predicted_cost_usd_per_1k_tokens": 0.045,
+  "predicted_cost_source": "subscription",
+  "session_id": "eb-c48b122f",
+  "duration_ms": 673054,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260701T195754-fdb816cb",
+  "prompt_file": ".ddx/executions/20260701T195754-fdb816cb/prompt.md",
+  "manifest_file": ".ddx/executions/20260701T195754-fdb816cb/manifest.json",
+  "result_file": ".ddx/executions/20260701T195754-fdb816cb/result.json",
+  "usage_file": ".ddx/executions/20260701T195754-fdb816cb/usage.json",
+  "rate_limit_budget": 300000000000,
+  "started_at": "2026-07-01T19:57:55.488269603Z",
+  "finished_at": "2026-07-01T20:09:08.543137845Z"
+}
