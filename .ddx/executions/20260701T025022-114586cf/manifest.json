@@ -1,0 +1,64 @@
+{
+  "attempt_id": "20260701T025022-114586cf",
+  "bead_id": "pqueue-7e7b8303",
+  "base_rev": "c8f3c87b3fbb197aeb34ec54e8fd95803f35d9a3",
+  "created_at": "2026-07-01T02:50:23.220339228Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-7e7b8303",
+    "title": "Add ProjectionImage import export seam",
+    "description": "Add the recovery image seam required by hybrid. In pqueue-projection, define a typed ProjectionImage that can fully represent a queue projection at a high-water: item lifecycle/state, client keys, priority/order metadata, lease state, fields/payload/metadata/gates/entity docs, secondary and typed indexes, side records, instance fences, paused state, and any data needed to reproduce metrics. Add ProjectionData::to_image and ProjectionData::from_image or equivalent narrow APIs, plus InMemoryProjection::hydrate_shard. In pqueue-sqlite, add SqliteProjectionStore::export_projection_image(shard) that reads the durable SQLite projection into the image. Out of scope: server env wiring and objectlog runtime selection.",
+    "acceptance": "1. cargo test -p pqueue-projection projection_image -- --nocapture passes.\\n2. cargo test -p pqueue-sqlite sqlite_projection_image -- --nocapture passes.\\n3. cargo test -p pqueue-sqlite --test sqlite_projection_tests -- --nocapture passes.\\n4. cargo fmt --check passes.",
+    "parent": "pqueue-6f4881ef",
+    "labels": [
+      "area:pqueue-projection",
+      "area:pqueue-sqlite",
+      "kind:implementation",
+      "plan-2026-06-30",
+      "backend:objectlog-hybrid",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"cargo test -p pqueue-projection projection_image -- --nocapture passes.\\\\n2. cargo test -p pqueue-sqlite sqlite_projection_image -- --nocapture passes.\\\\n3. cargo test -p pqueue-sqlite --test sqlite_projection_tests -- --nocapture passes.\\\\n4. cargo fmt --check passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-01T02:50:20.233931997Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/1"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-01T02:50:22.743715447Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "plan-hybrid-sqlite-inmemory-projection"
+    }
+  },
+  "governing": [
+    {
+      "id": "plan-hybrid-sqlite-inmemory-projection",
+      "path": "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md",
+      "title": "Hybrid SQLite + In-Memory Projection Implementation Plan"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260701T025022-114586cf",
+    "prompt": ".ddx/executions/20260701T025022-114586cf/prompt.md",
+    "manifest": ".ddx/executions/20260701T025022-114586cf/manifest.json",
+    "result": ".ddx/executions/20260701T025022-114586cf/result.json",
+    "checks": ".ddx/executions/20260701T025022-114586cf/checks.json",
+    "usage": ".ddx/executions/20260701T025022-114586cf/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-7e7b8303-20260701T025022-114586cf"
+  },
+  "prompt_sha": "7f06a6f74056730eb614cf145c97cbba23bc4ba43a0a32b1246c5c670ada34e8"
+}
