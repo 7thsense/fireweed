@@ -1,0 +1,37 @@
+{
+  "attempt_id": "20260701T173352-d47bfe5a",
+  "bead_id": "pqueue-3b85bd4f",
+  "base_rev": "003eebb0cf5b492401559ecfca4ca6fe8eb771fd",
+  "created_at": "2026-07-01T17:33:52.785598732Z",
+  "requested": {
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-3b85bd4f",
+    "title": "Implement ordered hybrid async batch barrier",
+    "description": "Implement the single sequencing point for hybrid-async mutations. In-scope files: crates/pqueue-engine/src/compose.rs and focused tests. The ordered barrier must force-seal prior buffered writes before claim selection, ensure every claim observes all prior memory-applied claims, append ordered log batches, apply commands to memory sequentially before any response is released, and attach per-command outcome metadata. Batching must not relax visibility/order semantics or create one-command segments unnecessarily. Out of scope: SQLite checkpoint persistence.",
+    "acceptance": "1. `cargo test -p pqueue-engine ordered -- --nocapture` passes.\n2. `cargo test -p pqueue-objectlog objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch -- --nocapture` passes.\n3. `cargo test -p pqueue-server --test server objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch -- --nocapture` passes.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:pqueue-engine",
+      "area:pqueue-objectlog",
+      "kind:task",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "spec-id": "plan-hybrid-async-checkpoint"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260701T173352-d47bfe5a",
+    "prompt": ".ddx/executions/20260701T173352-d47bfe5a/prompt.md",
+    "manifest": ".ddx/executions/20260701T173352-d47bfe5a/manifest.json",
+    "result": ".ddx/executions/20260701T173352-d47bfe5a/result.json",
+    "checks": ".ddx/executions/20260701T173352-d47bfe5a/checks.json",
+    "usage": ".ddx/executions/20260701T173352-d47bfe5a/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-3b85bd4f-20260701T173352-d47bfe5a"
+  },
+  "prompt_sha": "26cbd8d0ff3996f67accf37289538303ea0bceb2f6b50e427bd612c7a58f9700"
+}

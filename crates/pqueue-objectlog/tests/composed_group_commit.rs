@@ -12,10 +12,11 @@ use pqueue_core::{
     TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind, FinalizeOutcome,
-    FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
+    ClaimCompatibility, ClaimPort, ClaimRequest, ComposedBackend, ControlPlaneStore, EngineError,
+    FinalizeKind, FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
 };
-use pqueue_objectlog::{SegmentConfig, composed_objectlog_backend_group_commit};
+use pqueue_objectlog::{ObjectLog, SegmentConfig, composed_objectlog_backend_group_commit};
+use pqueue_sqlite::HybridProjectionStore;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -23,6 +24,16 @@ fn tmp_root(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let p = std::env::temp_dir().join(format!("pqueue-objlog-gc-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&p);
+    p
+}
+
+fn tmp_db(tag: &str) -> std::path::PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let p = std::env::temp_dir().join(format!(
+        "pqueue-objlog-gc-{tag}-{}-{n}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&p);
     p
 }
 
@@ -70,6 +81,21 @@ fn gc_config() -> SegmentConfig {
 
 fn ts(secs: i64) -> UtcTimestamp {
     UtcTimestamp::new(secs, 0).unwrap()
+}
+
+fn hybrid_backend(
+    root: &std::path::Path,
+    projection: &std::path::Path,
+) -> ComposedBackend<ObjectLog, HybridProjectionStore, pqueue_engine::InProcessControlPlane> {
+    ComposedBackend::new(
+        ObjectLog::open_group_commit(root, gc_config()).expect("open object log"),
+        HybridProjectionStore::open(projection.to_str().expect("utf8 projection path"))
+            .expect("open hybrid projection"),
+        pqueue_engine::InProcessControlPlane::new(),
+    )
+    .with_group_commit(true)
+    .recover()
+    .expect("recover hybrid backend")
 }
 
 #[tokio::test]
@@ -204,6 +230,67 @@ async fn claim_force_seals_buffer_before_select_then_finalize() {
     assert!(again.items.is_empty());
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
+    let root = tmp_root("hybrid-force-seal");
+    let projection = tmp_db("hybrid-force-seal");
+    let backend = hybrid_backend(&root, &projection);
+    backend.create_queue(qdef()).await.unwrap();
+    let shard = shard();
+    let epoch = backend.current_epoch(&shard).await.unwrap();
+
+    let mut buffered =
+        Box::pin(backend.push(&shard, vec![PushSpec::default()], ts(0), Some(epoch)));
+    struct NoopWake;
+    impl std::task::Wake for NoopWake {
+        fn wake(self: std::sync::Arc<Self>) {}
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        matches!(buffered.as_mut().poll(&mut cx), std::task::Poll::Pending),
+        "large-segment push buffers until the ordered barrier force-seals"
+    );
+
+    let claimed = backend
+        .claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("hybrid-claimer").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("hybrid-force-seal-lease").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: Some(epoch),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "claim selection observes the force-sealed buffered push"
+    );
+    let pushed = buffered.await.unwrap();
+    assert_eq!(claimed.items[0].item_id, pushed[0]);
+
+    let superseding_epoch = backend.acquire_epoch(&shard).await.unwrap();
+    assert!(superseding_epoch > epoch);
+    let stale = backend
+        .push_with_request_id(
+            &shard,
+            pqueue_core::RequestId::new("stale-writer").unwrap(),
+            vec![PushSpec::default()],
+            ts(2),
+            Some(epoch),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale, EngineError::EpochFenced);
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&projection);
 }
 
 #[tokio::test]

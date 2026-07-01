@@ -2523,3 +2523,593 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortRenewL
     for ComposedBackend<L, P, C>
 {
 }
+
+#[cfg(test)]
+mod ordered_tests {
+    use super::*;
+    use crate::port::{ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
+    use pqueue_core::{
+        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+        PriorityTieBreaker, RecurrencePolicy, RetryPolicy, WorkerId,
+    };
+    use std::sync::Mutex;
+    use std::task::{Poll, Wake};
+
+    #[derive(Default)]
+    struct FakeLogState {
+        epoch: u64,
+        next_sequence: u64,
+        buffered: Vec<CommandEnvelope>,
+        sealed_batches: Vec<usize>,
+    }
+
+    #[derive(Default)]
+    struct FakeGroupCommitLog {
+        state: Mutex<FakeLogState>,
+    }
+
+    impl FakeGroupCommitLog {
+        fn sealed_batches(&self) -> Vec<usize> {
+            self.state
+                .lock()
+                .expect("fake log poisoned")
+                .sealed_batches
+                .clone()
+        }
+
+        fn seal_buffered(state: &mut FakeLogState, shard: &QueueKey) -> Vec<CommandPosition> {
+            let n = state.buffered.len();
+            let positions = (0..n)
+                .map(|_| {
+                    let p = CommandPosition::new(shard.clone(), state.epoch, state.next_sequence);
+                    state.next_sequence += 1;
+                    p
+                })
+                .collect();
+            state.buffered.clear();
+            state.sealed_batches.push(n);
+            positions
+        }
+    }
+
+    impl LogStore for FakeGroupCommitLog {
+        fn ensure_shard(&mut self, _shard: &QueueKey) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn current_epoch(&self, _shard: &QueueKey) -> EngineResult<u64> {
+            Ok(self.state.lock().expect("fake log poisoned").epoch)
+        }
+
+        fn acquire_epoch(&mut self, _shard: &QueueKey) -> EngineResult<u64> {
+            let state = self.state.get_mut().expect("fake log poisoned");
+            state.epoch += 1;
+            Ok(state.epoch)
+        }
+
+        fn append(
+            &mut self,
+            shard: &QueueKey,
+            commands: &[CommandEnvelope],
+            expected_epoch: u64,
+        ) -> EngineResult<Vec<CommandPosition>> {
+            let state = self.state.get_mut().expect("fake log poisoned");
+            if expected_epoch != state.epoch {
+                return Err(EngineError::EpochFenced);
+            }
+            let positions = (0..commands.len())
+                .map(|_| {
+                    let p = CommandPosition::new(shard.clone(), state.epoch, state.next_sequence);
+                    state.next_sequence += 1;
+                    p
+                })
+                .collect();
+            state.sealed_batches.push(commands.len());
+            Ok(positions)
+        }
+
+        fn read_from(
+            &self,
+            _shard: &QueueKey,
+            _from: Option<CommandPosition>,
+            _limit: usize,
+        ) -> EngineResult<CommandPage> {
+            Ok(CommandPage {
+                entries: Vec::new(),
+                next: None,
+            })
+        }
+
+        fn high_water(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+            Ok(None)
+        }
+
+        fn set_high_water(
+            &mut self,
+            _shard: &QueueKey,
+            _position: CommandPosition,
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn write_snapshot(
+            &mut self,
+            shard: &QueueKey,
+            position: CommandPosition,
+            snapshot: ProjectionSnapshot,
+        ) -> EngineResult<SnapshotRef> {
+            Ok(SnapshotRef {
+                queue: shard.clone(),
+                position,
+                ref_id: String::from_utf8_lossy(&snapshot.payload).into_owned(),
+            })
+        }
+
+        fn latest_snapshot(&self, _shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
+            Ok(None)
+        }
+
+        fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
+            Ok(ProjectionSnapshot {
+                payload: snapshot_ref.ref_id.clone().into_bytes(),
+            })
+        }
+
+        fn supports_group_commit(&self) -> bool {
+            true
+        }
+
+        fn gc_enqueue(
+            &self,
+            _shard: &QueueKey,
+            commands: &[CommandEnvelope],
+            expected_epoch: u64,
+            _now_ms: i64,
+        ) -> EngineResult<Vec<CommandPosition>> {
+            let mut state = self.state.lock().expect("fake log poisoned");
+            if expected_epoch != state.epoch {
+                state.buffered.clear();
+                return Err(EngineError::EpochFenced);
+            }
+            state.buffered.extend_from_slice(commands);
+            Ok(Vec::new())
+        }
+
+        fn gc_seal(
+            &self,
+            shard: &QueueKey,
+            expected_epoch: u64,
+            _now_ms: i64,
+        ) -> EngineResult<Vec<CommandPosition>> {
+            let mut state = self.state.lock().expect("fake log poisoned");
+            if expected_epoch != state.epoch {
+                state.buffered.clear();
+                return Err(EngineError::EpochFenced);
+            }
+            if state.buffered.is_empty() {
+                return Ok(Vec::new());
+            }
+            Ok(Self::seal_buffered(&mut state, shard))
+        }
+
+        fn gc_flush_due(
+            &self,
+            shard: &QueueKey,
+            expected_epoch: u64,
+            now_ms: i64,
+        ) -> EngineResult<Vec<CommandPosition>> {
+            self.gc_seal(shard, expected_epoch, now_ms)
+        }
+
+        fn gc_advance_high_water(
+            &self,
+            _shard: &QueueKey,
+            _position: CommandPosition,
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeProjection {
+        state: Mutex<FakeProjectionState>,
+    }
+
+    #[derive(Default)]
+    struct FakeProjectionState {
+        pending: Vec<ItemId>,
+        leased: BTreeMap<ItemId, LeaseToken>,
+        apply_batches: Vec<Vec<&'static str>>,
+    }
+
+    impl FakeProjection {
+        fn apply_batches(&self) -> Vec<Vec<&'static str>> {
+            self.state
+                .lock()
+                .expect("fake projection poisoned")
+                .apply_batches
+                .clone()
+        }
+    }
+
+    impl ProjectionStore for FakeProjection {
+        fn ensure_shard(&mut self, _definition: &QueueDefinition) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn apply(
+            &mut self,
+            positions: &[CommandPosition],
+            commands: &[CommandEnvelope],
+        ) -> EngineResult<()> {
+            assert_eq!(positions.len(), commands.len());
+            let state = self.state.get_mut().expect("fake projection poisoned");
+            state
+                .apply_batches
+                .push(commands.iter().map(command_kind).collect());
+            for env in commands {
+                match &env.command {
+                    QueueCommand::Push(push) => {
+                        state
+                            .pending
+                            .extend(push.items.iter().map(|item| item.item_id));
+                    }
+                    QueueCommand::Claim(claim) => {
+                        for id in &claim.item_ids {
+                            if let Some(pos) =
+                                state.pending.iter().position(|pending| pending == id)
+                            {
+                                state.pending.remove(pos);
+                                state.leased.insert(*id, claim.lease_token.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+
+        fn eligible_candidates(
+            &self,
+            _shard: &QueueKey,
+            _now: UtcTimestamp,
+            max: usize,
+        ) -> EngineResult<Vec<ItemId>> {
+            Ok(self
+                .state
+                .lock()
+                .expect("fake projection poisoned")
+                .pending
+                .iter()
+                .copied()
+                .take(max)
+                .collect())
+        }
+
+        fn render_claimed(
+            &self,
+            _shard: &QueueKey,
+            ids: &[ItemId],
+        ) -> EngineResult<Vec<ClaimedItem>> {
+            let state = self.state.lock().expect("fake projection poisoned");
+            Ok(ids
+                .iter()
+                .filter_map(|id| {
+                    state.leased.get(id).map(|token| ClaimedItem {
+                        item_id: *id,
+                        client_item_key: ClientItemKey::new(id.to_string()).unwrap(),
+                        item_version: 1,
+                        priority: None,
+                        group_key: None,
+                        not_before: None,
+                        lease_token: Some(token.clone()),
+                        lease_expires_at: ts(60),
+                        attempt_count: 1,
+                        payload: None,
+                        fields: BTreeMap::new(),
+                        metadata: Metadata::default(),
+                        gate_keys: Vec::new(),
+                    })
+                })
+                .collect())
+        }
+
+        fn lookup_by_key(
+            &self,
+            _shard: &QueueKey,
+            _client_item_key: &ClientItemKey,
+        ) -> EngineResult<Option<ItemId>> {
+            Ok(None)
+        }
+
+        fn item_state(&self, _shard: &QueueKey, _id: &ItemId) -> EngineResult<Option<ItemState>> {
+            Ok(None)
+        }
+
+        fn item_version(&self, _shard: &QueueKey, _id: &ItemId) -> EngineResult<Option<u64>> {
+            Ok(Some(1))
+        }
+
+        fn expired_leases(
+            &self,
+            _shard: &QueueKey,
+            _now: UtcTimestamp,
+        ) -> EngineResult<Vec<ItemId>> {
+            Ok(Vec::new())
+        }
+
+        fn all_expired_leases(&self, _now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)> {
+            Vec::new()
+        }
+
+        fn finalize_validate(
+            &self,
+            _shard: &QueueKey,
+            _outcomes: &[FinalizeOutcome],
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn renew_validate(&self, _shard: &QueueKey, _ids: &[ItemId]) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn reassign_validate(&self, _shard: &QueueKey, _ids: &[ItemId]) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn update_fields_validate(
+            &self,
+            _shard: &QueueKey,
+            _id: &ItemId,
+            _expected_item_version: Option<u64>,
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn index_validate(
+            &self,
+            _shard: &QueueKey,
+            _item_id: &ItemId,
+            _fields: &BTreeMap<String, Bytes>,
+            _entity: Option<&serde_json::Value>,
+            _exclude: Option<&ItemId>,
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn index_validate_push(&self, _shard: &QueueKey, _items: &[PushItem]) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn index_validate_replace(
+            &self,
+            _shard: &QueueKey,
+            _existing_id: &ItemId,
+            _item: &PushItem,
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn index_validate_update(
+            &self,
+            _shard: &QueueKey,
+            _id: &ItemId,
+            _field_ops: &BTreeMap<String, Option<Bytes>>,
+            _entity: Option<&serde_json::Value>,
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn select_eligible(
+            &self,
+            shard: &QueueKey,
+            now: UtcTimestamp,
+            limit: usize,
+        ) -> EngineResult<Vec<ItemId>> {
+            self.eligible_candidates(shard, now, limit)
+        }
+
+        fn peek(&self, _shard: &QueueKey, _limit: usize) -> EngineResult<Vec<ItemView>> {
+            Ok(Vec::new())
+        }
+
+        fn pending(&self, _shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+            Ok(Vec::new())
+        }
+
+        fn metrics(&self, _shard: &QueueKey) -> EngineResult<QueueMetrics> {
+            let pending = self
+                .state
+                .lock()
+                .expect("fake projection poisoned")
+                .pending
+                .len() as u64;
+            Ok(QueueMetrics {
+                pending,
+                ..Default::default()
+            })
+        }
+
+        fn live_items(
+            &self,
+            _shard: &QueueKey,
+            keys: &[ClientItemKey],
+        ) -> EngineResult<Vec<Option<LiveItemView>>> {
+            Ok(keys.iter().map(|_| None).collect())
+        }
+
+        fn index_get_unique(
+            &self,
+            _shard: &QueueKey,
+            _index: &str,
+            _key: &[Vec<u8>],
+        ) -> EngineResult<Option<IndexHit>> {
+            Ok(None)
+        }
+
+        fn index_lookup(
+            &self,
+            _shard: &QueueKey,
+            _index: &str,
+            _key: &[Vec<u8>],
+        ) -> EngineResult<Vec<IndexHit>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn command_kind(env: &CommandEnvelope) -> &'static str {
+        match env.command {
+            QueueCommand::Push(_) => "push",
+            QueueCommand::Claim(_) => "claim",
+            _ => "other",
+        }
+    }
+
+    fn queue() -> QueueKey {
+        QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        )
+    }
+
+    fn qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
+        }
+    }
+
+    fn ts(seconds: i64) -> UtcTimestamp {
+        UtcTimestamp::new(seconds, 0).unwrap()
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        let waker = std::task::Waker::from(Arc::new(NoopWake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        Pin::new(future).poll(&mut cx)
+    }
+
+    #[test]
+    fn ordered_hybrid_async_barrier_force_seals_before_claims_and_applies_before_release() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true);
+        let shard = queue();
+        assert!(matches!(
+            poll_once(&mut backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+        let epoch = match poll_once(&mut backend.current_epoch(&shard)) {
+            Poll::Ready(Ok(epoch)) => epoch,
+            other => panic!("unexpected current_epoch result: {other:?}"),
+        };
+
+        let mut first_push = backend.push(&shard, vec![PushSpec::default()], ts(0), Some(epoch));
+        let mut second_push = backend.push(&shard, vec![PushSpec::default()], ts(0), Some(epoch));
+        assert!(matches!(poll_once(&mut first_push), Poll::Pending));
+        assert!(matches!(poll_once(&mut second_push), Poll::Pending));
+        assert_eq!(
+            backend.with_log(|log| log.sealed_batches()),
+            Vec::<usize>::new(),
+            "buffered pushes do not create one-command segments"
+        );
+
+        let first_claim = match poll_once(&mut backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer-1").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: Some(epoch),
+        })) {
+            Poll::Ready(Ok(claimed)) => claimed,
+            other => panic!("unexpected first claim result: {other:?}"),
+        };
+        assert_eq!(first_claim.items.len(), 1);
+        let first_ids = match poll_once(&mut first_push) {
+            Poll::Ready(Ok(ids)) => ids,
+            other => panic!("first push was not released after force-seal/apply: {other:?}"),
+        };
+        let second_ids = match poll_once(&mut second_push) {
+            Poll::Ready(Ok(ids)) => ids,
+            other => panic!("second push was not released after force-seal/apply: {other:?}"),
+        };
+        assert_eq!(first_claim.items[0].item_id, first_ids[0]);
+
+        let second_claim = match poll_once(&mut backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer-2").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-2").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(2),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: Some(epoch),
+        })) {
+            Poll::Ready(Ok(claimed)) => claimed,
+            other => panic!("unexpected second claim result: {other:?}"),
+        };
+        assert_eq!(second_claim.items.len(), 1);
+        assert_eq!(second_claim.items[0].item_id, second_ids[0]);
+        assert_ne!(
+            first_claim.items[0].item_id, second_claim.items[0].item_id,
+            "the second claim observes the first claim's memory apply"
+        );
+        assert_eq!(
+            poll_once(&mut backend.metrics(&shard)),
+            Poll::Ready(Ok(QueueMetrics {
+                pending: 0,
+                ..Default::default()
+            }))
+        );
+        assert_eq!(
+            backend.with_log(|log| log.sealed_batches()),
+            vec![2, 1, 1],
+            "the two buffered pushes seal as one ordered batch; claims seal only their own response barrier"
+        );
+        assert_eq!(
+            backend
+                .inner
+                .lock()
+                .expect("backend poisoned")
+                .projection
+                .apply_batches(),
+            vec![vec!["push", "push"], vec!["claim"], vec!["claim"]]
+        );
+    }
+}
