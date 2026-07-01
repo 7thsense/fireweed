@@ -1,0 +1,55 @@
+{
+  "attempt_id": "20260701T033345-fdb4b473",
+  "bead_id": "pqueue-1363098f",
+  "base_rev": "718329cac87c28257c8c323d6ae2a4c334943e05",
+  "created_at": "2026-07-01T03:33:46.064204388Z",
+  "requested": {
+    "harness": "codex",
+    "prompt": "synthesized",
+    "min_power": 10
+  },
+  "bead": {
+    "id": "pqueue-1363098f",
+    "title": "Record hybrid load and recovery evidence",
+    "description": "Add and run hybrid performance evidence for multi-million-member campaign reshape/report scenarios. Provide smoke-safe defaults plus ignored release-tier commands. Compare objectlog/hybrid to objectlog/inmemory and objectlog/sqlite under the same segment config. Record push throughput, p50/p95/p99 ack latency, claim/finalize p95 latency, segment density/object PUT count, normal restart hydrate+tail time, tail length, and disk-loss exact reconstruction. Enforce gates from the plan: hot path within 20% of objectlog/inmemory where specified; 100k smoke recovery \u003c=5s and \u003c=1000 tail commands; 10M release-tier recovery \u003c=60s and tail \u003c=max(10000, 0.1% resident). Publish evidence under docs/perf/.",
+    "acceptance": "1. Hybrid smoke performance command passes and writes docs/perf hybrid evidence.\\n2. Hybrid release-tier command for 10M resident items passes or records an explicit blocker with raw logs.\\n3. rg -n \"objectlog/hybrid|10M|recovery|p99|segment\" docs/perf finds the evidence.\\n4. cargo test --workspace --all-features passes.\\n5. cargo fmt --check passes.",
+    "parent": "pqueue-6f4881ef",
+    "labels": [
+      "area:performance",
+      "area:docs",
+      "kind:verification",
+      "plan-2026-06-30",
+      "backend:objectlog-hybrid"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-01T03:33:45.578218088Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "plan-hybrid-sqlite-inmemory-projection"
+    }
+  },
+  "governing": [
+    {
+      "id": "plan-hybrid-sqlite-inmemory-projection",
+      "path": "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md",
+      "title": "Hybrid SQLite + In-Memory Projection Implementation Plan"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260701T033345-fdb4b473",
+    "prompt": ".ddx/executions/20260701T033345-fdb4b473/prompt.md",
+    "manifest": ".ddx/executions/20260701T033345-fdb4b473/manifest.json",
+    "result": ".ddx/executions/20260701T033345-fdb4b473/result.json",
+    "checks": ".ddx/executions/20260701T033345-fdb4b473/checks.json",
+    "usage": ".ddx/executions/20260701T033345-fdb4b473/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-1363098f-20260701T033345-fdb4b473"
+  },
+  "prompt_sha": "ca9d52fddbd453f1f5758ac8747208caefe4efabdc7b6e191390197d28c2429a"
+}
