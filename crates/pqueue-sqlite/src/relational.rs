@@ -68,8 +68,8 @@ use pqueue_engine::{
     PayloadUpdate, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
     PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
-    TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestOutcome, SetGatesCommand,
+    SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
     WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
     validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
     validate_purge_force,
@@ -253,6 +253,24 @@ CREATE TABLE IF NOT EXISTS pqueue_item_index (
 );
 CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
     ON pqueue_item_index (tenant_id, queue_id, index_name, index_key);
+-- objectlog/hybrid-async logical checkpoint lineage (bead pqueue-16b85e28, plan §Snapshot Authority).
+-- The async SQLite checkpoint worker records, per queue, the object-log lineage the durable SQLite
+-- projection was last advanced from: the LOGICAL high-water it reached (relational_cursor.next_seq at
+-- checkpoint time), the object-log assignment epoch, and an opaque object-log segment/manifest reference
+-- (stored verbatim — pqueue-sqlite does not depend on pqueue-objectlog types). This is LOGICAL high-water
+-- lineage, deliberately distinct from the PHYSICAL SQLite WAL checkpoint (PRAGMA wal_checkpoint), which is
+-- a storage-file concern that reclaims WAL frames and never advances the command cursor. The row is
+-- upserted in the SAME transaction that advances the logical high-water, so recorded lineage can never be
+-- ahead of durably materialized projection state.
+CREATE TABLE IF NOT EXISTS pqueue_checkpoint_lineage (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL,
+    logical_high_water INTEGER NOT NULL,   -- relational_cursor.next_seq reached by this checkpoint
+    source_epoch INTEGER NOT NULL,         -- object-log assignment epoch the batch was committed under
+    source_segment TEXT NOT NULL,          -- opaque object-log segment/manifest reference
+    applied_commands INTEGER NOT NULL,     -- cumulative commands absorbed into this checkpoint lineage
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -3507,6 +3525,397 @@ impl SqliteProjectionStore {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Async SQLite logical checkpoint store (bead pqueue-16b85e28, backend:objectlog-hybrid-async)
+// ---------------------------------------------------------------------------
+
+/// Object-log lineage for one async checkpoint: which committed object-log segment/manifest the durable
+/// SQLite logical high-water was advanced from. `source_segment` is an opaque object-log reference (a
+/// segment object name or manifest id) stored verbatim — pqueue-sqlite deliberately does NOT depend on
+/// pqueue-objectlog types, so lineage crosses the crate boundary as opaque metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointLineage {
+    pub source_epoch: u64,
+    pub source_segment: String,
+}
+
+/// Durable progress recorded by the async SQLite checkpoint worker: the LOGICAL high-water (the next
+/// command sequence the projection expects, `relational_cursor.next_seq`) plus the cumulative object-log
+/// lineage it was derived from. This is distinct from the PHYSICAL SQLite WAL checkpoint (see
+/// [`SqliteCheckpointStore::wal_checkpoint`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointProgress {
+    /// `relational_cursor.next_seq`: the next command sequence the projection expects. `None` until the
+    /// queue's projection row exists.
+    pub logical_high_water: Option<u64>,
+    /// Cumulative object-log commands absorbed into the recorded lineage.
+    pub applied_commands: u64,
+    /// The object-log lineage recorded for the last checkpoint, if any.
+    pub lineage: Option<CheckpointLineage>,
+}
+
+/// Physical SQLite WAL checkpoint result (`PRAGMA wal_checkpoint`). Deliberately SEPARATE from the logical
+/// high-water: this reclaims WAL frames into the main database file; it does NOT advance the logical
+/// command cursor or mutate the projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalCheckpointStats {
+    /// `1` if the checkpoint could not run to completion because another connection held a lock.
+    pub busy: i64,
+    /// Total frames in the WAL before the checkpoint.
+    pub wal_frames: i64,
+    /// Frames successfully moved into the database file.
+    pub checkpointed_frames: i64,
+}
+
+/// The async SQLite **logical checkpoint** store for the `objectlog/hybrid-async` profile.
+///
+/// The object log is the durability authority; this store is the owner-local restart accelerator. Off the
+/// hot request path, the checkpoint worker consumes committed object-log entries IN ORDER and, for each
+/// batch, in ONE SQLite transaction: applies every command to the durable projection, persists request-id
+/// idempotency/outcome rows so a committed-but-unreturned push converges after restart, records the
+/// object-log lineage, and advances the LOGICAL high-water LAST. Because the high-water advances inside the
+/// same transaction, a crash mid-checkpoint leaves the cursor behind the object-log head, so the
+/// uncommitted tail is replayed (never skipped) on recovery.
+///
+/// The LOGICAL high-water (which command sequence is durably materialized) is distinct from the PHYSICAL
+/// SQLite WAL checkpoint (which reclaims WAL frames): [`Self::wal_checkpoint`] is a storage-file concern
+/// that never advances the command cursor.
+pub struct SqliteCheckpointStore {
+    store: SqliteProjectionStore,
+}
+
+impl SqliteCheckpointStore {
+    /// Open (or create) a durable checkpoint store at `path`.
+    pub fn open(path: &str) -> EngineResult<Self> {
+        Ok(Self::new(SqliteProjectionStore::open(path)?))
+    }
+
+    /// An ephemeral `:memory:` checkpoint store for tests.
+    pub fn in_memory() -> EngineResult<Self> {
+        Ok(Self::new(SqliteProjectionStore::in_memory()?))
+    }
+
+    pub fn new(store: SqliteProjectionStore) -> Self {
+        Self { store }
+    }
+
+    /// The wrapped durable projection store (hot reads / image export for hydration).
+    pub fn projection(&self) -> &SqliteProjectionStore {
+        &self.store
+    }
+
+    /// Create or validate the queue projection metadata this worker checkpoints into.
+    pub fn create_queue_projection(
+        &self,
+        definition: QueueDefinition,
+    ) -> EngineResult<CreateQueueOutcome> {
+        self.store.create_queue_projection(definition)
+    }
+
+    /// Consume a batch of committed object-log entries for `shard` IN ORDER and checkpoint them durably.
+    ///
+    /// In ONE SQLite transaction: apply each command to the projection, persist request-id
+    /// idempotency/outcome rows, upsert the object-log `lineage`, and advance the LOGICAL high-water LAST.
+    /// `positions[i]` is the object-log position of `envelopes[i]`; positions MUST be contiguous from the
+    /// queue's current logical high-water (an already-applied prefix is skipped idempotently, an
+    /// out-of-order position is a hard gap error). Every position MUST belong to `shard`.
+    pub async fn checkpoint(
+        &self,
+        shard: &QueueKey,
+        positions: &[CommandPosition],
+        envelopes: &[CommandEnvelope],
+        lineage: &CheckpointLineage,
+    ) -> EngineResult<CheckpointProgress> {
+        if positions.len() != envelopes.len() {
+            return Err(EngineError::Storage(
+                "checkpoint: positions/envelopes length mismatch".into(),
+            ));
+        }
+        let mut g = self.store.inner.lock().expect("projection store poisoned");
+        checkpoint_batch_sql(&mut g, shard, positions, envelopes, lineage)
+    }
+
+    /// The durable LOGICAL high-water for `shard`: the next command sequence the projection expects
+    /// (`relational_cursor.next_seq`). `None` if the queue has no projection row yet. This is the cursor a
+    /// restart resumes the object-log tail from — NOT the physical WAL checkpoint.
+    pub fn logical_high_water(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+        let g = self.store.inner.lock().expect("projection store poisoned");
+        recovery_high_water_sql(&g.conn, shard)
+    }
+
+    /// The recorded checkpoint progress (logical high-water + cumulative object-log lineage) for `shard`.
+    pub fn progress(&self, shard: &QueueKey) -> EngineResult<CheckpointProgress> {
+        let g = self.store.inner.lock().expect("projection store poisoned");
+        let logical_high_water = recovery_high_water_sql(&g.conn, shard)?;
+        let lineage = read_checkpoint_lineage_sql(&g.conn, shard)?;
+        Ok(CheckpointProgress {
+            logical_high_water,
+            applied_commands: lineage.as_ref().map(|(_, n)| *n).unwrap_or(0),
+            lineage: lineage.map(|(l, _)| l),
+        })
+    }
+
+    /// Replay the durably persisted push response ids for `(shard, request_id)`, or `None` if no
+    /// idempotency row survives (unknown request id or expired). This is the restart-convergence seam: a
+    /// same-body retry after a crash returns the original ids without re-appending to the object log.
+    pub fn replay_push(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+    ) -> EngineResult<Option<Vec<ItemId>>> {
+        let g = self.store.inner.lock().expect("projection store poisoned");
+        read_push_replay_sql(&g.conn, shard, request_id)
+    }
+
+    /// Run a PHYSICAL SQLite WAL checkpoint (`PRAGMA wal_checkpoint(TRUNCATE)`): reclaim WAL frames into
+    /// the main database file. This is a storage-file concern, DELIBERATELY distinct from advancing the
+    /// logical high-water — it never changes the command cursor or the projection. A no-op on `:memory:` /
+    /// non-WAL databases (reports zero frames).
+    pub async fn wal_checkpoint(&self) -> EngineResult<WalCheckpointStats> {
+        let g = self.store.inner.lock().expect("projection store poisoned");
+        let (busy, wal_frames, checkpointed_frames) =
+            st(g.conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                }))?;
+        Ok(WalCheckpointStats {
+            busy,
+            wal_frames,
+            checkpointed_frames,
+        })
+    }
+}
+
+/// The persisted LOGICAL high-water for `shard`: `relational_cursor.next_seq`, or `None` if the queue has
+/// no projection row yet.
+fn recovery_high_water_sql(conn: &Connection, shard: &QueueKey) -> EngineResult<Option<u64>> {
+    let (t, q) = parts(shard);
+    let next_seq: Option<i64> = st(conn
+        .query_row(
+            "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?;
+    Ok(next_seq.map(|n| n as u64))
+}
+
+/// Read the recorded object-log lineage (+ cumulative applied-command count) for `shard`, if any.
+fn read_checkpoint_lineage_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<Option<(CheckpointLineage, u64)>> {
+    let (t, q) = parts(shard);
+    let row: Option<(i64, String, i64)> = st(conn
+        .query_row(
+            "SELECT source_epoch, source_segment, applied_commands \
+             FROM pqueue_checkpoint_lineage WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional())?;
+    Ok(row.map(|(epoch, segment, applied)| {
+        (
+            CheckpointLineage {
+                source_epoch: epoch as u64,
+                source_segment: segment,
+            },
+            applied as u64,
+        )
+    }))
+}
+
+/// Read the durably persisted push response ids for `(shard, request_id)`, or `None` if absent.
+fn read_push_replay_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    request_id: &RequestId,
+) -> EngineResult<Option<Vec<ItemId>>> {
+    let (t, q) = parts(shard);
+    let payload: Option<String> = st(conn
+        .query_row(
+            "SELECT response_payload FROM pqueue_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![t, q, IDEMPOTENCY_OPERATION_PUSH, request_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional())?;
+    payload.map(item_ids_from_json).transpose()
+}
+
+/// Persist the durable request-id idempotency/outcome row for a committed request-id-bearing command, so a
+/// committed-but-unreturned retry converges after restart (plan §Request-Id Replay). Only push commands
+/// currently carry replayable outcomes; a command with no `request_id`, or one missing replay metadata, is
+/// skipped (nothing durable to replay). Written inside the caller's checkpoint transaction.
+fn persist_request_outcome_sql(
+    tx: &Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    env: &CommandEnvelope,
+    pos: &CommandPosition,
+) -> EngineResult<()> {
+    let Some(request_id) = env.request_id.as_ref() else {
+        return Ok(());
+    };
+    let (Some(fingerprint), Some(RequestOutcome::Push { item_ids })) =
+        (env.request_fingerprint, env.request_outcome.as_ref())
+    else {
+        return Ok(());
+    };
+    let expires_at = request_expires_at(queues, shard, env.created_at)?;
+    record_request_idempotency(
+        tx,
+        shard,
+        IDEMPOTENCY_OPERATION_PUSH,
+        request_id,
+        &fingerprint.to_be_bytes(),
+        item_ids,
+        std::slice::from_ref(pos),
+        env.created_at,
+        expires_at,
+    )
+}
+
+/// Single-shard checkpoint apply (bead pqueue-16b85e28): apply an ordered batch of already-committed
+/// object-log commands, persist request-id idempotency rows, record object-log lineage, and advance the
+/// LOGICAL high-water LAST — all in ONE transaction. Mirrors [`apply_committed_batch_sql`] but is bound to
+/// a single shard so it can additionally stamp that queue's checkpoint-lineage row.
+fn checkpoint_batch_sql(
+    g: &mut Inner,
+    shard: &QueueKey,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    lineage: &CheckpointLineage,
+) -> EngineResult<CheckpointProgress> {
+    if !g.queues.contains_key(shard) {
+        return Err(EngineError::NotFound);
+    }
+    for pos in positions {
+        if &pos.queue != shard {
+            return Err(EngineError::Storage(
+                "checkpoint: position does not belong to the checkpointed shard".into(),
+            ));
+        }
+    }
+    if positions.is_empty() {
+        // Nothing to checkpoint; report current durable progress without opening a transaction.
+        let logical_high_water = recovery_high_water_sql(&g.conn, shard)?;
+        let lineage_row = read_checkpoint_lineage_sql(&g.conn, shard)?;
+        return Ok(CheckpointProgress {
+            logical_high_water,
+            applied_commands: lineage_row.as_ref().map(|(_, n)| *n).unwrap_or(0),
+            lineage: lineage_row.map(|(l, _)| l),
+        });
+    }
+    let Inner {
+        conn,
+        queues,
+        grouped_shards,
+        live_tokens,
+        ..
+    } = g;
+    let (t, q) = parts(shard);
+    let tx = st(conn.transaction())?;
+    let mut cursor: i64 = st(tx
+        .query_row(
+            "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?
+    .ok_or(EngineError::NotFound)?;
+    let mut max_epoch = lineage.source_epoch as i64;
+    let mut token_ops = Vec::new();
+    let mut applied_this_batch: u64 = 0;
+    for (pos, env) in positions.iter().zip(envelopes) {
+        let incoming = pos.sequence as i64;
+        if incoming < cursor {
+            // Idempotent replay of an already-absorbed prefix.
+            continue;
+        }
+        if incoming > cursor {
+            return Err(EngineError::Storage(format!(
+                "sqlite checkpoint replay gap for {}:{}: expected sequence {cursor}, got {incoming}",
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str()
+            )));
+        }
+        apply_command_sql(
+            &tx,
+            queues,
+            grouped_shards,
+            &mut token_ops,
+            shard,
+            pos.sequence,
+            env.created_at,
+            &env.command,
+        )?;
+        // Persist request-id idempotency/outcome BEFORE the cursor advance, so the row lands under the
+        // same high-water it belongs to.
+        persist_request_outcome_sql(&tx, queues, shard, env, pos)?;
+        cursor = incoming
+            .checked_add(1)
+            .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+        let e = pos.backend_epoch as i64;
+        if e > max_epoch {
+            max_epoch = e;
+        }
+        applied_this_batch += 1;
+    }
+    // Object-log lineage: cumulative applied-command count + the segment/manifest this high-water derives
+    // from. Upserted in the SAME transaction, BEFORE the high-water write.
+    let prior_applied: i64 = st(tx
+        .query_row(
+            "SELECT applied_commands FROM pqueue_checkpoint_lineage WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?
+    .unwrap_or(0);
+    let total_applied = prior_applied + applied_this_batch as i64;
+    let updated_at = ts_nanos(envelopes[envelopes.len() - 1].created_at);
+    st(tx.execute(
+        "INSERT INTO pqueue_checkpoint_lineage \
+         (tenant,queue,logical_high_water,source_epoch,source_segment,applied_commands,updated_at) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7) \
+         ON CONFLICT(tenant,queue) DO UPDATE SET \
+          logical_high_water=excluded.logical_high_water, \
+          source_epoch=excluded.source_epoch, \
+          source_segment=excluded.source_segment, \
+          applied_commands=excluded.applied_commands, \
+          updated_at=excluded.updated_at",
+        params![
+            t,
+            q,
+            cursor,
+            lineage.source_epoch as i64,
+            lineage.source_segment,
+            total_applied,
+            updated_at,
+        ],
+    ))?;
+    // LOGICAL high-water LAST: advance the command cursor (and the durable ownership epoch) as the final
+    // write before commit, so the cursor can never be ahead of the applied projection + persisted lineage.
+    st(tx.execute(
+        "UPDATE relational_cursor SET \
+         next_seq=?3, \
+         assignment_epoch=CASE WHEN assignment_epoch<?4 THEN ?4 ELSE assignment_epoch END \
+         WHERE tenant=?1 AND queue=?2",
+        params![t, q, cursor, max_epoch],
+    ))?;
+    st(tx.commit())?;
+    apply_token_ops(live_tokens, token_ops);
+    Ok(CheckpointProgress {
+        logical_high_water: Some(cursor as u64),
+        applied_commands: total_applied as u64,
+        lineage: Some(lineage.clone()),
+    })
 }
 
 fn open_inner(conn: Connection) -> EngineResult<Inner> {
