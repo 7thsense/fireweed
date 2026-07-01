@@ -336,6 +336,21 @@ opportunistic per-command fragments:
 | WAL/fsync boundary | SQLite WAL frames, checkpoint state, page-cache contents, and fsync policy are local durability implementation details beneath the projection store. They MUST NOT be reported as `sqlite_high_water`, MUST NOT let recovery skip commands whose logical effects are not applied, and MUST NOT authorize object-log segment trimming. |
 | Lag failure | If the worker cannot advance ordered batching within `hybrid_async_sqlite_apply_lag`, the store MUST keep serving from memory only when the object log proves memory completeness; recovery/high-water claims fail closed until ordered replay catches up or recovery replays from an earlier authoritative source. |
 
+#### Async lineage validation (`objectlog/hybrid-async`, normative)
+
+Before `objectlog/hybrid-async` may advertise a queue as recovered, compacted, or
+release-ready, it MUST validate one lineage from durable log through both
+projection images:
+
+| Element | Rule |
+|---------|------|
+| Manifest to segment | Every active manifest entry MUST name an existing segment whose checksum, `[first_sequence, last_sequence]`, `batch_sequence`, and `assignment_epoch` match the manifest metadata. Missing, truncated, or checksum-mismatched segments fail recovery closed. |
+| Segment to command sequence | Commands inside retained segments MUST be contiguous and monotonic by `sequence`; per-command checksums and `request_id`/`request_fingerprint` metadata MUST be validated before replay or idempotency cache reconstruction. Gaps, overlaps, or divergent fingerprints for the same `request_id` fail recovery closed. |
+| Command sequence to memory | The hot in-memory projection MUST expose a `ProjectionImage` lineage marker containing the highest applied command `sequence` and the manifest tail it was built from. After success, memory MUST cover every acknowledged command through the operation's own sequence even when SQLite lags. |
+| Command sequence to SQLite | SQLite `ProjectionImage` export MUST include `sqlite_high_water`, the covered batch sequence range, projection schema version, and source manifest tail. It is valid only if its applied command prefix is contiguous from the retained recovery base through `sqlite_high_water`. |
+| Cross-image equality | For a shared prefix, memory and SQLite images MUST agree on queue definition, item lifecycle, leases, secondary indexes, side records, instance fences, pause/gate state, metrics, request-id replay records, client item-key retention records, and counters. A mismatch poisons the local projection and requires replay from an authoritative object-log source. |
+| Release evidence | The release ledger for `objectlog/hybrid-async` MUST record the manifest tail, segment sequence ranges, applied `batch_sequence` values, `sqlite_high_water`, memory image high-water, idempotency replay record count, item-key retention record count, and the computed retention frontier. |
+
 ## Hybrid ProjectionImage Recovery (normative)
 
 Hybrid recovery MUST avoid full-genesis replay on ordinary owner-local restart
@@ -484,6 +499,33 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 | Idempotency retention | Request-idempotency and item-key convergence records expire per `request_id_retention_ms` / `client_item_key_retention_ms` (API-001), enforced in the SQLite projection; expired records MUST NOT be required for any non-expired segment's replay. |
 | Manifest retention | Manifest entries (including epoch fence records) for expired segments MAY be compacted, but the manifest MUST retain enough tail to validate the active recovery window and the monotonic `sequence`/epoch invariants. |
 | Snapshot retention | At least the most recent committed snapshot whose recovery window has not expired MUST be retained at all times so recovery is always possible. |
+
+For `objectlog/hybrid-async`, segment, manifest, snapshot, idempotency, and
+item-key expiry share one retention frontier. The implementation MUST compute
+the deletion frontier as the minimum of:
+
+1. the highest command sequence fully covered by a committed object-store
+   snapshot whose `log_recovery_window_ms` has elapsed;
+2. the oldest command sequence still required by the active manifest tail needed
+   to validate monotonic sequence and epoch lineage;
+3. the oldest command sequence that may still be needed to resolve an unexpired
+   `request_id` replay, including committed-but-unreturned and response-lost
+   async outcomes;
+4. the oldest command sequence that may still be needed to enforce unexpired
+   `client_item_key` convergence/tombstone retention;
+5. for async mode, `sqlite_high_water - hybrid_async_sqlite_apply_lag` only when
+   ordered SQLite apply is healthy, or no advancement at all while lag is
+   over-budget, failed, or lineage validation is incomplete.
+
+The object log MAY delete only segments whose entire sequence range is below
+that minimum frontier and whose lineage has been validated through manifest,
+segment, memory image, and SQLite image. Async outcome retention MUST keep the
+material needed to return or reconstruct the original response for every
+unexpired `request_id`; deleting the segment that contains the original command
+is legal only after an equivalent durable replay record and any required
+item-key tombstone survive beyond the same frontier. WAL checkpoint/fsync state,
+page-cache contents, and local SQLite high-water never move this frontier by
+themselves.
 
 ## Configuration Validation (normative)
 
@@ -653,7 +695,14 @@ The following cases define the required evidence surface:
   operator-style mutations; same-body retry returns the original result without
   append, different-body retry returns `request-id-conflict`.
 - Hybrid segment retention: prove local SQLite high-water alone never authorizes
-  object-log segment expiry; disk-loss recovery succeeds from retained log.
+  object-log segment expiry; compute the retention frontier as the minimum of
+  committed snapshot coverage, active manifest tail, request-id retention,
+  item-key retention, and async SQLite lag; disk-loss recovery succeeds from
+  retained log.
+- Hybrid async lineage validation: validate manifest entry -> segment checksum
+  and sequence range -> command `request_id` fingerprints -> memory
+  `ProjectionImage` -> SQLite `ProjectionImage`/`sqlite_high_water`; fail closed
+  on gaps, overlaps, divergent fingerprints, or cross-image mismatches.
 - Response / apply ordering: an operation's own committed effect is visible to the same caller's
   immediate follow-up read (self read-after-write); an unrelated reader's apply-lag for a concurrent
   command is bounded by the configured budget; a new owner serves reads only after replaying the log tail.

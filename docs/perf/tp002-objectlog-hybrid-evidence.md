@@ -22,6 +22,14 @@ partial batch restart, and proof that readers/claims/metrics are served from
 memory while SQLite lags. `sqlite_high_water` is a logical high-water for
 applied commands only; SQLite WAL, checkpoint, page-cache, and fsync state are
 local durability details and never authorize object-log trimming.
+The async evidence row must additionally include lineage validation from
+manifest entry to segment checksum/range, command `request_id` fingerprint,
+memory `ProjectionImage`, and SQLite `ProjectionImage`; it must report the
+retention frontier computed from committed snapshot coverage, active manifest
+tail, request_id outcome retention, client item-key retention, and async SQLite
+lag. A run that cannot prove retained outcome replay records through
+`request_id_retention_ms`, or that advances retention from local SQLite
+high-water alone, is not release evidence.
 
 ## Smoke command
 
@@ -87,7 +95,12 @@ Release gate: `objectlog/hybrid-strict` hot path must be within 20% of
 unknown-outcome replay contract before being cited as release evidence. Its
 ledger must include ordered batching fields (`batch_sequence`, covered command
 range, `sqlite_high_water`, replay count) and must show WAL/fsync/checkpoint
-state is not used as a logical high-water or retention authority.
+state is not used as a logical high-water or retention authority. It must also
+include lineage fields (`manifest_tail`, segment range/checksum,
+`request_id_fingerprint_count`, memory image high-water, SQLite image
+high-water) plus `retention_frontier` inputs for committed snapshots, active
+manifest tail, request_id outcome retention, client item-key retention, and
+async SQLite lag.
 
 Blocker and raw command output:
 `docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log`.
