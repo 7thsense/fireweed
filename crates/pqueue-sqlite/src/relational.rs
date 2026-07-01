@@ -3242,6 +3242,13 @@ pub struct SqliteProjectionStore {
 /// pre-commit validation use only the in-memory projection after `ensure_shard` has hydrated it from
 /// SQLite's exported image. If SQLite advances but memory rejects the same batch, the store is poisoned so
 /// the current process cannot serve or mutate from a memory image that is behind the durable cursor.
+/// Default cap on how many deferred commands one [`ProjectionStore::flush_deferred`] call applies
+/// (TD flush-chunking). `flush_deferred` runs under the composed backend's unit-of-work mutex, so an
+/// unbounded batch there blocks every concurrent push/claim for as long as the whole backlog takes to
+/// apply. Bounding the per-call batch bounds that worst-case hold time; the periodic flusher cadence
+/// (`spawn_hybrid_flusher`, 250ms) drains the remainder over subsequent ticks.
+pub const DEFAULT_DEFERRED_FLUSH_CHUNK: usize = 2_000;
+
 pub struct HybridProjectionStore {
     sqlite: SqliteProjectionStore,
     memory: InMemoryProjection,
@@ -3249,6 +3256,7 @@ pub struct HybridProjectionStore {
     memory_next_seq: HashMap<QueueKey, u64>,
     deferred: VecDeque<(CommandPosition, CommandEnvelope)>,
     deferred_commands: usize,
+    deferred_flush_chunk: usize,
     poisoned: Option<String>,
 }
 
@@ -3269,6 +3277,7 @@ impl HybridProjectionStore {
             memory_next_seq: HashMap::new(),
             deferred: VecDeque::new(),
             deferred_commands: 0,
+            deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             poisoned: None,
         }
     }
@@ -3282,8 +3291,17 @@ impl HybridProjectionStore {
             memory_next_seq: HashMap::new(),
             deferred: VecDeque::new(),
             deferred_commands: 0,
+            deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             poisoned: None,
         }
+    }
+
+    /// Bound how many deferred commands a single `flush_deferred` call applies. Test/tuning seam for
+    /// the flush-chunking bound (defaults to [`DEFAULT_DEFERRED_FLUSH_CHUNK`]); `0` is treated as `1`
+    /// so a flush always makes forward progress.
+    pub fn with_deferred_flush_chunk(mut self, chunk: usize) -> Self {
+        self.deferred_flush_chunk = chunk.max(1);
+        self
     }
 
     pub fn sqlite(&self) -> &SqliteProjectionStore {
@@ -7008,19 +7026,33 @@ impl ProjectionStore for HybridProjectionStore {
         self.apply_durable_then_memory(positions, commands)
     }
 
+    /// Apply at most [`Self::deferred_flush_chunk`] deferred commands, oldest-first, then return —
+    /// leaving any remainder queued for the next call. This runs under the composed backend's
+    /// unit-of-work mutex, so bounding the batch bounds how long one call can block concurrent
+    /// push/claim callers waiting on the same lock; the periodic flusher cadence drains a large
+    /// backlog over several calls instead of one unbounded transaction.
     fn flush_deferred(&mut self) -> EngineResult<()> {
         self.check_healthy()?;
         if self.deferred.is_empty() {
             return Ok(());
         }
 
-        let positions: Vec<CommandPosition> =
-            self.deferred.iter().map(|(pos, _)| pos.clone()).collect();
-        let commands: Vec<CommandEnvelope> =
-            self.deferred.iter().map(|(_, env)| env.clone()).collect();
+        let take = self.deferred.len().min(self.deferred_flush_chunk);
+        let positions: Vec<CommandPosition> = self
+            .deferred
+            .iter()
+            .take(take)
+            .map(|(pos, _)| pos.clone())
+            .collect();
+        let commands: Vec<CommandEnvelope> = self
+            .deferred
+            .iter()
+            .take(take)
+            .map(|(_, env)| env.clone())
+            .collect();
         self.sqlite.apply_committed_batch(&positions, &commands)?;
-        self.deferred.clear();
-        self.deferred_commands = 0;
+        self.deferred.drain(..take);
+        self.deferred_commands = self.deferred.len();
         Ok(())
     }
 

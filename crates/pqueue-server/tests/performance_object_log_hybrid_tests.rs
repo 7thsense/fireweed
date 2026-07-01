@@ -2510,6 +2510,109 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
     }
 }
 
+/// pqueue-960b29b4: `flush_deferred` must bound one call's batch instead of draining the whole
+/// backlog, so a background flush can never hold the composed backend mutex for an unbounded batch
+/// (the 100k hot-path tail regression). Proves: (1) a single flush with a small configured chunk
+/// leaves the remainder queued (partial), and (2) repeated flushes catch the backlog up to exactly
+/// the applied prefix, with no gap/duplicate-apply error along the way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn performance_object_log_hybrid_deferred_flush_chunking() {
+    const CHUNK: usize = 3;
+    const PUSHES: usize = 10;
+
+    let root = scratch("hybrid-deferred-flush-chunking-obj");
+    let projection = scratch("hybrid-deferred-flush-chunking.db");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&projection);
+    let cfg = SegmentConfig::new(1, 60_000).expect("valid segment config");
+    let def = qdef("hybrid-deferred-flush-chunking", 8);
+    let test_shard = shard(&def);
+
+    let backend = Arc::new(
+        ComposedBackend::new(
+            ObjectLog::open_group_commit(&root, cfg).expect("open object log"),
+            HybridProjectionStore::open(projection.to_str().unwrap())
+                .expect("open projection")
+                .with_deferred_flush_chunk(CHUNK),
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true)
+        .recover()
+        .expect("recover fresh backend"),
+    );
+    backend
+        .create_queue(def.clone())
+        .await
+        .expect("create queue");
+
+    // Each push seals (target_bytes=1) and applies to memory synchronously, deferring exactly one
+    // SQLite checkpoint command per push.
+    for i in 0..PUSHES {
+        backend
+            .push(
+                &test_shard,
+                vec![spec(format!("chunk-{i}"))],
+                ts(i as i64),
+                None,
+            )
+            .await
+            .expect("push");
+    }
+    assert_eq!(
+        backend.with_projection(|p| p.deferred_command_count()),
+        PUSHES,
+        "every sealed push should be deferred before any flush runs"
+    );
+
+    backend
+        .flush_deferred_projection()
+        .expect("first (partial) deferred flush");
+    assert_eq!(
+        backend.with_projection(|p| p.deferred_command_count()),
+        PUSHES - CHUNK,
+        "one flush call must drain only one bounded chunk, proving the composed backend mutex is \
+         not held for the whole backlog"
+    );
+    assert_eq!(
+        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(CHUNK as u64),
+        "sqlite high-water should advance by exactly one chunk after the partial flush"
+    );
+
+    let mut flushes = 1usize;
+    while backend.with_projection(|p| p.deferred_command_count()) > 0 {
+        backend
+            .flush_deferred_projection()
+            .expect("catch-up deferred flush");
+        flushes += 1;
+        assert!(
+            flushes <= PUSHES.div_ceil(CHUNK) + 1,
+            "chunked catch-up must converge within a bounded number of flush calls"
+        );
+    }
+    assert_eq!(backend.with_projection(|p| p.deferred_command_count()), 0);
+    assert_eq!(
+        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(PUSHES as u64),
+        "after catch-up sqlite must reflect exactly the applied prefix"
+    );
+
+    // A flush against an already-empty backlog is a no-op, not a re-apply: high-water is unchanged.
+    backend
+        .flush_deferred_projection()
+        .expect("flush on an empty backlog is a no-op");
+    assert_eq!(
+        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(PUSHES as u64),
+        "flushing an empty backlog must not re-apply or advance high-water"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", projection.display()));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "10M resident release-tier evidence; run explicitly in a provisioned perf lane"]
 async fn performance_object_log_hybrid_release_10m() {
