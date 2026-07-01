@@ -64,15 +64,15 @@ use pqueue_engine::{
     CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry, ControlPlaneStore,
     CreateQueueOutcome, DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError,
     EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
-    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter,
-    PayloadUpdate, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
-    PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestOutcome, SetGatesCommand,
-    SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
-    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
-    validate_purge_force,
+    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView,
+    LogLineageIdentity, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
+    RequestOutcome, SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
+    compile_entity_schema, project_scopes, validate_claim_compatibility, validate_entity,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
@@ -3502,6 +3502,15 @@ impl SqliteProjectionStore {
         export_projection_image_sql(&g.conn, shard)
     }
 
+    /// The object-log lineage the async checkpoint worker durably recorded for `shard`, or `None` if no
+    /// lineage row exists (a queue whose projection was materialized synchronously, or never checkpointed).
+    /// Recovery cross-validates this against the log identity via
+    /// [`HybridProjectionStore::validate_recovery_lineage`].
+    pub fn checkpoint_lineage(&self, shard: &QueueKey) -> EngineResult<Option<CheckpointLineage>> {
+        let g = self.inner.lock().expect("projection store poisoned");
+        Ok(read_checkpoint_lineage_sql(&g.conn, shard)?.map(|(l, _)| l))
+    }
+
     /// Restart recovery for the object-log backends' item-id mint counter: seed `counters` past every item
     /// id already materialized in the snapshot (`pqueue_items`), so a push after a snapshot-tail reopen never
     /// re-mints an id that the full-genesis replay would have observed. Safe because the object_log_sqlite
@@ -6532,6 +6541,58 @@ impl ProjectionStore for HybridProjectionStore {
         self.require_hydrated(shard)?;
         let next = self.sqlite.recovery_high_water(shard)?;
         Ok(next.and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1))))
+    }
+
+    /// Fail closed unless the durable SQLite image provably descends from the object log it is about to be
+    /// replayed against (TD-004 async lineage validation, "Manifest to segment" / "Command sequence to
+    /// SQLite" rows). Two mismatches poison the local projection so the composition never serves a divergent
+    /// image:
+    ///
+    /// 1. **Manifest generation / epoch** — a recorded checkpoint lineage whose `source_epoch` is NEWER than
+    ///    the log's current `assignment_epoch` cannot descend from this log (a rolled-back or foreign log,
+    ///    or an image restored over the wrong namespace).
+    /// 2. **Segment chain / high-water identity** — a SQLite logical high-water AHEAD of the log's committed
+    ///    head means the projection absorbed commands the durable log does not contain; its high-water can
+    ///    never be a safe replay-skip point.
+    ///
+    /// The lenient direction is intentional: a recorded epoch OLDER than the log's (the log was re-acquired
+    /// at a higher epoch) and a SQLite high-water BEHIND the log's head (async apply lagging) are the normal
+    /// recovery cases — tail replay catches memory up. Only a projection ahead of, or forked from, the log
+    /// fails closed.
+    fn validate_recovery_lineage(&mut self, identity: &LogLineageIdentity) -> EngineResult<()> {
+        self.check_healthy()?;
+        let shard = &identity.shard;
+        let recorded = self.sqlite.checkpoint_lineage(shard)?;
+        let sqlite_next_seq = self.sqlite.recovery_high_water(shard)?.unwrap_or(0);
+        // The exclusive upper bound on any applied prefix: the next sequence the log will assign.
+        let log_next_seq = identity
+            .high_water
+            .as_ref()
+            .map_or(0, |pos| pos.sequence.saturating_add(1));
+
+        if let Some(lineage) = recorded
+            .as_ref()
+            .filter(|l| l.source_epoch > identity.current_epoch)
+        {
+            return self.poison(format!(
+                "hybrid recovery lineage for {}/{} records object-log epoch {} (segment {}) newer than \
+                 the log's current epoch {}; the SQLite image does not descend from this log",
+                shard.tenant_id,
+                shard.queue_id,
+                lineage.source_epoch,
+                lineage.source_segment,
+                identity.current_epoch,
+            ));
+        }
+
+        if sqlite_next_seq > log_next_seq {
+            return self.poison(format!(
+                "hybrid recovery SQLite high-water {} for {}/{} is ahead of the object-log head {}; the \
+                 projection absorbed commands the durable log does not contain",
+                sqlite_next_seq, shard.tenant_id, shard.queue_id, log_next_seq,
+            ));
+        }
+        Ok(())
     }
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {

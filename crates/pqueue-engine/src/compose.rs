@@ -311,6 +311,23 @@ fn ts_to_ms(now: UtcTimestamp) -> i64 {
 // Axis 2: ProjectionStore — the materialized read model
 // ---------------------------------------------------------------------------
 
+/// The object-log's durable identity for one shard, presented to the projection during recovery-on-open so a
+/// hybrid projection can cross-validate its own durably recorded lineage against the log it is about to
+/// replay from (TD-004 "Async lineage validation": manifest/segment/high-water identity). The composition
+/// builds this from the [`LogStore`] axis ([`LogStore::current_epoch`] + [`LogStore::high_water`]) after the
+/// projection has been hydrated but BEFORE any tail replay; a projection whose recorded lineage does not
+/// descend from this identity MUST fail closed rather than serve a divergent image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLineageIdentity {
+    /// The queue namespace (tenant/queue) the log identity is for.
+    pub shard: QueueKey,
+    /// The log's current `assignment_epoch` (the highest epoch any committed manifest entry records).
+    pub current_epoch: u64,
+    /// The log's durable committed head, or `None` for an empty log. `sequence + 1` is the next command
+    /// sequence the log will assign, i.e. the exclusive upper bound on any projection's applied prefix.
+    pub high_water: Option<CommandPosition>,
+}
+
 /// The projection axis: the materialized read model. Exposes the full `ProjectionRead` surface, the
 /// secondary-index queries, the pre-commit VALIDATION helpers the orchestration relies on (so the
 /// post-append `apply` is infallible — commit has no rollback), and the `apply` seam itself.
@@ -465,6 +482,19 @@ pub trait ProjectionStore: Send {
     /// has nothing to replay (its `apply` already wrote durably in the same transaction).
     fn recovery_high_water(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         Ok(None)
+    }
+
+    /// Cross-validate this projection's durably recorded object-log lineage against the log's actual
+    /// `identity` (TD-004 "Async lineage validation") BEFORE the composition advertises this projection's
+    /// high-water as a safe replay-skip point. Called once per durable shard during recovery-on-open, after
+    /// the shard is hydrated but before any object-log tail replay. A hybrid projection whose recorded
+    /// lineage does not descend from the log it is about to replay from — a recorded source epoch newer than
+    /// the log currently records, or a logical high-water ahead of the log's committed head — MUST fail
+    /// closed here (poison + `Storage` error) so the composition never serves from a projection image that
+    /// diverges from the durable log. Default: `Ok` — a projection that records no lineage has nothing to
+    /// validate.
+    fn validate_recovery_lineage(&mut self, _identity: &LogLineageIdentity) -> EngineResult<()> {
+        Ok(())
     }
 
     /// Enumerate the durable queue definitions this projection persists, for recovery-on-open. Default: empty
@@ -903,6 +933,16 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             projection.ensure_shard(&def)?;
             // Seed counters from the durable projection snapshot (no-op for the in-memory projection).
             projection.restore_counters(&key, &self.counters)?;
+            // Cross-validate the (now hydrated) durable projection's recorded object-log lineage against the
+            // log's actual identity (TD-004 async lineage validation), BEFORE trusting its high-water as a
+            // replay-skip point. A hybrid projection whose recorded lineage does not descend from this log
+            // fails closed here (the in-memory / relational projections record no lineage → no-op default).
+            let identity = LogLineageIdentity {
+                shard: key.clone(),
+                current_epoch: log.current_epoch(&key)?,
+                high_water: log.high_water(&key)?,
+            };
+            projection.validate_recovery_lineage(&identity)?;
             if self.durability == DurabilityClass::EventualApply {
                 Self::rebuild_push_idempotency_from_log(
                     log,
