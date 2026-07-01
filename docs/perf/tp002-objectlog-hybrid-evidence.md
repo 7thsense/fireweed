@@ -71,3 +71,35 @@ Release gate: `objectlog/hybrid` hot path must be within 20% of
 
 Blocker and raw command output:
 `docs/perf/evidence/performance_object_log_hybrid_release_10m.blocker.log`.
+
+## 10k release-lane preflight
+
+After the `v0.6.0` release, the release-tier lane was run with a smaller
+resident count before attempting the full 10M run:
+
+```text
+PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 \
+  PQUEUE_HYBRID_RESIDENT=10000 PQUEUE_HYBRID_LOAD_BATCH=1000 \
+  PQUEUE_HYBRID_CLAIM_BATCH=1000 \
+  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+  performance_object_log_hybrid_release_10m -- --ignored --nocapture
+```
+
+Result: **fail**. The release-lane correctness checks completed and wrote
+`docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl`,
+but the test failed its release assertion because `bars_met=false`.
+
+| metric | value |
+|---|---:|
+| resident items | 10,000 |
+| hybrid ack p99 vs objectlog/inmemory | 2.836 |
+| hybrid claim/finalize p95 vs objectlog/inmemory | 33.359 |
+| normal restart hydrate + tail | 46.948 ms |
+| normal restart pending after | 10,000 |
+| disk-loss reconstruction wall | 73.986 ms |
+| disk-loss pending after | 10,000 |
+
+This run proves restart and disk-loss reconstruction at 10k resident, but it
+does **not** prove the hybrid hot path at scale. Do not claim multi-million
+hybrid performance until the release-lane hot-path regression is fixed and this
+matrix passes at increasing resident counts through the full 10M run.
