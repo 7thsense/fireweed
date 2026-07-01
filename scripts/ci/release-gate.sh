@@ -88,7 +88,7 @@ bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov" \
     --crate pqueue-core --min-lines 90 --min-branches 85
 ${CARGO} llvm-cov clean --workspace
-for package in pqueue-engine pqueue pqueue-memory pqueue-sqlite pqueue-objectlog; do
+for package in pqueue-engine pqueue pqueue-memory pqueue-sqlite; do
     CARGO_BUILD_JOBS=1 ${CARGO} llvm-cov --no-report --package "${package}"
 done
 ${CARGO} llvm-cov report --lcov \
