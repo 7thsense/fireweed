@@ -237,6 +237,164 @@ struct EligKey {
     group_key: Option<GroupKey>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EligToken {
+    Compact { created_seq: u64, item: ItemId },
+    Rich(EligKey),
+}
+
+impl EligToken {
+    fn rich(self) -> EligKey {
+        match self {
+            EligToken::Compact { created_seq, item } => EligKey {
+                rank: EligRank::Unpriced,
+                created_seq,
+                item,
+                not_before: None,
+                group_key: None,
+            },
+            EligToken::Rich(key) => key,
+        }
+    }
+}
+
+enum EligibilityIndex {
+    Compact(BTreeSet<(u64, ItemId)>),
+    Rich(BTreeSet<EligKey>),
+}
+
+impl EligibilityIndex {
+    fn new() -> Self {
+        Self::Compact(BTreeSet::new())
+    }
+
+    fn can_compact(rec: &ItemRecord) -> bool {
+        rec.priority.is_none() && rec.not_before.is_none() && rec.group_key.is_none()
+    }
+
+    fn token(rec: &ItemRecord, model: &PriorityModel) -> EligToken {
+        if Self::can_compact(rec) {
+            EligToken::Compact {
+                created_seq: rec.created_seq,
+                item: rec.item_id,
+            }
+        } else {
+            EligToken::Rich(elig_key(rec, model))
+        }
+    }
+
+    fn promote(&mut self, items: &FastHashMap<ItemId, ItemRecord>, model: &PriorityModel) {
+        let Self::Compact(compact) = self else {
+            return;
+        };
+        let mut rich = BTreeSet::new();
+        for (_, item) in compact.iter() {
+            if let Some(rec) = items.get(item) {
+                rich.insert(elig_key(rec, model));
+            }
+        }
+        *self = Self::Rich(rich);
+    }
+
+    fn insert(
+        &mut self,
+        rec: &ItemRecord,
+        items: &FastHashMap<ItemId, ItemRecord>,
+        model: &PriorityModel,
+    ) {
+        match self {
+            Self::Compact(compact) if Self::can_compact(rec) => {
+                compact.insert((rec.created_seq, rec.item_id));
+            }
+            Self::Compact(_) => {
+                self.promote(items, model);
+                if let Self::Rich(rich) = self {
+                    rich.insert(elig_key(rec, model));
+                }
+            }
+            Self::Rich(rich) => {
+                rich.insert(elig_key(rec, model));
+            }
+        }
+    }
+
+    fn remove(&mut self, token: EligToken) {
+        match self {
+            Self::Compact(compact) => match token {
+                EligToken::Compact { created_seq, item } => {
+                    compact.remove(&(created_seq, item));
+                }
+                EligToken::Rich(key) => {
+                    compact.remove(&(key.created_seq, key.item));
+                }
+            },
+            Self::Rich(rich) => {
+                rich.remove(&token.rich());
+            }
+        }
+    }
+
+    fn strict_candidates(&self, now: UtcTimestamp, max: usize) -> Vec<ItemId> {
+        match self {
+            Self::Compact(compact) => compact.iter().take(max).map(|(_, item)| *item).collect(),
+            Self::Rich(rich) => rich
+                .iter()
+                .filter(|k| due_at(k, now))
+                .take(max)
+                .map(|k| k.item)
+                .collect(),
+        }
+    }
+
+    fn strict_candidates_after(
+        &self,
+        now: UtcTimestamp,
+        after: &ItemRecord,
+        model: &PriorityModel,
+        max: usize,
+    ) -> Vec<ItemId> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        match self {
+            Self::Compact(compact) if Self::can_compact(after) => compact
+                .range((Excluded(&(after.created_seq, after.item_id)), Unbounded))
+                .take(max)
+                .map(|(_, item)| *item)
+                .collect(),
+            Self::Compact(_) => self.strict_candidates(now, max),
+            Self::Rich(rich) => {
+                let after_key = elig_key(after, model);
+                rich.range((Excluded(&after_key), Unbounded))
+                    .filter(|k| due_at(k, now))
+                    .take(max)
+                    .map(|k| k.item)
+                    .collect()
+            }
+        }
+    }
+
+    fn relaxed_candidates(&self, now: UtcTimestamp, max: usize, bound: u32) -> Vec<ItemId> {
+        match self {
+            Self::Compact(compact) => compact.iter().take(max).map(|(_, item)| *item).collect(),
+            Self::Rich(rich) => {
+                let mut selected: Vec<&EligKey> =
+                    rich.iter().filter(|k| due_at(k, now)).take(max).collect();
+                let block = bound as usize + 1;
+                for chunk in selected.chunks_mut(block) {
+                    chunk.sort_by(|a, b| locality_key(a).cmp(&locality_key(b)));
+                }
+                selected.into_iter().map(|k| k.item).collect()
+            }
+        }
+    }
+
+    fn ordered_items(&self, limit: usize) -> Vec<ItemId> {
+        match self {
+            Self::Compact(compact) => compact.iter().take(limit).map(|(_, item)| *item).collect(),
+            Self::Rich(rich) => rich.iter().take(limit).map(|key| key.item).collect(),
+        }
+    }
+}
+
 fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
     let rank = match &rec.priority {
         Some(p) => EligRank::Priced(priority_sort(p, model)),
@@ -569,7 +727,7 @@ pub fn commit(
 pub struct ProjectionData {
     items: FastHashMap<ItemId, ItemRecord>,
     by_key: FastHashMap<ClientItemKey, ItemId>,
-    eligible: BTreeSet<EligKey>,
+    eligible: EligibilityIndex,
     metrics: QueueMetrics,
     next_seq: u64,
     priority_model: PriorityModel,
@@ -622,7 +780,7 @@ impl ProjectionData {
         Self {
             items: FastHashMap::default(),
             by_key: FastHashMap::default(),
-            eligible: BTreeSet::new(),
+            eligible: EligibilityIndex::new(),
             metrics: QueueMetrics::default(),
             next_seq: 0,
             priority_model,
@@ -701,7 +859,7 @@ impl ProjectionData {
             if rec.state == ItemState::Pending && !rec.superseded {
                 projection
                     .eligible
-                    .insert(elig_key(&rec, &projection.priority_model));
+                    .insert(&rec, &projection.items, &projection.priority_model);
             }
             if !rec.superseded {
                 projection.metrics_inc(rec.state);
@@ -789,7 +947,8 @@ impl ProjectionData {
             fenced: false,
             superseded: false,
         };
-        self.eligible.insert(elig_key(&rec, &self.priority_model));
+        self.eligible
+            .insert(&rec, &self.items, &self.priority_model);
         if let Some(key) = rec.explicit_client_item_key.clone() {
             self.by_key.insert(key, rec.item_id);
         }
@@ -837,19 +996,21 @@ impl ProjectionData {
                 return Err(EngineError::Superseded);
             }
             let old_state = rec.state;
-            let old = (old_state == ItemState::Pending).then(|| elig_key(rec, &model));
+            let old =
+                (old_state == ItemState::Pending).then(|| EligibilityIndex::token(rec, &model));
             let new = apply_transition(old_state, ev)
                 .map_err(|_| EngineError::Invalid("illegal lifecycle transition"))?;
             rec.state = new;
             rec.item_version += 1;
-            let nk = (new == ItemState::Pending).then(|| elig_key(rec, &model));
+            let nk = (new == ItemState::Pending).then(|| EligibilityIndex::token(rec, &model));
             (old, nk, old_state, new)
         };
         if let Some(k) = old_key {
-            self.eligible.remove(&k);
+            self.eligible.remove(k);
         }
-        if let Some(k) = new_key {
-            self.eligible.insert(k);
+        if new_key.is_some() {
+            let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
+            self.eligible.insert(rec, &self.items, &self.priority_model);
         }
         self.metrics_transition(old_state, new_state);
         Ok(new_state)
@@ -949,7 +1110,8 @@ impl ProjectionData {
                     let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
                         || matches!(c.set_not_before, ScheduleUpdate::Set(_));
                     let was_pending = rec.state == ItemState::Pending;
-                    let old_elig = (repricing && was_pending).then(|| elig_key(rec, &model));
+                    let old_elig =
+                        (repricing && was_pending).then(|| EligibilityIndex::token(rec, &model));
 
                     let mut next_fields = rec.fields.clone();
                     for (k, op) in &c.field_ops {
@@ -983,7 +1145,8 @@ impl ProjectionData {
                         next_rec.not_before = *nb;
                     }
                     next_rec.item_version += 1;
-                    let new_elig = (repricing && was_pending).then(|| elig_key(&next_rec, &model));
+                    let new_elig = (repricing && was_pending)
+                        .then(|| EligibilityIndex::token(&next_rec, &model));
                     (old_keys, old_elig, new_keys, new_elig)
                 };
                 let rec = self
@@ -1030,10 +1193,11 @@ impl ProjectionData {
                 // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
                 // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
                 if let Some(old) = old_elig {
-                    self.eligible.remove(&old);
+                    self.eligible.remove(old);
                 }
-                if let Some(new) = new_elig {
-                    self.eligible.insert(new);
+                if new_elig.is_some() {
+                    let rec = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
+                    self.eligible.insert(rec, &self.items, &self.priority_model);
                 }
                 Ok(())
             }
@@ -1078,43 +1242,53 @@ impl ProjectionData {
                         }
                     };
                     self.transition(&o.item_id, ev)?;
-                    let rec = self
-                        .items
-                        .get_mut(&o.item_id)
-                        .ok_or(EngineError::NotFound)?;
-                    rec.lease_token = None;
-                    rec.lease_expires_at = None;
-                    rec.fenced = false;
-                    // A rearm that returned to Pending (within `until`) resets the delivery count and, when
-                    // the caller supplied the next-occurrence time, defers re-eligibility to that new
-                    // `not_before` (the idle interval). `not_before` is part of `EligKey`, so re-key after
-                    // the transition inserted the newly pending item.
-                    let old_elig = (rec.state == ItemState::Pending).then(|| {
-                        let model = self.priority_model;
-                        elig_key(rec, &model)
-                    });
-                    if matches!(o.kind, FinalizeKind::Rearm) && rec.state == ItemState::Pending {
-                        rec.attempt_count = 0;
-                        if let Some(nb) = o.not_before {
+                    let should_reinsert = {
+                        let rec = self
+                            .items
+                            .get_mut(&o.item_id)
+                            .ok_or(EngineError::NotFound)?;
+                        rec.lease_token = None;
+                        rec.lease_expires_at = None;
+                        rec.fenced = false;
+                        // A rearm that returned to Pending (within `until`) resets the delivery count and,
+                        // when the caller supplied the next-occurrence time, defers re-eligibility to that
+                        // new `not_before` (the idle interval). Re-key after the record mutation.
+                        let old_elig = (rec.state == ItemState::Pending).then(|| {
+                            let model = self.priority_model;
+                            EligibilityIndex::token(rec, &model)
+                        });
+                        if matches!(o.kind, FinalizeKind::Rearm) && rec.state == ItemState::Pending
+                        {
+                            rec.attempt_count = 0;
+                            if let Some(nb) = o.not_before {
+                                rec.not_before = Some(nb);
+                            }
+                        }
+                        // Queue-native retry backoff: a Retry that returned the item to Pending (still under
+                        // the attempt bound) defers its re-eligibility to `not_before`. Guarded on Pending so
+                        // an exhausted Retry (-> Failed) gets no backoff.
+                        if matches!(o.kind, FinalizeKind::Retry)
+                            && rec.state == ItemState::Pending
+                            && let Some(nb) = o.not_before
+                        {
                             rec.not_before = Some(nb);
                         }
-                    }
-                    // Queue-native retry backoff: a Retry that returned the item to Pending (still under the
-                    // attempt bound) defers its re-eligibility to `not_before`. Guarded on Pending so an
-                    // exhausted Retry (-> Failed) gets no backoff.
-                    if matches!(o.kind, FinalizeKind::Retry)
-                        && rec.state == ItemState::Pending
-                        && let Some(nb) = o.not_before
-                    {
-                        rec.not_before = Some(nb);
-                    }
-                    if let Some(old) = old_elig {
-                        let model = self.priority_model;
-                        let new = elig_key(rec, &model);
-                        if old != new {
-                            self.eligible.remove(&old);
-                            self.eligible.insert(new);
+                        if let Some(old) = old_elig {
+                            let model = self.priority_model;
+                            let new = EligibilityIndex::token(rec, &model);
+                            if old != new {
+                                self.eligible.remove(old);
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
                         }
+                    };
+                    if should_reinsert {
+                        let rec = self.items.get(&o.item_id).ok_or(EngineError::NotFound)?;
+                        self.eligible.insert(rec, &self.items, &self.priority_model);
                     }
                 }
                 Ok(())
@@ -1131,12 +1305,13 @@ impl ProjectionData {
                     .map(|rec| self.record_index_keys(&rec.fields, rec.entity_document.as_ref()))
                     .transpose()?;
                 if let Some(rec) = self.items.get_mut(&c.superseded_item_id) {
-                    let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
+                    let old = (rec.state == ItemState::Pending)
+                        .then(|| EligibilityIndex::token(rec, &model));
                     let old_state = rec.state;
                     let was_live = !rec.superseded;
                     rec.superseded = true;
                     if let Some(k) = old {
-                        self.eligible.remove(&k);
+                        self.eligible.remove(k);
                     }
                     if was_live {
                         self.metrics_dec(old_state);
@@ -1175,12 +1350,13 @@ impl ProjectionData {
                     .collect();
                 for id in ids {
                     if let Some(rec) = self.items.get_mut(&id) {
-                        let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
+                        let old = (rec.state == ItemState::Pending)
+                            .then(|| EligibilityIndex::token(rec, &model));
                         let old_state = rec.state;
                         rec.state = ItemState::Failed; // forced terminal (cohort-incomplete)
                         rec.item_version += 1;
                         if let Some(k) = old {
-                            self.eligible.remove(&k);
+                            self.eligible.remove(k);
                         }
                         self.metrics_transition(old_state, ItemState::Failed);
                     }
@@ -1243,7 +1419,7 @@ impl ProjectionData {
                             self.by_key.remove(key);
                         }
                         if rec.state == ItemState::Pending {
-                            self.eligible.remove(&elig_key(&rec, &model));
+                            self.eligible.remove(EligibilityIndex::token(&rec, &model));
                         }
                         let keys =
                             self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
@@ -1284,13 +1460,7 @@ impl ProjectionData {
             // Strict / 0-bound: byte-for-byte the original strict selection (no relaxation). `eligible`
             // contains only pending, non-superseded items; due-time lives on the key so the claim hot path
             // does not need one HashMap lookup per candidate.
-            return self
-                .eligible
-                .iter()
-                .filter(|k| due_at(k, now))
-                .take(max)
-                .map(|k| k.item)
-                .collect();
+            return self.eligible.strict_candidates(now, max);
         }
         self.relaxed_candidates(now, max, bound)
     }
@@ -1319,14 +1489,8 @@ impl ProjectionData {
         let Some(rec) = self.items.get(&after) else {
             return self.eligible_candidates(now, max);
         };
-        let after_key = elig_key(rec, &self.priority_model);
-        use std::ops::Bound::{Excluded, Unbounded};
         self.eligible
-            .range((Excluded(&after_key), Unbounded))
-            .filter(|k| due_at(k, now))
-            .take(max)
-            .map(|k| k.item)
-            .collect()
+            .strict_candidates_after(now, rec, &self.priority_model, max)
     }
 
     /// Bounded-relaxed claim selection (TP-003 INV-6 + INV-4). Takes the strict-priority eligible prefix
@@ -1348,21 +1512,7 @@ impl ProjectionData {
         if max == 0 {
             return Vec::new();
         }
-        // Strict-priority eligible prefix (the reference order the rank error is measured against).
-        let mut selected: Vec<&EligKey> = self
-            .eligible
-            .iter()
-            .filter(|k| due_at(k, now))
-            .take(max)
-            .collect();
-
-        // Reorder each consecutive block of `bound + 1` items by locality. A stable sort keeps strict
-        // order within equal locality keys, so a 0-bound block (size 1) is a no-op (strict-equivalent).
-        let block = bound as usize + 1;
-        for chunk in selected.chunks_mut(block) {
-            chunk.sort_by(|a, b| locality_key(a).cmp(&locality_key(b)));
-        }
-        selected.into_iter().map(|k| k.item).collect()
+        self.eligible.relaxed_candidates(now, max, bound)
     }
 
     /// `ProjectionRead::select_eligible`.
@@ -1373,11 +1523,11 @@ impl ProjectionData {
     /// `ProjectionRead::peek` — non-destructive eligible view (shows the pending order).
     pub fn peek(&self, limit: usize) -> Vec<ItemView> {
         let mut out = Vec::new();
-        for key in self.eligible.iter() {
+        for item in self.eligible.ordered_items(limit) {
             if out.len() >= limit {
                 break;
             }
-            if let Some(rec) = self.items.get(&key.item)
+            if let Some(rec) = self.items.get(&item)
                 && rec.state == ItemState::Pending
                 && !rec.superseded
             {
@@ -1915,6 +2065,10 @@ mod tests {
             projection.by_key.is_empty(),
             "default client keys must not allocate by_key entries"
         );
+        assert!(
+            matches!(projection.eligible, EligibilityIndex::Compact(_)),
+            "plain FIFO pending items should use the compact eligibility index"
+        );
         assert_eq!(projection.lookup_by_key(&default_key), Some(id));
         let live = projection.live_items_by_key(std::slice::from_ref(&default_key));
         assert_eq!(live[0].as_ref().unwrap().client_item_key, default_key);
@@ -1975,6 +2129,44 @@ mod tests {
         let restored = ProjectionData::from_image(&definition, image).unwrap();
         assert_eq!(restored.by_key.len(), 1);
         assert_eq!(restored.lookup_by_key(&explicit_key), Some(id));
+    }
+
+    #[test]
+    fn rich_eligibility_promotes_compact_fifo_index() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![
+                    PushItem {
+                        priority: None,
+                        ..push_item("1", "1", 10)
+                    },
+                    PushItem {
+                        priority: None,
+                        not_before: Some(ts(10)),
+                        ..push_item("2", "2", 20)
+                    },
+                ],
+            }))
+            .unwrap();
+
+        assert!(
+            matches!(projection.eligible, EligibilityIndex::Rich(_)),
+            "priority, delay, or group usage should promote to the rich eligibility index"
+        );
+        assert_eq!(projection.eligible_candidates(ts(0), 10), vec![iid("1")]);
+        assert_eq!(
+            projection.eligible_candidates(ts(10), 10),
+            vec![iid("1"), iid("2")]
+        );
     }
 
     fn push_item_g(id: &str, key: &str, priority: i64, group: &str) -> PushItem {
