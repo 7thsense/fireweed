@@ -1,0 +1,96 @@
+{
+  "attempt_id": "20260702T152259-dc39f98d",
+  "bead_id": "pqueue-06d779b7",
+  "base_rev": "94e76e4fe63398994e02c8a5b6442b5116641db1",
+  "created_at": "2026-07-02T15:22:59.641311582Z",
+  "requested": {
+    "effort": "medium",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-06d779b7",
+    "title": "Implement typed range scans and stable cursor pagination",
+    "description": "PROBLEM\nDetail pages and due-work queries need typed range scans and stable cursor pagination over compound indexes. Current typed index lookup is exact-key oriented and does not provide ordered range pages.\n\nPROPOSED FIX\nImplement memory and sqlite support for bounded typed range scans over declared compound indexes, including stable ordering by `(scheduled_at ASC, action_id ASC)` and cursor page tokens or an explicit retryable cursor-invalidated error. Expose through the public facade query API added earlier.\n\nIN-SCOPE FILES\n- crates/pqueue-projection/src/lib.rs for in-memory projection range scan support.\n- crates/pqueue-sqlite/src/relational.rs for sqlite range scan support.\n- crates/pqueue/src/lib.rs and crates/pqueue/tests/hot_projection_queries.rs.\n\nOUT-OF-SCOPE\n- Grouped aggregates.\n- Bounded mutation.\n- Claim-by-query.\n\nORDERING/TIE-BREAK\nStable ordering and the cursor tie-break must follow the contract decision in pqueue-b1feb686: `action_id` is not a field of the canonical range index, so either the implementation tie-breaks on the internal item id or the test's declared index is extended — implement whichever the contract specifies, and make the test assert that behavior explicitly. In the canonical fixture, ordering by (scheduled_at ASC, internal id ASC) and (scheduled_at ASC, action_id ASC) yield the same page sequence.",
+    "acceptance": "1. `cargo test -p pqueue --test hot_projection_queries ordered_cursor_pagination_is_stable -- --nocapture` passes and returns pages `[act_001, act_002]`, `[act_003, act_004]`, `[act_005]` for `message.send`.\n2. The same test inserts an unrelated later row between page fetches and proves no duplicate/skip of already-visible rows, or gets the documented retryable cursor-invalidated error.\n3. `cargo test -p pqueue --test hot_projection_queries detail_range_filter_by_run_status_and_schedule -- --nocapture` passes.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:projection",
+      "area:indexes",
+      "kind:feature",
+      "backend:memory",
+      "backend:sqlite",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field .readiness_checks.evidence of type string\",\"fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\"}",
+          "created_at": "2026-07-02T15:01:37.402584972Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal string into Go struct field .readiness_checks.checkable_before_attempt of type bool\",\"fingerprint\":\"b5e1e76c0dd1279af2db38df9f37d1a992d761aa0f0f71cd8b2de212e38e14ed\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"b5e1e76c0dd1279af2db38df9f37d1a992d761aa0f0f71cd8b2de212e38e14ed\"}",
+          "created_at": "2026-07-02T15:01:59.320089797Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-02T15:19:50.955054893Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider="
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"\",\"actual_model\":\"\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260702T150141-633233cc\",\"bead_id\":\"pqueue-06d779b7\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":true,\"routing_intent_note\":\"actual route facts unavailable\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-02T15:19:51.684321532Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli note=actual route facts unavailable"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"8416653d786cb1ebe398ce8469ee1b1c2362c2fd\",\"classification\":\"transport\",\"detail\":\"agent: provider process exited without emitting a final event\",\"rationale\":\"Attempt failed because the agent provider subprocess exited without emitting a final event; no evidence shows bead-owned code failure, red tests, quota exhaustion, or an external blocker.\",\"recommended_action\":\"release_claim_retry\",\"result_rev\":\"ce79c665d96cb68b3d090f070ca9f2625d449531\",\"session_id\":\"eb-ad7ad658\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-02T15:20:09.752630379Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "transport: release_claim_retry"
+        },
+        {
+          "actor": "erik",
+          "body": "agent: provider process exited without emitting a final event\ndecision_audit={\"failure_class\":\"transport\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=ce79c665d96cb68b3d090f070ca9f2625d449531\nbase_rev=8416653d786cb1ebe398ce8469ee1b1c2362c2fd\noutcome_reason=transport",
+          "created_at": "2026-07-02T15:20:09.779211523Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        }
+      ],
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T152259-dc39f98d",
+    "prompt": ".ddx/executions/20260702T152259-dc39f98d/prompt.md",
+    "manifest": ".ddx/executions/20260702T152259-dc39f98d/manifest.json",
+    "result": ".ddx/executions/20260702T152259-dc39f98d/result.json",
+    "checks": ".ddx/executions/20260702T152259-dc39f98d/checks.json",
+    "usage": ".ddx/executions/20260702T152259-dc39f98d/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-06d779b7-20260702T152259-dc39f98d"
+  },
+  "prompt_sha": "9276b0e9b1f6c00b9928fd653aa825c8dea45a277aa0acd176b2f31e392cff61"
+}
