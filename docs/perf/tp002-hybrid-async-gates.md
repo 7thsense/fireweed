@@ -72,13 +72,21 @@ The suite already emitted `segments_sealed`, `objects_put`,
 **Documented bounds:**
 
 - Packing bound: no segment can pack more than `target_bytes / MIN_COMMAND_BYTES`
-  commands (`MIN_COMMAND_BYTES = 8`). `mean` and `max` commands-per-segment must be
-  `>= 1` and `<= ` this bound.
+  commands (`MIN_COMMAND_BYTES = 8`). Release evidence for the object-storage log
+  must show real packing: `mean_commands_per_segment > 1` and
+  `max_commands_per_segment > 1` for normal data-plane traffic. A run with
+  `mean == 1` is a release blocker, even if hot-path latency passes, because it
+  means the object store is being used as a tiny per-command commit log.
 - PUT-volume bound: `objects_put <= 8 × resident` (`OBJECTS_PUT_PER_RESIDENT_MAX`).
   Each resident item drives push/claim/finalize commands and each sealed segment
   writes a bounded number of objects (segment + manifest), so total PUTs are
   `O(resident)`. This catches a PUT storm / one-object-per-command regression.
 - `segments_sealed >= 1` and `objects_put >= 1` (something sealed).
+
+If a transactional path cannot safely batch before acknowledgement, that path must
+use a local transactional log/checkpoint layer or another non-object-storage log
+implementation. It must not force one command per object-storage segment under the
+`objectlog/hybrid-async` release profile.
 
 ## Running the gates
 

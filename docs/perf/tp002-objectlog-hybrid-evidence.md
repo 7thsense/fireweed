@@ -32,9 +32,15 @@ update, purge, and operator-style mutations before it can reuse this lane.
 It must also report ordered batching evidence: sealed batch sequence ranges,
 `sqlite_high_water` after each batch, exactly-once async apply/replay after a
 partial batch restart, and proof that readers/claims/metrics are served from
-memory while SQLite lags. `sqlite_high_water` is a logical high-water for
-applied commands only; SQLite WAL, checkpoint, page-cache, and fsync state are
-local durability details and never authorize object-log trimming.
+memory while SQLite lags. Object-storage release evidence must show packed
+segments (`mean_commands_per_segment > 1` and `max_commands_per_segment > 1`)
+for normal data-plane traffic; one command per object-log segment is a blocker.
+If claim/finalize or another high-churn transactional path cannot safely batch
+before acknowledgement, that path must use a local transactional log/checkpoint
+layer or another non-object-storage log implementation rather than writing tiny
+object-storage segments. `sqlite_high_water` is a logical high-water for applied
+commands only; SQLite WAL, checkpoint, page-cache, and fsync state are local
+durability details and never authorize object-log trimming.
 The async evidence row must additionally include lineage validation from
 manifest entry to segment checksum/range, command `request_id` fingerprint,
 memory `ProjectionImage`, and SQLite `ProjectionImage`; it must report the
@@ -117,7 +123,9 @@ or retention advancement failed closed while debt was over budget. Future
 performance fields used here: resident count,
 hybrid/inmemory hot-path ratios, restart hydrate + tail time, restart pending
 count, disk-loss reconstruction wall time, disk-loss pending count, and
-`bars_met`.
+`bars_met`. It must also record segment density as a hard release gate:
+`objectlog_hybrid_mean_commands_per_segment > 1` and
+`objectlog_hybrid_max_commands_per_segment > 1` for object-storage output.
 
 Raw ledger: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl`.
 
@@ -230,7 +238,7 @@ ratio **0.918** (gate `<=1.20` each), finished in 11.98s. This confirms the
 `pqueue-8e5e7846`'s own closing evidence both pass with comfortable margin.
 Snapshot: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_100k.jsonl`.
 
-### 1M — FAIL: reproducible correctness bug, not a host/hardware limit
+### 1M — BLOCKED: one-command object-storage segments after recovery fix
 
 ```text
 PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 \
@@ -238,33 +246,28 @@ PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRI
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
-Fails deterministically (3/3 runs, byte-for-byte identical) during the
-normal-restart recovery reopen:
+The recovery-replay pagination bug from `pqueue-864b1c74` and the bounded-debt
+gate from `pqueue-e523813a` are fixed: the 1M command now passes the hot-path,
+recovery, disk-loss, and bounded-debt gates (`bars_met=true`). Snapshot:
+`docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_1m.jsonl`.
 
-```text
-recover hybrid normal restart: Storage("sqlite projection replay gap for
-tp002:hybrid-recovery: expected sequence 256, got 257")
-```
+The run is still not release evidence because segment density proves the
+object-storage log is being used at the wrong granularity:
+`objectlog_hybrid_mean_commands_per_segment=1.0`,
+`objectlog_hybrid_max_commands_per_segment=1`,
+`objectlog_hybrid_segments_sealed=6000`, and `objectlog_hybrid_objects_put=12000`
+for 1M resident with 500-member command batches. That means each batch command
+became its own object-log segment. Filed as `pqueue-5f2302e3`, which blocks this
+evidence gate.
 
-This is a real data-durability defect in the hybrid-async object log's
-recovery-replay pagination — it only manifests once the resident push volume
-is large enough (1M+) for the background periodic deferred-flush tick to land
-at least one partial SQLite high-water advance before the recovery push loop
-completes; at 100k the push finishes too fast for that to happen, so recovery
-replays from genesis and never exercises the buggy tail-resume path. Full
-investigation, root-cause lead, and code pointers:
-`.ddx/executions/20260701T224118-e73883ca/hybrid-scale-1m-recovery-gap.md`.
-Filed as `pqueue-864b1c74` (blocks this evidence gate), depended on by
-`pqueue-d6453cdd`.
+### 10M — blocked on object-storage segment granularity
 
-### 10M — blocked on the same defect
-
-`PQUEUE_HYBRID_RESIDENT=10000000` was attempted; see
-`.ddx/executions/20260701T224118-e73883ca/hybrid-scale-1m-recovery-gap.md`
-for the outcome. This tier is blocked on the same `pqueue-864b1c74` fix
-regardless of its own result, since the recovery path it exercises is
-identical.
-
-The 100k pass demonstrates the hybrid-async performance bars hold at that
-scale on this host; 1M/10M release evidence cannot be produced until
-`pqueue-864b1c74` lands.
+`PQUEUE_HYBRID_RESIDENT=10000000` was attempted after the 1M fixes and stopped
+after roughly an hour. A CPU sample showed the hot thread dominated by
+`pqueue_objectlog::segmented::walk_keys` /
+`SegmentedObjectLog::recover_manifest`, reached from `current_epoch`/`seal`
+during claim/finalize. This was a symptom of the same granularity failure:
+object storage was receiving one tiny segment per batch command. 10M evidence
+cannot be produced until `pqueue-5f2302e3` changes the append/storage contract so
+object-storage output is packed, or routes high-churn transactional mutations to
+a non-object-storage log while preserving recovery.

@@ -61,9 +61,12 @@ In scope:
 Out of scope:
 
 - Changing pqueue's queue-as-shard ownership model.
-- Making SQLite the command-log authority for this profile. SQLite remains a
-  rebuildable durable projection snapshot; the object log remains the command
-  authority.
+- Using the object-storage segmented log as a tiny per-operation commit log.
+  Normal data-plane traffic must be appended in packed object-log segments. If a
+  transactional mutation cannot be safely acknowledged from a batched object-log
+  segment, that mutation must use a local transactional log/checkpoint layer or a
+  different non-object-storage log implementation, with object storage retaining
+  packed campaign-shape/replay evidence.
 - Adding cross-node active/active serving of one queue.
 - Replacing the object-log segmented substrate or release-tier MinIO evidence
   harness except where needed to add hybrid rows.
@@ -127,9 +130,15 @@ loads pending items is not acceptable.
 
 ### Snapshot Authority
 
-The object log remains the authority. The local SQLite file is the owner-local
-restart accelerator and recovery high-water source for `objectlog/hybrid`; it is
-not permission to delete object-log segments by itself.
+The object log remains the packed campaign-shape/replay authority for the
+object-storage profile. The local SQLite file is the owner-local restart
+accelerator and recovery high-water source for `objectlog/hybrid`; it is not
+permission to delete object-log segments by itself. High-churn transactional
+commands such as claim/finalize must not force one object-storage segment per
+batch command. If they require per-operation acknowledgement, the implementation
+must route them through a local transactional log/checkpoint layer or another
+non-object-storage log, then expose object-storage snapshots/segments at a
+release-safe packed granularity.
 
 For the first hybrid release, segment expiry MUST remain disabled unless a
 separate object-store snapshot is written and validated. TD-004 must be amended
