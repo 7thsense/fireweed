@@ -47,7 +47,7 @@ type FastHashMap<K, V> = rustc_hash::FxHashMap<K, V>;
 #[derive(Debug, Clone)]
 struct ItemRecord {
     item_id: ItemId,
-    client_item_key: ClientItemKey,
+    explicit_client_item_key: Option<ClientItemKey>,
     priority: Option<PriorityValue>,
     not_before: Option<UtcTimestamp>,
     group_key: Option<GroupKey>,
@@ -100,7 +100,7 @@ impl From<&ItemRecord> for ProjectionImageItem {
     fn from(rec: &ItemRecord) -> Self {
         Self {
             item_id: rec.item_id,
-            client_item_key: rec.client_item_key.clone(),
+            client_item_key: rec.client_item_key(),
             priority: rec.priority.clone(),
             not_before: rec.not_before,
             group_key: rec.group_key.clone(),
@@ -124,9 +124,10 @@ impl From<&ItemRecord> for ProjectionImageItem {
 
 impl From<ProjectionImageItem> for ItemRecord {
     fn from(item: ProjectionImageItem) -> Self {
+        let explicit_client_item_key = explicit_client_item_key(item.item_id, item.client_item_key);
         Self {
             item_id: item.item_id,
-            client_item_key: item.client_item_key,
+            explicit_client_item_key,
             priority: item.priority,
             not_before: item.not_before,
             group_key: item.group_key,
@@ -164,10 +165,16 @@ pub struct ProjectionImage {
 }
 
 impl ItemRecord {
+    fn client_item_key(&self) -> ClientItemKey {
+        self.explicit_client_item_key
+            .clone()
+            .unwrap_or_else(|| default_client_item_key(self.item_id))
+    }
+
     fn to_claimed(&self) -> Option<ClaimedItem> {
         Some(ClaimedItem {
             item_id: self.item_id,
-            client_item_key: self.client_item_key.clone(),
+            client_item_key: self.client_item_key(),
             item_version: self.item_version,
             priority: self.priority.clone(),
             group_key: self.group_key.clone(),
@@ -188,7 +195,7 @@ impl ItemRecord {
         }
         Some(LiveItemView {
             item_id: self.item_id,
-            client_item_key: self.client_item_key.clone(),
+            client_item_key: self.client_item_key(),
             item_version: self.item_version,
             lifecycle_state: self.state,
             priority: self.priority.clone(),
@@ -199,6 +206,18 @@ impl ItemRecord {
             fields: self.fields.clone(),
         })
     }
+}
+
+fn default_client_item_key(item_id: ItemId) -> ClientItemKey {
+    ClientItemKey::new(item_id.to_string()).expect("item id is a valid default client key")
+}
+
+fn explicit_client_item_key(item_id: ItemId, key: ClientItemKey) -> Option<ClientItemKey> {
+    (key.as_str() != item_id.to_string()).then_some(key)
+}
+
+fn is_explicit_client_item_key(item_id: ItemId, key: &ClientItemKey) -> bool {
+    key.as_str() != item_id.to_string()
 }
 
 /// Priority-ordered eligibility key. Ascending order = claim order: priced items first (tag 0, then
@@ -668,9 +687,9 @@ impl ProjectionData {
         for item in image.items {
             let rec = ItemRecord::from(item);
             if !rec.superseded {
-                projection
-                    .by_key
-                    .insert(rec.client_item_key.clone(), rec.item_id);
+                if let Some(key) = rec.explicit_client_item_key.clone() {
+                    projection.by_key.insert(key, rec.item_id);
+                }
                 let keys =
                     projection.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
                 projection.index_insert_keys(rec.item_id, &keys);
@@ -741,7 +760,10 @@ impl ProjectionData {
         self.next_seq += 1;
         let rec = ItemRecord {
             item_id: item.item_id,
-            client_item_key: item.client_item_key.clone(),
+            explicit_client_item_key: explicit_client_item_key(
+                item.item_id,
+                item.client_item_key.clone(),
+            ),
             priority: item.priority,
             not_before: item.not_before,
             group_key: item.group_key,
@@ -761,7 +783,9 @@ impl ProjectionData {
             superseded: false,
         };
         self.eligible.insert(elig_key(&rec, &self.priority_model));
-        self.by_key.insert(rec.client_item_key.clone(), rec.item_id);
+        if let Some(key) = rec.explicit_client_item_key.clone() {
+            self.by_key.insert(key, rec.item_id);
+        }
         let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
         self.index_insert_keys(rec.item_id, &keys);
         self.items.insert(rec.item_id, rec);
@@ -802,7 +826,14 @@ impl ProjectionData {
             QueueCommand::CreateQueue(_) => Ok(()),
             QueueCommand::Push(c) => {
                 self.items.reserve(c.items.len());
-                self.by_key.reserve(c.items.len());
+                self.by_key.reserve(
+                    c.items
+                        .iter()
+                        .filter(|item| {
+                            is_explicit_client_item_key(item.item_id, &item.client_item_key)
+                        })
+                        .count(),
+                );
                 for it in &c.items {
                     self.insert_pending(it.clone())?;
                 }
@@ -1163,7 +1194,9 @@ impl ProjectionData {
                 let model = self.priority_model;
                 for id in &c.item_ids {
                     if let Some(rec) = self.items.remove(id) {
-                        self.by_key.remove(&rec.client_item_key);
+                        if let Some(key) = &rec.explicit_client_item_key {
+                            self.by_key.remove(key);
+                        }
                         if rec.state == ItemState::Pending {
                             self.eligible.remove(&elig_key(&rec, &model));
                         }
@@ -1305,7 +1338,7 @@ impl ProjectionData {
             {
                 out.push(ItemView {
                     item_id: rec.item_id,
-                    client_item_key: rec.client_item_key.clone(),
+                    client_item_key: rec.client_item_key(),
                     priority: rec.priority.clone(),
                     item_version: rec.item_version,
                 });
@@ -1360,8 +1393,7 @@ impl ProjectionData {
     pub fn live_items_by_key(&self, keys: &[ClientItemKey]) -> Vec<Option<LiveItemView>> {
         keys.iter()
             .map(|key| {
-                self.by_key
-                    .get(key)
+                self.item_id_for_client_key(key)
                     .and_then(|id| self.items.get(id))
                     .and_then(ItemRecord::to_live)
             })
@@ -1370,7 +1402,17 @@ impl ProjectionData {
 
     /// The item id currently mapped to `client_item_key`, if any (upsert collision lookup).
     pub fn lookup_by_key(&self, client_item_key: &ClientItemKey) -> Option<ItemId> {
-        self.by_key.get(client_item_key).cloned()
+        self.item_id_for_client_key(client_item_key).copied()
+    }
+
+    fn item_id_for_client_key(&self, client_item_key: &ClientItemKey) -> Option<&ItemId> {
+        if let Some(id) = self.by_key.get(client_item_key) {
+            return Some(id);
+        }
+        let id = ItemId::new(client_item_key.as_str()).ok()?;
+        self.items
+            .get_key_value(&id)
+            .and_then(|(id, rec)| (!rec.superseded).then_some(id))
     }
 
     /// The lifecycle state of `id`, if present (upsert collision classification).
@@ -1595,7 +1637,7 @@ impl ProjectionData {
     /// Build the [`IndexHit`] for `id` from its current record (current `client_item_key`/`item_version`).
     fn index_hit(&self, id: &ItemId) -> Option<IndexHit> {
         self.items.get(id).map(|rec| IndexHit {
-            client_item_key: rec.client_item_key.clone(),
+            client_item_key: rec.client_item_key(),
             item_id: rec.item_id,
             item_version: rec.item_version,
         })
@@ -1707,8 +1749,8 @@ mod tests {
     };
     use pqueue_engine::{
         AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandId, FinalizeCommand,
-        FinalizeKind, FinalizeOutcome, PushCommand, RenewLeaseCommand, SideRecord,
-        UpdateFieldsCommand, WriteSideRecordsCommand,
+        FinalizeKind, FinalizeOutcome, PurgeItemsCommand, PushCommand, RenewLeaseCommand,
+        SideRecord, UpdateFieldsCommand, WriteSideRecordsCommand,
     };
 
     fn shard() -> QueueKey {
@@ -1802,6 +1844,104 @@ mod tests {
     }
     fn version_of(proj: &ProjectionData, id: &str) -> u64 {
         proj.items.get(&iid(id)).unwrap().item_version
+    }
+
+    #[test]
+    fn default_client_keys_are_derived_without_by_key_entries() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let id = ItemId::mint(1, 7, 42);
+        let default_key = default_client_item_key(id);
+
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: default_key.clone(),
+                    item_id: id,
+                    priority: None,
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: BTreeMap::new(),
+                    metadata: Metadata::default(),
+                    cohort_size: None,
+                    gate_keys: Vec::new(),
+                    entity_document: None,
+                }],
+            }))
+            .unwrap();
+
+        assert!(
+            projection.by_key.is_empty(),
+            "default client keys must not allocate by_key entries"
+        );
+        assert_eq!(projection.lookup_by_key(&default_key), Some(id));
+        let live = projection.live_items_by_key(std::slice::from_ref(&default_key));
+        assert_eq!(live[0].as_ref().unwrap().client_item_key, default_key);
+
+        let image = projection.to_image(None);
+        assert_eq!(image.items[0].client_item_key, default_key);
+        let restored = ProjectionData::from_image(&definition, image).unwrap();
+        assert!(
+            restored.by_key.is_empty(),
+            "image import should keep default keys compact"
+        );
+        assert_eq!(restored.lookup_by_key(&default_key), Some(id));
+
+        projection
+            .apply_command(&QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![id],
+                force: false,
+            }))
+            .unwrap();
+        assert_eq!(projection.lookup_by_key(&default_key), None);
+    }
+
+    #[test]
+    fn explicit_client_keys_still_index_and_roundtrip() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let id = iid("42");
+        let explicit_key = ClientItemKey::new("campaign-member-42").unwrap();
+
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: explicit_key.clone(),
+                    item_id: id,
+                    priority: None,
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: BTreeMap::new(),
+                    metadata: Metadata::default(),
+                    cohort_size: None,
+                    gate_keys: Vec::new(),
+                    entity_document: None,
+                }],
+            }))
+            .unwrap();
+
+        assert_eq!(projection.by_key.len(), 1);
+        assert_eq!(projection.lookup_by_key(&explicit_key), Some(id));
+        let image = projection.to_image(None);
+        let restored = ProjectionData::from_image(&definition, image).unwrap();
+        assert_eq!(restored.by_key.len(), 1);
+        assert_eq!(restored.lookup_by_key(&explicit_key), Some(id));
     }
 
     fn push_item_g(id: &str, key: &str, priority: i64, group: &str) -> PushItem {
