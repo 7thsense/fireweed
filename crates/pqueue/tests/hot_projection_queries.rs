@@ -3,15 +3,15 @@
 //! than silently degrading to a full scan. No backend bead in epic pqueue-45e13e4d implements the
 //! substrate yet (this bead ships only the typed request/response shapes + compile-tested stubs).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use pqueue::{
     BoundedMutationRequest, ClaimByQueryRequest, DeclaredBucketSegmentRequest, EligibilityPolicy,
-    EngineError, FilterOp, GroupByField, GroupedAggregateRequest, NewItem, OrderField,
+    EngineError, FilterOp, GroupByField, GroupedAggregateRequest, ItemId, NewItem, OrderField,
     OrderingMode, Pqueue, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    QueryCapabilityFlags, QueryFilter, QueueDefinition, QueueId, RangeScanRequest,
-    RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue,
+    QueryCapabilityFlags, QueryFilter, QueueDefinition, QueueId, RangeScanRequest, RangeScanRow,
+    RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue, UtcTimestamp,
 };
 use pqueue_core::{
     CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex, WorkerId,
@@ -51,23 +51,6 @@ fn queue_definition() -> QueueDefinition {
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
-    }
-}
-
-fn range_scan_request() -> RangeScanRequest {
-    RangeScanRequest {
-        index: Some("by_scheduled_at".to_string()),
-        filters: vec![QueryFilter {
-            field: "scheduled_at".to_string(),
-            op: FilterOp::Gte,
-            value: TypedValue::Integer(0),
-        }],
-        order_by: vec![OrderField {
-            field: "scheduled_at".to_string(),
-            direction: SortDirection::Ascending,
-        }],
-        page_size: 50,
-        cursor: None,
     }
 }
 
@@ -126,18 +109,9 @@ fn claim_by_query_request() -> ClaimByQueryRequest {
 async fn capability_defaults_are_explicitly_unavailable() {
     let q = qkey();
 
-    // Log-replay / atomic-class family (memory).
     let memory_backend = Arc::new(composed_memory_backend());
     let memory_pq = Pqueue::new(memory_backend, Arc::new(ManualClock::at(0)));
     memory_pq.create_queue(queue_definition()).await.unwrap();
-    assert_eq!(
-        memory_pq.hot_projection_capabilities(&q),
-        QueryCapabilityFlags::default()
-    );
-    assert_eq!(
-        memory_pq.range_scan(&q, range_scan_request()).await,
-        Err(EngineError::Unavailable)
-    );
     assert_eq!(
         memory_pq
             .grouped_aggregate(&q, grouped_aggregate_request())
@@ -164,7 +138,6 @@ async fn capability_defaults_are_explicitly_unavailable() {
         EngineError::Unavailable
     );
 
-    // Sqlite-relational family.
     let sqlite_path = std::env::temp_dir()
         .join(format!(
             "pqueue-hot-projection-queries-{}.db",
@@ -177,16 +150,11 @@ async fn capability_defaults_are_explicitly_unavailable() {
     let sqlite_backend = Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap());
     let sqlite_pq = Pqueue::new(sqlite_backend, Arc::new(ManualClock::at(0)));
     sqlite_pq.create_queue(queue_definition()).await.unwrap();
-    assert_eq!(
-        sqlite_pq.hot_projection_capabilities(&q),
-        QueryCapabilityFlags::default()
-    );
-    assert_eq!(
-        sqlite_pq.range_scan(&q, range_scan_request()).await,
+    assert!(matches!(
+        sqlite_pq.claim_by_query(&q, claim_by_query_request()).await,
         Err(EngineError::Unavailable)
-    );
+    ));
 
-    // Eventual-apply object-log family.
     let root = std::env::temp_dir().join(format!(
         "pqueue-hot-projection-queries-objlog-{}",
         std::process::id()
@@ -195,24 +163,13 @@ async fn capability_defaults_are_explicitly_unavailable() {
     let objectlog_backend = Arc::new(ObjectLogBackend::open(&root).unwrap());
     let objectlog_pq = Pqueue::new(objectlog_backend, Arc::new(ManualClock::at(0)));
     objectlog_pq.create_queue(queue_definition()).await.unwrap();
-    assert_eq!(
-        objectlog_pq.hot_projection_capabilities(&q),
-        QueryCapabilityFlags::default()
-    );
-    assert_eq!(
-        objectlog_pq.range_scan(&q, range_scan_request()).await,
-        Err(EngineError::Unavailable)
-    );
-    assert_eq!(
+    assert!(matches!(
         objectlog_pq
             .claim_by_query(&q, claim_by_query_request())
-            .await
-            .unwrap_err(),
-        EngineError::Unavailable
-    );
+            .await,
+        Err(EngineError::Unavailable)
+    ));
 
-    // `side_record_query` is independently gated and MUST remain unavailable everywhere in this
-    // epic — asserted once, not per-backend, since it is a fixed constant on the shared flags type.
     assert!(!QueryCapabilityFlags::default().side_record_query);
 }
 
@@ -403,6 +360,216 @@ fn scheduled_action_item(record: &Value) -> NewItem {
         entity: Some(record.clone()),
         ..Default::default()
     }
+}
+
+fn action_id_map(ids: &[(ItemId, String)], rows: &[RangeScanRow]) -> Vec<String> {
+    let by_id: HashMap<ItemId, String> = ids.iter().cloned().collect();
+    rows.iter()
+        .map(|row| {
+            by_id
+                .get(&row.item_id)
+                .cloned()
+                .expect("row item_id should map to a seeded action_id")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ordered_cursor_pagination_is_stable() {
+    let q = qkey();
+    let backend = Arc::new(composed_memory_backend());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    pq.create_queue(scheduled_action_queue_definition())
+        .await
+        .unwrap();
+
+    let mut ids = Vec::new();
+    for record in scheduled_action_fixture_records() {
+        let action_id = record["action_id"].as_str().unwrap().to_string();
+        let minted = pq.push(&q, scheduled_action_item(&record)).await.unwrap();
+        ids.push((minted, action_id));
+    }
+
+    let request = RangeScanRequest {
+        index: Some("by_action_type".to_string()),
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "action_type".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("message.send".to_string()),
+            },
+        ],
+        order_by: vec![OrderField {
+            field: "scheduled_at".to_string(),
+            direction: SortDirection::Ascending,
+        }],
+        page_size: 2,
+        cursor: None,
+    };
+
+    let page1 = pq.range_scan(&q, request.clone()).await.unwrap();
+    assert_eq!(action_id_map(&ids, &page1.rows), vec!["act_001", "act_002"]);
+    let page2 = pq
+        .range_scan(
+            &q,
+            RangeScanRequest {
+                cursor: page1.next_cursor.clone(),
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(action_id_map(&ids, &page2.rows), vec!["act_003", "act_004"]);
+    let page3 = pq
+        .range_scan(
+            &q,
+            RangeScanRequest {
+                cursor: page2.next_cursor.clone(),
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(action_id_map(&ids, &page3.rows), vec!["act_005"]);
+    assert!(page3.next_cursor.is_none());
+
+    let late = json!({
+        "tenant_id": "tenant_7s",
+        "account_id": "acct_42",
+        "workflow_id": "wf_nurture",
+        "run_id": "job_9001",
+        "action_id": "act_999",
+        "instance_id": "inst_contact_999",
+        "target_key": "contact:999",
+        "scheduled_at": "2026-07-03T12:15:00Z",
+        "status": "scheduled",
+        "action_type": "message.send",
+        "scheduler_algorithm": "personalized",
+        "engagement_probability": 0.7777,
+        "engagement_threshold": 0.10,
+        "suppressed_by_recycling": false,
+        "is_enrolled_using_open_rate_filter": true
+    });
+    let minted = pq.push(&q, scheduled_action_item(&late)).await.unwrap();
+    ids.push((minted, "act_999".to_string()));
+
+    let page1 = pq.range_scan(&q, request.clone()).await.unwrap();
+    assert_eq!(action_id_map(&ids, &page1.rows), vec!["act_001", "act_002"]);
+    let page2 = pq
+        .range_scan(
+            &q,
+            RangeScanRequest {
+                cursor: page1.next_cursor.clone(),
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(action_id_map(&ids, &page2.rows), vec!["act_003", "act_004"]);
+    let page3 = pq
+        .range_scan(
+            &q,
+            RangeScanRequest {
+                cursor: page2.next_cursor.clone(),
+                ..request.clone()
+            },
+        )
+        .await
+        .unwrap();
+    let seen = [
+        action_id_map(&ids, &page1.rows),
+        action_id_map(&ids, &page2.rows),
+        action_id_map(&ids, &page3.rows),
+    ]
+    .concat();
+    assert_eq!(
+        seen[..5],
+        ["act_001", "act_002", "act_003", "act_004", "act_005"]
+    );
+    assert_eq!(seen.last().cloned(), Some("act_999".to_string()));
+}
+
+#[tokio::test]
+async fn detail_range_filter_by_run_status_and_schedule() {
+    let q = qkey();
+    let sqlite_path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-hot-projection-queries-range-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&sqlite_path);
+    let backend = Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    pq.create_queue(scheduled_action_queue_definition())
+        .await
+        .unwrap();
+
+    let mut ids = Vec::new();
+    for record in scheduled_action_fixture_records() {
+        let action_id = record["action_id"].as_str().unwrap().to_string();
+        let minted = pq.push(&q, scheduled_action_item(&record)).await.unwrap();
+        ids.push((minted, action_id));
+    }
+
+    let request = RangeScanRequest {
+        index: Some("by_status".to_string()),
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "status".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("scheduled".to_string()),
+            },
+            QueryFilter {
+                field: "scheduled_at".to_string(),
+                op: FilterOp::Lte,
+                value: TypedValue::DateTime(UtcTimestamp::new(1_783_008_000, 0).expect("valid ts")),
+            },
+        ],
+        order_by: vec![OrderField {
+            field: "scheduled_at".to_string(),
+            direction: SortDirection::Ascending,
+        }],
+        page_size: 2,
+        cursor: None,
+    };
+
+    let page1 = pq.range_scan(&q, request.clone()).await.unwrap();
+    assert_eq!(action_id_map(&ids, &page1.rows), vec!["act_001", "act_002"]);
+    let page2 = pq
+        .range_scan(
+            &q,
+            RangeScanRequest {
+                cursor: page1.next_cursor.clone(),
+                ..request
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(action_id_map(&ids, &page2.rows), vec!["act_004"]);
+    assert!(page2.next_cursor.is_none());
 }
 
 /// Seeds the six fixture records as ordinary CLAIMABLE items over the typed indexed queue, proves

@@ -31,7 +31,8 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use pqueue_core::{
     BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OrderingMode,
-    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+    PriorityValue, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
+    TenantId, UtcTimestamp,
 };
 
 use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
@@ -575,6 +576,14 @@ pub trait ProjectionStore: Send {
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>>;
+
+    fn range_scan(
+        &self,
+        _shard: &QueueKey,
+        _request: RangeScanRequest,
+    ) -> EngineResult<RangeScanResponse> {
+        Err(EngineError::Unavailable)
+    }
 
     // -- secondary-index query ----------------------------------------------
 
@@ -2588,6 +2597,19 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectionQueryPort
     for ComposedBackend<L, P, C>
 {
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> impl std::future::Future<Output = EngineResult<RangeScanResponse>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .range_scan(shard, request);
+        std::future::ready(result)
+    }
 }
 
 // ---------------------------------------------------------------------------
