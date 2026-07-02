@@ -1143,6 +1143,156 @@ fn parse_priority(raw: Option<String>) -> EngineResult<Option<PriorityValue>> {
         .transpose()
 }
 
+fn is_fifo_claim_scan_item(item: &PushItem) -> bool {
+    item.priority.is_none()
+        && item.not_before.is_none()
+        && item.group_key.is_none()
+        && item.cohort_size.is_none()
+        && item.gate_keys.is_empty()
+}
+
+fn reset_claim_scan_hint(
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+) {
+    claim_scan_hints.remove(shard);
+    claim_scan_default_fifo.insert(shard.clone(), false);
+}
+
+fn observe_push_for_claim_scan(
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+    items: &[PushItem],
+) {
+    if items.iter().all(is_fifo_claim_scan_item) {
+        claim_scan_default_fifo.entry(shard.clone()).or_insert(true);
+    } else {
+        reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+    }
+}
+
+fn advance_claim_scan_hint_for_ids(
+    tx: &Transaction<'_>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+    item_ids: &[ItemId],
+) -> EngineResult<()> {
+    if item_ids.is_empty() || !claim_scan_default_fifo.get(shard).copied().unwrap_or(false) {
+        return Ok(());
+    }
+    let (t, q) = parts(shard);
+    let mut seen = 0_i64;
+    let mut max_rowid: Option<i64> = None;
+    let mut rich_rows = 0_i64;
+    let ids: Vec<String> = item_ids.iter().map(|id| id.to_string()).collect();
+    for chunk in ids.chunks(SQLITE_BATCH) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(*), MAX(rowid), \
+             COALESCE(SUM(CASE WHEN priority IS NOT NULL OR not_before IS NOT NULL \
+             OR group_key IS NOT NULL OR cohort_size IS NOT NULL THEN 1 ELSE 0 END), 0) \
+             FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
+        );
+        let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
+        for id in chunk {
+            p.push(Value::Text(id.clone()));
+        }
+        let (count, chunk_max_rowid, chunk_rich): (i64, Option<i64>, i64) =
+            st(tx.query_row(&sql, params_from_iter(p.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            }))?;
+        seen += count;
+        rich_rows += chunk_rich;
+        if let Some(rowid) = chunk_max_rowid {
+            max_rowid = Some(max_rowid.map_or(rowid, |current| current.max(rowid)));
+        }
+    }
+    if seen != item_ids.len() as i64 || rich_rows > 0 {
+        reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+        return Ok(());
+    }
+    if let Some(rowid) = max_rowid {
+        let next = rowid
+            .checked_add(1)
+            .ok_or_else(|| EngineError::Storage("claim scan hint overflow".into()))?;
+        let slot = claim_scan_hints.entry(shard.clone()).or_insert(0);
+        if next > *slot {
+            *slot = next;
+        }
+    }
+    Ok(())
+}
+
+fn fifo_rowid_range_for_id_strings(
+    conn: &Connection,
+    shard: &QueueKey,
+    ids: &[String],
+    expected_state: Option<&str>,
+) -> EngineResult<Option<(i64, i64)>> {
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let (t, q) = parts(shard);
+    let mut seen = 0_i64;
+    let mut min_rowid: Option<i64> = None;
+    let mut max_rowid: Option<i64> = None;
+    let mut rich_rows = 0_i64;
+    for chunk in ids.chunks(SQLITE_BATCH) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(*), MIN(rowid), MAX(rowid), \
+             COALESCE(SUM(CASE WHEN priority IS NOT NULL OR not_before IS NOT NULL \
+             OR group_key IS NOT NULL OR cohort_size IS NOT NULL THEN 1 ELSE 0 END), 0) \
+             FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
+        );
+        let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
+        for id in chunk {
+            p.push(Value::Text(id.clone()));
+        }
+        let (count, chunk_min, chunk_max, chunk_rich): (i64, Option<i64>, Option<i64>, i64) =
+            st(conn.query_row(&sql, params_from_iter(p.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            }))?;
+        seen += count;
+        rich_rows += chunk_rich;
+        if let Some(rowid) = chunk_min {
+            min_rowid = Some(min_rowid.map_or(rowid, |current| current.min(rowid)));
+        }
+        if let Some(rowid) = chunk_max {
+            max_rowid = Some(max_rowid.map_or(rowid, |current| current.max(rowid)));
+        }
+    }
+    if seen != ids.len() as i64 || rich_rows > 0 {
+        return Ok(None);
+    }
+    let (Some(min_rowid), Some(max_rowid)) = (min_rowid, max_rowid) else {
+        return Ok(None);
+    };
+    let range_count: i64 = if let Some(state) = expected_state {
+        st(conn.query_row(
+            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND rowid BETWEEN ?3 AND ?4 AND lifecycle_state=?5",
+            params![t, q, min_rowid, max_rowid, state],
+            |row| row.get(0),
+        ))?
+    } else {
+        st(conn.query_row(
+            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND rowid BETWEEN ?3 AND ?4",
+            params![t, q, min_rowid, max_rowid],
+            |row| row.get(0),
+        ))?
+    };
+    if range_count == ids.len() as i64 {
+        Ok(Some((min_rowid, max_rowid)))
+    } else {
+        Ok(None)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Inner: the durable connection + the queue-definition cache + the live-token map
 // ---------------------------------------------------------------------------
@@ -1154,6 +1304,10 @@ struct Inner {
     /// Compiled entity schemas (ADR-011). Rebuilt from `queues` on open; keyed by queue.
     schemas: HashMap<QueueKey, Arc<CompiledSchema>>,
     grouped_shards: HashSet<QueueKey>,
+    /// Process-local rowid cursor for high-volume FIFO claim scans. Never persisted; reset on reopen or rich
+    /// queue shapes, so correctness comes from the fallback SQL path rather than from the hint.
+    claim_scan_hints: HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: HashMap<QueueKey, bool>,
     /// Ephemeral live lease tokens (cleartext is never persisted; only the hash is). Lost on reopen.
     live_tokens: HashMap<ItemId, LeaseToken>,
 }
@@ -1224,6 +1378,8 @@ impl Inner {
             conn,
             queues,
             grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
             live_tokens,
             ..
         } = self;
@@ -1249,6 +1405,8 @@ impl Inner {
             &tx,
             queues,
             grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
             &mut token_ops,
             shard,
             seq as u64,
@@ -1818,6 +1976,8 @@ fn apply_command_sql(
     tx: &Transaction<'_>,
     queues: &HashMap<QueueKey, QueueDefinition>,
     grouped_shards: &mut HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
     token_ops: &mut Vec<TokenOp>,
     shard: &QueueKey,
     seq: u64,
@@ -1828,13 +1988,18 @@ fn apply_command_sql(
     let now_n = ts_nanos(now);
     match command {
         // Queue creation is a control-plane concern; idempotent no-op if it reaches the apply path.
-        QueueCommand::CreateQueue(_) => Ok(()),
+        QueueCommand::CreateQueue(_) => {
+            claim_scan_hints.remove(shard);
+            claim_scan_default_fifo.insert(shard.clone(), true);
+            Ok(())
+        }
         QueueCommand::Push(c) => {
             let model = queues
                 .get(shard)
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
             insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
+            observe_push_for_claim_scan(claim_scan_hints, claim_scan_default_fifo, shard, &c.items);
             let mut groups: Vec<GroupKey> = Vec::new();
             for it in &c.items {
                 if let Some(g) = &it.group_key
@@ -1855,21 +2020,53 @@ fn apply_command_sql(
             let hash = lease_hash(&c.lease_token);
             let exp = ts_nanos(c.lease_expires_at);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
-            exec_items_in(
-                tx,
-                "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?, \
-                 lease_expires_at=?, retry_count=retry_count+1, item_version=item_version+1, \
-                 updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
-                &[
-                    Value::Blob(hash),
-                    Value::Integer(exp),
-                    Value::Integer(now_n),
-                    Value::Integer(seq as i64),
-                ],
-                &t,
-                &q,
-                &ids,
-            )?;
+            if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
+                && let Some((min_rowid, max_rowid)) =
+                    fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
+            {
+                let changed = st(tx.execute(
+                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
+                     lease_expires_at=?2, retry_count=retry_count+1, item_version=item_version+1, \
+                     updated_at=?3, last_command_sequence=?4 \
+                     WHERE tenant_id=?5 AND queue_id=?6 AND rowid BETWEEN ?7 AND ?8",
+                    params![hash, exp, now_n, seq as i64, t, q, min_rowid, max_rowid],
+                ))?;
+                if changed != ids.len() {
+                    return Err(EngineError::Storage(
+                        "sqlite fifo claim range update changed an unexpected row count".into(),
+                    ));
+                }
+                let next = max_rowid
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("claim scan hint overflow".into()))?;
+                let slot = claim_scan_hints.entry(shard.clone()).or_insert(0);
+                if next > *slot {
+                    *slot = next;
+                }
+            } else {
+                exec_items_in(
+                    tx,
+                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?, \
+                     lease_expires_at=?, retry_count=retry_count+1, item_version=item_version+1, \
+                     updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                    &[
+                        Value::Blob(hash),
+                        Value::Integer(exp),
+                        Value::Integer(now_n),
+                        Value::Integer(seq as i64),
+                    ],
+                    &t,
+                    &q,
+                    &ids,
+                )?;
+                advance_claim_scan_hint_for_ids(
+                    tx,
+                    claim_scan_hints,
+                    claim_scan_default_fifo,
+                    shard,
+                    &c.item_ids,
+                )?;
+            }
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
@@ -1881,6 +2078,7 @@ fn apply_command_sql(
             Ok(())
         }
         QueueCommand::CohortClaim(c) => {
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             let hash = lease_hash(&c.lease_token);
             let exp = ts_nanos(c.lease_expires_at);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
@@ -2170,20 +2368,51 @@ fn apply_command_sql(
                 ),
             ];
             for (state, reset, terminal_at, ids) in buckets {
-                exec_items_in(
-                    tx,
-                    FINALIZE_SET,
-                    &[
-                        Value::Text(state.to_string()),
-                        Value::Integer(reset as i64),
-                        terminal_at,
-                        Value::Integer(now_n),
-                        Value::Integer(seq as i64),
-                    ],
-                    &t,
-                    &q,
-                    ids,
-                )?;
+                if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
+                    && matches!(state, "Complete" | "Failed")
+                    && let Some((min_rowid, max_rowid)) =
+                        fifo_rowid_range_for_id_strings(tx, shard, ids, Some("Leased"))?
+                {
+                    let changed = st(tx.execute(
+                        "UPDATE pqueue_items SET lifecycle_state=?1, lease_token_hash=NULL, \
+                         lease_expires_at=NULL, fenced=0, item_version=item_version+1, \
+                         retry_count=CASE WHEN ?2 THEN 0 ELSE retry_count END, terminal_at=?3, \
+                         updated_at=?4, last_command_sequence=?5 \
+                         WHERE tenant_id=?6 AND queue_id=?7 AND rowid BETWEEN ?8 AND ?9",
+                        params![
+                            state,
+                            reset as i64,
+                            terminal_at,
+                            now_n,
+                            seq as i64,
+                            t,
+                            q,
+                            min_rowid,
+                            max_rowid
+                        ],
+                    ))?;
+                    if changed != ids.len() {
+                        return Err(EngineError::Storage(
+                            "sqlite fifo finalize range update changed an unexpected row count"
+                                .into(),
+                        ));
+                    }
+                } else {
+                    exec_items_in(
+                        tx,
+                        FINALIZE_SET,
+                        &[
+                            Value::Text(state.to_string()),
+                            Value::Integer(reset as i64),
+                            terminal_at,
+                            Value::Integer(now_n),
+                            Value::Integer(seq as i64),
+                        ],
+                        &t,
+                        &q,
+                        ids,
+                    )?;
+                }
             }
             for (nb_n, ids) in &backoff {
                 exec_items_in(
@@ -2197,6 +2426,14 @@ fn apply_command_sql(
                 )?;
             }
             let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id).collect();
+            if c.outcomes.iter().any(|o| {
+                matches!(
+                    o.kind,
+                    FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm
+                )
+            }) {
+                reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+            }
             if grouped_shards.contains(shard) {
                 for g in groups_of(tx, shard, &ids)? {
                     refresh_group_summary(tx, shard, &g, now)?;
@@ -2221,6 +2458,8 @@ fn apply_command_sql(
                 tx,
                 queues,
                 grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
                 token_ops,
                 shard,
                 seq,
@@ -2245,6 +2484,7 @@ fn apply_command_sql(
             Ok(())
         }
         QueueCommand::ReplacePending(c) => {
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             // Supersede the old pending item (drops it from the active partial-unique index + eligibility),
             // then insert the replacement under the same client_item_key.
             // ADR-011: delete the superseded item's index rows first so the replacement can claim
@@ -2287,6 +2527,7 @@ fn apply_command_sql(
             Ok(())
         }
         QueueCommand::LeaseExpired(c) => {
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             exec_items_in(
                 tx,
@@ -2497,6 +2738,7 @@ fn apply_command_sql(
             Ok(())
         }
         QueueCommand::SetGates(c) => {
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             // BQ-14d (TD-002 §gate): set/clear queue gate-key block state. A blocked gate key makes every
             // item carrying it ineligible (enforced by the eligibility anti-join). This is exact-on-read:
             // toggling a gate flips eligibility on the next claim with no per-item rewrite.
@@ -2580,32 +2822,75 @@ fn has_blocked_gates(conn: &Connection, shard: &QueueKey) -> EngineResult<bool> 
 /// Priority-ordered eligible candidates (pending, not superseded, due at `now`), capped at `limit`. Empty
 /// while paused. `created_seq` is the stable FIFO tiebreaker (the relational analogue of the in-memory
 /// `created_seq`; BQ-11b adds Eligibility-Precedence progress-guard ordering).
-fn select_eligible_sql(
+fn select_eligible_sql_with_scan_hint(
+    conn: &Connection,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    limit: usize,
+) -> EngineResult<Vec<ItemId>> {
+    if claim_scan_default_fifo.get(shard).copied().unwrap_or(false) {
+        let hint = claim_scan_hints.get(shard).copied().unwrap_or(1).max(1);
+        let hinted = select_eligible_sql_after(conn, shard, now, limit, Some(hint))?;
+        if hinted.len() == limit {
+            return Ok(hinted);
+        }
+        claim_scan_hints.remove(shard);
+    }
+    select_eligible_sql_after(conn, shard, now, limit, None)
+}
+
+fn select_eligible_sql_after(
     conn: &Connection,
     shard: &QueueKey,
     now: UtcTimestamp,
     limit: usize,
+    rowid_floor: Option<i64>,
 ) -> EngineResult<Vec<ItemId>> {
     if queue_paused(conn, shard)? {
         return Ok(Vec::new());
     }
     let (t, q) = parts(shard);
     if !has_blocked_gates(conn, shard)? {
-        let mut stmt = st(conn.prepare(
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-             AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
-             AND (not_before IS NULL OR not_before<=?3) \
-             AND eligible_since IS NOT NULL \
-             ORDER BY priority_sort, created_seq LIMIT ?4",
-        ))?;
-        let mapped = st(
-            stmt.query_map(params![t, q, ts_nanos(now), limit as i64], |row| {
-                row.get::<_, String>(0)
-            }),
-        )?;
+        let (sql, floor) = if rowid_floor.is_some() {
+            (
+                "SELECT item_id FROM pqueue_items NOT INDEXED WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
+                 AND (not_before IS NULL OR not_before<=?3) \
+                 AND eligible_since IS NOT NULL AND rowid>=?5 \
+                 ORDER BY rowid LIMIT ?4",
+                rowid_floor,
+            )
+        } else {
+            (
+                "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
+                 AND (not_before IS NULL OR not_before<=?3) \
+                 AND eligible_since IS NOT NULL \
+                 ORDER BY priority_sort, created_seq LIMIT ?4",
+                None,
+            )
+        };
         let mut out = Vec::new();
-        for r in mapped {
-            out.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+        let mut stmt = st(conn.prepare(sql))?;
+        if let Some(floor) = floor {
+            let mapped = st(stmt
+                .query_map(params![t, q, ts_nanos(now), limit as i64, floor], |row| {
+                    row.get::<_, String>(0)
+                }))?;
+            for r in mapped {
+                out.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+            }
+        } else {
+            let mapped = st(
+                stmt.query_map(params![t, q, ts_nanos(now), limit as i64], |row| {
+                    row.get::<_, String>(0)
+                }),
+            )?;
+            for r in mapped {
+                out.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+            }
         }
         return Ok(out);
     }
@@ -3033,33 +3318,68 @@ fn render_claimed(
     resolve: impl Fn(&ItemId) -> Option<LeaseToken>,
 ) -> EngineResult<Vec<ClaimedItem>> {
     let (t, q) = parts(shard);
-    let mut out = Vec::new();
+    type ClaimedRow = (
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        Option<Vec<u8>>,
+        String,
+        String,
+    );
+    let mut requested = Vec::new();
+    let mut id_strs = Vec::new();
     for id in ids {
-        let Some(token) = resolve(id) else {
-            continue;
-        };
-        let row = st(conn
-            .query_row(
-                "SELECT client_item_key, item_version, priority, group_key, not_before, \
-                 lease_expires_at, retry_count, payload, fields, metadata FROM pqueue_items \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND lifecycle_state='Leased'",
-                params![t, q, id.to_string()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, Option<Vec<u8>>>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, String>(9)?,
-                    ))
-                },
-            )
-            .optional())?;
+        if let Some(token) = resolve(id) {
+            requested.push((*id, token));
+            id_strs.push(id.to_string());
+        }
+    }
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut rows: HashMap<String, ClaimedRow> = HashMap::with_capacity(requested.len());
+    for chunk in id_strs.chunks(SQLITE_BATCH) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT item_id, client_item_key, item_version, priority, group_key, not_before, \
+             lease_expires_at, retry_count, payload, fields, metadata FROM pqueue_items \
+             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' AND item_id IN ({ph})"
+        );
+        let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
+        for id in chunk {
+            p.push(Value::Text(id.clone()));
+        }
+        let mut stmt = st(conn.prepare(&sql))?;
+        let mapped = st(stmt.query_map(params_from_iter(p.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<Vec<u8>>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ),
+            ))
+        }))?;
+        for row in mapped {
+            let (item_id, data) = st(row)?;
+            rows.insert(item_id, data);
+        }
+    }
+    let gate_keys = item_gate_keys_for_ids(conn, shard, &id_strs)?;
+    let mut out = Vec::new();
+    for (id, token) in requested {
+        let id_str = id.to_string();
         let Some((
             key,
             version,
@@ -3071,14 +3391,14 @@ fn render_claimed(
             payload,
             fields,
             metadata,
-        )) = row
+        )) = rows.get(&id_str).cloned()
         else {
             continue;
         };
         let Some(exp) = exp else { continue };
-        let gate_keys = item_gate_keys(conn, shard, id)?;
+        let gate_keys = gate_keys.get(&id_str).cloned().unwrap_or_default();
         out.push(ClaimedItem {
-            item_id: *id,
+            item_id: id,
             client_item_key: ClientItemKey::new(key)
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             item_version: version as u64,
@@ -3100,19 +3420,34 @@ fn render_claimed(
     Ok(out)
 }
 
-fn item_gate_keys(conn: &Connection, shard: &QueueKey, id: &ItemId) -> EngineResult<Vec<String>> {
+fn item_gate_keys_for_ids(
+    conn: &Connection,
+    shard: &QueueKey,
+    id_strs: &[String],
+) -> EngineResult<HashMap<String, Vec<String>>> {
     let (t, q) = parts(shard);
-    let mut stmt = st(conn.prepare(
-        "SELECT gate_key FROM pqueue_item_gates \
-         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
-         ORDER BY gate_key",
-    ))?;
-    let rows = st(stmt.query_map(params![t, q, id.to_string()], |row| row.get::<_, String>(0)))?;
-    let mut keys = Vec::new();
-    for row in rows {
-        keys.push(st(row)?);
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for chunk in id_strs.chunks(SQLITE_BATCH) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT item_id, gate_key FROM pqueue_item_gates \
+             WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph}) \
+             ORDER BY item_id, gate_key"
+        );
+        let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
+        for id in chunk {
+            p.push(Value::Text(id.clone()));
+        }
+        let mut stmt = st(conn.prepare(&sql))?;
+        let rows = st(stmt.query_map(params_from_iter(p.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }))?;
+        for row in rows {
+            let (item_id, gate_key) = st(row)?;
+            out.entry(item_id).or_default().push(gate_key);
+        }
     }
-    Ok(keys)
+    Ok(out)
 }
 
 fn item_gate_key_map(
@@ -3689,6 +4024,14 @@ impl SqliteProjectionStore {
         }
         let mut g = self.inner.lock().expect("projection store poisoned");
         apply_committed_batch_sql(&mut g, positions, envelopes)
+    }
+
+    /// Lightweight finalize pre-validation for object-log backends: true when every distinct `id` is
+    /// currently leased in the durable projection. This avoids rendering full claimed-item payloads when a
+    /// caller only needs leased-state validation.
+    pub fn all_leased(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<bool> {
+        let g = self.inner.lock().expect("projection store poisoned");
+        Ok(leased_id_count_sql(&g.conn, shard, ids)? == ids.len())
     }
 
     /// Snapshot recovery seam (bead pqueue-8a76daad): the per-queue **high-water** durably recorded by the
@@ -4442,6 +4785,8 @@ fn checkpoint_batch_sql(
         conn,
         queues,
         grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
         live_tokens,
         ..
     } = g;
@@ -4475,6 +4820,8 @@ fn checkpoint_batch_sql(
             &tx,
             queues,
             grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
             &mut token_ops,
             shard,
             pos.sequence,
@@ -4565,6 +4912,8 @@ fn open_inner(conn: Connection) -> EngineResult<Inner> {
         queues: HashMap::new(),
         schemas: HashMap::new(),
         grouped_shards: HashSet::new(),
+        claim_scan_hints: HashMap::new(),
+        claim_scan_default_fifo: HashMap::new(),
         live_tokens: HashMap::new(),
     };
     inner.reload()?;
@@ -4765,6 +5114,8 @@ fn apply_committed_sql(
         conn,
         queues,
         grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
         live_tokens,
         ..
     } = g;
@@ -4794,6 +5145,8 @@ fn apply_committed_sql(
         &tx,
         queues,
         grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
         &mut token_ops,
         &position.queue,
         position.sequence,
@@ -4828,6 +5181,8 @@ fn apply_committed_batch_sql(
         conn,
         queues,
         grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
         live_tokens,
         ..
     } = g;
@@ -4875,6 +5230,8 @@ fn apply_committed_batch_sql(
             &tx,
             queues,
             grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
             &mut token_ops,
             &pos.queue,
             pos.sequence,
@@ -4955,6 +5312,8 @@ struct RelProjectionWriter<'a> {
     tx: &'a Transaction<'a>,
     queues: &'a HashMap<QueueKey, QueueDefinition>,
     grouped_shards: &'a mut HashSet<QueueKey>,
+    claim_scan_hints: &'a mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &'a mut HashMap<QueueKey, bool>,
     /// Token mutations accumulate here and are replayed onto the live map by `write` AFTER commit (F4).
     token_ops: &'a mut Vec<TokenOp>,
 }
@@ -4970,6 +5329,8 @@ impl ProjectionWriter for RelProjectionWriter<'_> {
                 self.tx,
                 self.queues,
                 self.grouped_shards,
+                self.claim_scan_hints,
+                self.claim_scan_default_fifo,
                 self.token_ops,
                 &pos.queue,
                 pos.sequence,
@@ -5021,6 +5382,8 @@ impl Backend for SqliteRelationalBackend {
                 conn,
                 queues,
                 grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
                 live_tokens,
                 ..
             } = &mut *guard;
@@ -5032,6 +5395,8 @@ impl Backend for SqliteRelationalBackend {
                     tx: &tx,
                     queues,
                     grouped_shards,
+                    claim_scan_hints,
+                    claim_scan_default_fifo,
                     token_ops: &mut token_ops,
                 };
                 f(&mut lw, &mut pw)?
@@ -5137,8 +5502,21 @@ impl ProjectionRead for SqliteRelationalBackend {
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = {
-            let g = self.inner.lock().expect("poisoned");
-            select_eligible_sql(&g.conn, shard, now, limit)
+            let mut g = self.inner.lock().expect("poisoned");
+            let Inner {
+                conn,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                ..
+            } = &mut *g;
+            select_eligible_sql_with_scan_hint(
+                conn,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                shard,
+                now,
+                limit,
+            )
         };
         std::future::ready(result)
     }
@@ -5210,8 +5588,21 @@ impl ProjectionRead for SqliteProjectionStore {
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = {
-            let g = self.inner.lock().expect("projection store poisoned");
-            select_eligible_sql(&g.conn, shard, now, limit)
+            let mut g = self.inner.lock().expect("projection store poisoned");
+            let Inner {
+                conn,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                ..
+            } = &mut *g;
+            select_eligible_sql_with_scan_hint(
+                conn,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                shard,
+                now,
+                limit,
+            )
         };
         std::future::ready(result)
     }
@@ -5467,6 +5858,8 @@ impl PushPort for SqliteRelationalBackend {
                 conn,
                 queues,
                 grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
                 live_tokens,
                 ..
             } = &mut *g;
@@ -5502,6 +5895,8 @@ impl PushPort for SqliteRelationalBackend {
                 &tx,
                 queues,
                 grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
                 &mut token_ops,
                 shard,
                 seq as u64,
@@ -5589,6 +5984,8 @@ impl ClaimPort for SqliteRelationalBackend {
                 conn,
                 queues,
                 grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
                 live_tokens,
                 ..
             } = &mut *g;
@@ -5614,7 +6011,14 @@ impl ClaimPort for SqliteRelationalBackend {
             // item-level path is the strict-claim order; the group/cohort paths consume their projections.
             let mut selected_cohort: Option<CohortId> = None;
             let candidates = match unit {
-                ClaimUnit::Item => select_eligible_sql(&tx, &req.shard, req.now, req.max_items)?,
+                ClaimUnit::Item => select_eligible_sql_with_scan_hint(
+                    &tx,
+                    claim_scan_hints,
+                    claim_scan_default_fifo,
+                    &req.shard,
+                    req.now,
+                    req.max_items,
+                )?,
                 ClaimUnit::WholeGroup => {
                     let max_groups = req
                         .compatibility
@@ -5668,6 +6072,8 @@ impl ClaimPort for SqliteRelationalBackend {
                 &tx,
                 queues,
                 grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
                 &mut token_ops,
                 &req.shard,
                 seq as u64,
@@ -5861,6 +6267,8 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                 conn,
                 queues,
                 grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
                 live_tokens,
                 ..
             } = &mut *g;
@@ -5903,6 +6311,8 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                         &tx,
                         queues,
                         grouped_shards,
+                        claim_scan_hints,
+                        claim_scan_default_fifo,
                         token_ops,
                         shard,
                         seq,
@@ -6572,6 +6982,26 @@ fn item_state_sql(
         .map(|(s, _, _, _)| *s))
 }
 
+fn leased_id_count_sql(conn: &Connection, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<usize> {
+    let (t, q) = parts(shard);
+    let id_strs: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    let mut total = 0usize;
+    for chunk in id_strs.chunks(SQLITE_BATCH) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM pqueue_items \
+             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' AND item_id IN ({ph})"
+        );
+        let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
+        for id in chunk {
+            p.push(Value::Text(id.clone()));
+        }
+        let count: i64 = st(conn.query_row(&sql, params_from_iter(p.iter()), |row| row.get(0)))?;
+        total += count as usize;
+    }
+    Ok(total)
+}
+
 /// Committed `item_version` of `id`, or `None` if absent.
 fn item_version_sql(conn: &Connection, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
     let (t, q) = parts(shard);
@@ -6927,7 +7357,21 @@ impl ProjectionStore for SqliteRelational {
         now: UtcTimestamp,
         max: usize,
     ) -> EngineResult<Vec<ItemId>> {
-        select_eligible_sql(&self.lock().conn, shard, now, max)
+        let mut g = self.lock();
+        let Inner {
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            ..
+        } = &mut *g;
+        select_eligible_sql_with_scan_hint(
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            shard,
+            now,
+            max,
+        )
     }
 
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
@@ -7055,7 +7499,21 @@ impl ProjectionStore for SqliteRelational {
         now: UtcTimestamp,
         limit: usize,
     ) -> EngineResult<Vec<ItemId>> {
-        select_eligible_sql(&self.lock().conn, shard, now, limit)
+        let mut g = self.lock();
+        let Inner {
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            ..
+        } = &mut *g;
+        select_eligible_sql_with_scan_hint(
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            shard,
+            now,
+            limit,
+        )
     }
 
     fn peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
@@ -7544,7 +8002,21 @@ impl ProjectionStore for SqliteProjectionStore {
         now: UtcTimestamp,
         max: usize,
     ) -> EngineResult<Vec<ItemId>> {
-        select_eligible_sql(&self.lock().conn, shard, now, max)
+        let mut g = self.lock();
+        let Inner {
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            ..
+        } = &mut *g;
+        select_eligible_sql_with_scan_hint(
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            shard,
+            now,
+            max,
+        )
     }
 
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
@@ -7668,7 +8140,21 @@ impl ProjectionStore for SqliteProjectionStore {
         now: UtcTimestamp,
         limit: usize,
     ) -> EngineResult<Vec<ItemId>> {
-        select_eligible_sql(&self.lock().conn, shard, now, limit)
+        let mut g = self.lock();
+        let Inner {
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            ..
+        } = &mut *g;
+        select_eligible_sql_with_scan_hint(
+            conn,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            shard,
+            now,
+            limit,
+        )
     }
 
     fn peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {

@@ -601,12 +601,15 @@ where
     let rmw_window = env_u64("PQUEUE_HYBRID_RMW_WINDOW", 64).max(1) as usize;
     let claim_finalize_io_start = ProcIoSnapshot::read();
     let claim_finalize_start = Instant::now();
+    let emit_claim_finalize_windows = backend_profile.contains("sqlite") && resident >= 1_000_000;
     while claimed_total < resident {
         let t = Instant::now();
+        let window_io_start = ProcIoSnapshot::read();
         let remaining = resident - claimed_total;
         let claim_ops = remaining
             .div_ceil(claim_batch.max(1) as u64)
             .min(rmw_window as u64) as usize;
+        let claim_start = Instant::now();
         let claims: Vec<_> = (0..claim_ops)
             .map(|op| {
                 let offset = claimed_total + (op as u64 * claim_batch as u64);
@@ -630,6 +633,7 @@ where
                 claimed_batches.push(claimed);
             }
         }
+        let claim_wall_ms = claim_start.elapsed().as_secs_f64() * 1000.0;
         if claimed_batches.is_empty() {
             break;
         }
@@ -637,6 +641,7 @@ where
             .iter()
             .map(|claimed| claimed.items.len() as u64)
             .sum();
+        let outcome_start = Instant::now();
         let finalizes: Vec<_> = claimed_batches
             .iter()
             .map(|claimed| {
@@ -648,11 +653,32 @@ where
                 backend.finalize(&shard, outcomes, ts(1), None)
             })
             .collect();
+        let outcome_wall_ms = outcome_start.elapsed().as_secs_f64() * 1000.0;
+        let finalize_start = Instant::now();
         for finalize in finalizes {
             finalize.await.expect("finalize");
         }
+        let finalize_wall_ms = finalize_start.elapsed().as_secs_f64() * 1000.0;
         claimed_total += claimed_in_window;
         claim_finalize_latencies.push(t.elapsed().as_secs_f64() * 1000.0);
+        if emit_claim_finalize_windows {
+            let window_io = phase_io_delta(window_io_start, t);
+            println!(
+                "phase-window {backend_profile}.hot_claim_finalize claimed_total={} claimed_window={} claim_ops={} claim_wall_ms={:.3} outcome_wall_ms={:.3} finalize_wall_ms={:.3} rchar={} wchar={} syscr={} syscw={} read_bytes={} write_bytes={}",
+                claimed_total,
+                claimed_in_window,
+                claim_ops,
+                claim_wall_ms,
+                outcome_wall_ms,
+                finalize_wall_ms,
+                window_io.rchar,
+                window_io.wchar,
+                window_io.syscr,
+                window_io.syscw,
+                window_io.read_bytes,
+                window_io.write_bytes
+            );
+        }
     }
     assert_eq!(claimed_total, resident);
     let hot_claim_finalize_io = phase_io_delta(claim_finalize_io_start, claim_finalize_start);
@@ -1873,7 +1899,7 @@ fn release_default_batch(release: bool, resident: u64) -> u64 {
     if release && resident <= 10_000 {
         100
     } else if release && resident >= 1_000_000 {
-        50_000
+        250_000
     } else if release {
         500
     } else {

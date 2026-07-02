@@ -2,7 +2,7 @@
 // the deliberate codebase pattern, not convertible to bare `async fn` without changing the trait shape.
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -264,6 +264,11 @@ impl ObjectLogSqliteBackend {
 
     async fn require_leased(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
         if ids.is_empty() {
+            return Ok(());
+        }
+        if ids.iter().copied().collect::<HashSet<_>>().len() == ids.len()
+            && self.projection.all_leased(shard, ids)?
+        {
             return Ok(());
         }
         let renderable = self.projection.claimed_view(shard, ids).await?;
@@ -1118,6 +1123,11 @@ impl SegmentedObjectLogSqliteBackend {
 
     async fn require_leased(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
         if ids.is_empty() {
+            return Ok(());
+        }
+        if ids.iter().copied().collect::<HashSet<_>>().len() == ids.len()
+            && self.projection.all_leased(shard, ids)?
+        {
             return Ok(());
         }
         let renderable = self.projection.claimed_view(shard, ids).await?;
