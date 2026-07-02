@@ -134,6 +134,20 @@ fn round6(v: f64) -> f64 {
     (v * 1_000_000.0).round() / 1_000_000.0
 }
 
+fn proc_status_kb(field: &str) -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(field) {
+            let kb = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())?;
+            return Some(kb);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ObjectStoreUtilization {
     object_count: u64,
@@ -713,6 +727,7 @@ async fn run_hybrid(
     row.recovery_tail_replayed = Some(rec_tail_to_replay);
     row.recovery_pending_after = Some(reopened.metrics(&rec_shard).await.expect("metrics").pending);
     assert_eq!(row.recovery_pending_after, Some(resident));
+    drop(reopened);
 
     // Disk-loss reconstruction is measured with an active resident projection, so load a second queue and
     // delete the local SQLite projection before reopening. This proves retained object-log reconstruction.
@@ -770,6 +785,7 @@ async fn run_hybrid(
     row.disk_loss_wall_ms = Some(round3(t.elapsed().as_secs_f64() * 1000.0));
     row.disk_loss_pending_after = Some(disk_reopened.metrics(&disk_shard).await.unwrap().pending);
     assert_eq!(row.disk_loss_pending_after, Some(resident));
+    drop(disk_reopened);
 
     apply_object_store_counters(&mut row, &c, cfg.target_bytes);
 
@@ -1228,6 +1244,14 @@ fn emit_ledger(
 
     let mut values = BTreeMap::new();
     values.insert("resident".into(), serde_json::json!(resident));
+    values.insert(
+        "process_vm_hwm_kb".into(),
+        serde_json::json!(proc_status_kb("VmHWM:").unwrap_or(0)),
+    );
+    values.insert(
+        "process_vm_rss_kb".into(),
+        serde_json::json!(proc_status_kb("VmRSS:").unwrap_or(0)),
+    );
     values.insert(
         "backend_compared_to".into(),
         serde_json::json!(["objectlog/inmemory", "objectlog/sqlite"]),
@@ -2554,6 +2578,8 @@ async fn performance_object_log_hybrid_segment_density_gate() {
         "objectlog_hybrid_list_count",
         "objectlog_hybrid_s3_estimated_cost_usd",
         "objectlog_hybrid_s3_price_inputs",
+        "process_vm_hwm_kb",
+        "process_vm_rss_kb",
     ] {
         assert!(values.contains_key(key), "ledger must emit {key}");
     }
@@ -2575,6 +2601,11 @@ async fn performance_object_log_hybrid_segment_density_gate() {
     assert!(
         values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0) > 0,
         "LIST request count must be populated"
+    );
+    assert!(
+        values["process_vm_hwm_kb"].as_u64().unwrap_or(0) > 0
+            && values["process_vm_rss_kb"].as_u64().unwrap_or(0) > 0,
+        "VmHWM and VmRSS should be populated on this Linux test host"
     );
 
     // Segment-density is a required `bars_met` input: flipping it off flips `bars_met` off.

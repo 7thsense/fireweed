@@ -749,7 +749,7 @@ struct Inner<L, P> {
 /// tail is normally a handful of commands; exceeding this suggests a projection that has fallen far behind
 /// the log. (For a fresh in-memory projection the whole log is the "tail", so the budget is generous.)
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
-const RECOVERY_READ_PAGE_LIMIT: usize = 65_536;
+const RECOVERY_READ_PAGE_LIMIT: usize = 8_192;
 
 /// The one generic backend (ADR-012): `Backend = LogStore × ProjectionStore × ControlPlane`. Implements
 /// every engine port by delegating to the three axes.
