@@ -52,10 +52,11 @@ use std::sync::{Arc, Mutex};
 use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, FilterOp, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState,
-    LeaseToken, Metadata, OrderField, PriorityModel, PriorityValue, QueryCursor, QueryFilter,
-    QueueDefinition, QueueId, QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow,
-    RequestId, SortDirection, TenantId, TypedValue, UtcTimestamp, is_retry_exhausted,
+    ClientItemKey, CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp,
+    GroupKey, GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexType,
+    ItemId, ItemState, LeaseToken, Metadata, OrderField, PriorityModel, PriorityValue, QueryCursor,
+    QueryFilter, QueueDefinition, QueueId, QueueIndex, RangeScanRequest, RangeScanResponse,
+    RangeScanRow, RequestId, SortDirection, TenantId, TypedValue, UtcTimestamp, is_retry_exhausted,
     priority_sort,
 };
 use pqueue_engine::ClaimUnit;
@@ -858,6 +859,17 @@ fn parts(shard: &QueueKey) -> (String, String) {
         shard.tenant_id.as_str().to_string(),
         shard.queue_id.as_str().to_string(),
     )
+}
+
+fn query_projection_image<R>(
+    definition: &QueueDefinition,
+    image: ProjectionImage,
+    f: impl FnOnce(&InMemoryProjection, &QueueKey) -> EngineResult<R>,
+) -> EngineResult<R> {
+    let mut projection = InMemoryProjection::new();
+    projection.hydrate_shard(definition, image)?;
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    f(&projection, &shard)
 }
 
 // ---------------------------------------------------------------------------
@@ -6971,6 +6983,38 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
         })();
         std::future::ready(result)
     }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> impl std::future::Future<Output = EngineResult<GroupedAggregateResponse>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("projection store poisoned");
+            let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let image = export_projection_image_sql(&g.conn, shard)?;
+            query_projection_image(&definition, image, |projection, shard| {
+                projection.grouped_aggregate(shard, request)
+            })
+        })();
+        std::future::ready(result)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> impl std::future::Future<Output = EngineResult<DeclaredBucketSegmentResponse>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("projection store poisoned");
+            let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let image = export_projection_image_sql(&g.conn, shard)?;
+            query_projection_image(&definition, image, |projection, shard| {
+                projection.declared_bucket_segment(shard, request)
+            })
+        })();
+        std::future::ready(result)
+    }
 }
 
 impl FinalizePort for SqliteRelationalBackend {
@@ -8408,6 +8452,24 @@ impl ProjectionStore for HybridProjectionStore {
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
         self.require_hydrated(shard)?;
         self.memory.live_items(shard, keys)
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        self.require_hydrated(shard)?;
+        self.memory.grouped_aggregate(shard, request)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        self.require_hydrated(shard)?;
+        self.memory.declared_bucket_segment(shard, request)
     }
 
     fn index_get_unique(

@@ -16,7 +16,10 @@ use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
-use pqueue_core::{RangeScanRequest, RangeScanResponse};
+use pqueue_core::{
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupedAggregateRequest,
+    GroupedAggregateResponse, RangeScanRequest, RangeScanResponse,
+};
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, EngineError,
     EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore,
@@ -381,6 +384,22 @@ impl ProjectionStore for InMemoryProjection {
     ) -> EngineResult<RangeScanResponse> {
         let _ = shard;
         self.get(shard)?.range_scan(request)
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        Ok(self.get(shard)?.grouped_aggregate(request)?)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        Ok(self.get(shard)?.declared_bucket_segment(request)?)
     }
 
     fn index_get_unique(

@@ -27,10 +27,12 @@ pub use compose_impls::{InMemoryProjection, MemoryLog};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, FilterOp, GroupKey, IndexDeclaration, IndexSpec, IndexType, ItemEvent, ItemId,
-    ItemState, LeaseToken, Metadata, OrderField, OrderingMode, PriorityModel, PriorityValue,
-    QueryCursor, QueryFilter, QueueDefinition, QueueIndex, RangeScanRequest, RangeScanResponse,
-    RangeScanRow, RecurrenceMode, RecurrencePolicy, SortDirection, TypedValue, UtcTimestamp,
+    AggregateGroup, BucketCount, ClientItemKey, DeclaredBucketSegmentRequest,
+    DeclaredBucketSegmentResponse, FilterOp, GroupKey, GroupedAggregateRequest,
+    GroupedAggregateResponse, IndexDeclaration, IndexSpec, IndexType, ItemEvent, ItemId, ItemState,
+    LeaseToken, Metadata, OrderField, OrderingMode, PriorityModel, PriorityValue, QueryCursor,
+    QueryFilter, QueueDefinition, QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow,
+    RecurrenceMode, RecurrencePolicy, SortDirection, TimeBucket, TypedValue, UtcTimestamp,
     apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
@@ -796,6 +798,138 @@ fn compare_rows(
         }
     }
     Ok(lhs.item_id.cmp(&rhs.item_id))
+}
+
+fn index_fields(spec: &QueueIndex) -> Vec<(&str, &IndexType)> {
+    match &spec.declaration {
+        IndexDeclaration::Single(def) => vec![(def.field.as_str(), &def.index_type)],
+        IndexDeclaration::Compound(def) => def
+            .fields
+            .iter()
+            .map(|field| (field.field.as_str(), &field.index_type))
+            .collect(),
+    }
+}
+
+fn index_field_type<'a>(spec: &'a QueueIndex, field: &str) -> Option<&'a IndexType> {
+    index_fields(spec)
+        .into_iter()
+        .find(|(name, _)| *name == field)
+        .map(|(_, ty)| ty)
+}
+
+fn truncate_timestamp(value: UtcTimestamp, bucket: TimeBucket) -> UtcTimestamp {
+    let seconds = match bucket {
+        TimeBucket::Hour => (value.seconds.div_euclid(3_600)) * 3_600,
+        TimeBucket::Day => (value.seconds.div_euclid(86_400)) * 86_400,
+    };
+    UtcTimestamp {
+        seconds,
+        nanoseconds: 0,
+    }
+}
+
+fn value_matches_bucket(value: &TypedValue, rule: &pqueue_core::BucketRule) -> bool {
+    let numeric = match value {
+        TypedValue::Integer(v) => *v as f64,
+        TypedValue::Float(v) => *v,
+        _ => return false,
+    };
+    if let Some(exact) = rule.exact {
+        return numeric == exact;
+    }
+    if let Some(gt) = rule.gt
+        && !(numeric > gt)
+    {
+        return false;
+    }
+    if let Some(gte) = rule.gte
+        && !(numeric >= gte)
+    {
+        return false;
+    }
+    if let Some(lt) = rule.lt
+        && !(numeric < lt)
+    {
+        return false;
+    }
+    if let Some(lte) = rule.lte
+        && !(numeric <= lte)
+    {
+        return false;
+    }
+    true
+}
+
+fn entity_index_value(
+    entity: &Value,
+    field: &str,
+    index_type: &IndexType,
+) -> EngineResult<Option<TypedValue>> {
+    typed_value_for_field(entity, field, index_type)
+}
+
+fn matches_filter_on_entity(entity: &Value, filter: &QueryFilter) -> EngineResult<bool> {
+    let Value::Object(map) = entity else {
+        return Err(EngineError::Invalid("typed index entity is not an object"));
+    };
+    let Some(value) = map.get(&filter.field) else {
+        return Ok(false);
+    };
+    if value.is_null() {
+        return Ok(false);
+    }
+    let typed = match &filter.value {
+        TypedValue::String(_) => value
+            .as_str()
+            .map(|s| TypedValue::String(s.to_string()))
+            .ok_or_else(|| {
+                EngineError::Invalid("typed index value is not valid for declared type")
+            })?,
+        TypedValue::Integer(_) => value.as_i64().map(TypedValue::Integer).ok_or_else(|| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?,
+        TypedValue::Float(_) => value.as_f64().map(TypedValue::Float).ok_or_else(|| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?,
+        TypedValue::Bool(_) => value.as_bool().map(TypedValue::Bool).ok_or_else(|| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?,
+        TypedValue::DateTime(_) => match value {
+            Value::String(s) => TypedValue::DateTime(parse_utc_timestamp(s)?),
+            Value::Number(n) => {
+                let seconds = n.as_i64().ok_or_else(|| {
+                    EngineError::Invalid("typed index value is not valid for declared type")
+                })?;
+                TypedValue::DateTime(UtcTimestamp::new(seconds, 0).map_err(|_| {
+                    EngineError::Invalid("typed index value is not valid for declared type")
+                })?)
+            }
+            _ => {
+                return Err(EngineError::Invalid(
+                    "typed index value is not valid for declared type",
+                ));
+            }
+        },
+    };
+    let ord = typed_value_compare(&typed, &filter.value)?;
+    let ok = match filter.op {
+        FilterOp::Eq => ord.is_eq(),
+        FilterOp::Gte => ord.is_ge(),
+        FilterOp::Gt => ord.is_gt(),
+        FilterOp::Lte => ord.is_le(),
+        FilterOp::Lt => ord.is_lt(),
+    };
+    Ok(ok)
+}
+
+fn matches_filters_on_entity(entity: &Value, filters: &[QueryFilter]) -> EngineResult<bool> {
+    for filter in filters {
+        if !matches_filter_on_entity(entity, filter)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -2355,6 +2489,135 @@ impl ProjectionData {
             rows: page_rows,
             next_cursor,
         })
+    }
+
+    /// Group filtered rows by declared index fields or hour/day buckets over a datetime field.
+    pub fn grouped_aggregate(
+        &self,
+        request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        if request.group_by.is_empty() {
+            return Err(EngineError::Invalid("group-by required"));
+        }
+        let spec = self.typed_range_index(request.index.as_deref())?;
+        let fields = index_fields(spec);
+        for group in &request.group_by {
+            let Some((_, index_type)) = fields
+                .iter()
+                .find(|(field, _)| *field == group.field.as_str())
+            else {
+                return Err(EngineError::Invalid("unindexed-field"));
+            };
+            if group.time_bucket.is_some() && !matches!(index_type, IndexType::Datetime) {
+                return Err(EngineError::Invalid("unsupported time bucket"));
+            }
+        }
+
+        let mut groups: BTreeMap<String, (BTreeMap<String, TypedValue>, u64)> = BTreeMap::new();
+        for rec in self.items.values() {
+            let Some(entity) = rec.entity_document.as_ref() else {
+                continue;
+            };
+            if !matches_filters_on_entity(entity, &request.filters)? {
+                continue;
+            }
+
+            let mut key = BTreeMap::new();
+            let mut skip = false;
+            for group in &request.group_by {
+                let index_type = index_field_type(spec, &group.field)
+                    .ok_or(EngineError::Invalid("unindexed-field"))?;
+                let Some(value) = entity_index_value(entity, &group.field, index_type)? else {
+                    skip = true;
+                    break;
+                };
+                let value = match (group.time_bucket, value) {
+                    (Some(bucket), TypedValue::DateTime(ts)) => {
+                        TypedValue::DateTime(truncate_timestamp(ts, bucket))
+                    }
+                    (Some(_), _) => return Err(EngineError::Invalid("unsupported time bucket")),
+                    (None, value) => value,
+                };
+                key.insert(group.field.clone(), value);
+            }
+            if skip {
+                continue;
+            }
+
+            let key_string =
+                serde_json::to_string(&key).map_err(|e| EngineError::Storage(e.to_string()))?;
+            let is_new_group = !groups.contains_key(&key_string);
+            if is_new_group && groups.len() as u32 >= request.max_groups {
+                return Err(EngineError::Invalid("aggregate-too-large"));
+            }
+            let entry = groups.entry(key_string).or_insert((key, 0));
+            entry.1 += 1;
+        }
+
+        let groups = groups
+            .into_values()
+            .map(|(key, count)| AggregateGroup { key, count })
+            .collect();
+        Ok(GroupedAggregateResponse { groups })
+    }
+
+    /// Segment filtered rows into caller-declared numeric buckets plus a required null bucket.
+    pub fn declared_bucket_segment(
+        &self,
+        request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        request
+            .validate(1_000)
+            .map_err(|_| EngineError::Invalid("invalid request"))?;
+        let spec = self.typed_range_index(request.index.as_deref())?;
+        let index_type = index_field_type(spec, &request.field)
+            .ok_or(EngineError::Invalid("unindexed-field"))?;
+        if !matches!(index_type, IndexType::Integer | IndexType::Float) {
+            return Err(EngineError::Invalid("unsupported bucket field"));
+        }
+
+        let mut counts: Vec<u64> = vec![0; request.buckets.len()];
+        let mut null_count = 0u64;
+        for rec in self.items.values() {
+            let Some(entity) = rec.entity_document.as_ref() else {
+                continue;
+            };
+            if !matches_filters_on_entity(entity, &request.filters)? {
+                continue;
+            }
+
+            let Some(value) = entity_index_value(entity, &request.field, index_type)? else {
+                null_count += 1;
+                continue;
+            };
+
+            let mut matched = false;
+            for (idx, bucket) in request.buckets.iter().enumerate() {
+                if value_matches_bucket(&value, bucket) {
+                    counts[idx] += 1;
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                continue;
+            }
+        }
+
+        let mut buckets = request
+            .buckets
+            .into_iter()
+            .zip(counts)
+            .map(|(bucket, count)| BucketCount {
+                label: bucket.label,
+                count,
+            })
+            .collect::<Vec<_>>();
+        buckets.push(BucketCount {
+            label: request.null_bucket_label,
+            count: null_count,
+        });
+        Ok(DeclaredBucketSegmentResponse { buckets })
     }
 
     /// Shared "every id is present + Leased + not fenced + not superseded" check used by finalize/renew.
