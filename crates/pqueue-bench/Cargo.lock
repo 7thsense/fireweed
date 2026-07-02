@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axon-esf",
  "serde",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-engine"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-memory"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "postcard",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -995,17 +995,18 @@ dependencies = [
 
 [[package]]
 name = "pqueue-projection"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "pqueue-core",
  "pqueue-engine",
+ "rustc-hash",
  "serde_json",
 ]
 
 [[package]]
 name = "pqueue-release"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1013,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.6.0"
+version = "0.6.2"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1145,6 +1146,12 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "rustversion"
