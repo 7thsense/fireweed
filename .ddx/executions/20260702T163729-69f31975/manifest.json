@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260702T163729-69f31975",
+  "bead_id": "pqueue-e9e46acd",
+  "base_rev": "ccc91537c0b7b0a6d33c327062277fcff6aaf516",
+  "created_at": "2026-07-02T16:37:30.091260916Z",
+  "requested": {
+    "effort": "medium",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-e9e46acd",
+    "title": "Add hot projection backend capability conformance",
+    "description": "PROBLEM\nThe contract requires every backend to advertise whether it supports hot projection range scans, grouping, side-record queryability, safe bounded mutation, and claim-by-query. Unsupported backends must fail explicitly instead of full-scanning or pretending support.\n\nPROPOSED FIX\nAdd backend conformance coverage for capability advertising. Memory and sqlite run in CI. Postgres/object-log profiles may be env-gated, but their skips must be loud and their unsupported capability behavior must be explicit. Include negative tests for a backend that lacks a capability.\n\nIN-SCOPE FILES\n- crates/pqueue-conformance/ if shared scenarios fit.\n- crates/pqueue/tests/hot_projection_queries.rs or backend-specific tests.\n- crates/pqueue-server/tests or adapter tests only if needed for env-gated profiles.\n\nOUT-OF-SCOPE\n- Implementing postgres/object-log support if not already feasible in this slice.\n- Changing unrelated conformance suites.\n\nNEGATIVE-TEST MECHANISM\nDo not require a live postgres/object-log instance for the negative capability path: memory and sqlite are expected to support the full capability set, so the \"backend without a capability\" test needs a test-only stub backend that implements the query port with all hot-projection capabilities advertised unavailable, or an assertion that the port trait's default method implementations return the structured unsupported error. `side_record_query` is advertised unavailable by ALL backends in this epic (implementation deferred; see the epic and contract) — assert that too.",
+    "acceptance": "1. `cargo test -p pqueue --test hot_projection_queries backend_capability_advertising_is_explicit -- --nocapture` passes for memory and sqlite.\n2. Env-gated postgres/object-log hot projection tests skip loudly when not configured and do not fail local CI.\n3. A backend without range scan, grouping, side-record queryability, bounded mutation, or claim-by-query advertises the missing capability and returns a structured unsupported error.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:conformance",
+      "area:projection",
+      "kind:test",
+      "backend:memory",
+      "backend:sqlite",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T163729-69f31975",
+    "prompt": ".ddx/executions/20260702T163729-69f31975/prompt.md",
+    "manifest": ".ddx/executions/20260702T163729-69f31975/manifest.json",
+    "result": ".ddx/executions/20260702T163729-69f31975/result.json",
+    "checks": ".ddx/executions/20260702T163729-69f31975/checks.json",
+    "usage": ".ddx/executions/20260702T163729-69f31975/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-e9e46acd-20260702T163729-69f31975"
+  },
+  "prompt_sha": "1684dc034c629ff0a80dd241d68391d5797b6a76c863d9aa50ef4fcdbdc55a5e"
+}
