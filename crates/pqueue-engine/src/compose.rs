@@ -30,11 +30,11 @@ use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use pqueue_core::{
-    BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClientItemKey,
+    BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
     DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey, GroupedAggregateRequest,
     GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata, OrderingMode, PriorityValue,
-    QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId, TenantId,
-    UtcTimestamp,
+    QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
+    TenantId, UtcTimestamp,
 };
 
 use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
@@ -2623,6 +2623,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectionQueryPort
     for ComposedBackend<L, P, C>
 {
+    fn hot_projection_capabilities(&self, _shard: &QueueKey) -> QueryCapabilityFlags {
+        QueryCapabilityFlags {
+            range_scan: true,
+            grouped_aggregate: true,
+            declared_bucket_segment: true,
+            bounded_mutation: true,
+            claim_by_query: true,
+            side_record_query: false,
+        }
+    }
+
     fn range_scan(
         &self,
         shard: &QueueKey,
@@ -2674,6 +2685,82 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
             let mut g = self.inner.lock().expect("poisoned");
             g.projection.bounded_mutation(shard, request)
         };
+        std::future::ready(result)
+    }
+
+    fn claim_by_query(
+        &self,
+        shard: &QueueKey,
+        request: ClaimByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let page_size = request.max_items.max(1).min(1_000);
+            let mut cursor = None;
+            let mut item_ids = Vec::new();
+            while item_ids.len() < request.max_items as usize {
+                let page = g.projection.range_scan(
+                    shard,
+                    RangeScanRequest {
+                        index: request.index.clone(),
+                        filters: request.filters.clone(),
+                        order_by: vec![request.order_by.clone()],
+                        page_size,
+                        cursor,
+                    },
+                )?;
+                item_ids.extend(page.rows.into_iter().map(|row| row.item_id));
+                item_ids.truncate(request.max_items as usize);
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+
+            if item_ids.is_empty() {
+                return Ok(Claimed::default());
+            }
+
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let lease_token =
+                LeaseToken::new(format!("cbq-{nanos}")).expect("generated lease token is valid");
+            let created_at = UtcTimestamp::new(
+                (nanos / 1_000_000_000) as i64,
+                (nanos % 1_000_000_000) as u32,
+            )
+            .expect("valid timestamp");
+            let lease_nanos = nanos + u128::from(request.lease_duration_ms) * 1_000_000;
+            let lease_expires_at = UtcTimestamp::new(
+                (lease_nanos / 1_000_000_000) as i64,
+                (lease_nanos % 1_000_000_000) as u32,
+            )
+            .expect("valid lease timestamp");
+            let env = Self::make_envelope(
+                &mut g,
+                self.node_id,
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: item_ids.clone(),
+                    lease_token: lease_token.clone(),
+                    lease_expires_at,
+                }),
+                item_ids.clone(),
+                created_at,
+            );
+            Self::commit_locked(&mut g, shard, env, None)?;
+            let items = g.projection.render_claimed(shard, &item_ids)?;
+            debug_assert_eq!(
+                items.len(),
+                item_ids.len(),
+                "every queried claim candidate must render"
+            );
+            Ok(Claimed {
+                items,
+                ..Default::default()
+            })
+        })();
         std::future::ready(result)
     }
 }

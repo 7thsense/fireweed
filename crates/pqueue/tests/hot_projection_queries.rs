@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use pqueue::{
-    AggregateGroup, BoundedMutationRequest, DeclaredBucketSegmentRequest, EligibilityPolicy,
-    FilterOp, GroupByField, GroupedAggregateRequest, ItemId, LibBackend, MutationOutcome, NewItem,
+    AggregateGroup, BoundedMutationRequest, ClaimByQueryRequest, ClaimRef, CommitEntry,
+    CommitRequest, DeclaredBucketSegmentRequest, EligibilityPolicy, FilterOp, FinalizeKind,
+    GroupByField, GroupedAggregateRequest, ItemId, LibBackend, MutationOutcome, NewItem,
     OrderField, OrderingMode, Pqueue, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueryFilter, QueueDefinition, QueueId, RangeScanRequest, RangeScanRow,
     RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue, UtcTimestamp,
@@ -114,6 +115,42 @@ fn claim_conflict_bounded_mutation_request() -> BoundedMutationRequest {
     }
 }
 
+fn claim_due_scheduled_actions_request() -> ClaimByQueryRequest {
+    ClaimByQueryRequest {
+        index: Some("by_action_type".to_string()),
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "action_type".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("message.send".to_string()),
+            },
+            QueryFilter {
+                field: "scheduled_at".to_string(),
+                op: FilterOp::Lte,
+                value: TypedValue::DateTime(UtcTimestamp::new(1_783_004_400, 0).expect("valid ts")),
+            },
+        ],
+        order_by: OrderField {
+            field: "scheduled_at".to_string(),
+            direction: SortDirection::Ascending,
+        },
+        max_items: 2,
+        lease_duration_ms: 30_000,
+        worker_id: pqueue_core::WorkerId::new("query-worker").expect("worker id"),
+        request_id: None,
+    }
+}
+
 #[tokio::test]
 async fn safe_recycling_rule_update_marks_only_act_001() {
     let memory_pq = Pqueue::new(
@@ -160,6 +197,30 @@ async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
         Arc::new(ManualClock::at(0)),
     );
     assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&sqlite_pq).await;
+}
+
+#[tokio::test]
+async fn claim_due_scheduled_actions_by_query() {
+    let memory_pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_claim_due_scheduled_actions_by_query_on_backend(&memory_pq).await;
+
+    let sqlite_path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-hot-projection-queries-claim-by-query-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&sqlite_path);
+    let sqlite_pq = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_claim_due_scheduled_actions_by_query_on_backend(&sqlite_pq).await;
 }
 
 #[tokio::test]
@@ -702,6 +763,67 @@ async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_clai
     let still_claimed = pq.claimed(&q, &[target.item_id]).await.unwrap();
     assert_eq!(still_claimed.len(), 1);
     assert_eq!(still_claimed[0].item_version, claimed_version);
+}
+
+async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+    let q = qkey();
+    let ids = seed_scheduled_action_fixture(pq).await;
+
+    let claimed = pq
+        .claim_by_query(&q, claim_due_scheduled_actions_request())
+        .await
+        .unwrap();
+    let by_id: HashMap<ItemId, String> = ids.into_iter().collect();
+    let action_ids = claimed
+        .items
+        .iter()
+        .map(|item| {
+            by_id
+                .get(&item.item_id)
+                .cloned()
+                .expect("claimed row should map to a seeded action_id")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(action_ids, vec!["act_001", "act_002"]);
+
+    let entries = claimed
+        .items
+        .iter()
+        .map(|item| CommitEntry {
+            claim_ref: ClaimRef {
+                item_id: item.item_id,
+                lease_token: item
+                    .lease_token
+                    .clone()
+                    .expect("claim-by-query must return a lease token"),
+                lease_expires_at: item.lease_expires_at,
+                item_version: item.item_version,
+            },
+            finalize: FinalizeKind::Complete,
+            side_records: vec![],
+            lifecycle_items: vec![],
+            instance_fence: None,
+        })
+        .collect::<Vec<_>>();
+    let outcomes = pq
+        .commit(
+            &q,
+            CommitRequest {
+                request_id: None,
+                entries,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, pqueue::EntryOutcome::Committed { .. }))
+    );
+
+    let metrics = pq.metrics(&q).await.unwrap();
+    assert_eq!(metrics.complete, 2);
+    assert_eq!(metrics.pending, 4);
 }
 
 fn hourly_distribution_request() -> GroupedAggregateRequest {

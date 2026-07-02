@@ -52,13 +52,13 @@ use std::sync::{Arc, Mutex};
 use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use pqueue_core::{
-    BoundedMutationRequest, BoundedMutationResponse, ClientItemKey, CohortId,
+    BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey, CohortId,
     DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexType, ItemId,
     ItemState, LeaseToken, Metadata, MutationOutcome, MutationResult, OrderField, PriorityModel,
-    PriorityValue, QueryCursor, QueryFilter, QueueDefinition, QueueId, QueueIndex,
-    RangeScanRequest, RangeScanResponse, RangeScanRow, RequestId, SortDirection, TenantId,
-    TypedValue, UtcTimestamp, is_retry_exhausted, priority_sort,
+    PriorityValue, QueryCapabilityFlags, QueryCursor, QueryFilter, QueueDefinition, QueueId,
+    QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow, RequestId, SortDirection,
+    TenantId, TypedValue, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
@@ -6857,6 +6857,17 @@ impl RecoveryReadPort for SqliteRelationalBackend {
 /// the sqlite-relational family inherits the all-`Unavailable` default except for the range-scan slice
 /// wired in this bead.
 impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
+    fn hot_projection_capabilities(&self, _shard: &QueueKey) -> QueryCapabilityFlags {
+        QueryCapabilityFlags {
+            range_scan: true,
+            grouped_aggregate: true,
+            declared_bucket_segment: true,
+            bounded_mutation: true,
+            claim_by_query: true,
+            side_record_query: false,
+        }
+    }
+
     fn range_scan(
         &self,
         shard: &QueueKey,
@@ -7104,6 +7115,249 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             Ok(RangeScanResponse {
                 rows: page_rows,
                 next_cursor,
+            })
+        })();
+        std::future::ready(result)
+    }
+
+    fn claim_by_query(
+        &self,
+        shard: &QueueKey,
+        request: ClaimByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("projection store poisoned");
+            let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let spec = if let Some(name) = request.index.as_deref() {
+                definition
+                    .typed_indexes
+                    .iter()
+                    .find(|qi| qi.name == name)
+                    .ok_or(EngineError::Invalid("unknown secondary index"))?
+            } else {
+                definition
+                    .typed_indexes
+                    .first()
+                    .ok_or(EngineError::Invalid("unknown secondary index"))?
+            };
+            if request.order_by.field.is_empty() {
+                return Err(EngineError::Invalid("range-scan order_by required"));
+            }
+            let fields: Vec<(&str, &IndexType)> = match &spec.declaration {
+                IndexDeclaration::Single(def) => vec![(def.field.as_str(), &def.index_type)],
+                IndexDeclaration::Compound(def) => def
+                    .fields
+                    .iter()
+                    .map(|field| (field.field.as_str(), &field.index_type))
+                    .collect(),
+            };
+            if !fields
+                .iter()
+                .any(|(field, _)| *field == request.order_by.field.as_str())
+            {
+                return Err(EngineError::Invalid("unindexed-field"));
+            }
+
+            let (t, q) = parts(shard);
+            let mut stmt = st(g.conn.prepare(
+                "SELECT item_id, entity_document FROM pqueue_items \
+                 WHERE tenant_id=?1 AND queue_id=?2",
+            ))?;
+            let rows = st(stmt.query_map(params![t, q], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            }))?;
+
+            let mut matched = Vec::new();
+            for row in rows {
+                let (item_id, entity_json): (String, Option<String>) = st(row)?;
+                let item_id =
+                    ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
+                let Some(entity_json) = entity_json else {
+                    continue;
+                };
+                let entity: JsonValue = serde_json::from_str(&entity_json)
+                    .map_err(|e| EngineError::Storage(e.to_string()))?;
+                let mut fields_map = BTreeMap::new();
+                match &spec.declaration {
+                    IndexDeclaration::Single(def) => {
+                        let Some(value) = typed_value_for_json(
+                            entity.get(&def.field).unwrap_or(&JsonValue::Null),
+                            &def.index_type,
+                        )?
+                        else {
+                            continue;
+                        };
+                        fields_map.insert(def.field.clone(), value);
+                    }
+                    IndexDeclaration::Compound(def) => {
+                        let mut missing = false;
+                        for field in &def.fields {
+                            let Some(value) = typed_value_for_json(
+                                entity.get(&field.field).unwrap_or(&JsonValue::Null),
+                                &field.index_type,
+                            )?
+                            else {
+                                missing = true;
+                                break;
+                            };
+                            fields_map.insert(field.field.clone(), value);
+                        }
+                        if missing {
+                            continue;
+                        }
+                    }
+                }
+                let row = RangeScanRow {
+                    item_id,
+                    fields: fields_map,
+                };
+
+                let mut accepted = true;
+                let mut prefix_len = 0usize;
+                for (field_name, index_type) in &fields {
+                    let Some(filter) = request
+                        .filters
+                        .iter()
+                        .find(|filter| filter.field == *field_name)
+                    else {
+                        break;
+                    };
+                    if filter.op != FilterOp::Eq {
+                        break;
+                    }
+                    let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+                    let Some(value) = row.fields.get(*field_name) else {
+                        accepted = false;
+                        break;
+                    };
+                    if !typed_value_matches_query(value, &typed) {
+                        accepted = false;
+                        break;
+                    }
+                    prefix_len += 1;
+                }
+                if accepted {
+                    for filter in &request.filters {
+                        let Some((idx, (_, index_type))) = fields
+                            .iter()
+                            .enumerate()
+                            .find(|(_, (field_name, _))| *field_name == filter.field.as_str())
+                        else {
+                            return Err(EngineError::Invalid("unindexed-field"));
+                        };
+                        if idx < prefix_len {
+                            continue;
+                        }
+                        let Some(value) = row.fields.get(filter.field.as_str()) else {
+                            accepted = false;
+                            break;
+                        };
+                        let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+                        let ord = typed_value_compare(value, &typed)?;
+                        let ok = match filter.op {
+                            FilterOp::Eq => ord.is_eq(),
+                            FilterOp::Gte => ord.is_ge(),
+                            FilterOp::Gt => ord.is_gt(),
+                            FilterOp::Lte => ord.is_le(),
+                            FilterOp::Lt => ord.is_lt(),
+                        };
+                        if !ok {
+                            accepted = false;
+                            break;
+                        }
+                    }
+                }
+                if accepted {
+                    matched.push(row);
+                }
+            }
+
+            matched.sort_by(|lhs, rhs| {
+                compare_rows(lhs, rhs, &[request.order_by.clone()]).expect("typed order compare")
+            });
+
+            let selected: Vec<ItemId> = matched
+                .into_iter()
+                .take(request.max_items as usize)
+                .map(|row| row.item_id)
+                .collect();
+
+            if selected.is_empty() {
+                return Ok(Claimed::default());
+            }
+
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let lease_token =
+                LeaseToken::new(format!("cbq-{nanos}")).expect("generated lease token is valid");
+            let created_at = UtcTimestamp::new(
+                (nanos / 1_000_000_000) as i64,
+                (nanos % 1_000_000_000) as u32,
+            )
+            .expect("valid timestamp");
+            let lease_nanos = nanos + u128::from(request.lease_duration_ms) * 1_000_000;
+            let lease_expires_at = UtcTimestamp::new(
+                (lease_nanos / 1_000_000_000) as i64,
+                (lease_nanos % 1_000_000_000) as u32,
+            )
+            .expect("valid lease timestamp");
+
+            drop(stmt);
+            let Inner {
+                conn,
+                live_tokens,
+                queues,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                ..
+            } = &mut *g;
+            let (t, q) = parts(shard);
+            let tx = st(conn.transaction())?;
+            let seq: i64 = st(tx
+                .query_row(
+                    "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![t, q],
+                    |row| row.get(0),
+                )
+                .optional())?
+            .ok_or(EngineError::NotFound)?;
+
+            let claim_command = QueueCommand::Claim(ClaimCommand {
+                item_ids: selected.clone(),
+                lease_token: lease_token.clone(),
+                lease_expires_at,
+            });
+            let mut token_ops = Vec::new();
+            apply_command_sql(
+                &tx,
+                queues,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                &mut token_ops,
+                shard,
+                seq as u64,
+                created_at,
+                &claim_command,
+            )?;
+            st(tx.execute(
+                "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
+                params![t, q, seq + 1],
+            ))?;
+            let items = render_claimed(&tx, shard, &selected, |_| Some(lease_token.clone()))?;
+            debug_assert_eq!(
+                items.len(),
+                selected.len(),
+                "every queried claim candidate must render"
+            );
+            st(tx.commit())?;
+            apply_token_ops(live_tokens, token_ops);
+            Ok(Claimed {
+                items,
+                ..Default::default()
             })
         })();
         std::future::ready(result)
