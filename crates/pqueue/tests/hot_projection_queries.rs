@@ -13,6 +13,7 @@ use pqueue::{
     RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue, UtcTimestamp,
 };
 use pqueue_core::{CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex};
+use pqueue_engine::{EngineError, HotProjectionQueryPort};
 use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_sqlite::SqliteRelationalBackend;
 use serde_json::{Value, json};
@@ -20,6 +21,11 @@ use serde_json::{Value, json};
 fn qkey() -> pqueue::QueueKey {
     pqueue::QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
 }
+
+#[derive(Default)]
+struct UnsupportedHotProjectionBackend;
+
+impl HotProjectionQueryPort for UnsupportedHotProjectionBackend {}
 
 fn queue_definition() -> QueueDefinition {
     QueueDefinition {
@@ -824,6 +830,99 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(p
     let metrics = pq.metrics(&q).await.unwrap();
     assert_eq!(metrics.complete, 2);
     assert_eq!(metrics.pending, 4);
+}
+
+#[tokio::test]
+async fn backend_capability_advertising_is_explicit() {
+    let q = qkey();
+    let expected = pqueue::QueryCapabilityFlags {
+        range_scan: true,
+        grouped_aggregate: true,
+        declared_bucket_segment: true,
+        bounded_mutation: true,
+        claim_by_query: true,
+        side_record_query: false,
+    };
+
+    let memory = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_eq!(memory.hot_projection_capabilities(&q), expected);
+    assert!(
+        memory
+            .hot_projection_capabilities(&q)
+            .paired_capabilities_consistent()
+    );
+    assert!(!memory.hot_projection_capabilities(&q).side_record_query);
+
+    let sqlite_path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-hot-projection-queries-capabilities-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&sqlite_path);
+    let sqlite = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_eq!(sqlite.hot_projection_capabilities(&q), expected);
+    assert!(
+        sqlite
+            .hot_projection_capabilities(&q)
+            .paired_capabilities_consistent()
+    );
+    assert!(!sqlite.hot_projection_capabilities(&q).side_record_query);
+
+    let unsupported = UnsupportedHotProjectionBackend::default();
+    let unsupported_flags = unsupported.hot_projection_capabilities(&q);
+    assert_eq!(unsupported_flags, pqueue::QueryCapabilityFlags::default());
+    assert!(!unsupported_flags.side_record_query);
+    assert_eq!(
+        unsupported
+            .range_scan(
+                &q,
+                RangeScanRequest {
+                    index: None,
+                    filters: vec![],
+                    order_by: vec![OrderField {
+                        field: "scheduled_at".to_string(),
+                        direction: SortDirection::Ascending,
+                    }],
+                    page_size: 1,
+                    cursor: None,
+                },
+            )
+            .await,
+        Err(EngineError::Unavailable)
+    );
+    assert_eq!(
+        unsupported
+            .grouped_aggregate(&q, hourly_distribution_request())
+            .await,
+        Err(EngineError::Unavailable)
+    );
+    assert_eq!(
+        unsupported
+            .declared_bucket_segment(&q, engagement_probability_request())
+            .await,
+        Err(EngineError::Unavailable)
+    );
+    assert_eq!(
+        unsupported
+            .bounded_mutation(&q, bounded_mutation_request())
+            .await,
+        Err(EngineError::Unavailable)
+    );
+    assert!(matches!(
+        unsupported
+            .claim_by_query(&q, claim_due_scheduled_actions_request())
+            .await,
+        Err(EngineError::Unavailable)
+    ));
 }
 
 fn hourly_distribution_request() -> GroupedAggregateRequest {
