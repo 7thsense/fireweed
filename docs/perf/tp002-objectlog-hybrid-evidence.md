@@ -243,7 +243,7 @@ ratio **0.918** (gate `<=1.20` each), finished in 11.98s. This confirms the
 `pqueue-8e5e7846`'s own closing evidence both pass with comfortable margin.
 Snapshot: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_100k.jsonl`.
 
-### 1M — BLOCKED: one-command object-storage segments after recovery fix
+### 1M — PASS after packed object-storage append (`pqueue-c23f74c9`)
 
 ```text
 PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 \
@@ -251,28 +251,60 @@ PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRI
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
-The recovery-replay pagination bug from `pqueue-864b1c74` and the bounded-debt
-gate from `pqueue-e523813a` are fixed: the 1M command now passes the hot-path,
-recovery, disk-loss, and bounded-debt gates (`bars_met=true`). Snapshot:
+The recovery-replay pagination bug from `pqueue-864b1c74`, the bounded-debt gate
+from `pqueue-e523813a`, and the object-storage granularity failure from
+`pqueue-9653618e` / `pqueue-c23f74c9` are fixed at 1M: the command passes with
+`bars_met=true`. Snapshot:
 `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_1m.jsonl`.
 
-The run is still not release evidence because segment density proves the
-object-storage log is being used at the wrong granularity:
-`objectlog_hybrid_mean_commands_per_segment=1.0`,
-`objectlog_hybrid_max_commands_per_segment=1`,
-`objectlog_hybrid_segments_sealed=6000`, and `objectlog_hybrid_objects_put=12000`
-for 1M resident with 500-member command batches. That means each batch command
-became its own object-log segment. Filed as `pqueue-5f2302e3`, which blocks this
-evidence gate.
+Key fields from the committed 1M row:
 
-### 10M — blocked on object-storage segment granularity
+| metric | value |
+|---|---:|
+| resident items | 1,000,000 |
+| hybrid ack p99 vs in-memory | 0.91 |
+| hybrid claim/finalize p95 vs in-memory | 1.11 |
+| mean / max commands per segment | 2.765 / 47 |
+| sealed segments / objects PUT | 2,170 / 4,340 |
+| object count / total stored bytes | 4,342 / 90,644,636 |
+| segment bytes / utilization ratio | 90,197,146 / 0.15856 |
+| PUT / GET / LIST counts | 6,511 / 8,168 / 8,172 |
+| estimated S3 request + storage cost | 0.078767 USD |
 
-`PQUEUE_HYBRID_RESIDENT=10000000` was attempted after the 1M fixes and stopped
-after roughly an hour. A CPU sample showed the hot thread dominated by
-`pqueue_objectlog::segmented::walk_keys` /
-`SegmentedObjectLog::recover_manifest`, reached from `current_epoch`/`seal`
-during claim/finalize. This was a symptom of the same granularity failure:
-object storage was receiving one tiny segment per batch command. 10M evidence
-cannot be produced until `pqueue-5f2302e3` changes the append/storage contract so
-object-storage output is packed before durable acknowledgement for normal
-data-plane traffic.
+This row proves normal data-plane traffic is no longer forced through
+single-command object-log segments. It is still intentionally conservative on
+segment utilization because the local benchmark uses low-latency group commit
+settings; the tracked cost fields let future runs optimize for fewer objects,
+larger segment objects, and lower total request cost.
+
+### 10M — preflight timeout, object-log metadata bottleneck removed (`pqueue-533c21ed`)
+
+The 10M preflight was rerun after packed appends and after removing manifest
+listing from the normal seal path:
+
+```text
+PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 \
+  timeout 15m cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+  performance_object_log_hybrid_release_10m -- --ignored --nocapture
+```
+
+Result: **timeout at 15m**, no 10M ledger row emitted. The timeout is not a
+return to the old object-storage granularity failure. Perf samples show the old
+hot path (`recover_manifest` / `walk_keys` / `current_epoch` on every
+append/seal) is gone from the object-log write path. After changing
+`SegmentedObjectLog::counters()` to use incrementally maintained object sizes,
+the metrics path also stopped walking the object directory.
+
+Representative post-fix CPU sample:
+
+| symbol/path | observation |
+|---|---|
+| `ProjectionData::eligible_candidates` via `ClaimPort::claim` | dominant CPU bucket |
+| `ProjectionData::finalize_validate` / `render_claimed` | secondary CPU buckets |
+| `SegmentedObjectLog::seal` / `build_segment_object` | about 1.5% in sample |
+| `recover_manifest` / `current_epoch` / `walk_keys` | absent from filtered hot-path sample |
+
+The next release blocker is therefore projection-side 10M claim/finalize CPU,
+not object-storage file count or manifest recovery. The broader 10M release
+evidence bead remains open until that projection bottleneck is fixed and the
+uncapped 10M row is committed with `bars_met=true`.

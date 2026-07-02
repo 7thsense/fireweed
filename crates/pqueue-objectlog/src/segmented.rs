@@ -592,6 +592,7 @@ struct ShardBuf {
 struct Inner {
     shards: BTreeMap<QueueKey, ShardBuf>,
     counters: SegmentCounters,
+    object_sizes: BTreeMap<String, u64>,
 }
 
 /// The outcome of an [`SegmentedObjectLog::enqueue`]: any positions that were acked because a size-triggered
@@ -620,8 +621,23 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             inner: Mutex::new(Inner {
                 shards: BTreeMap::new(),
                 counters: SegmentCounters::default(),
+                object_sizes: BTreeMap::new(),
             }),
         }
+    }
+
+    fn register_object(g: &mut Inner, key: &str, len: u64) {
+        let old = g.object_sizes.insert(key.to_string(), len);
+        match old {
+            Some(old_len) => {
+                g.counters.total_bytes = g.counters.total_bytes.saturating_sub(old_len) + len;
+            }
+            None => {
+                g.counters.object_count += 1;
+                g.counters.total_bytes += len;
+            }
+        }
+        g.counters.max_object_bytes = g.counters.max_object_bytes.max(len);
     }
 
     fn store_put(&self, key: &str, body: &[u8], count_object_put: bool) -> EngineResult<()> {
@@ -631,7 +647,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         if count_object_put {
             g.counters.objects_put += 1;
         }
-        g.counters.max_object_bytes = g.counters.max_object_bytes.max(body.len() as u64);
+        Self::register_object(&mut g, key, body.len() as u64);
         Ok(())
     }
 
@@ -641,7 +657,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         g.counters.put_count += 1;
         g.counters.objects_put += 1;
         g.counters.segment_bytes += body.len() as u64;
-        g.counters.max_object_bytes = g.counters.max_object_bytes.max(body.len() as u64);
+        Self::register_object(&mut g, key, body.len() as u64);
         Ok(())
     }
 
@@ -658,7 +674,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if count_object_put {
                 g.counters.objects_put += 1;
             }
-            g.counters.max_object_bytes = g.counters.max_object_bytes.max(body.len() as u64);
+            Self::register_object(&mut g, key, body.len() as u64);
         }
         Ok(created)
     }
@@ -743,13 +759,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// The queue's current `assignment_epoch` (highest epoch any committed manifest entry records).
     pub fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
-        {
-            let g = self.inner.lock().expect("segmented log poisoned");
-            if !g.shards.contains_key(shard) {
-                return Err(EngineError::NotFound);
-            }
-        }
-        Ok(self.recover_manifest(shard)?.2)
+        self.inner
+            .lock()
+            .expect("segmented log poisoned")
+            .shards
+            .get(shard)
+            .map(|buf| buf.committed_epoch)
+            .ok_or(EngineError::NotFound)
     }
 
     /// Acquire the queue at a NEW, strictly-greater epoch by publishing a **fence entry** to the manifest
@@ -881,23 +897,19 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         };
         let n = drained.len();
 
-        // 2. Epoch fence: read the AUTHORITATIVE current epoch + tail from the manifest. A stale writer is
-        //    fenced here, before any segment object is written.
-        let (cur_seq, cur_index, cur_epoch) = self.recover_manifest(shard)?;
-        {
+        // 2. Epoch fence from the recovered in-memory tail. Recovery/acquire/CAS-lost paths refresh this tail
+        //    from the manifest; the normal single-writer hot path must not list the manifest before every seal.
+        let (cur_seq, cur_index, cur_epoch) = {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
-            // Re-sync the in-memory view to the manifest (a peer/new-owner may have advanced it).
-            buf.next_seq = cur_seq;
-            buf.next_manifest_index = cur_index;
-            buf.committed_epoch = cur_epoch;
-            if expected_epoch != cur_epoch {
+            if expected_epoch != buf.committed_epoch {
                 // Fenced: discard the buffer (the commands are unacked; no segment, no manifest entry).
                 buf.buffered_bytes = 0;
                 buf.oldest_buffered_ms = None;
                 return Err(EngineError::EpochFenced);
             }
-        }
+            (buf.next_seq, buf.next_manifest_index, buf.committed_epoch)
+        };
 
         // 3. Write the immutable, checksummed segment object (idempotent at its first-seq key). The segment
         //    is the framed concatenation of the per-command bytes serialized once at buffer time — no
@@ -1041,18 +1053,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// A snapshot of the measured segment/object counters (release-ledger harness surface).
     pub fn counters(&self) -> SegmentCounters {
-        let mut counters = self
-            .inner
+        self.inner
             .lock()
             .expect("segmented log poisoned")
             .counters
-            .clone();
-        if let Ok(stats) = self.store.stats("") {
-            counters.object_count = stats.object_count;
-            counters.total_bytes = stats.total_bytes;
-            counters.max_object_bytes = counters.max_object_bytes.max(stats.max_object_bytes);
-        }
-        counters
+            .clone()
     }
 
     // -- high-water + snapshots (ADR-012 LogStore facets stored as blobs in the object store) ----------
