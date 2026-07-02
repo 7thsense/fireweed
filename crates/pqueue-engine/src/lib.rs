@@ -66,11 +66,12 @@ pub use port::{
     CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitCapabilities, CommitEntryOutcome,
     CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery,
-    FinalizePort, IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView, LeaseView,
-    LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
-    PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeasePort, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
-    TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
+    FinalizePort, HotProjectionQueryPort, IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView,
+    LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
+    ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, ReschedulePort, SetGatesPort,
+    SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};

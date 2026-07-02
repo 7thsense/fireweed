@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod domain;
+mod query;
 
 pub mod scaffold {
     pub const NAME: &str = "pqueue-core";
@@ -22,4 +23,11 @@ pub use domain::{
     QueueId, QueueIndex, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, TenantId,
     TimestampError, TransitionError, UtcTimestamp, WorkerId, apply_transition, check_idempotency,
     evaluate_eligibility, failure_event, is_retry_exhausted, priority_sort,
+};
+pub use query::{
+    AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, BucketRule,
+    ClaimByQueryRequest, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp,
+    GroupByField, GroupedAggregateRequest, GroupedAggregateResponse, MutationOutcome,
+    MutationResult, OrderField, QueryCapabilityFlags, QueryCursor, QueryFilter, QueryRequestError,
+    RangeScanRequest, RangeScanResponse, RangeScanRow, SortDirection, TimeBucket, TypedValue,
 };

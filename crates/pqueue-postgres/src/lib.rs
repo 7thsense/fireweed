@@ -916,6 +916,10 @@ impl pqueue_engine::DiscoveryPort for PostgresBackend {}
 /// Recovery/explain reads inherit the `Unavailable` default (no authoritative commit boundary on this path).
 impl pqueue_engine::RecoveryReadPort for PostgresBackend {}
 
+/// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
+/// the log-replay postgres family inherits the all-`Unavailable` default.
+impl pqueue_engine::HotProjectionQueryPort for PostgresBackend {}
+
 impl FinalizePort for PostgresBackend {
     fn finalize(
         &self,

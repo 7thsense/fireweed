@@ -22,10 +22,10 @@ use pqueue_core::{IndexDeclaration, QueueIndex, WorkerId};
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome, FinalizePort,
-    IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
-    PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort,
-    RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
-    acquire_and_fence,
+    HotProjectionQueryPort, IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome,
+    ProjectionRead, PurgePort, PushPort, PushSpec, QueueControlPlane, ReassignLeasePort,
+    ReclaimPort, RecoveryReadPort, RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort,
+    UpdateFieldsPort, UpsertPort, acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,12 +35,17 @@ use pqueue_engine::{
 // ---------------------------------------------------------------------------
 pub use bytes::Bytes;
 pub use pqueue_core::{
-    ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, CreateQueue, CreateQueueError,
-    CreateQueueErrorKind, DecimalValue, EligibilityPolicy, GateKeyPolicy, GroupKey,
-    IdentifierError, IndexSpec, ItemId, LeaseToken, Metadata, MetadataValue, OrderingMode, OwnerId,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    QueueCreationPolicy, QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RequestId,
-    RetryPolicy, TenantId, TimestampError, UtcTimestamp,
+    AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, BucketRule,
+    ClaimByQueryRequest, ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, CreateQueue,
+    CreateQueueError, CreateQueueErrorKind, DecimalValue, DeclaredBucketSegmentRequest,
+    DeclaredBucketSegmentResponse, EligibilityPolicy, FilterOp, GateKeyPolicy, GroupByField,
+    GroupKey, GroupedAggregateRequest, GroupedAggregateResponse, IdentifierError, IndexSpec,
+    ItemId, LeaseToken, Metadata, MetadataValue, MutationOutcome, MutationResult, OrderField,
+    OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    PriorityValue, QueryCapabilityFlags, QueryCursor, QueryFilter, QueryRequestError,
+    QueueCreationPolicy, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse,
+    RangeScanRow, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, SortDirection,
+    TenantId, TimeBucket, TimestampError, TypedValue, UtcTimestamp,
 };
 pub use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommitCapabilities,
@@ -86,6 +91,7 @@ pub trait LibBackend:
     + ProjectionRead
     + IndexQueryPort
     + DiscoveryPort
+    + HotProjectionQueryPort
     + ControlPlaneStore
     + Send
     + Sync
@@ -110,6 +116,7 @@ impl<T> LibBackend for T where
         + ProjectionRead
         + IndexQueryPort
         + DiscoveryPort
+        + HotProjectionQueryPort
         + ControlPlaneStore
         + Send
         + Sync
@@ -1208,6 +1215,75 @@ impl<B: LibBackend> Pqueue<B> {
         ids: &[ItemId],
     ) -> EngineResult<Vec<ClaimedItem>> {
         self.backend.claimed_view(queue, ids).await
+    }
+
+    /// The hot-projection query capabilities `queue`'s backend advertises (API-004 Query Capability
+    /// Names). Every flag defaults to `false` until a backend bead implements the corresponding
+    /// capability; a caller MUST check this before issuing [`Pqueue::range_scan`],
+    /// [`Pqueue::grouped_aggregate`], [`Pqueue::declared_bucket_segment`],
+    /// [`Pqueue::bounded_mutation`], or [`Pqueue::claim_by_query`] rather than discover unavailability
+    /// only via the structured [`EngineError::Unavailable`] each returns.
+    pub fn hot_projection_capabilities(&self, queue: &QueueKey) -> QueryCapabilityFlags {
+        self.backend.hot_projection_capabilities(queue)
+    }
+
+    /// Ordered scan over a declared index with cursor pagination (API-004 Range Scan). Returns
+    /// [`EngineError::Unavailable`] on a backend that has not implemented `range_scan` — see
+    /// [`Pqueue::hot_projection_capabilities`].
+    pub async fn range_scan(
+        &self,
+        queue: &QueueKey,
+        request: RangeScanRequest,
+    ) -> EngineResult<RangeScanResponse> {
+        self.backend.range_scan(queue, request).await
+    }
+
+    /// Grouped/bucketed count aggregation over a declared index (API-004 Grouping / Aggregation).
+    /// Returns [`EngineError::Unavailable`] on a backend that has not implemented
+    /// `grouped_aggregate` — see [`Pqueue::hot_projection_capabilities`].
+    pub async fn grouped_aggregate(
+        &self,
+        queue: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        self.backend.grouped_aggregate(queue, request).await
+    }
+
+    /// Caller-declared numeric bucket segmentation over one declared numeric-indexed field,
+    /// including the required null/no-value bucket (API-004 Declared Numeric Buckets). Returns
+    /// [`EngineError::Unavailable`] on a backend that has not implemented `declared_bucket_segment`
+    /// — see [`Pqueue::hot_projection_capabilities`].
+    pub async fn declared_bucket_segment(
+        &self,
+        queue: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        self.backend.declared_bucket_segment(queue, request).await
+    }
+
+    /// Scan a declared-index predicate and apply a caller-specified field update to every matching
+    /// record, with per-record optimistic concurrency (API-004 Bounded Mutation). Returns
+    /// [`EngineError::Unavailable`] on a backend that has not implemented `bounded_mutation` — see
+    /// [`Pqueue::hot_projection_capabilities`].
+    pub async fn bounded_mutation(
+        &self,
+        queue: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationResponse> {
+        self.backend.bounded_mutation(queue, request).await
+    }
+
+    /// Claim due records selected by a declared-index predicate instead of the queue's default
+    /// priority order (API-004 Claim By Query) — an alternate *selection* path into the same claim/
+    /// lease/finalize lifecycle as [`Pqueue::claim`], not a parallel one. Returns
+    /// [`EngineError::Unavailable`] on a backend that has not implemented `claim_by_query` — see
+    /// [`Pqueue::hot_projection_capabilities`].
+    pub async fn claim_by_query(
+        &self,
+        queue: &QueueKey,
+        request: ClaimByQueryRequest,
+    ) -> EngineResult<Claimed> {
+        self.backend.claim_by_query(queue, request).await
     }
 }
 

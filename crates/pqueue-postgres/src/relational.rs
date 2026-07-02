@@ -3457,6 +3457,10 @@ impl pqueue_engine::CommitTransitionPort for PostgresRelationalBackend {}
 /// Recovery/explain reads inherit the `Unavailable` default until the relational parity slice lands.
 impl pqueue_engine::RecoveryReadPort for PostgresRelationalBackend {}
 
+/// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
+/// the postgres-relational family inherits the all-`Unavailable` default.
+impl pqueue_engine::HotProjectionQueryPort for PostgresRelationalBackend {}
+
 impl FinalizePort for PostgresRelationalBackend {
     fn finalize(
         &self,

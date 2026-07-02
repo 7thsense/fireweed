@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260702T143602-020e6569",
+  "bead_id": "pqueue-c907b5b6",
+  "base_rev": "187454f675cd5e76d3ed12f9b522b003ea597c1e",
+  "created_at": "2026-07-02T14:36:03.286944878Z",
+  "requested": {
+    "effort": "medium",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-c907b5b6",
+    "title": "Add public hot projection query types and capability flags",
+    "description": "PROBLEM\nThe public Rust facade only exposes exact item reads and exact index lookups. The hot projection contract needs typed query request/response shapes before backend work can be implemented consistently.\n\nPROPOSED FIX\nAdd domain-neutral query model types for filters, typed values, range bounds, sort keys, cursor page requests/responses, aggregate/grouping requests, numeric buckets, bounded mutation requests, and advertised capability flags. Wire the public facade surface as compile-tested stubs that return `EngineError::Unavailable` until backend beads implement support.\n\nIN-SCOPE FILES\n- crates/pqueue-core/src/domain.rs or a focused query module for public data types.\n- crates/pqueue-engine/src/port.rs for capability/query traits.\n- crates/pqueue/src/lib.rs for facade methods that expose the new types.\n\nOUT-OF-SCOPE\n- Memory/sqlite query execution.\n- Snorri-specific names or policies.\n- Aggregation implementation beyond type definitions and unsupported defaults.\n\nCAPABILITY FLAGS\nAdvertise at minimum: range_scan, grouped_aggregates, numeric_buckets, bounded_mutation, claim_by_query, side_record_query. In this epic `side_record_query` is defined but never implemented — every backend advertises it unavailable (see the epic and contract).",
+    "acceptance": "1. `cargo test -p pqueue-core core_domain_tests_hot_projection_query_types -- --nocapture` passes or an equivalent named core-domain test proves serde/validation for query types.\n2. `cargo test -p pqueue --test hot_projection_queries capability_defaults_are_explicitly_unavailable -- --nocapture` passes and proves unsupported backends do not silently full-scan.\n3. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:core",
+      "area:contracts",
+      "area:projection",
+      "kind:feature",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T143602-020e6569",
+    "prompt": ".ddx/executions/20260702T143602-020e6569/prompt.md",
+    "manifest": ".ddx/executions/20260702T143602-020e6569/manifest.json",
+    "result": ".ddx/executions/20260702T143602-020e6569/result.json",
+    "checks": ".ddx/executions/20260702T143602-020e6569/checks.json",
+    "usage": ".ddx/executions/20260702T143602-020e6569/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-c907b5b6-20260702T143602-020e6569"
+  },
+  "prompt_sha": "38a679fe75d8466a07cc83d94d7575d1de2460040e67d87aeabd6440f6f6874d"
+}

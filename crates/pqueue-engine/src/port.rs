@@ -10,8 +10,11 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
-    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
+    BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey, CohortId,
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey, GroupedAggregateRequest,
+    GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
+    TenantId, UtcTimestamp, WorkerId,
 };
 
 use crate::claim_validation::ClaimCompatibility;
@@ -830,6 +833,69 @@ pub trait DiscoveryPort: Send + Sync {
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<Vec<crate::active_scope::ActiveScope>>> + Send
     {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hot projection query substrate (API-004)
+// ---------------------------------------------------------------------------
+
+/// Hot-projection query operations over a queue's declared indexes (API-004): range scan, grouped/
+/// bucketed aggregation, bounded mutation, and claim-by-query. Every default impl returns
+/// [`EngineError::Unavailable`] and [`hot_projection_capabilities`](Self::hot_projection_capabilities)
+/// defaults to [`QueryCapabilityFlags::default`] (all-false), so a backend that has not implemented
+/// this contract explicitly rejects a request rather than silently degrading to a full scan (API-004
+/// Query Capability Names). `side_record_query` is deferred beyond epic pqueue-45e13e4d for every
+/// backend (API-004 Side/Projection Records) — no override in this epic may advertise it `true`.
+#[doc(hidden)]
+pub trait HotProjectionQueryPort: Send + Sync {
+    /// Advertised capability flags for `shard`. The default advertises every capability
+    /// unavailable.
+    fn hot_projection_capabilities(&self, _shard: &QueueKey) -> QueryCapabilityFlags {
+        QueryCapabilityFlags::default()
+    }
+
+    fn range_scan(
+        &self,
+        _shard: &QueueKey,
+        _request: RangeScanRequest,
+    ) -> impl std::future::Future<Output = EngineResult<RangeScanResponse>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn grouped_aggregate(
+        &self,
+        _shard: &QueueKey,
+        _request: GroupedAggregateRequest,
+    ) -> impl std::future::Future<Output = EngineResult<GroupedAggregateResponse>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        _shard: &QueueKey,
+        _request: DeclaredBucketSegmentRequest,
+    ) -> impl std::future::Future<Output = EngineResult<DeclaredBucketSegmentResponse>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn bounded_mutation(
+        &self,
+        _shard: &QueueKey,
+        _request: BoundedMutationRequest,
+    ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// Claim due records selected by a declared-index predicate (API-004 Claim By Query). Returns the
+    /// same [`Claimed`] shape as [`ClaimPort::claim`] — an alternate *selection* path into the same
+    /// claim/lease/finalize lifecycle, not a parallel one.
+    fn claim_by_query(
+        &self,
+        _shard: &QueueKey,
+        _request: ClaimByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }
