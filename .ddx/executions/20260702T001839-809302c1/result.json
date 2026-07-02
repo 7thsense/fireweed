@@ -1,0 +1,56 @@
+{
+  "bead_id": "pqueue-d6453cdd",
+  "attempt_id": "20260702T001839-809302c1",
+  "base_rev": "e96f6d03843fc9233adb23b2e17a796588a8dd4e",
+  "result_rev": "0796f2754a9acab2b105bb78db34d3e5b46bde1d",
+  "implementation_rev": "0796f2754a9acab2b105bb78db34d3e5b46bde1d",
+  "outcome": "task_succeeded",
+  "status": "success",
+  "detail": "success",
+  "candidate_ref": "refs/ddx/iterations/20260702T001839-809302c1/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260702T001839-809302c1",
+      "result_rev": "0796f2754a9acab2b105bb78db34d3e5b46bde1d",
+      "implementer_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "requested_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "actual_route": {
+        "harness": "claude-tui",
+        "model": "sonnet-4.6"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "claude-tui",
+  "model": "sonnet-4.6",
+  "predicted_power": 8,
+  "predicted_cost_usd_per_1k_tokens": 0.009,
+  "predicted_cost_source": "subscription",
+  "session_id": "eb-61798228",
+  "duration_ms": 215757,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260702T001839-809302c1",
+  "prompt_file": ".ddx/executions/20260702T001839-809302c1/prompt.md",
+  "manifest_file": ".ddx/executions/20260702T001839-809302c1/manifest.json",
+  "result_file": ".ddx/executions/20260702T001839-809302c1/result.json",
+  "usage_file": ".ddx/executions/20260702T001839-809302c1/usage.json",
+  "started_at": "2026-07-02T00:18:39.445538759Z",
+  "finished_at": "2026-07-02T00:22:15.203165489Z"
+}

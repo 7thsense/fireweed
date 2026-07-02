@@ -1,0 +1,144 @@
+{
+  "attempt_id": "20260702T001839-809302c1",
+  "bead_id": "pqueue-d6453cdd",
+  "base_rev": "e96f6d03843fc9233adb23b2e17a796588a8dd4e",
+  "created_at": "2026-07-02T00:18:39.440083847Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-d6453cdd",
+    "title": "Run full hybrid async release evidence",
+    "description": "Run and record the full release evidence for hybrid-async after the smoke/10k gates are green. In-scope files: docs/perf/evidence/*, docs/perf/tp002-objectlog-hybrid-evidence.md, release gate scripts only if needed for evidence collection. Execute the largest feasible release lane, including 100k, 1M, and 10M resident tiers or document an explicit hardware/disk blocker with a failing bead rather than claiming completion. Out of scope: code changes except test harness fixes required by evidence integrity.",
+    "acceptance": "1. PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=100000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture passes.\\n2. PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture passes.\\n3. PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture passes.\\n4. cargo fmt --check passes.",
+    "parent": "pqueue-b207e65d",
+    "labels": [
+      "area:release",
+      "area:performance",
+      "kind:verification",
+      "backend:objectlog-hybrid-async",
+      "plan-2026-07-01-hybrid-async"
+    ],
+    "metadata": {
+      "closing_commit_sha": "42f115cbc111ea095928ae5f669b3e80bccda99d",
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude-tui\",\"resolved_model\":\"opus-4.7\",\"route_reason\":\"policy=default; score=143.0\",\"fallback_chain\":[],\"requested_min_power\":10}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude-tui model=opus-4.7 reason=policy=default; score=143.0"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260701T212322-823b6b4b\",\"harness\":\"claude-tui\",\"model\":\"opus-4.7\",\"route_reason\":\"policy=default; score=143.0\",\"input_tokens\":2,\"output_tokens\":508,\"total_tokens\":510,\"cost_usd\":0,\"duration_ms\":419173,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=510 model=opus-4.7"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude-tui\",\"actual_model\":\"opus-4.7\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260701T212322-823b6b4b\",\"bead_id\":\"pqueue-d6453cdd\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=opus-4.7 harness=claude-tui"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\nrationale: status: blocked\nreason: The 100k/1M/10M hybrid-async release tiers cannot pass the hot-path gate on this shared execution host; a provisioned/dedicated perf host is required. AC1 (100k) fails reproducibly (3/3 runs, exit 101): hybrid ack_p99-vs-inmemory ratio 1.736 / 2.115 / 3.176 (all \u003e 1.20 gate); claim/finalize p95 ratio swings 0.30–3.09, characteristic of shared-host tail contention. This is NOT a timing/disk failure — object logs write to $TMPDIR on /dev/vdb1 (288G free) and each run finishes in ~11s. The durability/correctness gates (recovery, disk-loss reconstruction, bounded apply-debt, segment density, attribution) all pass at 100k; only the \"hybrid hot path within 20% of pure in-memory objectlog\" latency bar fails. This matches the prior evidence doc, which already documents 100k+ requires a provisioned perf host and that this host's capacity is 10k (docs/perf/tp002-objectlog-hybrid-evidence.md:94,205). AC2 (1M) and AC3 (10M) are strictly larger, exercise the same gate, and would cost 20–40x the wall time to reconfirm the known failure, so they were not run. Full evidence: .ddx/executions/20260701T212322-823b6b4b/hybrid-scale-release-blocker.md. The committed 10k-pass hybrid-scale ledger was restored (no source/production code changed). Unblock: run on an isolated perf host, and/or a design decision on the hybrid claim/finalize scaling characteristic vs the inmemory-parity bar for durable backends at release scale (code change, out of this bead's scope).\ndecision_audit={\"failure_class\":\"unknown\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"opus-4.7\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"opus-4.7\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=0619f8ddbe6d53b7a959feaeb97ff0c06b970ae1\nbase_rev=23d1f35a5cc17ed9d9ee78f770494a3cef5d4730\noutcome_reason=unknown",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude-tui\",\"resolved_model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=139.5\",\"fallback_chain\":[]}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude-tui model=sonnet-4.6 reason=policy=default; score=139.5"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260701T224118-e73883ca\",\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"policy=default; score=139.5\",\"input_tokens\":131,\"output_tokens\":179,\"total_tokens\":310,\"cost_usd\":0,\"duration_ms\":1184652,\"exit_code\":0}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=310 model=sonnet-4.6"
+        },
+        {
+          "actor": "",
+          "body": "{\"candidate_ref\":\"refs/ddx/iterations/20260701T224118-e73883ca/0\",\"cycle_index\":0,\"attempt_id\":\"20260701T224118-e73883ca\",\"base_rev\":\"ca7a0aecb4ee1e404313e4742acbcc7e82b51c22\",\"result_rev\":\"0019e63fa5c5f37af167003cae6da43db76f8210\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "candidate_cycle_pinned",
+          "source": "",
+          "summary": ""
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude-tui\",\"actual_model\":\"sonnet-4.6\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260701T224118-e73883ca\",\"bead_id\":\"pqueue-d6453cdd\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=default powerClass=standard model=sonnet-4.6 harness=claude-tui"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"escalation_count\":0,\"estimated_difficulty\":\"\",\"fallback_chain\":[],\"final_power_class\":\"\",\"requested_power_class\":\"standard\",\"requested_profile\":\"default\",\"resolved_model\":\"sonnet-4.6\",\"resolved_power_class\":\"\",\"resolved_provider\":\"claude-tui\",\"routing_intent_note\":\"\",\"routing_intent_source\":\"default\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "routing",
+          "source": "ddx work",
+          "summary": "provider=claude-tui model=sonnet-4.6"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"advisory\":true,\"base_rev\":\"ca7a0aecb4ee1e404313e4742acbcc7e82b51c22\",\"changed_docs\":[\"docs/perf/tp002-objectlog-hybrid-evidence.md\"],\"evidence\":\".ddx/executions/20260701T224118-e73883ca/prose-findings.json\",\"findings\":null,\"result_rev\":\"42f115cbc111ea095928ae5f669b3e80bccda99d\"}",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "prose-check.findings",
+          "source": "ddx try",
+          "summary": "prose check: 0 finding(s) across 1 doc(s)"
+        },
+        {
+          "actor": "erik",
+          "body": "success\npowerClass=standard\ncycle_trace=[{\"cycle_index\":0,\"attempt_id\":\"20260701T224118-e73883ca\",\"result_rev\":\"0019e63fa5c5f37af167003cae6da43db76f8210\",\"implementer_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\"},\"review_result\":{},\"final_decision\":\"success\",\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}]\ndecision_audit={\"failure_class\":\"none\",\"retry_action\":\"close\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"profile\":\"default\",\"routing_intent_source\":\"default\",\"inferred_power_class\":\"standard\",\"requested_power_class\":\"standard\"},\"actual_route\":{\"harness\":\"claude-tui\",\"model\":\"sonnet-4.6\",\"route_reason\":\"default\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=42f115cbc111ea095928ae5f669b3e80bccda99d\nbase_rev=ca7a0aecb4ee1e404313e4742acbcc7e82b51c22",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "success"
+        },
+        {
+          "actor": "erik",
+          "body": "Review after DDx closure: reject. AC1 100k passed, but AC2 1M failed 3/3 with sqlite projection replay gap expected sequence 256 got 257; AC3 10M is blocked on the same correctness defect. The attempt filed pqueue-864b1c74 and documented the blocker in .ddx/executions/20260701T224118-e73883ca/hybrid-scale-1m-recovery-gap.md. pqueue-d6453cdd cannot remain closed until pqueue-864b1c74 lands and the 1M/10M acceptance commands pass.",
+          "created_at": "0001-01-01T00:00:00Z",
+          "kind": "review",
+          "source": "codex-local",
+          "summary": "REJECT: AC2/AC3 blocked by 1M recovery gap"
+        },
+        {
+          "actor": "",
+          "body": "",
+          "created_at": "2026-07-01T23:01:38.705866804Z",
+          "kind": "reopen",
+          "source": "",
+          "summary": "AC2/AC3 not met; blocked by pqueue-864b1c74 recovery replay gap"
+        }
+      ],
+      "session_id": "eb-34e87c96",
+      "spec-id": "plan-hybrid-async-checkpoint"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260702T001839-809302c1",
+    "prompt": ".ddx/executions/20260702T001839-809302c1/prompt.md",
+    "manifest": ".ddx/executions/20260702T001839-809302c1/manifest.json",
+    "result": ".ddx/executions/20260702T001839-809302c1/result.json",
+    "checks": ".ddx/executions/20260702T001839-809302c1/checks.json",
+    "usage": ".ddx/executions/20260702T001839-809302c1/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-d6453cdd-20260702T001839-809302c1"
+  },
+  "prompt_sha": "9a8570d01ee841a7cea61fef3bef5ef1ce9394a11de11bfb13a33694a137e05c"
+}
