@@ -3028,6 +3028,28 @@ fn item_gate_keys(conn: &Connection, shard: &QueueKey, id: &ItemId) -> EngineRes
     Ok(keys)
 }
 
+fn item_gate_key_map(
+    conn: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<HashMap<ItemId, Vec<String>>> {
+    let (t, q) = parts(shard);
+    let mut stmt = st(conn.prepare(
+        "SELECT item_id,gate_key FROM pqueue_item_gates \
+         WHERE tenant_id=?1 AND queue_id=?2 \
+         ORDER BY item_id,gate_key",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }))?;
+    let mut out: HashMap<ItemId, Vec<String>> = HashMap::new();
+    for row in rows {
+        let (item_id, gate_key) = st(row)?;
+        let item_id = ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
+        out.entry(item_id).or_default().push(gate_key);
+    }
+    Ok(out)
+}
+
 fn apply_whole_cohort_response_shape(items: &mut [ClaimedItem]) -> Option<GroupKey> {
     let cohort_id = items.first().and_then(|item| item.group_key.clone());
     for item in items {
@@ -4525,6 +4547,7 @@ fn export_projection_image_sql(
         |row| row.get(0),
     ))?;
 
+    let mut gate_keys_by_item = item_gate_key_map(conn, shard)?;
     let mut stmt = st(conn.prepare(
         "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,group_key,payload,\
          fields,metadata,entity_document,retry_count,item_version,lease_expires_at,fenced,\
@@ -4590,7 +4613,7 @@ fn export_projection_image_sql(
             payload: payload.map(Bytes::from),
             fields: fields_from_json(fields)?,
             metadata: metadata_from_json(metadata)?,
-            gate_keys: item_gate_keys(conn, shard, &item_id)?,
+            gate_keys: gate_keys_by_item.remove(&item_id).unwrap_or_default(),
             entity_document,
             state: parse_state(&lifecycle_state)?,
             item_version: item_version as u64,
