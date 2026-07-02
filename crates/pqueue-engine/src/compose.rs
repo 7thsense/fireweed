@@ -30,9 +30,10 @@ use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use pqueue_core::{
-    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OrderingMode,
-    PriorityValue, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
-    TenantId, UtcTimestamp,
+    BodyHash, ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
+    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
+    OrderingMode, PriorityValue, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse,
+    RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
@@ -582,6 +583,22 @@ pub trait ProjectionStore: Send {
         _shard: &QueueKey,
         _request: RangeScanRequest,
     ) -> EngineResult<RangeScanResponse> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn grouped_aggregate(
+        &self,
+        _shard: &QueueKey,
+        _request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        _shard: &QueueKey,
+        _request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
         Err(EngineError::Unavailable)
     }
 
@@ -2610,6 +2627,34 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
             .range_scan(shard, request);
         std::future::ready(result)
     }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> impl std::future::Future<Output = EngineResult<GroupedAggregateResponse>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .grouped_aggregate(shard, request);
+        std::future::ready(result)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> impl std::future::Future<Output = EngineResult<DeclaredBucketSegmentResponse>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .declared_bucket_segment(shard, request);
+        std::future::ready(result)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3321,6 +3366,22 @@ mod ordered_tests {
             keys: &[ClientItemKey],
         ) -> EngineResult<Vec<Option<LiveItemView>>> {
             Ok(keys.iter().map(|_| None).collect())
+        }
+
+        fn grouped_aggregate(
+            &self,
+            _shard: &QueueKey,
+            _request: GroupedAggregateRequest,
+        ) -> EngineResult<GroupedAggregateResponse> {
+            Err(EngineError::Unavailable)
+        }
+
+        fn declared_bucket_segment(
+            &self,
+            _shard: &QueueKey,
+            _request: DeclaredBucketSegmentRequest,
+        ) -> EngineResult<DeclaredBucketSegmentResponse> {
+            Err(EngineError::Unavailable)
         }
 
         fn index_get_unique(

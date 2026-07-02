@@ -7,11 +7,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use pqueue::{
-    BoundedMutationRequest, ClaimByQueryRequest, DeclaredBucketSegmentRequest, EligibilityPolicy,
-    EngineError, FilterOp, GroupByField, GroupedAggregateRequest, ItemId, NewItem, OrderField,
-    OrderingMode, Pqueue, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    QueryCapabilityFlags, QueryFilter, QueueDefinition, QueueId, RangeScanRequest, RangeScanRow,
-    RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue, UtcTimestamp,
+    AggregateGroup, BoundedMutationRequest, ClaimByQueryRequest, DeclaredBucketSegmentRequest,
+    EligibilityPolicy, EngineError, FilterOp, GroupByField, GroupedAggregateRequest, ItemId,
+    LibBackend, NewItem, OrderField, OrderingMode, Pqueue, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, QueryCapabilityFlags, QueryFilter, QueueDefinition,
+    QueueId, RangeScanRequest, RangeScanRow, RecurrencePolicy, RetryPolicy, SortDirection,
+    TenantId, TypedValue, UtcTimestamp,
 };
 use pqueue_core::{
     CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex, WorkerId,
@@ -171,6 +172,78 @@ async fn capability_defaults_are_explicitly_unavailable() {
     ));
 
     assert!(!QueryCapabilityFlags::default().side_record_query);
+}
+
+#[tokio::test]
+async fn hourly_distribution_by_status() {
+    let memory_pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_hourly_distribution_by_status_on_backend(&memory_pq).await;
+
+    let sqlite_path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-hot-projection-queries-hourly-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&sqlite_path);
+    let sqlite_pq = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_hourly_distribution_by_status_on_backend(&sqlite_pq).await;
+}
+
+#[tokio::test]
+async fn recycling_preview_by_hour() {
+    let memory_pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_recycling_preview_by_hour_on_backend(&memory_pq).await;
+
+    let sqlite_path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-hot-projection-queries-recycling-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&sqlite_path);
+    let sqlite_pq = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_recycling_preview_by_hour_on_backend(&sqlite_pq).await;
+}
+
+#[tokio::test]
+async fn engagement_probability_segments() {
+    let memory_pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_engagement_probability_segments_on_backend(&memory_pq).await;
+
+    let sqlite_path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-hot-projection-queries-engagement-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&sqlite_path);
+    let sqlite_pq = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_engagement_probability_segments_on_backend(&sqlite_pq).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +432,332 @@ fn scheduled_action_item(record: &Value) -> NewItem {
         payload: Some(bytes::Bytes::from(record.to_string())),
         entity: Some(record.clone()),
         ..Default::default()
+    }
+}
+
+fn group_datetime(group: &AggregateGroup, field: &str) -> UtcTimestamp {
+    match group.key.get(field).expect("group key field") {
+        TypedValue::DateTime(ts) => *ts,
+        other => panic!("expected datetime for {field}, got {other:?}"),
+    }
+}
+
+fn group_string(group: &AggregateGroup, field: &str) -> String {
+    match group.key.get(field).expect("group key field") {
+        TypedValue::String(value) => value.clone(),
+        other => panic!("expected string for {field}, got {other:?}"),
+    }
+}
+
+fn group_bool(group: &AggregateGroup, field: &str) -> bool {
+    match group.key.get(field).expect("group key field") {
+        TypedValue::Bool(value) => *value,
+        other => panic!("expected bool for {field}, got {other:?}"),
+    }
+}
+
+fn assert_grouped_status_counts(groups: &[AggregateGroup], expected: &[(UtcTimestamp, &str, u64)]) {
+    let mut actual = groups
+        .iter()
+        .map(|group| {
+            (
+                group_datetime(group, "scheduled_at"),
+                group_string(group, "status"),
+                group.count,
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort_by_key(|entry| (entry.0, entry.1.clone()));
+    let mut expected = expected
+        .iter()
+        .map(|(ts, status, count)| (*ts, status.to_string(), *count))
+        .collect::<Vec<_>>();
+    expected.sort_by_key(|entry| (entry.0, entry.1.clone()));
+    assert_eq!(actual, expected);
+}
+
+fn assert_grouped_recycling_counts(
+    groups: &[AggregateGroup],
+    expected: &[(UtcTimestamp, bool, u64)],
+) {
+    let mut actual = groups
+        .iter()
+        .map(|group| {
+            (
+                group_datetime(group, "scheduled_at"),
+                group_bool(group, "suppressed_by_recycling"),
+                group.count,
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort_by_key(|entry| (entry.0, entry.1));
+    let mut expected = expected
+        .iter()
+        .map(|(ts, value, count)| (*ts, *value, *count))
+        .collect::<Vec<_>>();
+    expected.sort_by_key(|entry| (entry.0, entry.1));
+    assert_eq!(actual, expected);
+}
+
+async fn seed_scheduled_action_fixture<B: LibBackend>(pq: &Pqueue<B>) -> Vec<(ItemId, String)> {
+    let q = qkey();
+    pq.create_queue(scheduled_action_queue_definition())
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for record in scheduled_action_fixture_records() {
+        let action_id = record["action_id"].as_str().unwrap().to_string();
+        let minted = pq.push(&q, scheduled_action_item(&record)).await.unwrap();
+        ids.push((minted, action_id));
+    }
+    ids
+}
+
+async fn assert_hourly_distribution_by_status_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+    let q = qkey();
+    let _ = seed_scheduled_action_fixture(pq).await;
+    let response = pq
+        .grouped_aggregate(&q, hourly_distribution_request())
+        .await
+        .unwrap();
+    assert_grouped_status_counts(
+        &response.groups,
+        &[
+            (
+                UtcTimestamp::new(1_783_000_800, 0).expect("valid ts"),
+                "scheduled",
+                2,
+            ),
+            (
+                UtcTimestamp::new(1_783_004_400, 0).expect("valid ts"),
+                "scheduled",
+                1,
+            ),
+            (
+                UtcTimestamp::new(1_783_004_400, 0).expect("valid ts"),
+                "suppressed",
+                1,
+            ),
+            (
+                UtcTimestamp::new(1_783_069_200, 0).expect("valid ts"),
+                "failed",
+                1,
+            ),
+        ],
+    );
+    assert_eq!(
+        response.groups.iter().map(|group| group.count).sum::<u64>(),
+        5
+    );
+}
+
+async fn assert_recycling_preview_by_hour_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+    let q = qkey();
+    let _ = seed_scheduled_action_fixture(pq).await;
+    let response = pq
+        .grouped_aggregate(&q, recycling_preview_request())
+        .await
+        .unwrap();
+    assert_grouped_recycling_counts(
+        &response.groups,
+        &[
+            (
+                UtcTimestamp::new(1_783_000_800, 0).expect("valid ts"),
+                true,
+                1,
+            ),
+            (
+                UtcTimestamp::new(1_783_000_800, 0).expect("valid ts"),
+                false,
+                1,
+            ),
+            (
+                UtcTimestamp::new(1_783_004_400, 0).expect("valid ts"),
+                true,
+                1,
+            ),
+            (
+                UtcTimestamp::new(1_783_004_400, 0).expect("valid ts"),
+                false,
+                1,
+            ),
+            (
+                UtcTimestamp::new(1_783_069_200, 0).expect("valid ts"),
+                false,
+                1,
+            ),
+        ],
+    );
+    assert_eq!(
+        response.groups.iter().map(|group| group.count).sum::<u64>(),
+        5
+    );
+}
+
+async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+    let q = qkey();
+    let _ = seed_scheduled_action_fixture(pq).await;
+    let response = pq
+        .declared_bucket_segment(&q, engagement_probability_request())
+        .await
+        .unwrap();
+    let labels = response
+        .buckets
+        .iter()
+        .map(|bucket| (bucket.label.clone(), bucket.count))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        vec![
+            ("0%".to_string(), 1),
+            ("8.01-10%".to_string(), 1),
+            ("10.01-15%".to_string(), 1),
+            ("45.01-50%".to_string(), 1),
+            ("no-activity".to_string(), 1),
+        ]
+    );
+    assert_eq!(
+        response
+            .buckets
+            .iter()
+            .map(|bucket| bucket.count)
+            .sum::<u64>(),
+        5
+    );
+}
+
+fn hourly_distribution_request() -> GroupedAggregateRequest {
+    GroupedAggregateRequest {
+        index: Some("by_status".to_string()),
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "action_type".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("message.send".to_string()),
+            },
+            QueryFilter {
+                field: "scheduled_at".to_string(),
+                op: FilterOp::Gte,
+                value: TypedValue::DateTime(UtcTimestamp::new(1_782_950_400, 0).expect("valid ts")),
+            },
+            QueryFilter {
+                field: "scheduled_at".to_string(),
+                op: FilterOp::Lt,
+                value: TypedValue::DateTime(UtcTimestamp::new(1_783_123_200, 0).expect("valid ts")),
+            },
+        ],
+        group_by: vec![
+            GroupByField {
+                field: "scheduled_at".to_string(),
+                time_bucket: Some(pqueue::TimeBucket::Hour),
+            },
+            GroupByField {
+                field: "status".to_string(),
+                time_bucket: None,
+            },
+        ],
+        max_groups: 10,
+    }
+}
+
+fn recycling_preview_request() -> GroupedAggregateRequest {
+    GroupedAggregateRequest {
+        index: Some("by_recycling".to_string()),
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "action_type".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("message.send".to_string()),
+            },
+            QueryFilter {
+                field: "scheduled_at".to_string(),
+                op: FilterOp::Gte,
+                value: TypedValue::DateTime(UtcTimestamp::new(1_782_950_400, 0).expect("valid ts")),
+            },
+            QueryFilter {
+                field: "scheduled_at".to_string(),
+                op: FilterOp::Lt,
+                value: TypedValue::DateTime(UtcTimestamp::new(1_783_123_200, 0).expect("valid ts")),
+            },
+        ],
+        group_by: vec![
+            GroupByField {
+                field: "scheduled_at".to_string(),
+                time_bucket: Some(pqueue::TimeBucket::Hour),
+            },
+            GroupByField {
+                field: "suppressed_by_recycling".to_string(),
+                time_bucket: None,
+            },
+        ],
+        max_groups: 10,
+    }
+}
+
+fn engagement_probability_request() -> DeclaredBucketSegmentRequest {
+    DeclaredBucketSegmentRequest {
+        index: Some("by_engagement_probability".to_string()),
+        filters: vec![QueryFilter {
+            field: "action_type".to_string(),
+            op: FilterOp::Eq,
+            value: TypedValue::String("message.send".to_string()),
+        }],
+        field: "engagement_probability".to_string(),
+        buckets: vec![
+            pqueue::BucketRule {
+                label: "0%".to_string(),
+                exact: Some(0.0),
+                gt: None,
+                gte: None,
+                lt: None,
+                lte: None,
+            },
+            pqueue::BucketRule {
+                label: "8.01-10%".to_string(),
+                exact: None,
+                gt: Some(0.08),
+                gte: None,
+                lt: None,
+                lte: Some(0.10),
+            },
+            pqueue::BucketRule {
+                label: "10.01-15%".to_string(),
+                exact: None,
+                gt: Some(0.10),
+                gte: None,
+                lt: None,
+                lte: Some(0.15),
+            },
+            pqueue::BucketRule {
+                label: "45.01-50%".to_string(),
+                exact: None,
+                gt: Some(0.45),
+                gte: None,
+                lt: None,
+                lte: Some(0.50),
+            },
+        ],
+        null_bucket_label: "no-activity".to_string(),
     }
 }
 

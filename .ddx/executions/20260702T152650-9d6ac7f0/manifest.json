@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260702T152650-9d6ac7f0",
+  "bead_id": "pqueue-70c85ac1",
+  "base_rev": "0d748234093fb9e7479700cb923a1bbeb111f989",
+  "created_at": "2026-07-02T15:26:50.942543215Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-70c85ac1",
+    "title": "Implement bounded hot projection aggregate queries",
+    "description": "PROBLEM\nCayce-style hot reporting needs bounded grouped counts over indexed hot records: hourly/status distribution, recycling preview buckets, and engagement-probability segments. pqueue must provide generic grouping primitives without arbitrary SQL or Snorri-specific policy.\n\nPROPOSED FIX\nImplement bounded aggregate query support over declared typed indexes for memory and sqlite: hour(scheduled_at) grouping, status/boolean grouping, scheduler/action filters, and declared numeric/null buckets for a numeric typed field. Reject unsupported expressions and unbounded result sizes explicitly.\n\nIN-SCOPE FILES\n- crates/pqueue-core query aggregate types if small extensions are needed.\n- crates/pqueue-projection/src/lib.rs.\n- crates/pqueue-sqlite/src/relational.rs.\n- crates/pqueue/tests/hot_projection_queries.rs.\n\nOUT-OF-SCOPE\n- Arbitrary SQL/JSONPath/expression execution.\n- Snorri open-rate business policy.\n- Long-retention analytics.\n\nDECLARED BUCKETS AND NULLS\nBuckets are caller-declared per the contract (pqueue-b1feb686); the test declares exactly the bucket list in the acceptance criteria. act_004 (engagement_probability = null) must land in the declared no-activity bucket via the contract's null-handling rule — it is absent from the numeric typed index, so the implementation cannot derive that count from the index alone.",
+    "acceptance": "1. `cargo test -p pqueue --test hot_projection_queries hourly_distribution_by_status -- --nocapture` passes with exactly: 2026-07-02T14:00Z {scheduled: 2}, 2026-07-02T15:00Z {scheduled: 1, suppressed: 1}, 2026-07-03T09:00Z {failed: 1} — for action_type=message.send over window [2026-07-02T00:00Z, 2026-07-04T00:00Z); act_006 is excluded by the action_type filter.\n2. `cargo test -p pqueue --test hot_projection_queries recycling_preview_by_hour -- --nocapture` passes with exactly: 2026-07-02T14:00Z {suppressed_by_recycling=true: 1, false: 1}, 2026-07-02T15:00Z {true: 1, false: 1}, 2026-07-03T09:00Z {false: 1} — same filter and window.\n3. `cargo test -p pqueue --test hot_projection_queries engagement_probability_segments -- --nocapture` passes with declared buckets: exact 0 -\u003e \"0%\" = 1 (act_003), (0.08, 0.10] -\u003e \"8.01-10%\" = 1 (act_001), (0.10, 0.15] -\u003e \"10.01-15%\" = 1 (act_002), (0.45, 0.50] -\u003e \"45.01-50%\" = 1 (act_005), null -\u003e \"no-activity\" = 1 (act_004); act_006 excluded by the action_type=message.send filter.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:projection",
+      "area:indexes",
+      "kind:feature",
+      "backend:memory",
+      "backend:sqlite",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T152650-9d6ac7f0",
+    "prompt": ".ddx/executions/20260702T152650-9d6ac7f0/prompt.md",
+    "manifest": ".ddx/executions/20260702T152650-9d6ac7f0/manifest.json",
+    "result": ".ddx/executions/20260702T152650-9d6ac7f0/result.json",
+    "checks": ".ddx/executions/20260702T152650-9d6ac7f0/checks.json",
+    "usage": ".ddx/executions/20260702T152650-9d6ac7f0/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-70c85ac1-20260702T152650-9d6ac7f0"
+  },
+  "prompt_sha": "c1f7f6838ac13626f8bec75f931e75201c6b3cb55cb73813519bcfa32b237b7a"
+}
