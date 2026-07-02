@@ -8,15 +8,18 @@ use std::sync::Arc;
 
 use pqueue::{
     BoundedMutationRequest, ClaimByQueryRequest, DeclaredBucketSegmentRequest, EligibilityPolicy,
-    EngineError, FilterOp, GroupByField, GroupedAggregateRequest, OrderField, OrderingMode, Pqueue,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueryCapabilityFlags,
-    QueryFilter, QueueDefinition, QueueId, RangeScanRequest, RecurrencePolicy, RetryPolicy,
-    SortDirection, TenantId, TypedValue,
+    EngineError, FilterOp, GroupByField, GroupedAggregateRequest, NewItem, OrderField,
+    OrderingMode, Pqueue, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    QueryCapabilityFlags, QueryFilter, QueueDefinition, QueueId, RangeScanRequest,
+    RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue,
 };
-use pqueue_core::WorkerId;
+use pqueue_core::{
+    CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex, WorkerId,
+};
 use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_objectlog::ObjectLogBackend;
 use pqueue_sqlite::SqliteRelationalBackend;
+use serde_json::{Value, json};
 
 fn qkey() -> pqueue::QueueKey {
     pqueue::QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -211,4 +214,269 @@ async fn capability_defaults_are_explicitly_unavailable() {
     // `side_record_query` is independently gated and MUST remain unavailable everywhere in this
     // epic — asserted once, not per-backend, since it is a fixed constant on the shared flags type.
     assert!(!QueryCapabilityFlags::default().side_record_query);
+}
+
+// ---------------------------------------------------------------------------
+// Snorri-shaped hot projection conformance fixture (pqueue-4529ede9)
+//
+// Domain-neutral scheduled-action-shaped records, seeded as ordinary CLAIMABLE queue items over a
+// typed indexed queue (ADR-011). This fixture does not embed Snorri semantics into pqueue: the field
+// names are the caller's entity document, not a pqueue schema. See API-004 "Example Fixture".
+// ---------------------------------------------------------------------------
+
+fn typed_index(name: &str, declaration: IndexDeclaration) -> QueueIndex {
+    QueueIndex {
+        name: name.to_string(),
+        declaration,
+    }
+}
+
+fn compound_field(field: &str, index_type: IndexType) -> CompoundIndexField {
+    CompoundIndexField {
+        field: field.to_string(),
+        index_type,
+    }
+}
+
+/// The seven canonical typed compound indexes declared over the fixture queue (API-004 "Canonical
+/// Typed Compound Indexes").
+fn scheduled_action_typed_indexes() -> Vec<QueueIndex> {
+    vec![
+        typed_index(
+            "by_scheduled_at",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("scheduled_at", IndexType::Datetime),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_status",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("status", IndexType::String),
+                    compound_field("scheduled_at", IndexType::Datetime),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_action_type",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("action_type", IndexType::String),
+                    compound_field("scheduled_at", IndexType::Datetime),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_recycling",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("suppressed_by_recycling", IndexType::Boolean),
+                    compound_field("scheduled_at", IndexType::Datetime),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_algorithm",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("scheduler_algorithm", IndexType::String),
+                    compound_field("scheduled_at", IndexType::Datetime),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_engagement_probability",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("engagement_probability", IndexType::Float),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_target_key",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("target_key", IndexType::String),
+                ],
+                unique: true,
+            }),
+        ),
+    ]
+}
+
+fn scheduled_action_queue_definition() -> QueueDefinition {
+    QueueDefinition {
+        typed_indexes: scheduled_action_typed_indexes(),
+        ..queue_definition()
+    }
+}
+
+/// The six canonical scheduled-action fixture records (API-004 "Example Fixture", originally drafted
+/// in the superseded task pqueue-630dbeaa). Every record shares `tenant_id`, `account_id`,
+/// `workflow_id`, `run_id`, and `engagement_threshold`; `instance_id`/`target_key` follow the action
+/// number. `act_004.engagement_probability` is `null` and MUST be absent from the numeric index.
+fn scheduled_action_fixture_records() -> Vec<Value> {
+    let shared = json!({
+        "tenant_id": "tenant_7s",
+        "account_id": "acct_42",
+        "workflow_id": "wf_nurture",
+        "run_id": "job_9001",
+        "engagement_threshold": 0.10
+    });
+
+    let overrides = vec![
+        json!({
+            "action_id": "act_001", "instance_id": "inst_contact_001", "target_key": "contact:001",
+            "scheduled_at": "2026-07-02T14:05:00Z", "status": "scheduled", "action_type": "message.send",
+            "scheduler_algorithm": "personalized", "engagement_probability": 0.0825,
+            "suppressed_by_recycling": true, "is_enrolled_using_open_rate_filter": false
+        }),
+        json!({
+            "action_id": "act_002", "instance_id": "inst_contact_002", "target_key": "contact:002",
+            "scheduled_at": "2026-07-02T14:37:00Z", "status": "scheduled", "action_type": "message.send",
+            "scheduler_algorithm": "personalized", "engagement_probability": 0.1280,
+            "suppressed_by_recycling": false, "is_enrolled_using_open_rate_filter": true
+        }),
+        json!({
+            "action_id": "act_003", "instance_id": "inst_contact_003", "target_key": "contact:003",
+            "scheduled_at": "2026-07-02T15:02:00Z", "status": "suppressed", "action_type": "message.send",
+            "scheduler_algorithm": "randomized", "engagement_probability": 0.0000,
+            "suppressed_by_recycling": true, "is_enrolled_using_open_rate_filter": false
+        }),
+        json!({
+            "action_id": "act_004", "instance_id": "inst_contact_004", "target_key": "contact:004",
+            "scheduled_at": "2026-07-02T15:45:00Z", "status": "scheduled", "action_type": "message.send",
+            "scheduler_algorithm": "randomized", "engagement_probability": Value::Null,
+            "suppressed_by_recycling": false, "is_enrolled_using_open_rate_filter": true
+        }),
+        json!({
+            "action_id": "act_005", "instance_id": "inst_contact_005", "target_key": "contact:005",
+            "scheduled_at": "2026-07-03T09:15:00Z", "status": "failed", "action_type": "message.send",
+            "scheduler_algorithm": "personalized", "engagement_probability": 0.4510,
+            "suppressed_by_recycling": false, "is_enrolled_using_open_rate_filter": true
+        }),
+        json!({
+            "action_id": "act_006", "instance_id": "inst_contact_006", "target_key": "contact:006",
+            "scheduled_at": "2026-07-03T09:50:00Z", "status": "scheduled", "action_type": "subject.mutation",
+            "scheduler_algorithm": "personalized", "engagement_probability": 0.9100,
+            "suppressed_by_recycling": false, "is_enrolled_using_open_rate_filter": true
+        }),
+    ];
+
+    overrides
+        .into_iter()
+        .map(|mut record| {
+            let record_obj = record.as_object_mut().unwrap();
+            for (k, v) in shared.as_object().unwrap() {
+                record_obj.insert(k.clone(), v.clone());
+            }
+            record
+        })
+        .collect()
+}
+
+fn scheduled_action_item(record: &Value) -> NewItem {
+    NewItem {
+        payload: Some(bytes::Bytes::from(record.to_string())),
+        entity: Some(record.clone()),
+        ..Default::default()
+    }
+}
+
+/// Seeds the six fixture records as ordinary CLAIMABLE items over the typed indexed queue, proves
+/// exact typed lookup by `(tenant_id, run_id, target_key)` for `contact:001`, and validates that the
+/// claimed row materializes `action_id`, `status`, `scheduled_at`, `action_type`, and
+/// `engagement_probability` stably. Also proves `act_004`'s null `engagement_probability` keeps it
+/// out of the numeric typed index (API-004 null semantics), rather than minting a synthetic null key.
+#[tokio::test]
+async fn hot_projection_fixture_seeds_six_claimable_records_and_resolves_target_key_lookup() {
+    let backend = Arc::new(composed_memory_backend());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    pq.create_queue(scheduled_action_queue_definition())
+        .await
+        .unwrap();
+
+    let records = scheduled_action_fixture_records();
+    for record in &records {
+        pq.push(&q, scheduled_action_item(record)).await.unwrap();
+    }
+
+    // All six records are ordinary CLAIMABLE (pending) queue items — not side/projection records.
+    let metrics = pq.metrics(&q).await.unwrap();
+    assert_eq!(metrics.pending, 6);
+
+    // Exact typed lookup by (tenant_id, run_id, target_key) for contact:001.
+    let hit = pq
+        .query_index_unique_typed(
+            &q,
+            "by_target_key",
+            &[json!("tenant_7s"), json!("job_9001"), json!("contact:001")],
+        )
+        .await
+        .unwrap()
+        .expect("contact:001 is indexed by (tenant_id, run_id, target_key)");
+
+    // Stable row materialization: claim the resolved item and check the fixture fields survive.
+    let claimed = pq.claim(&q, 6, 30_000).await.unwrap();
+    let claimed_contact_001 = claimed
+        .iter()
+        .find(|item| item.item_id == hit.item_id)
+        .expect("the target_key hit resolves to a claimed item");
+    let materialized: Value = serde_json::from_slice(
+        claimed_contact_001
+            .payload
+            .as_deref()
+            .expect("payload carries the entity document"),
+    )
+    .unwrap();
+    assert_eq!(materialized["action_id"], json!("act_001"));
+    assert_eq!(materialized["status"], json!("scheduled"));
+    assert_eq!(materialized["scheduled_at"], json!("2026-07-02T14:05:00Z"));
+    assert_eq!(materialized["action_type"], json!("message.send"));
+    assert_eq!(materialized["engagement_probability"], json!(0.0825));
+
+    // act_004's null engagement_probability makes it sparse (absent) in the numeric compound index —
+    // a compound key requires every field present, so a null/missing field yields no index entry
+    // rather than a synthetic null key (API-004 "Declared Numeric Buckets" null semantics).
+    let engagement_probability_index = match &scheduled_action_typed_indexes()
+        .into_iter()
+        .find(|index| index.name == "by_engagement_probability")
+        .unwrap()
+        .declaration
+    {
+        IndexDeclaration::Compound(def) => def.clone(),
+        IndexDeclaration::Single(_) => unreachable!(),
+    };
+    let act_004 = records
+        .iter()
+        .find(|r| r["action_id"] == json!("act_004"))
+        .unwrap();
+    assert_eq!(
+        engagement_probability_index.index_key(act_004).unwrap(),
+        None,
+        "a null engagement_probability must be absent from the numeric typed index"
+    );
 }

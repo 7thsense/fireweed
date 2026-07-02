@@ -1,0 +1,55 @@
+{
+  "attempt_id": "20260702T145349-962cbca0",
+  "bead_id": "pqueue-4529ede9",
+  "base_rev": "fb40ef531a6dabf3a33bc7e53f5471b9fd739ced",
+  "created_at": "2026-07-02T14:53:50.231174893Z",
+  "requested": {
+    "effort": "medium",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-4529ede9",
+    "title": "Add Snorri-shaped hot projection conformance fixture",
+    "description": "PROBLEM\nThe future implementation needs one shared scheduled-action-shaped fixture so query behavior is tested consistently without embedding Snorri semantics in pqueue.\n\nPROPOSED FIX\nAdd `crates/pqueue/tests/hot_projection_queries.rs` with helper builders for a typed indexed queue and the six domain-neutral scheduled-action fixture records below. Initially prove exact typed lookup by `(tenant_id, run_id, target_key)` for `contact:001` and stable materialization through the public Rust facade.\n\nSeed the six records as ordinary CLAIMABLE queue items in a queue declaring the typed indexes below. The later claim-due-work bead (pqueue-5c5353f7) depends on their claimability — do NOT model them as side/projection records (side-record implementation is deferred out of this epic).\n\nCANONICAL FIXTURE RECORDS\nAll six records share tenant_id=tenant_7s, account_id=acct_42, workflow_id=wf_nurture, run_id=job_9001, engagement_threshold=0.10; instance_id=inst_contact_NNN and target_key=contact:NNN follow the action number. This is the canonical copy (originally drafted in superseded bead pqueue-630dbeaa — do not go hunting for that bead):\n\n```json\n[\n  {\"action_id\":\"act_001\",\"target_key\":\"contact:001\",\"scheduled_at\":\"2026-07-02T14:05:00Z\",\"status\":\"scheduled\",\"action_type\":\"message.send\",\"scheduler_algorithm\":\"personalized\",\"engagement_probability\":0.0825,\"suppressed_by_recycling\":true,\"is_enrolled_using_open_rate_filter\":false},\n  {\"action_id\":\"act_002\",\"target_key\":\"contact:002\",\"scheduled_at\":\"2026-07-02T14:37:00Z\",\"status\":\"scheduled\",\"action_type\":\"message.send\",\"scheduler_algorithm\":\"personalized\",\"engagement_probability\":0.1280,\"suppressed_by_recycling\":false,\"is_enrolled_using_open_rate_filter\":true},\n  {\"action_id\":\"act_003\",\"target_key\":\"contact:003\",\"scheduled_at\":\"2026-07-02T15:02:00Z\",\"status\":\"suppressed\",\"action_type\":\"message.send\",\"scheduler_algorithm\":\"randomized\",\"engagement_probability\":0.0000,\"suppressed_by_recycling\":true,\"is_enrolled_using_open_rate_filter\":false},\n  {\"action_id\":\"act_004\",\"target_key\":\"contact:004\",\"scheduled_at\":\"2026-07-02T15:45:00Z\",\"status\":\"scheduled\",\"action_type\":\"message.send\",\"scheduler_algorithm\":\"randomized\",\"engagement_probability\":null,\"suppressed_by_recycling\":false,\"is_enrolled_using_open_rate_filter\":true},\n  {\"action_id\":\"act_005\",\"target_key\":\"contact:005\",\"scheduled_at\":\"2026-07-03T09:15:00Z\",\"status\":\"failed\",\"action_type\":\"message.send\",\"scheduler_algorithm\":\"personalized\",\"engagement_probability\":0.4510,\"suppressed_by_recycling\":false,\"is_enrolled_using_open_rate_filter\":true},\n  {\"action_id\":\"act_006\",\"target_key\":\"contact:006\",\"scheduled_at\":\"2026-07-03T09:50:00Z\",\"status\":\"scheduled\",\"action_type\":\"subject.mutation\",\"scheduler_algorithm\":\"personalized\",\"engagement_probability\":0.9100,\"suppressed_by_recycling\":false,\"is_enrolled_using_open_rate_filter\":true}\n]\n```\n\nNote act_004 has engagement_probability = null: it will be absent from any numeric typed index over that field (projection index_key returns None for null/missing fields) — see the contract's null semantics and the no-activity bucket.\n\nCANONICAL TYPED COMPOUND INDEXES (declare on the fixture queue)\n- (tenant_id, run_id, scheduled_at) range/order index.\n- (tenant_id, run_id, status, scheduled_at) pending/due/status index.\n- (tenant_id, run_id, action_type, scheduled_at) action distribution index.\n- (tenant_id, run_id, suppressed_by_recycling, scheduled_at) recycling bucket index.\n- (tenant_id, run_id, scheduler_algorithm, scheduled_at) algorithm bucket index.\n- (tenant_id, run_id, engagement_probability) numeric segment source index.\n- (tenant_id, run_id, target_key) unique lookup/upsert index.\n\nIN-SCOPE FILES\n- crates/pqueue/tests/hot_projection_queries.rs.\n- Existing public facade helpers in crates/pqueue/src/lib.rs only if needed to expose existing exact lookup cleanly.\n\nOUT-OF-SCOPE\n- Range scans, grouping, cursor paging, mutation, claim-by-query.\n- Backend internals beyond what is needed for the exact lookup fixture.",
+    "acceptance": "1. `cargo test -p pqueue --test hot_projection_queries -- --nocapture` passes with the six fixture records.\n2. The test asserts exact typed lookup by `(tenant_id, run_id, target_key)` for `contact:001` and validates stable row materialization for at least `action_id`, `status`, `scheduled_at`, `action_type`, and `engagement_probability`.\n3. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:tests",
+      "area:indexes",
+      "kind:test",
+      "system:snorri",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-02T14:53:45.069215982Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T145349-962cbca0",
+    "prompt": ".ddx/executions/20260702T145349-962cbca0/prompt.md",
+    "manifest": ".ddx/executions/20260702T145349-962cbca0/manifest.json",
+    "result": ".ddx/executions/20260702T145349-962cbca0/result.json",
+    "checks": ".ddx/executions/20260702T145349-962cbca0/checks.json",
+    "usage": ".ddx/executions/20260702T145349-962cbca0/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-4529ede9-20260702T145349-962cbca0"
+  },
+  "prompt_sha": "81976a0a8f38ffb13ecdcc1382bd32f80716fa8847a9c52e64358af0f034bb74"
+}
