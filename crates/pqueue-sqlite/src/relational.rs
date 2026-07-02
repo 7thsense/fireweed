@@ -1316,6 +1316,14 @@ fn insert_items(
         "UPDATE relational_cursor SET next_item_seq=?3 WHERE tenant=?1 AND queue=?2",
         params![t, q, base_seq + items.len() as i64],
     ))?;
+    let typed_indexes = queues
+        .get(shard)
+        .map(|d| d.typed_indexes.as_slice())
+        .unwrap_or(&[]);
+    if typed_indexes.is_empty() && items.iter().all(is_default_empty_push_item) {
+        insert_default_empty_items(tx, &t, &q, items, seqi, now_n, base_seq)?;
+        return Ok(());
+    }
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let not_before = ts_nanos_opt(item.not_before);
@@ -1358,11 +1366,59 @@ fn insert_items(
     insert_gates(tx, &t, &q, items)?;
     upsert_cohorts(tx, queues, shard, &t, &q, items, now_n)?;
     // ADR-011: typed secondary index maintenance.
-    let typed_indexes = queues
-        .get(shard)
-        .map(|d| d.typed_indexes.as_slice())
-        .unwrap_or(&[]);
     maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, items)?;
+    Ok(())
+}
+
+fn is_default_empty_push_item(item: &PushItem) -> bool {
+    item.client_item_key.as_str() == item.item_id.to_string()
+        && item.priority.is_none()
+        && item.not_before.is_none()
+        && item.group_key.is_none()
+        && item.cohort_size.is_none()
+        && item.payload.is_none()
+        && item.fields.is_empty()
+        && item.metadata == Metadata::default()
+        && item.gate_keys.is_empty()
+        && item.entity_document.is_none()
+}
+
+fn insert_default_empty_items(
+    tx: &Transaction<'_>,
+    t: &str,
+    q: &str,
+    items: &[PushItem],
+    seqi: i64,
+    now_n: i64,
+    base_seq: i64,
+) -> EngineResult<()> {
+    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,NULL,'{}','{}',NULL,0,1,NULL,NULL,NULL,?,?,?,NULL,0,0,?,?)";
+    for (chunk_idx, chunk) in items.chunks(SQLITE_BATCH).enumerate() {
+        let values = vec![ROW_PH; chunk.len()].join(",");
+        let sql = format!(
+            "INSERT INTO pqueue_items \
+             (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
+              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
+              item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
+              updated_at,terminal_at,fenced,superseded,max_attempts,created_seq) VALUES {values}"
+        );
+        let mut params = Vec::with_capacity(chunk.len() * 10);
+        let offset = chunk_idx * SQLITE_BATCH;
+        for (i, item) in chunk.iter().enumerate() {
+            params.push(Value::Text(t.to_string()));
+            params.push(Value::Text(q.to_string()));
+            let item_id = item.item_id.to_string();
+            params.push(Value::Text(item_id.clone()));
+            params.push(Value::Text(item_id));
+            params.push(Value::Integer(now_n));
+            params.push(Value::Integer(seqi));
+            params.push(Value::Integer(now_n));
+            params.push(Value::Integer(now_n));
+            params.push(Value::Integer(item.max_attempts as i64));
+            params.push(Value::Integer(base_seq + offset as i64 + i as i64));
+        }
+        st(tx.execute(&sql, params_from_iter(params.iter())))?;
+    }
     Ok(())
 }
 
