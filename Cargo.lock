@@ -1317,6 +1317,7 @@ dependencies = [
  "pqueue-core",
  "pqueue-engine",
  "rustc-hash",
+ "serde",
  "serde_json",
 ]
 

@@ -16,6 +16,7 @@ use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
+use pqueue_core::{RangeScanRequest, RangeScanResponse};
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, EngineError,
     EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore,
@@ -371,6 +372,15 @@ impl ProjectionStore for InMemoryProjection {
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
         Ok(self.get(shard)?.live_items_by_key(keys))
+    }
+
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> EngineResult<RangeScanResponse> {
+        let _ = shard;
+        self.get(shard)?.range_scan(request)
     }
 
     fn index_get_unique(

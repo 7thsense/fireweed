@@ -45,15 +45,18 @@
 //! which is why the relational-reconnect conformance scenario asserts only pending-item state. BQ-11d
 //! must keep its reconnect assertions within this contract (no post-reopen token claims).
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken,
-    Metadata, PriorityModel, PriorityValue, QueueDefinition, QueueId, QueueIndex, RequestId,
-    TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
+    ClientItemKey, CohortId, FilterOp, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState,
+    LeaseToken, Metadata, OrderField, PriorityModel, PriorityValue, QueryCursor, QueryFilter,
+    QueueDefinition, QueueId, QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow,
+    RequestId, SortDirection, TenantId, TypedValue, UtcTimestamp, is_retry_exhausted,
+    priority_sort,
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
@@ -932,6 +935,215 @@ fn typed_index_keys_for_entity(
         }
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct RangeScanCursorState {
+    index: String,
+    filters: Vec<QueryFilter>,
+    order_by: Vec<OrderField>,
+    anchor_item_id: ItemId,
+    anchor_values: Vec<TypedValue>,
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * month + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn parse_utc_timestamp(value: &str) -> EngineResult<UtcTimestamp> {
+    let Some(value) = value
+        .strip_suffix('Z')
+        .or_else(|| value.strip_suffix("+00:00"))
+    else {
+        return Err(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ));
+    };
+    let (date, time) = value
+        .split_once('T')
+        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    let month: i64 = date_parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    let day: i64 = date_parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    if date_parts.next().is_some() {
+        return Err(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ));
+    }
+
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    let minute: i64 = time_parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    let sec_part = time_parts
+        .next()
+        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    if time_parts.next().is_some() {
+        return Err(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ));
+    }
+    let (second, nanos) = match sec_part.split_once('.') {
+        Some((whole, frac)) => {
+            let second: i64 = whole
+                .parse()
+                .map_err(|_| EngineError::Invalid("typed index value is not a valid datetime"))?;
+            if frac.is_empty() || frac.len() > 9 || !frac.chars().all(|c| c.is_ascii_digit()) {
+                return Err(EngineError::Invalid(
+                    "typed index value is not a valid datetime",
+                ));
+            }
+            let mut digits = frac.to_string();
+            while digits.len() < 9 {
+                digits.push('0');
+            }
+            let nanos: u32 = digits
+                .parse()
+                .map_err(|_| EngineError::Invalid("typed index value is not a valid datetime"))?;
+            (second, nanos)
+        }
+        None => (
+            sec_part
+                .parse()
+                .map_err(|_| EngineError::Invalid("typed index value is not a valid datetime"))?,
+            0,
+        ),
+    };
+    let seconds = days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second;
+    UtcTimestamp::new(seconds, nanos)
+        .map_err(|_| EngineError::Invalid("typed index value is not a valid datetime"))
+}
+
+fn typed_value_for_json(
+    value: &JsonValue,
+    index_type: &IndexType,
+) -> EngineResult<Option<TypedValue>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let typed = match index_type {
+        IndexType::String => value
+            .as_str()
+            .map(|s| TypedValue::String(s.to_string()))
+            .ok_or_else(|| {
+                EngineError::Invalid("typed index value is not valid for declared type")
+            })?,
+        IndexType::Integer => value.as_i64().map(TypedValue::Integer).ok_or_else(|| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?,
+        IndexType::Float => value.as_f64().map(TypedValue::Float).ok_or_else(|| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?,
+        IndexType::Boolean => value.as_bool().map(TypedValue::Bool).ok_or_else(|| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?,
+        IndexType::Datetime => match value {
+            JsonValue::String(s) => TypedValue::DateTime(parse_utc_timestamp(s)?),
+            JsonValue::Number(n) => {
+                let seconds = n.as_i64().ok_or_else(|| {
+                    EngineError::Invalid("typed index value is not valid for declared type")
+                })?;
+                TypedValue::DateTime(UtcTimestamp::new(seconds, 0).map_err(|_| {
+                    EngineError::Invalid("typed index value is not valid for declared type")
+                })?)
+            }
+            _ => {
+                return Err(EngineError::Invalid(
+                    "typed index value is not valid for declared type",
+                ));
+            }
+        },
+    };
+    Ok(Some(typed))
+}
+
+fn typed_value_from_filter_value(
+    value: &TypedValue,
+    index_type: &IndexType,
+) -> EngineResult<TypedValue> {
+    match (value, index_type) {
+        (TypedValue::String(v), IndexType::String) => Ok(TypedValue::String(v.clone())),
+        (TypedValue::Integer(v), IndexType::Integer) => Ok(TypedValue::Integer(*v)),
+        (TypedValue::Float(v), IndexType::Float) => Ok(TypedValue::Float(*v)),
+        (TypedValue::Bool(v), IndexType::Boolean) => Ok(TypedValue::Bool(*v)),
+        (TypedValue::DateTime(v), IndexType::Datetime) => Ok(TypedValue::DateTime(*v)),
+        _ => Err(EngineError::Invalid(
+            "typed index value is not valid for declared type",
+        )),
+    }
+}
+
+fn typed_value_matches_query(value: &TypedValue, filter: &TypedValue) -> bool {
+    match (value, filter) {
+        (TypedValue::String(a), TypedValue::String(b)) => a == b,
+        (TypedValue::Integer(a), TypedValue::Integer(b)) => a == b,
+        (TypedValue::Float(a), TypedValue::Float(b)) => a == b,
+        (TypedValue::Bool(a), TypedValue::Bool(b)) => a == b,
+        (TypedValue::DateTime(a), TypedValue::DateTime(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn typed_value_compare(a: &TypedValue, b: &TypedValue) -> EngineResult<Ordering> {
+    match (a, b) {
+        (TypedValue::String(a), TypedValue::String(b)) => Ok(a.cmp(b)),
+        (TypedValue::Integer(a), TypedValue::Integer(b)) => Ok(a.cmp(b)),
+        (TypedValue::Float(a), TypedValue::Float(b)) => a
+            .partial_cmp(b)
+            .ok_or_else(|| EngineError::Invalid("typed index value comparison is undefined")),
+        (TypedValue::Bool(a), TypedValue::Bool(b)) => Ok(a.cmp(b)),
+        (TypedValue::DateTime(a), TypedValue::DateTime(b)) => Ok(a.cmp(b)),
+        _ => Err(EngineError::Invalid(
+            "typed index value is not valid for declared type",
+        )),
+    }
+}
+
+fn compare_rows(
+    lhs: &RangeScanRow,
+    rhs: &RangeScanRow,
+    order_by: &[OrderField],
+) -> EngineResult<Ordering> {
+    for field in order_by {
+        let left = lhs
+            .fields
+            .get(&field.field)
+            .ok_or_else(|| EngineError::Invalid("unindexed-field"))?;
+        let right = rhs
+            .fields
+            .get(&field.field)
+            .ok_or_else(|| EngineError::Invalid("unindexed-field"))?;
+        let ord = typed_value_compare(left, right)?;
+        let ord = match field.direction {
+            SortDirection::Ascending => ord,
+            SortDirection::Descending => ord.reverse(),
+        };
+        if !ord.is_eq() {
+            return Ok(ord);
+        }
+    }
+    Ok(lhs.item_id.cmp(&rhs.item_id))
 }
 
 type TypedIndexRows = Vec<(String, Vec<(String, Vec<u8>)>)>;
@@ -6505,8 +6717,261 @@ impl RecoveryReadPort for SqliteRelationalBackend {
 }
 
 /// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
-/// the sqlite-relational family inherits the all-`Unavailable` default.
-impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {}
+/// the sqlite-relational family inherits the all-`Unavailable` default except for the range-scan slice
+/// wired in this bead.
+impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> impl std::future::Future<Output = EngineResult<RangeScanResponse>> + Send {
+        let result = (|| {
+            const MAX_PAGE_SIZE: u32 = 1_000;
+            request
+                .validate(MAX_PAGE_SIZE)
+                .map_err(|_| EngineError::Invalid("invalid page size"))?;
+
+            let g = self.inner.lock().expect("projection store poisoned");
+            let def = g.queues.get(shard).ok_or(EngineError::NotFound)?;
+            let spec = if let Some(name) = request.index.as_deref() {
+                def.typed_indexes
+                    .iter()
+                    .find(|qi| qi.name == name)
+                    .ok_or(EngineError::Invalid("unknown secondary index"))?
+            } else {
+                def.typed_indexes
+                    .first()
+                    .ok_or(EngineError::Invalid("unknown secondary index"))?
+            };
+            if request.order_by.is_empty() {
+                return Err(EngineError::Invalid("range-scan order_by required"));
+            }
+            let fields: Vec<(&str, &IndexType)> = match &spec.declaration {
+                IndexDeclaration::Single(def) => vec![(def.field.as_str(), &def.index_type)],
+                IndexDeclaration::Compound(def) => def
+                    .fields
+                    .iter()
+                    .map(|field| (field.field.as_str(), &field.index_type))
+                    .collect(),
+            };
+            if request.order_by.iter().any(|order| {
+                !fields
+                    .iter()
+                    .any(|(field, _)| *field == order.field.as_str())
+            }) {
+                return Err(EngineError::Invalid("unindexed-field"));
+            }
+            if let Some(first_direction) = request.order_by.first().map(|o| o.direction)
+                && !request
+                    .order_by
+                    .iter()
+                    .all(|o| o.direction == first_direction)
+            {
+                return Err(EngineError::Invalid(
+                    "mixed order directions are unsupported",
+                ));
+            }
+
+            let cursor_state = match &request.cursor {
+                Some(cursor) => Some(
+                    serde_json::from_str::<RangeScanCursorState>(&cursor.0)
+                        .map_err(|_| EngineError::Invalid("cursor-invalidated"))?,
+                ),
+                None => None,
+            };
+            if let Some(state) = &cursor_state {
+                if state.index != spec.name
+                    || state.filters != request.filters
+                    || state.order_by != request.order_by
+                {
+                    return Err(EngineError::Invalid("cursor-invalidated"));
+                }
+            }
+
+            let (t, q) = parts(shard);
+            let mut stmt = st(g.conn.prepare(
+                "SELECT item_id, entity_document FROM pqueue_items \
+                 WHERE tenant_id=?1 AND queue_id=?2",
+            ))?;
+            let rows = st(stmt.query_map(params![t, q], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            }))?;
+
+            let mut matched = Vec::new();
+            for row in rows {
+                let (item_id, entity_json): (String, Option<String>) = st(row)?;
+                let item_id =
+                    ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
+                let Some(entity_json) = entity_json else {
+                    continue;
+                };
+                let entity: JsonValue = serde_json::from_str(&entity_json)
+                    .map_err(|e| EngineError::Storage(e.to_string()))?;
+                let mut fields_map = BTreeMap::new();
+                match &spec.declaration {
+                    IndexDeclaration::Single(def) => {
+                        let Some(value) = typed_value_for_json(
+                            entity.get(&def.field).unwrap_or(&JsonValue::Null),
+                            &def.index_type,
+                        )?
+                        else {
+                            continue;
+                        };
+                        fields_map.insert(def.field.clone(), value);
+                    }
+                    IndexDeclaration::Compound(def) => {
+                        let mut missing = false;
+                        for field in &def.fields {
+                            let Some(value) = typed_value_for_json(
+                                entity.get(&field.field).unwrap_or(&JsonValue::Null),
+                                &field.index_type,
+                            )?
+                            else {
+                                missing = true;
+                                break;
+                            };
+                            fields_map.insert(field.field.clone(), value);
+                        }
+                        if missing {
+                            continue;
+                        }
+                    }
+                }
+                let row = RangeScanRow {
+                    item_id,
+                    fields: fields_map,
+                };
+
+                let mut accepted = true;
+                let mut prefix_len = 0usize;
+                for (field_name, index_type) in &fields {
+                    let Some(filter) = request
+                        .filters
+                        .iter()
+                        .find(|filter| filter.field == *field_name)
+                    else {
+                        break;
+                    };
+                    if filter.op != FilterOp::Eq {
+                        break;
+                    }
+                    let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+                    let Some(value) = row.fields.get(*field_name) else {
+                        accepted = false;
+                        break;
+                    };
+                    if !typed_value_matches_query(value, &typed) {
+                        accepted = false;
+                        break;
+                    }
+                    prefix_len += 1;
+                }
+                if accepted {
+                    for filter in &request.filters {
+                        let Some((idx, (_, index_type))) = fields
+                            .iter()
+                            .enumerate()
+                            .find(|(_, (field_name, _))| *field_name == filter.field.as_str())
+                        else {
+                            return Err(EngineError::Invalid("unindexed-field"));
+                        };
+                        if idx < prefix_len {
+                            continue;
+                        }
+                        let Some(value) = row.fields.get(filter.field.as_str()) else {
+                            accepted = false;
+                            break;
+                        };
+                        let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+                        let ord = typed_value_compare(value, &typed)?;
+                        let ok = match filter.op {
+                            FilterOp::Eq => ord.is_eq(),
+                            FilterOp::Gte => ord.is_ge(),
+                            FilterOp::Gt => ord.is_gt(),
+                            FilterOp::Lte => ord.is_le(),
+                            FilterOp::Lt => ord.is_lt(),
+                        };
+                        if !ok {
+                            accepted = false;
+                            break;
+                        }
+                    }
+                }
+                if accepted {
+                    matched.push(row);
+                }
+            }
+
+            matched.sort_by(|lhs, rhs| {
+                compare_rows(lhs, rhs, &request.order_by).expect("typed order compare")
+            });
+
+            let start = if let Some(state) = &cursor_state {
+                let anchor = matched
+                    .iter()
+                    .position(|row| row.item_id == state.anchor_item_id)
+                    .ok_or(EngineError::Invalid("cursor-invalidated"))?;
+                let current = &matched[anchor];
+                let current_values: Vec<TypedValue> = request
+                    .order_by
+                    .iter()
+                    .map(|field| {
+                        current
+                            .fields
+                            .get(&field.field)
+                            .cloned()
+                            .ok_or(EngineError::Invalid("cursor-invalidated"))
+                    })
+                    .collect::<EngineResult<_>>()?;
+                if current_values != state.anchor_values {
+                    return Err(EngineError::Invalid("cursor-invalidated"));
+                }
+                anchor + 1
+            } else {
+                0
+            };
+
+            let page_rows = matched
+                .iter()
+                .skip(start)
+                .take(request.page_size as usize)
+                .cloned()
+                .collect::<Vec<_>>();
+            let next_cursor = if start + page_rows.len() < matched.len() {
+                let last = page_rows
+                    .last()
+                    .expect("page has at least one row when next_cursor exists");
+                let payload = RangeScanCursorState {
+                    index: spec.name.clone(),
+                    filters: request.filters.clone(),
+                    order_by: request.order_by.clone(),
+                    anchor_item_id: last.item_id,
+                    anchor_values: request
+                        .order_by
+                        .iter()
+                        .map(|field| {
+                            last.fields
+                                .get(&field.field)
+                                .cloned()
+                                .ok_or(EngineError::Invalid("cursor-invalidated"))
+                        })
+                        .collect::<EngineResult<_>>()?,
+                };
+                Some(QueryCursor(
+                    serde_json::to_string(&payload).expect("cursor serialization"),
+                ))
+            } else {
+                None
+            };
+
+            Ok(RangeScanResponse {
+                rows: page_rows,
+                next_cursor,
+            })
+        })();
+        std::future::ready(result)
+    }
+}
 
 impl FinalizePort for SqliteRelationalBackend {
     fn finalize(
