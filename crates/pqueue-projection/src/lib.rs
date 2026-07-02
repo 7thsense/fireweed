@@ -33,8 +33,8 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeKind, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PayloadUpdate,
-    ProjectionSnapshot, PushItem, QueueCommand, QueueKey, QueueMetrics, ScheduleUpdate,
-    SnapshotRef,
+    ProjectionSnapshot, PushItem, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ScheduleUpdate, SnapshotRef,
 };
 use serde_json::Value;
 
@@ -1601,6 +1601,14 @@ impl ProjectionData {
     /// The lifecycle state of `id`, if present (upsert collision classification).
     pub fn item_state(&self, id: &ItemId) -> Option<ItemState> {
         self.items.get(id).map(|r| r.state)
+    }
+
+    /// Seed restart item-id counters from this already-materialized projection. Hybrid recovery has just
+    /// hydrated memory from SQLite, so this avoids a second full durable-store item scan.
+    pub fn observe_item_counters(&self, shard: &QueueKey, counters: &QueueCounters) {
+        for id in self.items.keys() {
+            counters.observe(shard, *id);
+        }
     }
 
     /// The current `item_version` of `id`, if present (read post-apply to return the bumped version

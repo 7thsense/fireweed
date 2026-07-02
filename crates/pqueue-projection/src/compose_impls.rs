@@ -19,7 +19,8 @@ use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestam
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, EngineError,
     EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore,
-    ProjectionSnapshot, ProjectionStore, PushItem, QueueKey, QueueMetrics, SnapshotRef,
+    ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey, QueueMetrics,
+    SnapshotRef,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -167,6 +168,15 @@ impl InMemoryProjection {
 
     fn get(&self, shard: &QueueKey) -> EngineResult<&ProjectionData> {
         self.projections.get(shard).ok_or(EngineError::NotFound)
+    }
+
+    pub fn observe_item_counters(
+        &self,
+        shard: &QueueKey,
+        counters: &QueueCounters,
+    ) -> EngineResult<()> {
+        self.get(shard)?.observe_item_counters(shard, counters);
+        Ok(())
     }
 }
 

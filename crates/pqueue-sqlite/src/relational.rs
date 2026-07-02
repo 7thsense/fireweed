@@ -1269,9 +1269,10 @@ impl Inner {
 // apply: the 14-arm command -> SQL projection write (the BQ-11a headline)
 // ---------------------------------------------------------------------------
 
-/// Max rows per dynamically-built multi-row / `IN (...)` statement. Each `pqueue_items` row binds 17
-/// params; 256 rows ≈ 4.4k params, well under sqlite's 32766 bound-variable ceiling (bundled SQLite).
-const SQLITE_BATCH: usize = 256;
+/// Max rows per dynamically-built multi-row / `IN (...)` statement. Each `pqueue_items` row binds 19
+/// params; 1,500 rows ≈ 28.5k params, under sqlite's 32,766 bound-variable ceiling (bundled SQLite) while
+/// cutting large Push materialization from tens of thousands of statements to a few thousand.
+const SQLITE_BATCH: usize = 1_500;
 const COHORT_EXPIRY_SWEEP_LIMIT: usize = 128;
 const GROUP_DUE_REFRESH_LIMIT: i64 = 128;
 
@@ -7183,7 +7184,7 @@ impl ProjectionStore for HybridProjectionStore {
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         self.require_hydrated(shard)?;
-        self.sqlite.observe_item_counters(shard, counters)
+        self.memory.observe_item_counters(shard, counters)
     }
 
     fn eligible_candidates(
