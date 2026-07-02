@@ -2509,6 +2509,18 @@ fn queue_paused(conn: &Connection, shard: &QueueKey) -> EngineResult<bool> {
     Ok(paused != 0)
 }
 
+fn has_blocked_gates(conn: &Connection, shard: &QueueKey) -> EngineResult<bool> {
+    let (t, q) = parts(shard);
+    let found: Option<i64> = st(conn
+        .query_row(
+            "SELECT 1 FROM pqueue_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?;
+    Ok(found.is_some())
+}
+
 /// Priority-ordered eligible candidates (pending, not superseded, due at `now`), capped at `limit`. Empty
 /// while paused. `created_seq` is the stable FIFO tiebreaker (the relational analogue of the in-memory
 /// `created_seq`; BQ-11b adds Eligibility-Precedence progress-guard ordering).
@@ -2522,6 +2534,25 @@ fn select_eligible_sql(
         return Ok(Vec::new());
     }
     let (t, q) = parts(shard);
+    if !has_blocked_gates(conn, shard)? {
+        let mut stmt = st(conn.prepare(
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
+             AND (not_before IS NULL OR not_before<=?3) \
+             AND eligible_since IS NOT NULL \
+             ORDER BY priority_sort, created_seq LIMIT ?4",
+        ))?;
+        let mapped = st(
+            stmt.query_map(params![t, q, ts_nanos(now), limit as i64], |row| {
+                row.get::<_, String>(0)
+            }),
+        )?;
+        let mut out = Vec::new();
+        for r in mapped {
+            out.push(ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
+        }
+        return Ok(out);
+    }
     // The TD-002 `BatchClaim` candidate predicate (owner-local, no shard filter): pending, due, eligible,
     // ordered by the strict-claim key. `eligible_since IS NOT NULL` matches the CTE; `progress_guard_sort`
     // is omitted — under `ordering_mode=strict` (TD-002:649 sanctions strict ordering as the valid first
