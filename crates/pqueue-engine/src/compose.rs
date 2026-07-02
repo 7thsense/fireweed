@@ -2695,7 +2695,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
-            let page_size = request.max_items.max(1).min(1_000);
+            let page_size = request.max_items.clamp(1, 1_000);
             let mut cursor = None;
             let mut item_ids = Vec::new();
             while item_ids.len() < request.max_items as usize {

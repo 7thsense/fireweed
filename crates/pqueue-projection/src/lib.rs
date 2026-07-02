@@ -610,23 +610,29 @@ fn parse_utc_timestamp(value: &str) -> EngineResult<UtcTimestamp> {
             "typed index value is not a valid datetime",
         ));
     };
-    let (date, time) = value
-        .split_once('T')
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    let (date, time) = value.split_once('T').ok_or(EngineError::Invalid(
+        "typed index value is not a valid datetime",
+    ))?;
 
     let mut date_parts = date.split('-');
     let year: i64 = date_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
     let month: i64 = date_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
     let day: i64 = date_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
     if date_parts.next().is_some() {
         return Err(EngineError::Invalid(
             "typed index value is not a valid datetime",
@@ -637,14 +643,19 @@ fn parse_utc_timestamp(value: &str) -> EngineResult<UtcTimestamp> {
     let hour: i64 = time_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
-    let minute: i64 = time_parts
-        .next()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
-    let sec_part = time_parts
-        .next()
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
+    let minute: i64 =
+        time_parts
+            .next()
+            .and_then(|v| v.parse().ok())
+            .ok_or(EngineError::Invalid(
+                "typed index value is not a valid datetime",
+            ))?;
+    let sec_part = time_parts.next().ok_or(EngineError::Invalid(
+        "typed index value is not a valid datetime",
+    ))?;
     if time_parts.next().is_some() {
         return Err(EngineError::Invalid(
             "typed index value is not a valid datetime",
@@ -701,22 +712,23 @@ fn typed_value_for_field(
         IndexType::String => value
             .as_str()
             .map(|s| TypedValue::String(s.to_string()))
-            .ok_or_else(|| {
-                EngineError::Invalid("typed index value is not valid for declared type")
-            })?,
-        IndexType::Integer => value.as_i64().map(TypedValue::Integer).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
-        IndexType::Float => value.as_f64().map(TypedValue::Float).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
-        IndexType::Boolean => value.as_bool().map(TypedValue::Bool).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        IndexType::Integer => value
+            .as_i64()
+            .map(TypedValue::Integer)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        IndexType::Float => value
+            .as_f64()
+            .map(TypedValue::Float)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        IndexType::Boolean => value
+            .as_bool()
+            .map(TypedValue::Bool)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
         IndexType::Datetime => match value {
             Value::String(s) => TypedValue::DateTime(parse_utc_timestamp(s)?),
             Value::Number(n) => {
-                let seconds = n.as_i64().ok_or_else(|| {
+                let seconds = n.as_i64().ok_or({
                     EngineError::Invalid("typed index value is not valid for declared type")
                 })?;
                 TypedValue::DateTime(UtcTimestamp::new(seconds, 0).map_err(|_| {
@@ -764,9 +776,9 @@ fn typed_value_compare(a: &TypedValue, b: &TypedValue) -> EngineResult<Ordering>
     match (a, b) {
         (TypedValue::String(a), TypedValue::String(b)) => Ok(a.cmp(b)),
         (TypedValue::Integer(a), TypedValue::Integer(b)) => Ok(a.cmp(b)),
-        (TypedValue::Float(a), TypedValue::Float(b)) => a
-            .partial_cmp(b)
-            .ok_or_else(|| EngineError::Invalid("typed index value comparison is undefined")),
+        (TypedValue::Float(a), TypedValue::Float(b)) => a.partial_cmp(b).ok_or(
+            EngineError::Invalid("typed index value comparison is undefined"),
+        ),
         (TypedValue::Bool(a), TypedValue::Bool(b)) => Ok(a.cmp(b)),
         (TypedValue::DateTime(a), TypedValue::DateTime(b)) => Ok(a.cmp(b)),
         _ => Err(EngineError::Invalid(
@@ -784,11 +796,11 @@ fn compare_rows(
         let left = lhs
             .fields
             .get(&field.field)
-            .ok_or_else(|| EngineError::Invalid("unindexed-field"))?;
+            .ok_or(EngineError::Invalid("unindexed-field"))?;
         let right = rhs
             .fields
             .get(&field.field)
-            .ok_or_else(|| EngineError::Invalid("unindexed-field"))?;
+            .ok_or(EngineError::Invalid("unindexed-field"))?;
         let ord = typed_value_compare(left, right)?;
         let ord = match field.direction {
             SortDirection::Ascending => ord,
@@ -840,22 +852,22 @@ fn value_matches_bucket(value: &TypedValue, rule: &pqueue_core::BucketRule) -> b
         return numeric == exact;
     }
     if let Some(gt) = rule.gt
-        && !(numeric > gt)
+        && numeric <= gt
     {
         return false;
     }
     if let Some(gte) = rule.gte
-        && !(numeric >= gte)
+        && numeric < gte
     {
         return false;
     }
     if let Some(lt) = rule.lt
-        && !(numeric < lt)
+        && numeric >= lt
     {
         return false;
     }
     if let Some(lte) = rule.lte
-        && !(numeric <= lte)
+        && numeric > lte
     {
         return false;
     }
@@ -884,22 +896,23 @@ fn matches_filter_on_entity(entity: &Value, filter: &QueryFilter) -> EngineResul
         TypedValue::String(_) => value
             .as_str()
             .map(|s| TypedValue::String(s.to_string()))
-            .ok_or_else(|| {
-                EngineError::Invalid("typed index value is not valid for declared type")
-            })?,
-        TypedValue::Integer(_) => value.as_i64().map(TypedValue::Integer).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
-        TypedValue::Float(_) => value.as_f64().map(TypedValue::Float).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
-        TypedValue::Bool(_) => value.as_bool().map(TypedValue::Bool).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        TypedValue::Integer(_) => value
+            .as_i64()
+            .map(TypedValue::Integer)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        TypedValue::Float(_) => value
+            .as_f64()
+            .map(TypedValue::Float)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        TypedValue::Bool(_) => value
+            .as_bool()
+            .map(TypedValue::Bool)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
         TypedValue::DateTime(_) => match value {
             Value::String(s) => TypedValue::DateTime(parse_utc_timestamp(s)?),
             Value::Number(n) => {
-                let seconds = n.as_i64().ok_or_else(|| {
+                let seconds = n.as_i64().ok_or({
                     EngineError::Invalid("typed index value is not valid for declared type")
                 })?;
                 TypedValue::DateTime(UtcTimestamp::new(seconds, 0).map_err(|_| {
@@ -938,7 +951,7 @@ fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
         TypedValue::String(v) => Value::String(v.clone()),
         TypedValue::Integer(v) => Value::Number((*v).into()),
         TypedValue::Float(v) => {
-            Value::Number(serde_json::Number::from_f64(*v).ok_or_else(|| {
+            Value::Number(serde_json::Number::from_f64(*v).ok_or({
                 EngineError::Invalid("typed index value is not valid for declared type")
             })?)
         }
@@ -2449,13 +2462,12 @@ impl ProjectionData {
             ),
             None => None,
         };
-        if let Some(state) = &cursor_state {
-            if state.index != spec.name
+        if let Some(state) = &cursor_state
+            && (state.index != spec.name
                 || state.filters != request.filters
-                || state.order_by != request.order_by
-            {
-                return Err(EngineError::Invalid("cursor-invalidated"));
-            }
+                || state.order_by != request.order_by)
+        {
+            return Err(EngineError::Invalid("cursor-invalidated"));
         }
 
         let mut rows = Vec::new();

@@ -396,7 +396,7 @@ impl ProjectionStore for InMemoryProjection {
         shard: &QueueKey,
         request: GroupedAggregateRequest,
     ) -> EngineResult<GroupedAggregateResponse> {
-        Ok(self.get(shard)?.grouped_aggregate(request)?)
+        self.get(shard)?.grouped_aggregate(request)
     }
 
     fn declared_bucket_segment(
@@ -404,7 +404,7 @@ impl ProjectionStore for InMemoryProjection {
         shard: &QueueKey,
         request: DeclaredBucketSegmentRequest,
     ) -> EngineResult<DeclaredBucketSegmentResponse> {
-        Ok(self.get(shard)?.declared_bucket_segment(request)?)
+        self.get(shard)?.declared_bucket_segment(request)
     }
 
     fn bounded_mutation(
@@ -412,7 +412,7 @@ impl ProjectionStore for InMemoryProjection {
         shard: &QueueKey,
         request: BoundedMutationRequest,
     ) -> EngineResult<BoundedMutationResponse> {
-        Ok(self.get_mut(shard)?.bounded_mutation(request)?)
+        self.get_mut(shard)?.bounded_mutation(request)
     }
 
     fn index_get_unique(
