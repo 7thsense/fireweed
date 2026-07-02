@@ -223,8 +223,14 @@ fn is_explicit_client_item_key(item_id: ItemId, key: &ClientItemKey) -> bool {
 /// Priority-ordered eligibility key. Ascending order = claim order: priced items first (tag 0, then
 /// `priority_sort` bytes), unpriced last (tag 1), FIFO by `created_seq` within ties.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum EligRank {
+    Priced(Vec<u8>),
+    Unpriced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct EligKey {
-    sort: Vec<u8>,
+    rank: EligRank,
     created_seq: u64,
     item: ItemId,
     not_before: Option<UtcTimestamp>,
@@ -232,16 +238,12 @@ struct EligKey {
 }
 
 fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
-    let sort = match &rec.priority {
-        Some(p) => {
-            let mut v = vec![0u8];
-            v.extend(priority_sort(p, model));
-            v
-        }
-        None => vec![1u8],
+    let rank = match &rec.priority {
+        Some(p) => EligRank::Priced(priority_sort(p, model)),
+        None => EligRank::Unpriced,
     };
     EligKey {
-        sort,
+        rank,
         created_seq: rec.created_seq,
         item: rec.item_id,
         not_before: rec.not_before,
@@ -1949,6 +1951,47 @@ mod tests {
             group_key: Some(GroupKey::new(group).unwrap()),
             ..push_item(id, key, priority)
         }
+    }
+
+    #[test]
+    fn eligibility_key_uses_compact_unpriced_rank() {
+        let unpriced = ItemRecord {
+            item_id: iid("1"),
+            explicit_client_item_key: None,
+            priority: None,
+            not_before: None,
+            group_key: None,
+            payload: None,
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            gate_keys: Vec::new(),
+            entity_document: None,
+            state: ItemState::Pending,
+            item_version: 1,
+            attempt_count: 0,
+            max_attempts: 3,
+            created_seq: 0,
+            lease_token: None,
+            lease_expires_at: None,
+            fenced: false,
+            superseded: false,
+        };
+        let priced = ItemRecord {
+            item_id: iid("2"),
+            priority: Some(PriorityValue::Int64(7)),
+            created_seq: 1,
+            ..unpriced.clone()
+        };
+
+        let unpriced_key = elig_key(&unpriced, &model());
+        let priced_key = elig_key(&priced, &model());
+
+        assert!(matches!(unpriced_key.rank, EligRank::Unpriced));
+        assert!(matches!(priced_key.rank, EligRank::Priced(_)));
+        assert!(
+            priced_key < unpriced_key,
+            "priced work must continue to sort ahead of unpriced FIFO work"
+        );
     }
 
     #[test]
