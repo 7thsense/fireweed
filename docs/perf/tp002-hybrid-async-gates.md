@@ -97,6 +97,19 @@ run.
   price inputs must be written into the evidence row so cost changes are
   explainable.
 
+Harness preparation for `pqueue-39be4662`: the hybrid performance test now has a
+pure object-store utilization helper for the target release-ledger fields:
+`objectlog_hybrid_object_count`, `objectlog_hybrid_total_bytes`,
+`objectlog_hybrid_segment_bytes`, `objectlog_hybrid_mean_object_bytes`,
+`objectlog_hybrid_max_object_bytes`,
+`objectlog_hybrid_storage_utilization_ratio`,
+`objectlog_hybrid_put_count`, `objectlog_hybrid_get_count`,
+`objectlog_hybrid_list_count`, `objectlog_hybrid_s3_estimated_cost_usd`, and
+`objectlog_hybrid_s3_price_inputs`. Live emission remains blocked on
+`SegmentCounters` exposing the measured object count, total bytes, segment
+bytes, mean/max object bytes, and GET/LIST request counts; the existing
+`objects_put` counter maps to the future PUT count.
+
 For the object-storage profile, durable acknowledgement is allowed only after the
 command's packed object-log segment and manifest are committed. Normal
 data-plane traffic must wait for group commit rather than force a tiny segment.
