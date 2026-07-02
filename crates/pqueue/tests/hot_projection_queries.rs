@@ -877,7 +877,7 @@ async fn backend_capability_advertising_is_explicit() {
     );
     assert!(!sqlite.hot_projection_capabilities(&q).side_record_query);
 
-    let unsupported = UnsupportedHotProjectionBackend::default();
+    let unsupported = UnsupportedHotProjectionBackend;
     let unsupported_flags = unsupported.hot_projection_capabilities(&q);
     assert_eq!(unsupported_flags, pqueue::QueryCapabilityFlags::default());
     assert!(!unsupported_flags.side_record_query);

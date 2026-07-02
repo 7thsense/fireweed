@@ -978,22 +978,28 @@ fn parse_utc_timestamp(value: &str) -> EngineResult<UtcTimestamp> {
             "typed index value is not a valid datetime",
         ));
     };
-    let (date, time) = value
-        .split_once('T')
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+    let (date, time) = value.split_once('T').ok_or(EngineError::Invalid(
+        "typed index value is not a valid datetime",
+    ))?;
     let mut date_parts = date.split('-');
     let year: i64 = date_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
     let month: i64 = date_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
     let day: i64 = date_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
     if date_parts.next().is_some() {
         return Err(EngineError::Invalid(
             "typed index value is not a valid datetime",
@@ -1004,14 +1010,19 @@ fn parse_utc_timestamp(value: &str) -> EngineResult<UtcTimestamp> {
     let hour: i64 = time_parts
         .next()
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
-    let minute: i64 = time_parts
-        .next()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
-    let sec_part = time_parts
-        .next()
-        .ok_or_else(|| EngineError::Invalid("typed index value is not a valid datetime"))?;
+        .ok_or(EngineError::Invalid(
+            "typed index value is not a valid datetime",
+        ))?;
+    let minute: i64 =
+        time_parts
+            .next()
+            .and_then(|v| v.parse().ok())
+            .ok_or(EngineError::Invalid(
+                "typed index value is not a valid datetime",
+            ))?;
+    let sec_part = time_parts.next().ok_or(EngineError::Invalid(
+        "typed index value is not a valid datetime",
+    ))?;
     if time_parts.next().is_some() {
         return Err(EngineError::Invalid(
             "typed index value is not a valid datetime",
@@ -1059,22 +1070,23 @@ fn typed_value_for_json(
         IndexType::String => value
             .as_str()
             .map(|s| TypedValue::String(s.to_string()))
-            .ok_or_else(|| {
-                EngineError::Invalid("typed index value is not valid for declared type")
-            })?,
-        IndexType::Integer => value.as_i64().map(TypedValue::Integer).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
-        IndexType::Float => value.as_f64().map(TypedValue::Float).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
-        IndexType::Boolean => value.as_bool().map(TypedValue::Bool).ok_or_else(|| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?,
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        IndexType::Integer => value
+            .as_i64()
+            .map(TypedValue::Integer)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        IndexType::Float => value
+            .as_f64()
+            .map(TypedValue::Float)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+        IndexType::Boolean => value
+            .as_bool()
+            .map(TypedValue::Bool)
+            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
         IndexType::Datetime => match value {
             JsonValue::String(s) => TypedValue::DateTime(parse_utc_timestamp(s)?),
             JsonValue::Number(n) => {
-                let seconds = n.as_i64().ok_or_else(|| {
+                let seconds = n.as_i64().ok_or({
                     EngineError::Invalid("typed index value is not valid for declared type")
                 })?;
                 TypedValue::DateTime(UtcTimestamp::new(seconds, 0).map_err(|_| {
@@ -1122,9 +1134,9 @@ fn typed_value_compare(a: &TypedValue, b: &TypedValue) -> EngineResult<Ordering>
     match (a, b) {
         (TypedValue::String(a), TypedValue::String(b)) => Ok(a.cmp(b)),
         (TypedValue::Integer(a), TypedValue::Integer(b)) => Ok(a.cmp(b)),
-        (TypedValue::Float(a), TypedValue::Float(b)) => a
-            .partial_cmp(b)
-            .ok_or_else(|| EngineError::Invalid("typed index value comparison is undefined")),
+        (TypedValue::Float(a), TypedValue::Float(b)) => a.partial_cmp(b).ok_or(
+            EngineError::Invalid("typed index value comparison is undefined"),
+        ),
         (TypedValue::Bool(a), TypedValue::Bool(b)) => Ok(a.cmp(b)),
         (TypedValue::DateTime(a), TypedValue::DateTime(b)) => Ok(a.cmp(b)),
         _ => Err(EngineError::Invalid(
@@ -1151,7 +1163,7 @@ fn merge_entity_document(
                 TypedValue::String(v) => JsonValue::String(v.clone()),
                 TypedValue::Integer(v) => JsonValue::Number((*v).into()),
                 TypedValue::Float(v) => {
-                    JsonValue::Number(serde_json::Number::from_f64(*v).ok_or_else(|| {
+                    JsonValue::Number(serde_json::Number::from_f64(*v).ok_or({
                         EngineError::Invalid("typed index value is not valid for declared type")
                     })?)
                 }
@@ -1266,11 +1278,11 @@ fn compare_rows(
         let left = lhs
             .fields
             .get(&field.field)
-            .ok_or_else(|| EngineError::Invalid("unindexed-field"))?;
+            .ok_or(EngineError::Invalid("unindexed-field"))?;
         let right = rhs
             .fields
             .get(&field.field)
-            .ok_or_else(|| EngineError::Invalid("unindexed-field"))?;
+            .ok_or(EngineError::Invalid("unindexed-field"))?;
         let ord = typed_value_compare(left, right)?;
         let ord = match field.direction {
             SortDirection::Ascending => ord,
@@ -6927,13 +6939,12 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 ),
                 None => None,
             };
-            if let Some(state) = &cursor_state {
-                if state.index != spec.name
+            if let Some(state) = &cursor_state
+                && (state.index != spec.name
                     || state.filters != request.filters
-                    || state.order_by != request.order_by
-                {
-                    return Err(EngineError::Invalid("cursor-invalidated"));
-                }
+                    || state.order_by != request.order_by)
+            {
+                return Err(EngineError::Invalid("cursor-invalidated"));
             }
 
             let (t, q) = parts(shard);
@@ -7273,7 +7284,8 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             }
 
             matched.sort_by(|lhs, rhs| {
-                compare_rows(lhs, rhs, &[request.order_by.clone()]).expect("typed order compare")
+                compare_rows(lhs, rhs, std::slice::from_ref(&request.order_by))
+                    .expect("typed order compare")
             });
 
             let selected: Vec<ItemId> = matched
@@ -7478,45 +7490,45 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
 
             let mut results = Vec::with_capacity(matches.len());
             for (item_id, lifecycle_state, fenced, superseded, entity) in matches {
-                let outcome =
-                    if fenced || superseded || parse_state(&lifecycle_state)?.is_terminal() {
-                        MutationOutcome::Conflict
-                    } else if parse_state(&lifecycle_state)? != ItemState::Pending {
-                        MutationOutcome::Conflict
-                    } else {
-                        let new_entity = merge_entity_document(Some(&entity), &request.set_fields)?;
-                        validate_entity(g.schemas.get(shard), Some(&new_entity))?;
-                        let now = {
-                            let d = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default();
-                            UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos())
-                                .expect("valid ts")
-                        };
-                        g.commit_command(
-                            shard,
-                            QueueCommand::UpdateFields(UpdateFieldsCommand {
-                                item_id,
-                                field_ops: request
-                                    .set_fields
-                                    .iter()
-                                    .map(|(field, value)| {
-                                        serde_json::to_vec(value)
-                                            .map(Bytes::from)
-                                            .map_err(|e| EngineError::Storage(e.to_string()))
-                                            .map(|bytes| (field.clone(), Some(bytes)))
-                                    })
-                                    .collect::<EngineResult<BTreeMap<_, _>>>()?,
-                                payload: PayloadUpdate::Keep,
-                                set_priority: Default::default(),
-                                set_not_before: Default::default(),
-                                set_entity_document: Some(new_entity),
-                            }),
-                            now,
-                            None,
-                        )?;
-                        MutationOutcome::Updated
+                let outcome = if fenced
+                    || superseded
+                    || parse_state(&lifecycle_state)?.is_terminal()
+                    || parse_state(&lifecycle_state)? != ItemState::Pending
+                {
+                    MutationOutcome::Conflict
+                } else {
+                    let new_entity = merge_entity_document(Some(&entity), &request.set_fields)?;
+                    validate_entity(g.schemas.get(shard), Some(&new_entity))?;
+                    let now = {
+                        let d = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid ts")
                     };
+                    g.commit_command(
+                        shard,
+                        QueueCommand::UpdateFields(UpdateFieldsCommand {
+                            item_id,
+                            field_ops: request
+                                .set_fields
+                                .iter()
+                                .map(|(field, value)| {
+                                    serde_json::to_vec(value)
+                                        .map(Bytes::from)
+                                        .map_err(|e| EngineError::Storage(e.to_string()))
+                                        .map(|bytes| (field.clone(), Some(bytes)))
+                                })
+                                .collect::<EngineResult<BTreeMap<_, _>>>()?,
+                            payload: PayloadUpdate::Keep,
+                            set_priority: Default::default(),
+                            set_not_before: Default::default(),
+                            set_entity_document: Some(new_entity),
+                        }),
+                        now,
+                        None,
+                    )?;
+                    MutationOutcome::Updated
+                };
                 results.push(MutationResult { item_id, outcome });
             }
 

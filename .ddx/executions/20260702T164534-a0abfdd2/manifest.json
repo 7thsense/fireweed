@@ -1,0 +1,55 @@
+{
+  "attempt_id": "20260702T164534-a0abfdd2",
+  "bead_id": "pqueue-085ae5ba",
+  "base_rev": "8d417bf8f8012b7d6a60a653724e27942c9dd19a",
+  "created_at": "2026-07-02T16:45:34.661408176Z",
+  "requested": {
+    "effort": "medium",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-085ae5ba",
+    "title": "Document and gate the hot projection query substrate",
+    "description": "PROBLEM\nAfter implementation, the public docs and final gates must prove the hot projection substrate is documented, discoverable, and does not regress the workspace.\n\nPROPOSED FIX\nUpdate public/contract docs with query capability names, index declaration examples, consistency/watermark semantics, cursor invalidation behavior, aggregate limits, bounded mutation semantics, side-record query language, backend capability matrix, and non-goals. Run final fmt, clippy, public query tests, and full workspace tests.\n\nIN-SCOPE FILES\n- docs/ contract and test-plan docs.\n- crates/pqueue/tests/hot_projection_queries.rs only for final assertions or names.\n\nOUT-OF-SCOPE\n- New feature implementation beyond doc/test fixes needed to close the epic.\n- Release tagging.\n\nSIDE-RECORD DOC NOTE\nDocument `side_record_query` as a defined-but-deferred capability: semantics live in the contract, all backends advertise it unavailable in this epic, and implementation is a follow-up epic.",
+    "acceptance": "1. `rg -n 'hot projection|range scan|hourly_distribution_by_status|recycling_preview_by_hour|cursor pagination|bounded mutation|side-record query' docs crates` finds the governing contract and test references.\n2. `cargo test -p pqueue --test hot_projection_queries -- --nocapture` passes.\n3. `cargo fmt --check` passes.\n4. `cargo clippy --workspace --all-targets --all-features -- -D warnings` passes.\n5. `cargo test --workspace --all-targets --all-features` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:docs",
+      "area:projection",
+      "kind:docs",
+      "system:snorri",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-02T16:45:30.921930819Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T164534-a0abfdd2",
+    "prompt": ".ddx/executions/20260702T164534-a0abfdd2/prompt.md",
+    "manifest": ".ddx/executions/20260702T164534-a0abfdd2/manifest.json",
+    "result": ".ddx/executions/20260702T164534-a0abfdd2/result.json",
+    "checks": ".ddx/executions/20260702T164534-a0abfdd2/checks.json",
+    "usage": ".ddx/executions/20260702T164534-a0abfdd2/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-085ae5ba-20260702T164534-a0abfdd2"
+  },
+  "prompt_sha": "b8de2d93e466d35ebc72858198cb3c772ec7e4f285dba83ea541466d15ece533"
+}
