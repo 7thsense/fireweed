@@ -148,6 +148,75 @@ fn proc_status_kb(field: &str) -> Option<u64> {
     None
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ProcIoSnapshot {
+    rchar: u64,
+    wchar: u64,
+    syscr: u64,
+    syscw: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProcIoDelta {
+    rchar: u64,
+    wchar: u64,
+    syscr: u64,
+    syscw: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    wall_ms: f64,
+}
+
+impl ProcIoSnapshot {
+    fn read() -> Self {
+        let Ok(text) = std::fs::read_to_string("/proc/self/io") else {
+            return Self::default();
+        };
+        let mut out = Self::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim().parse::<u64>().unwrap_or(0);
+            match key {
+                "rchar" => out.rchar = value,
+                "wchar" => out.wchar = value,
+                "syscr" => out.syscr = value,
+                "syscw" => out.syscw = value,
+                "read_bytes" => out.read_bytes = value,
+                "write_bytes" => out.write_bytes = value,
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn delta_since(self, start: Self, wall_ms: f64) -> ProcIoDelta {
+        ProcIoDelta {
+            rchar: self.rchar.saturating_sub(start.rchar),
+            wchar: self.wchar.saturating_sub(start.wchar),
+            syscr: self.syscr.saturating_sub(start.syscr),
+            syscw: self.syscw.saturating_sub(start.syscw),
+            read_bytes: self.read_bytes.saturating_sub(start.read_bytes),
+            write_bytes: self.write_bytes.saturating_sub(start.write_bytes),
+            wall_ms: round3(wall_ms),
+        }
+    }
+}
+
+fn phase_io_delta(start: ProcIoSnapshot, t: Instant) -> ProcIoDelta {
+    ProcIoSnapshot::read().delta_since(start, t.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn print_phase_io(label: &str, io: ProcIoDelta) {
+    println!(
+        "phase-io {label}: wall_ms={:.3} rchar={} wchar={} syscr={} syscw={} read_bytes={} write_bytes={}",
+        io.wall_ms, io.rchar, io.wchar, io.syscr, io.syscw, io.read_bytes, io.write_bytes
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ObjectStoreUtilization {
     object_count: u64,
@@ -423,6 +492,7 @@ fn spawn_objectlog_flusher(backend: Arc<ComposedObjectLogBackend>) -> tokio::tas
 
 struct ProfileRun {
     backend_profile: &'static str,
+    phase_io: BTreeMap<String, ProcIoDelta>,
     ack_p50_ms: f64,
     ack_p95_ms: f64,
     ack_p99_ms: f64,
@@ -485,8 +555,10 @@ where
     let shard = shard(&def);
     backend.create_queue(def).await.expect("create queue");
 
+    let mut phase_io = BTreeMap::new();
     let mut ack_latencies = Vec::new();
     let start = Instant::now();
+    let push_io_start = ProcIoSnapshot::read();
     let mut id = 0u64;
     while id < resident {
         let n = (resident - id).min(load_batch);
@@ -500,12 +572,17 @@ where
         id += n;
     }
     let push_elapsed = start.elapsed().as_secs_f64();
+    let hot_push_io = ProcIoSnapshot::read().delta_since(push_io_start, push_elapsed * 1000.0);
+    print_phase_io(&format!("{backend_profile}.hot_push"), hot_push_io);
+    phase_io.insert("hot_push".to_string(), hot_push_io);
     let pending = backend.metrics(&shard).await.expect("metrics").pending;
     assert_eq!(pending, resident);
 
     let mut claim_finalize_latencies = Vec::new();
     let mut claimed_total = 0u64;
     let rmw_window = env_u64("PQUEUE_HYBRID_RMW_WINDOW", 64).max(1) as usize;
+    let claim_finalize_io_start = ProcIoSnapshot::read();
+    let claim_finalize_start = Instant::now();
     while claimed_total < resident {
         let t = Instant::now();
         let remaining = resident - claimed_total;
@@ -560,6 +637,12 @@ where
         claim_finalize_latencies.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     assert_eq!(claimed_total, resident);
+    let hot_claim_finalize_io = phase_io_delta(claim_finalize_io_start, claim_finalize_start);
+    print_phase_io(
+        &format!("{backend_profile}.hot_claim_finalize"),
+        hot_claim_finalize_io,
+    );
+    phase_io.insert("hot_claim_finalize".to_string(), hot_claim_finalize_io);
 
     let counters = counters();
     let object_store = ObjectStoreUtilization {
@@ -583,6 +666,7 @@ where
 
     ProfileRun {
         backend_profile,
+        phase_io,
         ack_p50_ms: round3(ack_p50_ms),
         ack_p95_ms: round3(ack_p95_ms),
         ack_p99_ms: round3(ack_p99_ms),
@@ -775,6 +859,8 @@ async fn run_hybrid(
         .create_queue(rec_def.clone())
         .await
         .expect("create recovery queue");
+    let recovery_load_io_start = ProcIoSnapshot::read();
+    let recovery_load_start = Instant::now();
     let mut id = 0u64;
     while id < resident {
         let n = (resident - id).min(load_batch);
@@ -785,15 +871,30 @@ async fn run_hybrid(
             .expect("push recovery");
         id += n;
     }
+    let recovery_load_io = phase_io_delta(recovery_load_io_start, recovery_load_start);
+    print_phase_io("objectlog/hybrid.normal_recovery_load", recovery_load_io);
+    row.phase_io
+        .insert("normal_recovery_load".to_string(), recovery_load_io);
     assert_eq!(
         rec_backend.metrics(&rec_shard).await.unwrap().pending,
         resident
     );
+    let recovery_flush_io_start = ProcIoSnapshot::read();
+    let recovery_flush_start = Instant::now();
     while rec_backend.with_projection(|p| p.deferred_command_count()) > 0 {
         rec_backend
             .flush_deferred_projection()
             .expect("flush recovery projection before normal restart");
     }
+    let recovery_flush_io = phase_io_delta(recovery_flush_io_start, recovery_flush_start);
+    print_phase_io(
+        "objectlog/hybrid.normal_recovery_flush_deferred",
+        recovery_flush_io,
+    );
+    row.phase_io.insert(
+        "normal_recovery_flush_deferred".to_string(),
+        recovery_flush_io,
+    );
     let rec_log_head = rec_backend
         .with_log(|log| log.high_water(&rec_shard).expect("recovery log high-water"))
         .map(|pos| pos.sequence.saturating_add(1))
@@ -805,6 +906,7 @@ async fn run_hybrid(
     rec_flusher.abort();
     drop(rec_backend);
 
+    let recovery_reopen_io_start = ProcIoSnapshot::read();
     let t = Instant::now();
     let reopened = ComposedBackend::new(
         ObjectLog::open_group_commit(&rec_root, cfg).expect("reopen recovery objectlog"),
@@ -816,6 +918,13 @@ async fn run_hybrid(
     .recover()
     .expect("recover hybrid normal restart");
     row.recovery_wall_ms = Some(round3(t.elapsed().as_secs_f64() * 1000.0));
+    let recovery_reopen_io = phase_io_delta(recovery_reopen_io_start, t);
+    print_phase_io(
+        "objectlog/hybrid.normal_recovery_reopen",
+        recovery_reopen_io,
+    );
+    row.phase_io
+        .insert("normal_recovery_reopen".to_string(), recovery_reopen_io);
     row.recovery_tail_replayed = Some(rec_tail_to_replay);
     row.recovery_pending_after = Some(reopened.metrics(&rec_shard).await.expect("metrics").pending);
     assert_eq!(row.recovery_pending_after, Some(resident));
@@ -844,6 +953,8 @@ async fn run_hybrid(
         .create_queue(disk_def.clone())
         .await
         .expect("create disk queue");
+    let disk_load_io_start = ProcIoSnapshot::read();
+    let disk_load_start = Instant::now();
     let mut id = 0u64;
     while id < resident {
         let n = (resident - id).min(load_batch);
@@ -854,6 +965,10 @@ async fn run_hybrid(
             .expect("push disk");
         id += n;
     }
+    let disk_load_io = phase_io_delta(disk_load_io_start, disk_load_start);
+    print_phase_io("objectlog/hybrid.disk_loss_load", disk_load_io);
+    row.phase_io
+        .insert("disk_loss_load".to_string(), disk_load_io);
     assert_eq!(
         disk_backend.metrics(&disk_shard).await.unwrap().pending,
         resident
@@ -864,6 +979,7 @@ async fn run_hybrid(
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", disk_projection.display()));
     }
+    let disk_reopen_io_start = ProcIoSnapshot::read();
     let t = Instant::now();
     let disk_reopened = ComposedBackend::new(
         ObjectLog::open_group_commit(&disk_root, cfg).expect("reopen disk-loss objectlog"),
@@ -875,6 +991,10 @@ async fn run_hybrid(
     .recover()
     .expect("recover from retained object log");
     row.disk_loss_wall_ms = Some(round3(t.elapsed().as_secs_f64() * 1000.0));
+    let disk_reopen_io = phase_io_delta(disk_reopen_io_start, t);
+    print_phase_io("objectlog/hybrid.disk_loss_reopen", disk_reopen_io);
+    row.phase_io
+        .insert("disk_loss_reopen".to_string(), disk_reopen_io);
     row.disk_loss_pending_after = Some(disk_reopened.metrics(&disk_shard).await.unwrap().pending);
     assert_eq!(row.disk_loss_pending_after, Some(resident));
     drop(disk_reopened);
@@ -1419,6 +1539,37 @@ fn emit_ledger(
             format!("{p}_claim_finalize_p95_ms"),
             serde_json::json!(row.claim_finalize_p95_ms),
         );
+        for (phase, io) in &row.phase_io {
+            let phase_key = phase.replace('/', "_");
+            values.insert(
+                format!("{p}_phase_io_{phase_key}_rchar"),
+                serde_json::json!(io.rchar),
+            );
+            values.insert(
+                format!("{p}_phase_io_{phase_key}_wchar"),
+                serde_json::json!(io.wchar),
+            );
+            values.insert(
+                format!("{p}_phase_io_{phase_key}_syscr"),
+                serde_json::json!(io.syscr),
+            );
+            values.insert(
+                format!("{p}_phase_io_{phase_key}_syscw"),
+                serde_json::json!(io.syscw),
+            );
+            values.insert(
+                format!("{p}_phase_io_{phase_key}_read_bytes"),
+                serde_json::json!(io.read_bytes),
+            );
+            values.insert(
+                format!("{p}_phase_io_{phase_key}_write_bytes"),
+                serde_json::json!(io.write_bytes),
+            );
+            values.insert(
+                format!("{p}_phase_io_{phase_key}_wall_ms"),
+                serde_json::json!(io.wall_ms),
+            );
+        }
         values.insert(
             format!("{p}_segments_sealed"),
             serde_json::json!(row.segments_sealed),
@@ -2785,6 +2936,17 @@ async fn performance_object_log_hybrid_segment_density_gate() {
         "objectlog_hybrid_s3_estimated_cost_usd",
         "objectlog_hybrid_s3_cost_per_million_resident_items_usd",
         "objectlog_hybrid_s3_price_inputs",
+        "objectlog_hybrid_phase_io_hot_push_rchar",
+        "objectlog_hybrid_phase_io_hot_push_wchar",
+        "objectlog_hybrid_phase_io_hot_push_wall_ms",
+        "objectlog_hybrid_phase_io_hot_claim_finalize_rchar",
+        "objectlog_hybrid_phase_io_hot_claim_finalize_wchar",
+        "objectlog_hybrid_phase_io_hot_claim_finalize_wall_ms",
+        "objectlog_hybrid_phase_io_normal_recovery_load_rchar",
+        "objectlog_hybrid_phase_io_normal_recovery_flush_deferred_rchar",
+        "objectlog_hybrid_phase_io_normal_recovery_reopen_rchar",
+        "objectlog_hybrid_phase_io_disk_loss_load_rchar",
+        "objectlog_hybrid_phase_io_disk_loss_reopen_rchar",
         "s3_cost_efficiency_cost_per_million_resident_items_usd",
         "s3_cost_efficiency_cost_per_million_resident_items_max_usd",
         "s3_cost_efficiency_api_requests_per_resident_item",
@@ -2821,6 +2983,17 @@ async fn performance_object_log_hybrid_segment_density_gate() {
     assert!(
         values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0) > 0,
         "LIST request count must be populated"
+    );
+    assert!(
+        values["objectlog_hybrid_phase_io_hot_push_wall_ms"]
+            .as_f64()
+            .unwrap_or(0.0)
+            > 0.0
+            && values["objectlog_hybrid_phase_io_hot_claim_finalize_wall_ms"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0,
+        "phase I/O wall times must be populated"
     );
     assert!(
         values["s3_cost_efficiency_cost_per_million_resident_items_usd"]
