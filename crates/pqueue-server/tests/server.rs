@@ -1289,6 +1289,18 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-force-seal");
     let backend = Arc::new(open_direct_objectlog_hybrid(&object_root, &projection_path));
     backend.create_queue(qdef()).await.unwrap();
+    let flusher_backend = backend.clone();
+    let flusher = tokio::spawn(async move {
+        loop {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
+            let _ = flusher_backend.flush_tick(now_ms);
+            let _ = flusher_backend.flush_deferred_projection();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
     let queue = shard();
     let e0 = backend.current_epoch(&queue).await.unwrap();
     let mut push = Box::pin(backend.push(
@@ -1354,6 +1366,7 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
         .unwrap_err();
     assert_eq!(stale, EngineError::EpochFenced);
 
+    flusher.abort();
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
 }

@@ -67,6 +67,15 @@ pub trait BlobStore: Send + Sync {
     /// List keys under `prefix` (lexical order not required; the caller sorts).
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>>;
 
+    /// List keys and report the number of billable LIST-class API requests consumed.
+    ///
+    /// Most in-process/local implementations satisfy one logical list with one
+    /// request. S3-compatible stores may page `ListObjectsV2`, so one logical
+    /// list can consume several billable LIST operations.
+    fn list_with_request_count(&self, prefix: &str) -> EngineResult<(Vec<String>, u64)> {
+        self.list(prefix).map(|keys| (keys, 1))
+    }
+
     /// Current object-count and byte-size stats under `prefix`. This is an
     /// evidence/introspection helper, not part of the hot append path.
     fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
@@ -95,6 +104,9 @@ impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
     }
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         (**self).list(prefix)
+    }
+    fn list_with_request_count(&self, prefix: &str) -> EngineResult<(Vec<String>, u64)> {
+        (**self).list_with_request_count(prefix)
     }
     fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
         (**self).stats(prefix)
@@ -693,12 +705,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     fn store_list(&self, prefix: &str) -> EngineResult<Vec<String>> {
-        let out = self.store.list(prefix)?;
+        let (out, request_count) = self.store.list_with_request_count(prefix)?;
         self.inner
             .lock()
             .expect("segmented log poisoned")
             .counters
-            .list_count += 1;
+            .list_count += request_count.max(1);
         Ok(out)
     }
 
@@ -1455,16 +1467,22 @@ impl BlobStore for S3BlobStore {
     }
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.list_with_request_count(prefix).map(|(keys, _)| keys)
+    }
+
+    fn list_with_request_count(&self, prefix: &str) -> EngineResult<(Vec<String>, u64)> {
         // ListObjectsV2 returns at most `MaxKeys` (default + cap 1000) keys per response. A queue that has
         // sealed more than 1000 segments therefore has a >1000-entry manifest, so a SINGLE-page list would
         // silently truncate it — returning a stale tail to `recover_manifest` (→ the next seal's manifest CAS
         // collides with an existing index = a spurious `Conflict`) AND dropping segments from `read_all` /
         // `read_from` (→ silent data loss on recovery). So follow the `NextContinuationToken` until the result
-        // is no longer truncated, accumulating every page's keys. (Exercised by the TP-002 E3 10M-item live
-        // recovery run, whose recovery queue exceeds 1000 sealed segments.)
+        // is no longer truncated, accumulating every page's keys. The returned request count feeds release
+        // cost evidence: each page is a billable S3 LIST-class API request. (Exercised by the TP-002 E3
+        // 10M-item live recovery run, whose recovery queue exceeds 1000 sealed segments.)
         let path = format!("/{}", self.bucket);
         let mut keys = Vec::new();
         let mut continuation: Option<String> = None;
+        let mut request_count = 0u64;
         loop {
             let mut query = vec![
                 ("list-type".to_string(), "2".to_string()),
@@ -1474,6 +1492,7 @@ impl BlobStore for S3BlobStore {
                 query.push(("continuation-token".to_string(), token.clone()));
             }
             let (status, body) = self.request("GET", &path, &query, &[], &[])?;
+            request_count += 1;
             if status != 200 {
                 return Err(EngineError::Storage(format!(
                     "S3 LIST {prefix} failed: HTTP {status}: {}",
@@ -1487,7 +1506,7 @@ impl BlobStore for S3BlobStore {
                 None => break,
             }
         }
-        Ok(keys)
+        Ok((keys, request_count))
     }
 }
 

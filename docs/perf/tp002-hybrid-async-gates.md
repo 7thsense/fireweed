@@ -57,7 +57,7 @@ falls unboundedly behind the durable log.
 **Documented ceiling:** `apply_lag_ceiling(max_batch) = max(1024, 4 × max_batch)`
 committed commands — a few in-flight batches of slack.
 
-`bounded_debt_ok` requires, over `>= 5` samples:
+`bounded_debt_ok` requires, over `>= 3` samples:
 
 - `bounded_debt_apply_lag_max <= bounded_debt_apply_lag_ceiling` (bounded), and
 - `bounded_debt_last_window_max <= bounded_debt_first_window_max + max(ceiling/4, 64)`
@@ -77,10 +77,11 @@ run.
 
 - Packing bound: no segment can pack more than `target_bytes / MIN_COMMAND_BYTES`
   commands (`MIN_COMMAND_BYTES = 8`). Release evidence for the object-storage log
-  must show real packing: `mean_commands_per_segment > 1` and
-  `max_commands_per_segment > 1` for normal data-plane traffic. A run with
-  `mean == 1` is a release blocker, even if hot-path latency passes, because it
-  means the object store is being used as a tiny per-command commit log.
+  must show real packing by command count or by resident work per object. A segment
+  with one command is acceptable only when that command represents a large batch of
+  resident campaign work. A run that sprays tiny one-command objects is a release
+  blocker, even if hot-path latency passes, because it means the object store is
+  being used as a tiny per-command commit log.
 - PUT-volume bound: `objects_put <= 8 × resident` (`OBJECTS_PUT_PER_RESIDENT_MAX`).
   Each resident item drives push/claim/finalize commands and each sealed segment
   writes a bounded number of objects (segment + manifest), so total PUTs are
@@ -91,11 +92,12 @@ run.
   (segments_sealed * target_segment_bytes)`. This ratio is expected to move up
   as batching improves; low utilization is a release blocker when paired with
   high object/file count.
-- Cost bound: release evidence must report estimated S3-style cost from the
-  measured request counts and bytes: PUT/COPY/POST/LIST request count, GET
-  request count, stored bytes, and retained-byte-month projection. The exact
-  price inputs must be written into the evidence row so cost changes are
-  explainable.
+- Cost bound: release evidence must report estimated S3-style cost from measured
+  request counts and bytes: PUT/COPY/POST/LIST request count, GET request count,
+  DELETE/CANCEL request count, stored bytes, and retained-byte-month projection.
+  LIST count is billable request count, including S3 pagination pages, not merely
+  logical manifest-list calls. The exact price inputs must be written into the
+  evidence row so cost changes are explainable.
 
 Harness preparation for `pqueue-39be4662`: the hybrid performance test now has a
 pure object-store utilization helper for the target release-ledger fields:

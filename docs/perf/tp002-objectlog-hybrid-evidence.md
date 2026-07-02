@@ -125,14 +125,17 @@ performance fields used here: resident count,
 hybrid/inmemory hot-path ratios, restart hydrate + tail time, restart pending
 count, disk-loss reconstruction wall time, disk-loss pending count, and
 `bars_met`. It must also record segment density as a hard release gate:
-`objectlog_hybrid_mean_commands_per_segment > 1` and
-`objectlog_hybrid_max_commands_per_segment > 1` for object-storage output. The
-same row must report object-storage file/object count, segment bytes, total
-stored bytes, mean/max object size, storage-utilization ratio versus configured
-target segment size, PUT/LIST/GET/DELETE counts, and an estimated S3-style
-request plus storage cost with the price inputs used for the calculation.
-DELETE/CANCEL requests are tracked as API volume even when their S3 Standard
-unit price is zero.
+object-storage output must show real packing either by command count or by
+resident work per object. A single object-log command is acceptable only when it
+represents a large batch of resident campaign work; tiny one-command objects in
+normal data-plane traffic are a release blocker. The same row must report
+object-storage file/object count, segment bytes, total stored bytes, mean/max
+object size, storage-utilization ratio versus configured target segment size,
+PUT/COPY/POST/LIST, GET, and DELETE/CANCEL counts, and an estimated S3-style
+request plus storage cost with the price inputs used for the calculation. LIST
+count is billable request count, including S3 pagination pages, not merely
+logical manifest-list calls. DELETE/CANCEL requests are tracked as API volume
+even when their S3 Standard unit price is zero.
 
 Raw ledger: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl`.
 

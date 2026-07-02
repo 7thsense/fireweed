@@ -141,9 +141,13 @@ measured separately and must not define the normal data-plane cost profile.
 
 Release evidence must report object-storage cost shape, not just latency:
 segment/object count, total object-log bytes, mean/max object size, segment-size
-utilization against the configured target, PUT/LIST/GET counts, and an
-S3-style estimated request plus retained-storage cost using price inputs written
-into the evidence row.
+utilization against the configured target, PUT/COPY/POST/LIST, GET, and
+DELETE/CANCEL counts, and an S3-style estimated request plus retained-storage
+cost using price inputs written into the evidence row. LIST count is billable
+request count, including S3 pagination pages, not merely logical manifest-list
+calls. A single object-log command is acceptable only when it represents a large
+batch of resident campaign work; tiny one-command objects in normal data-plane
+traffic are a release blocker.
 
 For the first hybrid release, segment expiry MUST remain disabled unless a
 separate object-store snapshot is written and validated. TD-004 must be amended

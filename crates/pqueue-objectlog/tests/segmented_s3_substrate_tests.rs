@@ -90,6 +90,48 @@ impl BlobStore for CountingBlobStore {
     }
 }
 
+struct PaginatedListBlobStore {
+    inner: InMemoryBlobStore,
+    billable_list_requests: u64,
+}
+
+impl PaginatedListBlobStore {
+    fn new(billable_list_requests: u64) -> Self {
+        Self {
+            inner: InMemoryBlobStore::new(),
+            billable_list_requests,
+        }
+    }
+}
+
+impl BlobStore for PaginatedListBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_request_count(&self, prefix: &str) -> EngineResult<(Vec<String>, u64)> {
+        self.inner
+            .list(prefix)
+            .map(|keys| (keys, self.billable_list_requests))
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(prefix)
+    }
+}
+
 #[test]
 fn ack_is_withheld_until_segment_and_manifest_commit() {
     // Latency-dominant config: a big byte target so enqueue NEVER size-seals; only an explicit seal commits.
@@ -123,6 +165,20 @@ fn ack_is_withheld_until_segment_and_manifest_commit() {
     assert_eq!(c.group_commit_batches, vec![3]);
     // One segment object + one manifest object PUT.
     assert_eq!(c.objects_put, 2);
+}
+
+#[test]
+fn list_counter_records_billable_list_requests_not_logical_calls() {
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(PaginatedListBlobStore::new(3), cfg);
+
+    log.create_queue(&qdef()).unwrap();
+
+    assert_eq!(
+        log.counters().list_count,
+        3,
+        "one logical manifest recovery list that spans three object-store pages must count as three billable LIST requests"
+    );
 }
 
 #[test]
