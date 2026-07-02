@@ -64,21 +64,45 @@ committed commands — a few in-flight batches of slack.
   (non-growing: the last third of the series is not meaningfully above the first
   third).
 
-## AC3 — segment density / object-PUT volume (`segment_density_*`)
+## AC3 — segment density / object-store utilization (`segment_density_*`)
 
 The suite already emitted `segments_sealed`, `objects_put`,
 `mean_commands_per_segment`, and `max_commands_per_segment`; this bead gates them.
+Release evidence must also emit object-store file count, object-log bytes,
+mean/max object size, utilization against configured target segment size, GET
+count, LIST count, PUT count, and an estimated S3 request/storage cost for the
+run.
 
 **Documented bounds:**
 
 - Packing bound: no segment can pack more than `target_bytes / MIN_COMMAND_BYTES`
-  commands (`MIN_COMMAND_BYTES = 8`). `mean` and `max` commands-per-segment must be
-  `>= 1` and `<= ` this bound.
+  commands (`MIN_COMMAND_BYTES = 8`). Release evidence for the object-storage log
+  must show real packing: `mean_commands_per_segment > 1` and
+  `max_commands_per_segment > 1` for normal data-plane traffic. A run with
+  `mean == 1` is a release blocker, even if hot-path latency passes, because it
+  means the object store is being used as a tiny per-command commit log.
 - PUT-volume bound: `objects_put <= 8 × resident` (`OBJECTS_PUT_PER_RESIDENT_MAX`).
   Each resident item drives push/claim/finalize commands and each sealed segment
   writes a bounded number of objects (segment + manifest), so total PUTs are
   `O(resident)`. This catches a PUT storm / one-object-per-command regression.
 - `segments_sealed >= 1` and `objects_put >= 1` (something sealed).
+- Utilization bound: release evidence must report average segment-object size
+  and `objectlog_hybrid_storage_utilization_ratio = segment_bytes /
+  (segments_sealed * target_segment_bytes)`. This ratio is expected to move up
+  as batching improves; low utilization is a release blocker when paired with
+  high object/file count.
+- Cost bound: release evidence must report estimated S3-style cost from the
+  measured request counts and bytes: PUT/COPY/POST/LIST request count, GET
+  request count, stored bytes, and retained-byte-month projection. The exact
+  price inputs must be written into the evidence row so cost changes are
+  explainable.
+
+For the object-storage profile, durable acknowledgement is allowed only after the
+command's packed object-log segment and manifest are committed. Normal
+data-plane traffic must wait for group commit rather than force a tiny segment.
+Rare explicit sync/control flushes are permitted, but they must be identified in
+metrics and must not dominate object count, request count, or storage
+utilization.
 
 ## Running the gates
 

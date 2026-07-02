@@ -61,9 +61,11 @@ In scope:
 Out of scope:
 
 - Changing pqueue's queue-as-shard ownership model.
-- Making SQLite the command-log authority for this profile. SQLite remains a
-  rebuildable durable projection snapshot; the object log remains the command
-  authority.
+- Using the object-storage segmented log as a tiny per-operation commit log.
+  Normal data-plane traffic must wait for packed object-log group commit before
+  durable acknowledgement. Rare explicit sync/control flushes are permitted, but
+  release evidence must show they do not dominate object count, request count, or
+  storage utilization.
 - Adding cross-node active/active serving of one queue.
 - Replacing the object-log segmented substrate or release-tier MinIO evidence
   harness except where needed to add hybrid rows.
@@ -127,9 +129,21 @@ loads pending items is not acceptable.
 
 ### Snapshot Authority
 
-The object log remains the authority. The local SQLite file is the owner-local
-restart accelerator and recovery high-water source for `objectlog/hybrid`; it is
-not permission to delete object-log segments by itself.
+The object log remains the packed campaign-shape/replay authority for the
+object-storage profile. The local SQLite file is the owner-local restart
+accelerator and recovery high-water source for `objectlog/hybrid`; it is not
+permission to delete object-log segments by itself. High-churn transactional
+commands such as claim/finalize must not force one object-storage segment per
+batch command. The implementation must delay normal acknowledgements until the
+command is included in a packed durable object-log segment and manifest.
+Operators may force a low-volume sync/control flush, but those flushes must be
+measured separately and must not define the normal data-plane cost profile.
+
+Release evidence must report object-storage cost shape, not just latency:
+segment/object count, total object-log bytes, mean/max object size, segment-size
+utilization against the configured target, PUT/LIST/GET counts, and an
+S3-style estimated request plus retained-storage cost using price inputs written
+into the evidence row.
 
 For the first hybrid release, segment expiry MUST remain disabled unless a
 separate object-store snapshot is written and validated. TD-004 must be amended

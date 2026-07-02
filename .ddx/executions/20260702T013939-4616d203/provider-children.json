@@ -1,0 +1,16 @@
+{
+  "attempt_id": "20260702T013939-4616d203",
+  "bead_id": "pqueue-5f2302e3",
+  "trigger": "attempt_ended",
+  "scanned_at": "2026-07-02T01:39:43.92922192Z",
+  "reaped": [
+    {
+      "pid": 2567708,
+      "provider": "claude",
+      "command": "[claude] \u003cdefunct\u003e",
+      "age_seconds": 1,
+      "action": "terminated",
+      "reason": "defunct_provider_child"
+    }
+  ]
+}

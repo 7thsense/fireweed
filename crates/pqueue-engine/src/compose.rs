@@ -22,7 +22,7 @@
 //! path (memory, sqlite-log-replay). The unified-transactional path (relational) reuses the same choke
 //! point with a single transactional store implementing BOTH axes — see ADR-012 §"The atomic write seam".
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -247,6 +247,29 @@ enum AckFuture<T> {
     },
 }
 
+struct SealWait {
+    slot: Arc<SealSlot>,
+}
+
+impl SealWait {
+    fn new(slot: Arc<SealSlot>) -> Self {
+        Self { slot }
+    }
+}
+
+impl Future for SealWait {
+    type Output = EngineResult<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut r = self.slot.result.lock().expect("seal slot poisoned");
+        if let Some(outcome) = r.take() {
+            return Poll::Ready(outcome);
+        }
+        *self.slot.waker.lock().expect("seal slot poisoned") = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
 impl<T> AckFuture<T> {
     fn ready(result: EngineResult<T>) -> Self {
         AckFuture::Ready(Some(result))
@@ -298,6 +321,9 @@ struct ShardCoord {
     waiters: Vec<Arc<SealSlot>>,
     /// The assignment epoch the buffered batch will seal under (set when the first command buffers).
     seal_epoch: u64,
+    /// Claim commands that have selected candidates and are waiting for durable object-log seal. Until the
+    /// seal applies them to the projection, later claims must exclude these ids to avoid duplicate leases.
+    in_flight_claims: BTreeSet<ItemId>,
 }
 
 /// `UtcTimestamp` → epoch milliseconds (the substrate's latency-trigger clock unit).
@@ -870,6 +896,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             .min(coord.waiters.len());
         let envelopes: Vec<CommandEnvelope> = coord.pending.drain(..n).collect();
         let waiters: Vec<Arc<SealSlot>> = coord.waiters.drain(..n).collect();
+        let in_flight_claims: Vec<ItemId> = envelopes
+            .iter()
+            .filter_map(|env| match &env.command {
+                QueueCommand::Claim(claim) => Some(claim.item_ids.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
         let result = (|| {
             let positions: Vec<CommandPosition> = positions.into_iter().take(n).collect();
             if let Some(last) = positions.last() {
@@ -877,6 +912,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             }
             projection.apply_live_owned(positions, envelopes)
         })();
+        if let Some(coord) = coords.get_mut(shard) {
+            for id in in_flight_claims {
+                coord.in_flight_claims.remove(&id);
+            }
+        }
         for w in waiters {
             w.complete(result.clone());
         }
@@ -888,6 +928,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     fn gc_fail_all(inner: &mut Inner<L, P>, shard: &QueueKey, err: EngineError) {
         if let Some(coord) = inner.coords.get_mut(shard) {
             coord.pending.clear();
+            coord.in_flight_claims.clear();
             for w in coord.waiters.drain(..) {
                 w.complete(Err(err.clone()));
             }
@@ -914,34 +955,45 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         }
     }
 
-    /// Synchronously commit ONE read-modify-write command on the group-commit log: buffer it, force-seal it
-    /// (the buffer is empty — the caller force-sealed any prior batch first), advance the high-water, and
+    /// Synchronously commit a read-modify-write command batch on the group-commit log: buffer it, force-seal
+    /// it (the buffer is empty — the caller force-sealed any prior batch first), advance the high-water, and
     /// apply it. The op observes its own write before returning (ack-after-seal, but synchronous because the
     /// caller already selected/validated under the lock). Caller holds the lock.
-    fn gc_commit_sync(
+    fn gc_commit_sync_batch(
         inner: &mut Inner<L, P>,
         shard: &QueueKey,
-        env: CommandEnvelope,
+        envs: Vec<CommandEnvelope>,
         expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
-        validate_gate_command(false, &env.command)?;
-        validate_request_replay_metadata(&env)?;
-        let now_ms = ts_to_ms(env.created_at);
+        for env in &envs {
+            validate_gate_command(false, &env.command)?;
+            validate_request_replay_metadata(env)?;
+        }
+        if envs.is_empty() {
+            return Ok(());
+        }
+        let now_ms = ts_to_ms(envs[0].created_at);
         let seal_epoch = match expected_epoch {
             Some(e) => e,
             None => inner.log.current_epoch(shard)?,
         };
-        let mut positions =
-            inner
-                .log
-                .gc_enqueue(shard, std::slice::from_ref(&env), seal_epoch, now_ms)?;
+        let mut positions = inner.log.gc_enqueue(shard, &envs, seal_epoch, now_ms)?;
         if positions.is_empty() {
             positions = inner.log.gc_seal(shard, seal_epoch, now_ms)?;
         }
         if let Some(last) = positions.last() {
             inner.log.gc_advance_high_water(shard, last.clone())?;
         }
-        inner.projection.apply_live_owned(positions, vec![env])
+        inner.projection.apply_live_owned(positions, envs)
+    }
+
+    fn gc_commit_sync(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        env: CommandEnvelope,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        Self::gc_commit_sync_batch(inner, shard, vec![env], expected_epoch)
     }
 
     /// Whether the group-commit write path is active for this composition (the builder flag AND a capable
@@ -1232,17 +1284,29 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         env: CommandEnvelope,
         expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
-        validate_gate_command(false, &env.command)?;
+        Self::commit_locked_batch(inner, shard, vec![env], expected_epoch)
+    }
+
+    fn commit_locked_batch(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        envs: Vec<CommandEnvelope>,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        for env in &envs {
+            validate_gate_command(false, &env.command)?;
+        }
+        if envs.is_empty() {
+            return Ok(());
+        }
         let epoch = inner.log.current_epoch(shard)?;
         // ADR-009 / TD-003: an owner that supplies its cached acquire-time epoch (`Some`) is fenced here if
         // superseded; `None` is the degenerate sole-owner path (stamp current, never fence).
         if expected_epoch.is_some_and(|e| e != epoch) {
             return Err(EngineError::EpochFenced);
         }
-        let positions = inner.log.append(shard, std::slice::from_ref(&env), epoch)?;
-        inner
-            .projection
-            .apply_live(&positions, std::slice::from_ref(&env))
+        let positions = inner.log.append(shard, &envs, epoch)?;
+        inner.projection.apply_live(&positions, &envs)
     }
 }
 
@@ -1666,10 +1730,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
 // ---------------------------------------------------------------------------
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBackend<L, P, C> {
+    #[allow(refining_impl_trait)]
     fn claim(
         &self,
         req: ClaimRequest,
-    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+    ) -> Pin<Box<dyn Future<Output = EngineResult<Claimed>> + Send + '_>> {
+        enum ClaimStart {
+            Ready(Claimed),
+            Wait {
+                slot: Arc<SealSlot>,
+                shard: QueueKey,
+                candidates: Vec<ItemId>,
+            },
+        }
+
         let result = (|| {
             // Resolve the claim unit from the compatibility options. Item-level (the default) is unchanged;
             // this log-replay composition refuses richer claim units with `Unavailable` rather than
@@ -1679,18 +1753,36 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 require_item_level_claim(&req.compatibility, req.max_items as u64, &def)?;
             }
             let mut g = self.inner.lock().expect("poisoned");
-            // Group-commit: force-seal any buffered batch + distribute it FIRST, so the select observes every
-            // prior co-buffered write and two claims can never pick the same candidate (the one composed lock
-            // serializes force-seal → select → commit → apply, replicating the monolith's `mutate_lock`).
             let gc = self.gc_active(&g);
             if gc {
-                Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
+                // Claims must observe earlier buffered data-plane writes that can change eligibility (notably
+                // pushes), but pending claims are already represented by `in_flight_claims` below and should
+                // remain batchable instead of being force-sealed one command at a time.
+                let must_observe_prior_writes = g.coords.get(&req.shard).is_some_and(|coord| {
+                    coord
+                        .pending
+                        .iter()
+                        .any(|env| !matches!(env.command, QueueCommand::Claim(_)))
+                });
+                if must_observe_prior_writes {
+                    Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
+                }
             }
-            let candidates =
-                g.projection
-                    .eligible_candidates(&req.shard, req.now, req.max_items)?;
+            let in_flight_claims = g
+                .coords
+                .get(&req.shard)
+                .map(|coord| coord.in_flight_claims.clone())
+                .unwrap_or_default();
+            let candidate_limit = req.max_items.saturating_add(in_flight_claims.len()).max(1);
+            let candidates: Vec<ItemId> = g
+                .projection
+                .eligible_candidates(&req.shard, req.now, candidate_limit)?
+                .into_iter()
+                .filter(|id| !in_flight_claims.contains(id))
+                .take(req.max_items)
+                .collect();
             if candidates.is_empty() {
-                return Ok(Claimed::default());
+                return Ok(ClaimStart::Ready(Claimed::default()));
             }
             let env = Self::make_envelope(
                 &mut g,
@@ -1704,7 +1796,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 req.now,
             );
             if gc {
-                Self::gc_commit_sync(&mut g, &req.shard, env, req.expected_epoch)?;
+                g.coords
+                    .entry(req.shard.clone())
+                    .or_default()
+                    .in_flight_claims
+                    .extend(candidates.iter().copied());
+                let slot = Self::gc_buffer(&mut g, &req.shard, env, req.expected_epoch, req.now)?;
+                return Ok(ClaimStart::Wait {
+                    slot,
+                    shard: req.shard.clone(),
+                    candidates,
+                });
             } else {
                 Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
             }
@@ -1714,12 +1816,33 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 candidates.len(),
                 "leased candidate failed to render"
             );
-            Ok(Claimed {
+            Ok(ClaimStart::Ready(Claimed {
                 items,
                 ..Default::default()
-            })
+            }))
         })();
-        std::future::ready(result)
+        match result {
+            Ok(ClaimStart::Wait {
+                slot,
+                shard,
+                candidates,
+            }) => Box::pin(async move {
+                SealWait::new(slot).await?;
+                let g = self.inner.lock().expect("poisoned");
+                let items = g.projection.render_claimed(&shard, &candidates)?;
+                debug_assert_eq!(
+                    items.len(),
+                    candidates.len(),
+                    "sealed claim failed to render"
+                );
+                Ok(Claimed {
+                    items,
+                    ..Default::default()
+                })
+            }),
+            Ok(ClaimStart::Ready(claimed)) => Box::pin(std::future::ready(Ok(claimed))),
+            Err(e) => Box::pin(std::future::ready(Err(e))),
+        }
     }
 }
 
@@ -1850,9 +1973,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
-            if gc {
-                Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
-            }
             g.projection.finalize_validate(shard, &outcomes)?;
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             let env = Self::make_envelope(
@@ -1863,13 +1983,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
                 now,
             );
             if gc {
-                Self::gc_commit_sync(&mut g, shard, env, expected_epoch)?;
+                let slot = Self::gc_buffer(&mut g, shard, env, expected_epoch, now)?;
+                Ok(Some(slot))
             } else {
                 Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+                Ok(None)
             }
-            Ok(())
         })();
-        std::future::ready(result)
+        match result {
+            Ok(Some(slot)) => AckFuture::seal(slot, ()),
+            Ok(None) => AckFuture::ready(Ok(())),
+            Err(e) => AckFuture::ready(Err(e)),
+        }
     }
 }
 
@@ -2610,12 +2735,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 );
                 envelopes.push(e);
 
-                // Commit the entry's envelopes under the held lock. The epoch cannot change while we hold
-                // the lock, so either the first append fences (EpochFenced, before any mutation) or all of
-                // the entry's appends commit — each entry's writes are atomic.
-                for env in envelopes {
-                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
-                }
+                // Commit the entry's envelopes under the held lock as one append batch. The epoch cannot
+                // change while we hold the lock, so either the append fences (EpochFenced, before any
+                // mutation) or all of the entry's writes commit and apply together.
+                Self::commit_locked_batch(&mut g, shard, envelopes, expected_epoch)?;
                 recovery.push(EntryRecovery {
                     consumed_input_id,
                     instance,
@@ -3231,7 +3354,7 @@ mod ordered_tests {
             "buffered pushes do not create one-command segments"
         );
 
-        let first_claim = match poll_once(&mut backend.claim(ClaimRequest {
+        let mut first_claim = backend.claim(ClaimRequest {
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-1").unwrap(),
             max_items: 1,
@@ -3240,11 +3363,8 @@ mod ordered_tests {
             now: ts(1),
             compatibility: ClaimCompatibility::default(),
             expected_epoch: Some(epoch),
-        })) {
-            Poll::Ready(Ok(claimed)) => claimed,
-            other => panic!("unexpected first claim result: {other:?}"),
-        };
-        assert_eq!(first_claim.items.len(), 1);
+        });
+        assert!(matches!(poll_once(&mut first_claim), Poll::Pending));
         let first_ids = match poll_once(&mut first_push) {
             Poll::Ready(Ok(ids)) => ids,
             other => panic!("first push was not released after force-seal/apply: {other:?}"),
@@ -3253,9 +3373,8 @@ mod ordered_tests {
             Poll::Ready(Ok(ids)) => ids,
             other => panic!("second push was not released after force-seal/apply: {other:?}"),
         };
-        assert_eq!(first_claim.items[0].item_id, first_ids[0]);
 
-        let second_claim = match poll_once(&mut backend.claim(ClaimRequest {
+        let mut second_claim = backend.claim(ClaimRequest {
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-2").unwrap(),
             max_items: 1,
@@ -3264,7 +3383,19 @@ mod ordered_tests {
             now: ts(2),
             compatibility: ClaimCompatibility::default(),
             expected_epoch: Some(epoch),
-        })) {
+        });
+        assert!(matches!(poll_once(&mut second_claim), Poll::Pending));
+
+        backend.flush_tick(2_001).expect("flush claims");
+
+        let first_claim = match poll_once(&mut first_claim) {
+            Poll::Ready(Ok(claimed)) => claimed,
+            other => panic!("unexpected first claim result: {other:?}"),
+        };
+        assert_eq!(first_claim.items.len(), 1);
+        assert_eq!(first_claim.items[0].item_id, first_ids[0]);
+
+        let second_claim = match poll_once(&mut second_claim) {
             Poll::Ready(Ok(claimed)) => claimed,
             other => panic!("unexpected second claim result: {other:?}"),
         };
@@ -3283,8 +3414,8 @@ mod ordered_tests {
         );
         assert_eq!(
             backend.with_log(|log| log.sealed_batches()),
-            vec![2, 1, 1],
-            "the two buffered pushes seal as one ordered batch; claims seal only their own response barrier"
+            vec![2, 2],
+            "the two buffered pushes seal as one ordered batch; normal claims batch before acknowledgement"
         );
         assert_eq!(
             backend
@@ -3293,7 +3424,7 @@ mod ordered_tests {
                 .expect("backend poisoned")
                 .projection
                 .apply_batches(),
-            vec![vec!["push", "push"], vec!["claim"], vec!["claim"]]
+            vec![vec!["push", "push"], vec!["claim", "claim"]]
         );
     }
 }
