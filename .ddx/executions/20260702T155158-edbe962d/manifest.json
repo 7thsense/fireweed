@@ -1,0 +1,55 @@
+{
+  "attempt_id": "20260702T155158-edbe962d",
+  "bead_id": "pqueue-1899b77e",
+  "base_rev": "e29a3602fbea49726512add10e9dfd435a5270a3",
+  "created_at": "2026-07-02T15:51:58.885509187Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-1899b77e",
+    "title": "Implement safe bounded hot projection mutation",
+    "description": "PROBLEM\nOperational previews must safely update bounded sets of hot records without racing claims/finalizes or losing concurrent changes. The substrate needs compare-and-set/version behavior, not an unguarded scan/update.\n\nPROPOSED FIX\nImplement bounded mutation over a typed indexed query for memory and sqlite with per-record version/CAS checks. The public API should return applied/skipped/conflict counts or a retryable error as defined by the contract. Use the scheduled-action fixture to update only records matching `run_id=job_9001 AND status=scheduled AND is_enrolled_using_open_rate_filter=false`.\n\nIN-SCOPE FILES\n- crates/pqueue-engine/src/port.rs if a mutation trait method is needed.\n- crates/pqueue-projection/src/lib.rs.\n- crates/pqueue-sqlite/src/relational.rs.\n- crates/pqueue/src/lib.rs.\n- crates/pqueue/tests/hot_projection_queries.rs.\n\nOUT-OF-SCOPE\n- Snorri recycling policy calculation.\n- Unbounded updates.\n- Arbitrary expression execution.",
+    "acceptance": "1. `cargo test -p pqueue --test hot_projection_queries safe_recycling_rule_update -- --nocapture` passes and marks only `act_001` as suppressed/recycling-updated in the fixture.\n2. The same test or a sibling named test proves a concurrent claim/commit version change is rejected or retried cleanly without losing the claim/finalize update.\n3. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:projection",
+      "area:mutation",
+      "kind:feature",
+      "backend:memory",
+      "backend:sqlite",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-02T15:51:53.488535831Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T155158-edbe962d",
+    "prompt": ".ddx/executions/20260702T155158-edbe962d/prompt.md",
+    "manifest": ".ddx/executions/20260702T155158-edbe962d/manifest.json",
+    "result": ".ddx/executions/20260702T155158-edbe962d/result.json",
+    "checks": ".ddx/executions/20260702T155158-edbe962d/checks.json",
+    "usage": ".ddx/executions/20260702T155158-edbe962d/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-1899b77e-20260702T155158-edbe962d"
+  },
+  "prompt_sha": "277e27ecf04d7377ca01e1128c73e859be0f40efb2f8dbc38866b28925333c16"
+}
