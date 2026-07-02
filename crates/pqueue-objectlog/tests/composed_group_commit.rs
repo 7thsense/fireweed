@@ -15,7 +15,9 @@ use pqueue_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, ComposedBackend, ControlPlaneStore, EngineError,
     FinalizeKind, FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
 };
-use pqueue_objectlog::{ObjectLog, SegmentConfig, composed_objectlog_backend_group_commit};
+use pqueue_objectlog::{
+    ObjectLog, SegmentConfig, composed_objectlog_backend, composed_objectlog_backend_group_commit,
+};
 use pqueue_sqlite::HybridProjectionStore;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -154,72 +156,153 @@ async fn concurrent_pushes_cobuffer_into_one_sealed_segment() {
 }
 
 #[tokio::test]
-async fn claim_force_seals_buffer_before_select_then_finalize() {
+async fn single_command_segment_is_only_on_distinguishable_sync_path() {
+    let root = tmp_root("sync-single");
+    let backend = composed_objectlog_backend(&root).expect("compose sync path");
+    backend.create_queue(qdef()).await.unwrap();
+    let shard = shard();
+
+    assert!(
+        !backend.group_commit_enabled(),
+        "the force-seal append path is an explicit non-group-commit mode"
+    );
+    let ids = backend
+        .push(&shard, vec![PushSpec::default()], ts(1), None)
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        backend.with_log(|l| l.counters()).group_commit_batches,
+        vec![1],
+        "single-command object segments are confined to the distinguishable sync path"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn claim_and_finalize_normal_traffic_batch_before_ack() {
     let root = tmp_root("claim");
     let backend = composed_objectlog_backend_group_commit(&root, gc_config()).expect("compose");
     backend.create_queue(qdef()).await.unwrap();
     let shard = shard();
     let now = ts(1);
 
-    // Push two items but do NOT flush — they are buffered, unsealed, NOT yet applied to the projection.
-    let p1 = backend.push(&shard, vec![PushSpec::default()], now, None);
-    let p2 = backend.push(&shard, vec![PushSpec::default()], now, None);
+    const N: usize = 4;
+    let pushes: Vec<_> = (0..N)
+        .map(|_| backend.push(&shard, vec![PushSpec::default()], now, None))
+        .collect();
     assert_eq!(
         backend.with_log(|l| l.counters()).segments_sealed,
         0,
         "still buffered"
     );
 
-    // A claim force-seals the buffered batch FIRST (so it observes the pushes), then selects from applied
-    // state. This both acks the buffered pushes AND leases from them in one serialized unit.
-    let claimed = backend
-        .claim(ClaimRequest {
-            shard: shard.clone(),
-            worker_id: WorkerId::new("w1").unwrap(),
-            max_items: 10,
-            lease_token: LeaseToken::new("lease-1").unwrap(),
-            lease_expires_at: ts(3_600),
-            now,
-            compatibility: ClaimCompatibility::default(),
-            expected_epoch: None,
-        })
-        .await
-        .unwrap();
+    // The first claim force-seals the buffered pushes so selection observes durable pushed items, but the
+    // claim command itself remains unacked until a later object-log group-commit seal.
+    let claim1 = backend.claim(ClaimRequest {
+        shard: shard.clone(),
+        worker_id: WorkerId::new("w1").unwrap(),
+        max_items: 2,
+        lease_token: LeaseToken::new("lease-1").unwrap(),
+        lease_expires_at: ts(3_600),
+        now,
+        compatibility: ClaimCompatibility::default(),
+        expected_epoch: None,
+    });
+    for p in pushes {
+        assert_eq!(p.await.unwrap().len(), 1);
+    }
     assert_eq!(
-        claimed.items.len(),
-        2,
-        "the force-seal-before-select made both buffered pushes visible to the claim"
+        backend.with_log(|l| l.counters()).group_commit_batches,
+        vec![N]
     );
 
-    // The buffered pushes acked because the claim's force-seal sealed their segment.
-    assert_eq!(p1.await.unwrap().len(), 1);
-    assert_eq!(p2.await.unwrap().len(), 1);
+    // A second normal claim starts before the first claim is durable. The in-flight claim guard excludes the
+    // first claim's candidates, so both claim commands can seal together without double-leasing.
+    let claim2 = backend.claim(ClaimRequest {
+        shard: shard.clone(),
+        worker_id: WorkerId::new("w2").unwrap(),
+        max_items: 2,
+        lease_token: LeaseToken::new("lease-2").unwrap(),
+        lease_expires_at: ts(3_600),
+        now,
+        compatibility: ClaimCompatibility::default(),
+        expected_epoch: None,
+    });
+    assert_eq!(
+        backend.with_log(|l| l.counters()).group_commit_batches,
+        vec![N],
+        "normal claims are buffered, not acknowledged as one-command segments"
+    );
 
-    let claimed_ids: Vec<ItemId> = claimed.items.iter().map(|c| c.item_id).collect();
-    backend
-        .finalize(
-            &shard,
-            claimed_ids
-                .iter()
-                .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
-                .collect(),
-            now,
-            None,
-        )
-        .await
-        .unwrap();
+    backend.flush_tick(1000 + 21).expect("flush claims");
+    let claimed1 = claim1.await.unwrap();
+    let claimed2 = claim2.await.unwrap();
+    assert_eq!(claimed1.items.len(), 2);
+    assert_eq!(claimed2.items.len(), 2);
+    assert_ne!(claimed1.items[0].item_id, claimed2.items[0].item_id);
+
+    let mut claimed_ids: Vec<ItemId> = claimed1.items.iter().map(|c| c.item_id).collect();
+    claimed_ids.extend(claimed2.items.iter().map(|c| c.item_id));
+    claimed_ids.sort();
+    claimed_ids.dedup();
+    assert_eq!(claimed_ids.len(), N);
+    assert_eq!(
+        backend.with_log(|l| l.counters()).group_commit_batches,
+        vec![N, 2],
+        "both normal claim commands sealed in one durable group"
+    );
+
+    let finalizes: Vec<_> = claimed_ids
+        .iter()
+        .map(|id| {
+            backend.finalize(
+                &shard,
+                vec![FinalizeOutcome::new(*id, FinalizeKind::Complete)],
+                now,
+                None,
+            )
+        })
+        .collect();
+    assert_eq!(
+        backend.with_log(|l| l.counters()).group_commit_batches,
+        vec![N, 2],
+        "normal finalizes are buffered until group commit"
+    );
+    assert_eq!(backend.metrics(&shard).await.unwrap().complete, 0);
+
+    backend.flush_tick(1000 + 21).expect("flush finalizes");
+    for finalize in finalizes {
+        finalize.await.unwrap();
+    }
 
     let m = backend.metrics(&shard).await.unwrap();
     assert_eq!(m.pending, 0);
-    assert_eq!(m.complete, 2);
+    assert_eq!(m.complete, N as u64);
 
-    // A second claim selects nothing (the candidates were leased then completed — never double-leased).
+    let counters = backend.with_log(|l| l.counters());
+    assert_eq!(counters.group_commit_batches, vec![N, 2, N]);
+    assert!(
+        counters.mean_batch_size() > 1.0,
+        "mean_commands_per_segment must prove batched normal traffic"
+    );
+    assert!(
+        counters.max_batch_size() > 1,
+        "max_commands_per_segment must prove batched normal traffic"
+    );
+    assert!(
+        counters.group_commit_batches.iter().all(|&n| n > 1),
+        "normal push/claim/finalize traffic under load must not create one-command segments"
+    );
+
+    // A later claim selects nothing (the candidates were leased then completed — never double-leased).
     let again = backend
         .claim(ClaimRequest {
             shard: shard.clone(),
-            worker_id: WorkerId::new("w2").unwrap(),
+            worker_id: WorkerId::new("w3").unwrap(),
             max_items: 10,
-            lease_token: LeaseToken::new("lease-2").unwrap(),
+            lease_token: LeaseToken::new("lease-3").unwrap(),
             lease_expires_at: ts(3_600),
             now,
             compatibility: ClaimCompatibility::default(),
@@ -254,19 +337,18 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
         "large-segment push buffers until the ordered barrier force-seals"
     );
 
-    let claimed = backend
-        .claim(ClaimRequest {
-            shard: shard.clone(),
-            worker_id: WorkerId::new("hybrid-claimer").unwrap(),
-            max_items: 1,
-            lease_token: LeaseToken::new("hybrid-force-seal-lease").unwrap(),
-            lease_expires_at: ts(60),
-            now: ts(1),
-            compatibility: ClaimCompatibility::default(),
-            expected_epoch: Some(epoch),
-        })
-        .await
-        .unwrap();
+    let claimed = backend.claim(ClaimRequest {
+        shard: shard.clone(),
+        worker_id: WorkerId::new("hybrid-claimer").unwrap(),
+        max_items: 1,
+        lease_token: LeaseToken::new("hybrid-force-seal-lease").unwrap(),
+        lease_expires_at: ts(60),
+        now: ts(1),
+        compatibility: ClaimCompatibility::default(),
+        expected_epoch: Some(epoch),
+    });
+    backend.flush_tick(1000 + 21).expect("flush claim");
+    let claimed = claimed.await.unwrap();
     assert_eq!(
         claimed.items.len(),
         1,
