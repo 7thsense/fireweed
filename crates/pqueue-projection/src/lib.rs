@@ -570,6 +570,7 @@ pub struct ProjectionData {
     items: FastHashMap<ItemId, ItemRecord>,
     by_key: FastHashMap<ClientItemKey, ItemId>,
     eligible: BTreeSet<EligKey>,
+    metrics: QueueMetrics,
     next_seq: u64,
     priority_model: PriorityModel,
     /// Queue ordering discipline (ADR / TP-003). `Strict` selects in exact priority order; `BoundedRelaxed`
@@ -622,6 +623,7 @@ impl ProjectionData {
             items: FastHashMap::default(),
             by_key: FastHashMap::default(),
             eligible: BTreeSet::new(),
+            metrics: QueueMetrics::default(),
             next_seq: 0,
             priority_model,
             ordering_mode,
@@ -700,6 +702,9 @@ impl ProjectionData {
                 projection
                     .eligible
                     .insert(elig_key(&rec, &projection.priority_model));
+            }
+            if !rec.superseded {
+                projection.metrics_inc(rec.state);
             }
             projection.next_seq = projection.next_seq.max(rec.created_seq.saturating_add(1));
             projection.items.insert(rec.item_id, rec);
@@ -791,27 +796,54 @@ impl ProjectionData {
         let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
         self.index_insert_keys(rec.item_id, &keys);
         self.items.insert(rec.item_id, rec);
+        self.metrics.pending += 1;
         Ok(())
+    }
+
+    fn metrics_inc(&mut self, state: ItemState) {
+        match state {
+            ItemState::Pending => self.metrics.pending += 1,
+            ItemState::Leased => self.metrics.leased += 1,
+            ItemState::Complete => self.metrics.complete += 1,
+            ItemState::Failed => self.metrics.failed += 1,
+        }
+    }
+
+    fn metrics_dec(&mut self, state: ItemState) {
+        match state {
+            ItemState::Pending => self.metrics.pending = self.metrics.pending.saturating_sub(1),
+            ItemState::Leased => self.metrics.leased = self.metrics.leased.saturating_sub(1),
+            ItemState::Complete => self.metrics.complete = self.metrics.complete.saturating_sub(1),
+            ItemState::Failed => self.metrics.failed = self.metrics.failed.saturating_sub(1),
+        }
+    }
+
+    fn metrics_transition(&mut self, old: ItemState, new: ItemState) {
+        if old != new {
+            self.metrics_dec(old);
+            self.metrics_inc(new);
+        }
     }
 
     /// Drive the lifecycle state machine for one item, keeping the eligibility index in sync and
     /// bumping `item_version` (API-001: version bumps on every committed mutation).
     fn transition(&mut self, id: &ItemId, ev: ItemEvent) -> EngineResult<ItemState> {
         let model = self.priority_model;
-        let (old_key, new_key, new_state) = {
+        let (old_key, new_key, old_state, new_state) = {
             let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
             // A superseded id (replaced by upsert) must never re-enter eligible or mutate
             // (TD-007 §2.3): the orchestration ports map this to `-ERR pqueue superseded`.
             if rec.superseded {
                 return Err(EngineError::Superseded);
             }
-            let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
-            let new = apply_transition(rec.state, ev)
+            let old_state = rec.state;
+            let old = (old_state == ItemState::Pending).then(|| elig_key(rec, &model));
+            let new = apply_transition(old_state, ev)
                 .map_err(|_| EngineError::Invalid("illegal lifecycle transition"))?;
             rec.state = new;
             rec.item_version += 1;
             let nk = (new == ItemState::Pending).then(|| elig_key(rec, &model));
-            (old, nk, new)
+            (old, nk, old_state, new)
         };
         if let Some(k) = old_key {
             self.eligible.remove(&k);
@@ -819,6 +851,7 @@ impl ProjectionData {
         if let Some(k) = new_key {
             self.eligible.insert(k);
         }
+        self.metrics_transition(old_state, new_state);
         Ok(new_state)
     }
 
@@ -1099,9 +1132,14 @@ impl ProjectionData {
                     .transpose()?;
                 if let Some(rec) = self.items.get_mut(&c.superseded_item_id) {
                     let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
+                    let old_state = rec.state;
+                    let was_live = !rec.superseded;
                     rec.superseded = true;
                     if let Some(k) = old {
                         self.eligible.remove(&k);
+                    }
+                    if was_live {
+                        self.metrics_dec(old_state);
                     }
                 }
                 if let Some(keys) = superseded_keys {
@@ -1138,11 +1176,13 @@ impl ProjectionData {
                 for id in ids {
                     if let Some(rec) = self.items.get_mut(&id) {
                         let old = (rec.state == ItemState::Pending).then(|| elig_key(rec, &model));
+                        let old_state = rec.state;
                         rec.state = ItemState::Failed; // forced terminal (cohort-incomplete)
                         rec.item_version += 1;
                         if let Some(k) = old {
                             self.eligible.remove(&k);
                         }
+                        self.metrics_transition(old_state, ItemState::Failed);
                     }
                 }
                 Ok(())
@@ -1196,6 +1236,9 @@ impl ProjectionData {
                 let model = self.priority_model;
                 for id in &c.item_ids {
                     if let Some(rec) = self.items.remove(id) {
+                        if !rec.superseded {
+                            self.metrics_dec(rec.state);
+                        }
                         if let Some(key) = &rec.explicit_client_item_key {
                             self.by_key.remove(key);
                         }
@@ -1367,19 +1410,7 @@ impl ProjectionData {
 
     /// `ProjectionRead::metrics` — per-state counts (superseded items excluded).
     pub fn metrics(&self) -> QueueMetrics {
-        let mut m = QueueMetrics::default();
-        for r in self.items.values() {
-            if r.superseded {
-                continue;
-            }
-            match r.state {
-                ItemState::Pending => m.pending += 1,
-                ItemState::Leased => m.leased += 1,
-                ItemState::Complete => m.complete += 1,
-                ItemState::Failed => m.failed += 1,
-            }
-        }
-        m
+        self.metrics.clone()
     }
 
     /// Render the given ids into the rich claimed-item shape (lease fields must be `Some`). Used right
@@ -1992,6 +2023,68 @@ mod tests {
             priced_key < unpriced_key,
             "priced work must continue to sort ahead of unpriced FIFO work"
         );
+    }
+
+    #[test]
+    fn metrics_are_maintained_across_lifecycle_replace_and_purge() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![push_item("1", "k1", 10), push_item("2", "k2", 20)],
+            }))
+            .unwrap();
+        assert_eq!(
+            projection.metrics(),
+            QueueMetrics {
+                pending: 2,
+                ..QueueMetrics::default()
+            }
+        );
+
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("1")],
+                lease_token: LeaseToken::new("lt").unwrap(),
+                lease_expires_at: ts(60),
+            }))
+            .unwrap();
+        assert_eq!(
+            projection.metrics(),
+            QueueMetrics {
+                pending: 1,
+                leased: 1,
+                ..QueueMetrics::default()
+            }
+        );
+
+        projection
+            .apply_command(&QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(iid("1"), FinalizeKind::Complete)],
+            }))
+            .unwrap();
+        assert_eq!(
+            projection.metrics(),
+            QueueMetrics {
+                pending: 1,
+                complete: 1,
+                ..QueueMetrics::default()
+            }
+        );
+
+        projection
+            .apply_command(&QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![iid("1"), iid("2")],
+                force: true,
+            }))
+            .unwrap();
+        assert_eq!(projection.metrics(), QueueMetrics::default());
     }
 
     #[test]
