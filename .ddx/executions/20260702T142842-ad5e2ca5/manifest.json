@@ -1,0 +1,38 @@
+{
+  "attempt_id": "20260702T142842-ad5e2ca5",
+  "bead_id": "pqueue-b1feb686",
+  "base_rev": "e8e05a8888d9bbdd3fd810f3ba4c239d0fe30b99",
+  "created_at": "2026-07-02T14:28:42.64674907Z",
+  "requested": {
+    "effort": "medium",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b1feb686",
+    "title": "Specify hot projection query contract",
+    "description": "PROBLEM\nThe Snorri hot projection requirement has no governing contract document; `spec-id=api-hot-projection-query-surface` currently only exists on the tracker bead. Implementation beads need a stable, domain-neutral contract before adding API or backend code.\n\nPROPOSED FIX\nCreate a contract doc under docs/ that defines the hot projection query substrate: capability names, typed indexed record shape, side/projection record semantics, consistency/watermark rules, cursor invalidation, aggregate limits, range scan/grouping/bounded mutation/claim-by-query operations, backend capability behavior, and non-goals. Include the six scheduled-action fixture records from pqueue-630dbeaa as an example fixture, but state that pqueue remains domain-neutral and Snorri-specific policy lives outside pqueue.\n\nIN-SCOPE FILES\n- docs/helix/02-design/contracts/ or docs/helix/02-design/technical-designs/ for the new contract doc.\n- docs/helix/03-test/test-plans/ if a test-plan pointer is needed.\n\nOUT-OF-SCOPE\n- Rust API implementation.\n- Backend query implementation.\n- Snorri/Cayce/MCP API design.\n\nREQUIRED DECISIONS (the contract must settle these explicitly)\n1. Null/missing indexed fields: today a record with a null or missing indexed field is simply absent from that index (projection `index_key` returns `None` — see crates/pqueue-projection/src/lib.rs). Define how declared numeric buckets report nulls (the no-activity bucket) — e.g. a declared null bucket computed as a base-filter count minus indexed rows, or a null-sentinel key encoding. Pick one and specify it; fixture record act_004 (engagement_probability = null) exercises it.\n2. Cursor ordering tie-break: define the ultimate tie-break for stable pagination when the declared sort fields tie (recommendation: the internal item id, implicitly appended to every ordering). Caller-visible sort fields must be fields of the declared index — note `action_id` is NOT a field of the canonical range index.\n3. Declared numeric buckets: buckets are caller-declared, not fixed. The 1%-wide bucket ladder in superseded pqueue-630dbeaa was illustrative only. The canonical conformance fixture declares: exact 0 -\u003e \"0%\", (0.08, 0.10] -\u003e \"8.01-10%\", (0.10, 0.15] -\u003e \"10.01-15%\", (0.45, 0.50] -\u003e \"45.01-50%\", null -\u003e \"no-activity\".\n4. Side/projection records: define record semantics and the `side_record_query` capability flag, and state that implementation is deferred beyond this epic — all backends advertise it unavailable and return the structured unsupported error.",
+    "acceptance": "1. `rg -n 'api-hot-projection-query-surface|hot projection|range scan|side-record query|cursor pagination|bounded mutation|claim by query' docs` finds the new governing contract.\n2. `rg -n 'Snorri-specific|Niflheim|ClickHouse|arbitrary SQL|RESP' docs/helix/02-design docs/helix/03-test` finds explicit non-goals or deferrals.\n3. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:contracts",
+      "area:projection",
+      "kind:spec",
+      "system:snorri",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260702T142842-ad5e2ca5",
+    "prompt": ".ddx/executions/20260702T142842-ad5e2ca5/prompt.md",
+    "manifest": ".ddx/executions/20260702T142842-ad5e2ca5/manifest.json",
+    "result": ".ddx/executions/20260702T142842-ad5e2ca5/result.json",
+    "checks": ".ddx/executions/20260702T142842-ad5e2ca5/checks.json",
+    "usage": ".ddx/executions/20260702T142842-ad5e2ca5/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b1feb686-20260702T142842-ad5e2ca5"
+  },
+  "prompt_sha": "849e18bdff2ab60acf8fd44c0e02eaabdfb86d25cb225a3f9755c9e9632ac8cc"
+}
