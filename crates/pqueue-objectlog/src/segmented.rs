@@ -388,6 +388,9 @@ pub struct SegmentCounters {
     pub get_count: u64,
     /// Count of object-store LIST API calls issued by this process.
     pub list_count: u64,
+    /// Count of object-store DELETE API calls issued by this process. The current append-only log does not
+    /// delete objects during the release run, but retention cleanup must be visible when it is added.
+    pub delete_count: u64,
 }
 
 impl SegmentCounters {

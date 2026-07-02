@@ -129,8 +129,10 @@ count, disk-loss reconstruction wall time, disk-loss pending count, and
 `objectlog_hybrid_max_commands_per_segment > 1` for object-storage output. The
 same row must report object-storage file/object count, segment bytes, total
 stored bytes, mean/max object size, storage-utilization ratio versus configured
-target segment size, PUT/LIST/GET counts, and an estimated S3-style request plus
-storage cost with the price inputs used for the calculation.
+target segment size, PUT/LIST/GET/DELETE counts, and an estimated S3-style
+request plus storage cost with the price inputs used for the calculation.
+DELETE/CANCEL requests are tracked as API volume even when their S3 Standard
+unit price is zero.
 
 Raw ledger: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl`.
 
@@ -372,9 +374,10 @@ Key fields from the current 1M row:
 
 The row includes the object-storage cost surface required for optimization:
 object count, total bytes, segment bytes, mean/max object size, storage
-utilization, live PUT/GET/LIST counts, and S3-style request plus storage cost
-using the ADR-001 US-East-1 price inputs. For this run, the hot path performed
-no segment GETs; recovery reads are bounded by high-water and page limit.
+utilization, live PUT/GET/LIST/DELETE counts, and S3-style request plus storage
+cost using the ADR-001 US-East-1 price inputs. For this run, the hot path
+performed no segment GETs; recovery reads are bounded by high-water and page
+limit.
 
 ### 10M — third preflight timeout, object-log recovery blocker removed (`pqueue-06f8e380`)
 

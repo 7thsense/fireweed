@@ -228,6 +228,7 @@ struct ObjectStoreUtilization {
     put_count: u64,
     get_count: u64,
     list_count: u64,
+    delete_count: u64,
     retained_hours: f64,
 }
 
@@ -235,12 +236,13 @@ struct ObjectStoreUtilization {
 struct ObjectStoreCostBreakdown {
     put_list_usd: f64,
     get_usd: f64,
+    delete_usd: f64,
     storage_usd: f64,
 }
 
 impl ObjectStoreCostBreakdown {
     fn total_usd(self) -> f64 {
-        self.put_list_usd + self.get_usd + self.storage_usd
+        self.put_list_usd + self.get_usd + self.delete_usd + self.storage_usd
     }
 }
 
@@ -264,6 +266,7 @@ impl ObjectStoreUtilization {
         self.put_count
             .saturating_add(self.get_count)
             .saturating_add(self.list_count)
+            .saturating_add(self.delete_count)
     }
 
     fn api_requests_per_resident_item(self, resident: u64) -> f64 {
@@ -292,12 +295,14 @@ fn s3_cost_breakdown(
     let put_list_cost =
         (m.put_count.saturating_add(m.list_count) as f64 / 1000.0) * prices.s3_put_per_1k;
     let get_cost = (m.get_count as f64 / 1000.0) * prices.s3_get_per_1k;
+    let delete_cost = (m.delete_count as f64 / 1000.0) * prices.s3_delete_per_1k;
     let storage_gb = m.total_bytes as f64 / pqueue_release::cost::BYTES_PER_GB;
     let month_fraction = m.retained_hours / pqueue_release::cost::HOURS_PER_MONTH;
     let storage_cost = storage_gb * prices.s3_storage_per_gb_month * month_fraction;
     ObjectStoreCostBreakdown {
         put_list_usd: put_list_cost,
         get_usd: get_cost,
+        delete_usd: delete_cost,
         storage_usd: storage_cost,
     }
 }
@@ -317,6 +322,7 @@ fn s3_price_inputs_json(
         "region": "us-east-1",
         "s3_put_copy_post_list_per_1k_usd": prices.s3_put_per_1k,
         "s3_get_per_1k_usd": prices.s3_get_per_1k,
+        "s3_delete_cancel_per_1k_usd": prices.s3_delete_per_1k,
         "s3_standard_storage_per_gb_month_usd": prices.s3_storage_per_gb_month,
         "retained_hours": retained_hours,
         "source": prices.instance_source,
@@ -367,6 +373,10 @@ fn insert_object_store_utilization(
         serde_json::json!(m.list_count),
     );
     values.insert(
+        format!("{prefix}_delete_count"),
+        serde_json::json!(m.delete_count),
+    );
+    values.insert(
         format!("{prefix}_s3_api_request_count"),
         serde_json::json!(m.api_request_count()),
     );
@@ -377,6 +387,10 @@ fn insert_object_store_utilization(
     values.insert(
         format!("{prefix}_s3_get_cost_usd"),
         serde_json::json!(round6(cost.get_usd)),
+    );
+    values.insert(
+        format!("{prefix}_s3_delete_cost_usd"),
+        serde_json::json!(round6(cost.delete_usd)),
     );
     values.insert(
         format!("{prefix}_s3_storage_cost_usd"),
@@ -408,6 +422,7 @@ fn apply_object_store_counters(
         put_count: c.put_count,
         get_count: c.get_count,
         list_count: c.list_count,
+        delete_count: c.delete_count,
         retained_hours: pqueue_release::cost::HOURS_PER_MONTH,
     };
     let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
@@ -425,6 +440,7 @@ fn apply_object_store_counters(
     row.put_count = object_store.put_count;
     row.get_count = object_store.get_count;
     row.list_count = object_store.list_count;
+    row.delete_count = object_store.delete_count;
     row.s3_api_request_count = object_store.api_request_count();
     row.s3_api_requests_per_resident_item =
         round6(object_store.api_requests_per_resident_item(resident));
@@ -511,10 +527,12 @@ struct ProfileRun {
     put_count: u64,
     get_count: u64,
     list_count: u64,
+    delete_count: u64,
     s3_api_request_count: u64,
     s3_api_requests_per_resident_item: f64,
     s3_put_list_cost_usd: f64,
     s3_get_cost_usd: f64,
+    s3_delete_cost_usd: f64,
     s3_storage_cost_usd: f64,
     s3_estimated_cost_usd: f64,
     s3_cost_per_million_resident_items_usd: f64,
@@ -655,6 +673,7 @@ where
         put_count: counters.put_count,
         get_count: counters.get_count,
         list_count: counters.list_count,
+        delete_count: counters.delete_count,
         retained_hours: pqueue_release::cost::HOURS_PER_MONTH,
     };
     let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
@@ -685,12 +704,14 @@ where
         put_count: object_store.put_count,
         get_count: object_store.get_count,
         list_count: object_store.list_count,
+        delete_count: object_store.delete_count,
         s3_api_request_count: object_store.api_request_count(),
         s3_api_requests_per_resident_item: round6(
             object_store.api_requests_per_resident_item(resident),
         ),
         s3_put_list_cost_usd: round6(cost.put_list_usd),
         s3_get_cost_usd: round6(cost.get_usd),
+        s3_delete_cost_usd: round6(cost.delete_usd),
         s3_storage_cost_usd: round6(cost.storage_usd),
         s3_estimated_cost_usd: round6(cost.total_usd()),
         s3_cost_per_million_resident_items_usd: round6(
@@ -1371,6 +1392,7 @@ fn s3_cost_efficiency_ok(row: &ProfileRun) -> bool {
                 .put_count
                 .saturating_add(row.get_count)
                 .saturating_add(row.list_count)
+                .saturating_add(row.delete_count)
 }
 
 /// The bounded-debt gate (AC2): the sampled apply-lag series stayed under the documented structural ceiling
@@ -1614,6 +1636,10 @@ fn emit_ledger(
         values.insert(format!("{p}_get_count"), serde_json::json!(row.get_count));
         values.insert(format!("{p}_list_count"), serde_json::json!(row.list_count));
         values.insert(
+            format!("{p}_delete_count"),
+            serde_json::json!(row.delete_count),
+        );
+        values.insert(
             format!("{p}_s3_api_request_count"),
             serde_json::json!(row.s3_api_request_count),
         );
@@ -1628,6 +1654,10 @@ fn emit_ledger(
         values.insert(
             format!("{p}_s3_get_cost_usd"),
             serde_json::json!(row.s3_get_cost_usd),
+        );
+        values.insert(
+            format!("{p}_s3_delete_cost_usd"),
+            serde_json::json!(row.s3_delete_cost_usd),
         );
         values.insert(
             format!("{p}_s3_storage_cost_usd"),
@@ -2637,16 +2667,19 @@ fn object_store_utilization_s3_cost_uses_request_and_storage_inputs() {
         put_count: 2_000,
         get_count: 5_000,
         list_count: 3_000,
+        delete_count: 4_000,
         retained_hours: pqueue_release::cost::HOURS_PER_MONTH / 2.0,
     };
 
     let expected_put_list = 5.0 * prices.s3_put_per_1k;
     let expected_get = 5.0 * prices.s3_get_per_1k;
+    let expected_delete = 4.0 * prices.s3_delete_per_1k;
     let expected_storage = 2.0 * prices.s3_storage_per_gb_month * 0.5;
     let cost = estimate_s3_cost_usd(metrics, &prices);
 
     assert!(
-        (cost - (expected_put_list + expected_get + expected_storage)).abs() < f64::EPSILON,
+        (cost - (expected_put_list + expected_get + expected_delete + expected_storage)).abs()
+            < f64::EPSILON,
         "cost={cost}"
     );
     assert_eq!(round3(metrics.mean_object_bytes()), 200_000_000.0);
@@ -2666,6 +2699,7 @@ fn object_store_utilization_inserts_release_ledger_fields() {
         put_count: 7,
         get_count: 2,
         list_count: 1,
+        delete_count: 3,
         retained_hours: 24.0,
     };
     let mut values = BTreeMap::new();
@@ -2682,9 +2716,11 @@ fn object_store_utilization_inserts_release_ledger_fields() {
         "objectlog_hybrid_put_count",
         "objectlog_hybrid_get_count",
         "objectlog_hybrid_list_count",
+        "objectlog_hybrid_delete_count",
         "objectlog_hybrid_s3_api_request_count",
         "objectlog_hybrid_s3_put_list_cost_usd",
         "objectlog_hybrid_s3_get_cost_usd",
+        "objectlog_hybrid_s3_delete_cost_usd",
         "objectlog_hybrid_s3_storage_cost_usd",
         "objectlog_hybrid_s3_estimated_cost_usd",
         "objectlog_hybrid_s3_price_inputs",
@@ -2704,8 +2740,12 @@ fn object_store_utilization_inserts_release_ledger_fields() {
     assert_eq!(values["objectlog_hybrid_get_count"], serde_json::json!(2));
     assert_eq!(values["objectlog_hybrid_list_count"], serde_json::json!(1));
     assert_eq!(
+        values["objectlog_hybrid_delete_count"],
+        serde_json::json!(3)
+    );
+    assert_eq!(
         values["objectlog_hybrid_s3_api_request_count"],
-        serde_json::json!(10)
+        serde_json::json!(13)
     );
     assert_eq!(
         values["objectlog_hybrid_s3_estimated_cost_usd"],
@@ -2714,6 +2754,9 @@ fn object_store_utilization_inserts_release_ledger_fields() {
                 .as_f64()
                 .unwrap()
                 + values["objectlog_hybrid_s3_get_cost_usd"].as_f64().unwrap()
+                + values["objectlog_hybrid_s3_delete_cost_usd"]
+                    .as_f64()
+                    .unwrap()
                 + values["objectlog_hybrid_s3_storage_cost_usd"]
                     .as_f64()
                     .unwrap()
@@ -2730,6 +2773,10 @@ fn object_store_utilization_inserts_release_ledger_fields() {
     assert_eq!(
         price_inputs["s3_get_per_1k_usd"],
         serde_json::json!(prices.s3_get_per_1k)
+    );
+    assert_eq!(
+        price_inputs["s3_delete_cancel_per_1k_usd"],
+        serde_json::json!(prices.s3_delete_per_1k)
     );
     assert_eq!(
         price_inputs["s3_standard_storage_per_gb_month_usd"],
@@ -2928,10 +2975,12 @@ async fn performance_object_log_hybrid_segment_density_gate() {
         "objectlog_hybrid_put_count",
         "objectlog_hybrid_get_count",
         "objectlog_hybrid_list_count",
+        "objectlog_hybrid_delete_count",
         "objectlog_hybrid_s3_api_request_count",
         "objectlog_hybrid_s3_api_requests_per_resident_item",
         "objectlog_hybrid_s3_put_list_cost_usd",
         "objectlog_hybrid_s3_get_cost_usd",
+        "objectlog_hybrid_s3_delete_cost_usd",
         "objectlog_hybrid_s3_storage_cost_usd",
         "objectlog_hybrid_s3_estimated_cost_usd",
         "objectlog_hybrid_s3_cost_per_million_resident_items_usd",
@@ -2977,8 +3026,11 @@ async fn performance_object_log_hybrid_segment_density_gate() {
             .unwrap_or(0),
         values["objectlog_hybrid_put_count"].as_u64().unwrap_or(0)
             + values["objectlog_hybrid_get_count"].as_u64().unwrap_or(0)
-            + values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0),
-        "S3 API request count must be PUT+GET+LIST"
+            + values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0)
+            + values["objectlog_hybrid_delete_count"]
+                .as_u64()
+                .unwrap_or(0),
+        "S3 API request count must be PUT+GET+LIST+DELETE"
     );
     assert!(
         values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0) > 0,

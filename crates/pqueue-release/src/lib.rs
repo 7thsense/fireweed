@@ -665,6 +665,9 @@ pub mod cost {
         pub s3_put_per_1k: f64,
         /// S3 GET, `$/1000 requests`.
         pub s3_get_per_1k: f64,
+        /// S3 DELETE/CANCEL, `$/1000 requests`. S3 Standard prices these at zero; keep the input explicit so
+        /// request-accounting rows can show that deletes are tracked rather than ignored.
+        pub s3_delete_per_1k: f64,
         /// The `postgres_native` provisioned DB instance, `$/hour` (the always-on claim authority).
         pub pg_instance_per_hour: f64,
         /// DB storage, `$/GB-month`.
@@ -689,6 +692,7 @@ pub mod cost {
                 s3_storage_per_gb_month: 0.023,
                 s3_put_per_1k: 0.005,
                 s3_get_per_1k: 0.0004,
+                s3_delete_per_1k: 0.0,
                 pg_instance_per_hour: 0.276,
                 pg_storage_per_gb_month: 0.10,
                 pg_iops_per_month_each: 0.065,
