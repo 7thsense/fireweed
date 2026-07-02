@@ -405,35 +405,58 @@ where
 
     let mut claim_finalize_latencies = Vec::new();
     let mut claimed_total = 0u64;
+    let rmw_window = env_u64("PQUEUE_HYBRID_RMW_WINDOW", 64).max(1) as usize;
     while claimed_total < resident {
-        let token = LeaseToken::new(format!("lt-{backend_profile}-{claimed_total}")).unwrap();
         let t = Instant::now();
-        let claimed = backend
-            .claim(ClaimRequest {
-                shard: shard.clone(),
-                worker_id: WorkerId::new("w").unwrap(),
-                max_items: claim_batch.min((resident - claimed_total) as usize),
-                lease_token: token,
-                lease_expires_at: ts(60_000),
-                now: ts(0),
-                compatibility: ClaimCompatibility::default(),
-                expected_epoch: None,
+        let remaining = resident - claimed_total;
+        let claim_ops = remaining
+            .div_ceil(claim_batch.max(1) as u64)
+            .min(rmw_window as u64) as usize;
+        let claims: Vec<_> = (0..claim_ops)
+            .map(|op| {
+                let offset = claimed_total + (op as u64 * claim_batch as u64);
+                let token = LeaseToken::new(format!("lt-{backend_profile}-{offset}")).unwrap();
+                backend.claim(ClaimRequest {
+                    shard: shard.clone(),
+                    worker_id: WorkerId::new("w").unwrap(),
+                    max_items: claim_batch.min((resident - offset) as usize),
+                    lease_token: token,
+                    lease_expires_at: ts(60_000),
+                    now: ts(0),
+                    compatibility: ClaimCompatibility::default(),
+                    expected_epoch: None,
+                })
             })
-            .await
-            .expect("claim");
-        if claimed.items.is_empty() {
+            .collect();
+        let mut claimed_batches = Vec::with_capacity(claim_ops);
+        for claim in claims {
+            let claimed = claim.await.expect("claim");
+            if !claimed.items.is_empty() {
+                claimed_batches.push(claimed);
+            }
+        }
+        if claimed_batches.is_empty() {
             break;
         }
-        let outcomes: Vec<FinalizeOutcome> = claimed
-            .items
+        let claimed_in_window: u64 = claimed_batches
             .iter()
-            .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+            .map(|claimed| claimed.items.len() as u64)
+            .sum();
+        let finalizes: Vec<_> = claimed_batches
+            .iter()
+            .map(|claimed| {
+                let outcomes: Vec<FinalizeOutcome> = claimed
+                    .items
+                    .iter()
+                    .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+                    .collect();
+                backend.finalize(&shard, outcomes, ts(1), None)
+            })
             .collect();
-        backend
-            .finalize(&shard, outcomes, ts(1), None)
-            .await
-            .expect("finalize");
-        claimed_total += claimed.items.len() as u64;
+        for finalize in finalizes {
+            finalize.await.expect("finalize");
+        }
+        claimed_total += claimed_in_window;
         claim_finalize_latencies.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     assert_eq!(claimed_total, resident);
