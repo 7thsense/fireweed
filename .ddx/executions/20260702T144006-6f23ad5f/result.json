@@ -1,0 +1,23 @@
+{
+  "bead_id": "pqueue-c907b5b6",
+  "attempt_id": "20260702T144006-6f23ad5f",
+  "base_rev": "3f099188bb56f5a464b0a756dccf4e40c2c56b36",
+  "result_rev": "123408b2846d4118e6c446c42f88f565b106cb78",
+  "implementation_rev": "123408b2846d4118e6c446c42f88f565b106cb78",
+  "outcome": "task_failed",
+  "status": "execution_failed",
+  "detail": "agent: provider process exited without emitting a final event",
+  "session_id": "eb-4807ab98",
+  "duration_ms": 717104,
+  "exit_code": 1,
+  "error": "agent: provider process exited without emitting a final event",
+  "project_root": "/Users/erik/Projects/pqueue",
+  "failure_mode": "unknown",
+  "execution_dir": ".ddx/executions/20260702T144006-6f23ad5f",
+  "prompt_file": ".ddx/executions/20260702T144006-6f23ad5f/prompt.md",
+  "manifest_file": ".ddx/executions/20260702T144006-6f23ad5f/manifest.json",
+  "result_file": ".ddx/executions/20260702T144006-6f23ad5f/result.json",
+  "rate_limit_budget": 300000000000,
+  "started_at": "2026-07-02T14:40:07.179769488Z",
+  "finished_at": "2026-07-02T14:52:04.284729671Z"
+}
