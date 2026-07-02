@@ -6504,6 +6504,10 @@ impl RecoveryReadPort for SqliteRelationalBackend {
     }
 }
 
+/// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
+/// the sqlite-relational family inherits the all-`Unavailable` default.
+impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {}
+
 impl FinalizePort for SqliteRelationalBackend {
     fn finalize(
         &self,

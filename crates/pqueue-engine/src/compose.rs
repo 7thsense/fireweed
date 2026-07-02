@@ -2580,6 +2580,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
 }
 
 // ---------------------------------------------------------------------------
+// HotProjectionQueryPort (API-004) — no backend in epic pqueue-45e13e4d implements the hot projection
+// query substrate yet; the composed family takes the all-default (all-`Unavailable`) implementation
+// until a follow-on bead wires real range-scan/aggregate/mutation execution.
+// ---------------------------------------------------------------------------
+
+impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectionQueryPort
+    for ComposedBackend<L, P, C>
+{
+}
+
+// ---------------------------------------------------------------------------
 // CommitTransitionPort — the authoritative vectorized claimed-work commit (Snorri StateStore boundary,
 // ADR-009 / epic pqueue-2201fd37), ported generically onto the composition via `commit_locked`.
 // ---------------------------------------------------------------------------

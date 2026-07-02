@@ -1061,6 +1061,10 @@ impl pqueue_engine::DiscoveryPort for ObjectLogBackend {}
 /// (it inherits the `Unavailable` default).
 impl pqueue_engine::RecoveryReadPort for ObjectLogBackend {}
 
+/// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
+/// the object-log family inherits the all-`Unavailable` default.
+impl pqueue_engine::HotProjectionQueryPort for ObjectLogBackend {}
+
 impl FinalizePort for ObjectLogBackend {
     fn finalize(
         &self,
