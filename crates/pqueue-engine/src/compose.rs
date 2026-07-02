@@ -749,6 +749,7 @@ struct Inner<L, P> {
 /// tail is normally a handful of commands; exceeding this suggests a projection that has fallen far behind
 /// the log. (For a fresh in-memory projection the whole log is the "tail", so the budget is generous.)
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
+const RECOVERY_READ_PAGE_LIMIT: usize = 65_536;
 
 /// The one generic backend (ADR-012): `Backend = LogStore × ProjectionStore × ControlPlane`. Implements
 /// every engine port by delegating to the three axes.
@@ -1168,12 +1169,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             };
             let mut tail: u64 = 0;
             loop {
-                let page = log.read_from(&key, from.clone(), 256)?;
+                let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
                 if !page.entries.is_empty() {
-                    let positions: Vec<CommandPosition> =
-                        page.entries.iter().map(|(p, _)| p.clone()).collect();
-                    let envelopes: Vec<CommandEnvelope> =
-                        page.entries.iter().map(|(_, e)| e.clone()).collect();
+                    let entries = page.entries;
+                    let mut positions = Vec::with_capacity(entries.len());
+                    let mut envelopes = Vec::with_capacity(entries.len());
+                    for (pos, env) in entries {
+                        positions.push(pos);
+                        envelopes.push(env);
+                    }
                     for env in &envelopes {
                         for id in &env.item_ids {
                             self.counters.observe(&key, *id);
@@ -1223,7 +1227,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     ) -> EngineResult<()> {
         let mut from = None;
         loop {
-            let page = log.read_from(shard, from.clone(), 256)?;
+            let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
             for (_, env) in &page.entries {
                 let Some(request_id) = &env.request_id else {
                     continue;

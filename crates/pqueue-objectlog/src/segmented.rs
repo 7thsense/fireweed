@@ -1023,6 +1023,21 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         shard: &QueueKey,
         from_seq: u64,
     ) -> EngineResult<Vec<(CommandPosition, CommandEnvelope)>> {
+        self.read_from_limited(shard, from_seq, usize::MAX)
+    }
+
+    /// Like [`Self::read_from`], but stops fetching/parsing segment objects as soon as `limit` commands have
+    /// been returned. The `LogStore` adapter uses this for recovery paging; without it, each page would
+    /// deserialize the entire remaining tail and then truncate in memory.
+    pub fn read_from_limited(
+        &self,
+        shard: &QueueKey,
+        from_seq: u64,
+        limit: usize,
+    ) -> EngineResult<Vec<(CommandPosition, CommandEnvelope)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::new();
         for entry in self.read_manifest(shard)? {
             if entry.fence {
@@ -1046,6 +1061,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     continue;
                 }
                 out.push((CommandPosition::new(shard.clone(), epoch, seq), env));
+                if out.len() == limit {
+                    return Ok(out);
+                }
             }
         }
         Ok(out)

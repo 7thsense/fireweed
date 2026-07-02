@@ -7065,7 +7065,20 @@ impl ProjectionStore for HybridProjectionStore {
         positions: &[CommandPosition],
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
-        self.apply_durable_then_memory(positions, commands)
+        self.check_healthy()?;
+        if positions.len() != commands.len() {
+            return Err(EngineError::Storage(
+                "hybrid apply_recovery: positions/commands length mismatch".into(),
+            ));
+        }
+        if positions.is_empty() {
+            return Ok(());
+        }
+        self.apply_memory(positions, commands)?;
+        self.deferred
+            .extend(positions.iter().cloned().zip(commands.iter().cloned()));
+        self.deferred_commands = self.deferred.len();
+        Ok(())
     }
 
     /// Apply at most [`Self::deferred_flush_chunk`] deferred commands, oldest-first, then return —

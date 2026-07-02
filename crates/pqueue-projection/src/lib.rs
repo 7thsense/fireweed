@@ -19,7 +19,7 @@
 //! collisions) MUST pre-validate via the provided helpers ([`ProjectionData::finalize_validate`],
 //! [`ProjectionData::item_state`]) so `apply_command` is infallible for the command they commit.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 mod compose_impls;
 pub use compose_impls::{InMemoryProjection, MemoryLog};
@@ -37,6 +37,8 @@ use pqueue_engine::{
     SnapshotRef,
 };
 use serde_json::Value;
+
+type FastHashMap<K, V> = rustc_hash::FxHashMap<K, V>;
 
 // ---------------------------------------------------------------------------
 // Projection record + eligibility key
@@ -544,8 +546,8 @@ pub fn commit(
 // ---------------------------------------------------------------------------
 
 pub struct ProjectionData {
-    items: HashMap<ItemId, ItemRecord>,
-    by_key: HashMap<ClientItemKey, ItemId>,
+    items: FastHashMap<ItemId, ItemRecord>,
+    by_key: FastHashMap<ClientItemKey, ItemId>,
     eligible: BTreeSet<EligKey>,
     next_seq: u64,
     priority_model: PriorityModel,
@@ -596,8 +598,8 @@ impl ProjectionData {
             indexes.insert(spec.name.clone(), index);
         }
         Self {
-            items: HashMap::new(),
-            by_key: HashMap::new(),
+            items: FastHashMap::default(),
+            by_key: FastHashMap::default(),
             eligible: BTreeSet::new(),
             next_seq: 0,
             priority_model,
@@ -799,6 +801,8 @@ impl ProjectionData {
             // Queue creation is handled by the control plane; idempotent no-op if replayed here.
             QueueCommand::CreateQueue(_) => Ok(()),
             QueueCommand::Push(c) => {
+                self.items.reserve(c.items.len());
+                self.by_key.reserve(c.items.len());
                 for it in &c.items {
                     self.insert_pending(it.clone())?;
                 }

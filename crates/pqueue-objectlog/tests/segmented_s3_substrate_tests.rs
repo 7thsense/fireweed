@@ -19,10 +19,12 @@
 //! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use pqueue_conformance::{envelope, item, qdef, shard};
-use pqueue_engine::{EngineError, PushCommand, QueueCommand};
+use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, InMemoryBlobStore, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    BlobStore, InMemoryBlobStore, ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -37,6 +39,55 @@ fn pushes(n: u64) -> Vec<pqueue_engine::CommandEnvelope> {
             )
         })
         .collect()
+}
+
+#[derive(Default)]
+struct CountingBlobStore {
+    inner: InMemoryBlobStore,
+    segment_gets: AtomicU64,
+    manifest_gets: AtomicU64,
+    list_count: AtomicU64,
+}
+
+impl CountingBlobStore {
+    fn segment_gets(&self) -> u64 {
+        self.segment_gets.load(Ordering::Relaxed)
+    }
+
+    fn reset_reads(&self) {
+        self.segment_gets.store(0, Ordering::Relaxed);
+        self.manifest_gets.store(0, Ordering::Relaxed);
+        self.list_count.store(0, Ordering::Relaxed);
+    }
+}
+
+impl BlobStore for CountingBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        if key.contains("/seg/") {
+            self.segment_gets.fetch_add(1, Ordering::Relaxed);
+        }
+        if key.contains("/manifest/") {
+            self.manifest_gets.fetch_add(1, Ordering::Relaxed);
+        }
+        self.inner.get(key)
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.list_count.fetch_add(1, Ordering::Relaxed);
+        self.inner.list(prefix)
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(prefix)
+    }
 }
 
 #[test]
@@ -142,9 +193,10 @@ fn stale_epoch_writer_is_cas_fenced_with_no_torn_segment() {
         committed_before,
         "the fenced seal committed nothing new (no torn segment)"
     );
-    // No segment object was written for the fenced seal (the fence is checked before the segment PUT); only
-    // the fence-entry manifest object was added by B's acquire.
-    assert_eq!(store.object_count(), objects_before + 1);
+    // The stale writer may leave one orphan segment object before losing the manifest CAS. Readers never
+    // observe it because only manifest-named segments are committed; avoiding a manifest LIST before every
+    // seal keeps the single-writer hot path bounded.
+    assert_eq!(store.object_count(), objects_before + 2);
 
     // The new owner B commits under epoch 1 successfully and the log extends.
     b.enqueue(&shard(), &pushes(2), 1, 300).unwrap();
@@ -195,6 +247,67 @@ fn recovery_replays_only_manifest_committed_segments() {
     reopened.enqueue(&shard(), &pushes(1), 0, 10).unwrap();
     let pos = reopened.seal(&shard(), 0, 11).unwrap();
     assert_eq!(pos[0].sequence, 5);
+}
+
+#[test]
+fn high_water_tail_replay_skips_fully_applied_segment_objects() {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for (now, batch) in [(1, 3), (2, 3), (3, 3)] {
+        log.enqueue(&shard(), &pushes(batch), 0, now).unwrap();
+        log.seal(&shard(), 0, now + 10).unwrap();
+    }
+    log.advance_high_water(&shard(), CommandPosition::new(shard(), 0, 5))
+        .unwrap();
+    let high_water = log.read_high_water(&shard()).unwrap().unwrap();
+
+    store.reset_reads();
+    let replayed = log
+        .read_from(&shard(), high_water.sequence + 1)
+        .expect("read tail from durable high-water");
+
+    assert_eq!(
+        replayed.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![6, 7, 8],
+        "tail replay starts after the durable high-water"
+    );
+    assert_eq!(
+        store.segment_gets(),
+        1,
+        "fully-applied segment prefixes must not be fetched or deserialized"
+    );
+}
+
+#[test]
+fn limited_read_fetches_only_segments_needed_for_the_page() {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for (now, batch) in [(1, 3), (2, 3), (3, 3)] {
+        log.enqueue(&shard(), &pushes(batch), 0, now).unwrap();
+        log.seal(&shard(), 0, now + 10).unwrap();
+    }
+
+    store.reset_reads();
+    let replayed = log
+        .read_from_limited(&shard(), 0, 4)
+        .expect("bounded recovery page");
+
+    assert_eq!(
+        replayed.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+        "bounded page returns exactly the requested command window"
+    );
+    assert_eq!(
+        store.segment_gets(),
+        2,
+        "bounded read should stop after fetching the segments needed to fill the page"
+    );
 }
 
 #[test]

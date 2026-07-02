@@ -16,3 +16,4 @@ pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 bytes = "1"
 serde_json = "1"
+rustc-hash = "2"

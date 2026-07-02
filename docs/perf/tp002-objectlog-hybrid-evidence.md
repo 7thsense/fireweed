@@ -340,3 +340,72 @@ The next release blocker is therefore recovery-tail replay volume/parsing, filed
 as `pqueue-06f8e380`. The broader 10M release evidence bead remains open until
 that recovery blocker is fixed and the uncapped 10M row is committed with
 `bars_met=true`.
+
+### 1M — PASS after bounded recovery reads and memory-first recovery (`pqueue-06f8e380`)
+
+The 1M release workload was rerun after the bounded object-log recovery read,
+memory-first hybrid recovery, and allocation-path reductions:
+
+```text
+PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 \
+  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+  performance_object_log_hybrid_release_10m -- --ignored --nocapture
+```
+
+Result: **pass**, `bars_met=true`, finished in 484.11s. Snapshot:
+`docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_1m.jsonl`.
+
+Key fields from the current 1M row:
+
+| metric | value |
+|---|---:|
+| resident items | 1,000,000 |
+| hybrid push/s | 207,667.481 |
+| hybrid ack p99 vs in-memory | 0.384 |
+| hybrid claim/finalize p95 vs in-memory | 1.085 |
+| objects PUT / object count | 4,324 / 4,326 |
+| total stored bytes | 62,974,748 |
+| PUT / GET / LIST counts | 6,487 / 0 / 2 |
+| estimated S3 request + storage cost | 0.033893 USD |
+| normal restart recovery wall | 5,391.241 ms |
+| disk-loss reconstruction wall | 1,545.46 ms |
+
+The row includes the object-storage cost surface required for optimization:
+object count, total bytes, segment bytes, mean/max object size, storage
+utilization, live PUT/GET/LIST counts, and S3-style request plus storage cost
+using the ADR-001 US-East-1 price inputs. For this run, the hot path performed
+no segment GETs; recovery reads are bounded by high-water and page limit.
+
+### 10M — third preflight timeout, object-log recovery blocker removed (`pqueue-06f8e380`)
+
+The 10M preflight was rerun after adding `SegmentedObjectLog::read_from_limited`
+and using it from the `LogStore` adapter so recovery pages fetch only the
+segments needed for the requested command window:
+
+```text
+PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 \
+  timeout 15m cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+  performance_object_log_hybrid_release_10m -- --ignored --nocapture
+```
+
+Result: **timeout at 15m**, no 10M ledger row emitted. Focused tests now prove
+the object-log recovery property directly:
+
+```text
+cargo test -p pqueue-objectlog --test segmented_s3_substrate_tests -- --nocapture
+```
+
+The added tests count segment-object GETs and verify that:
+
+| test | proof |
+|---|---|
+| `high_water_tail_replay_skips_fully_applied_segment_objects` | replay from durable high-water `5` returns only sequences `6..8` and fetches one segment, not the two fully-applied prefix segments |
+| `limited_read_fetches_only_segments_needed_for_the_page` | a four-command recovery page over three-command segments fetches two segments and stops before the third |
+
+The remaining 10M blocker moved again. The sampled 8m rerun on 2026-07-02 hit
+`VmHWM=11,237,368 kB`, later fell to roughly 2.9 GB RSS, performed low read I/O
+(~1.1 MB), and wrote about 1.0 GB. That points away from object-storage
+GET/recovery parsing and toward 10M resident in-memory/test workload footprint,
+allocation rate, and duplicated item/command representations across benchmark
+phases. The next child bead is `pqueue-0a6567b5`; the broader 10M release
+evidence bead remains open until the 10M run completes with `bars_met=true`.

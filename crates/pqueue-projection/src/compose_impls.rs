@@ -10,7 +10,9 @@
 //! `SqliteBackend`, so the compositions are behaviorally identical to the monoliths (proven by running the
 //! shared TD-001 conformance suite against both).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
@@ -30,7 +32,7 @@ use crate::{LogData, ProjectionData, ProjectionImage};
 /// snapshots + high-water). The log substrate of the composed memory backend.
 #[derive(Default)]
 pub struct MemoryLog {
-    logs: HashMap<QueueKey, LogData>,
+    logs: FxHashMap<QueueKey, LogData>,
 }
 
 impl MemoryLog {
@@ -129,7 +131,7 @@ impl LogStore for MemoryLog {
 /// on the projection.
 #[derive(Default)]
 pub struct InMemoryProjection {
-    projections: HashMap<QueueKey, ProjectionData>,
+    projections: FxHashMap<QueueKey, ProjectionData>,
 }
 
 impl InMemoryProjection {

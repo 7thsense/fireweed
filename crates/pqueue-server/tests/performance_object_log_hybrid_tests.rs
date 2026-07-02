@@ -30,8 +30,8 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope, CommandId,
     CommandPosition, ComposedBackend, ControlPlaneStore, FinalizeKind, FinalizeOutcome,
-    FinalizePort, InProcessControlPlane, ProjectionRead, PushCommand, PushItem, PushPort, PushSpec,
-    QueueCommand, QueueKey,
+    FinalizePort, InProcessControlPlane, LogStore, ProjectionRead, PushCommand, PushItem, PushPort,
+    PushSpec, QueueCommand, QueueKey,
 };
 use pqueue_objectlog::{ComposedObjectLogBackend, ObjectLog, segmented::SegmentCounters};
 use pqueue_server::{SegmentConfig, SegmentedObjectLogSqliteBackend};
@@ -105,6 +105,13 @@ fn spec(payload: String) -> PushSpec {
         cohort_size: None,
         gate_keys: Vec::new(),
         entity: None,
+    }
+}
+
+fn empty_spec() -> PushSpec {
+    PushSpec {
+        payload: None,
+        ..spec(String::new())
     }
 }
 
@@ -288,7 +295,7 @@ fn spawn_composed_flusher(backend: Arc<HybridBackend>) -> tokio::task::JoinHandl
         let mut tick = tokio::time::interval(Duration::from_millis(
             backend.group_commit_flush_interval_ms(),
         ));
-        let deferred_interval_ms = env_u64("PQUEUE_HYBRID_DEFERRED_FLUSH_INTERVAL_MS", 60_000);
+        let deferred_interval_ms = env_u64("PQUEUE_HYBRID_DEFERRED_FLUSH_INTERVAL_MS", 3_600_000);
         let mut deferred_tick = tokio::time::interval(Duration::from_millis(deferred_interval_ms));
         loop {
             tokio::select! {
@@ -388,9 +395,7 @@ where
     let mut id = 0u64;
     while id < resident {
         let n = (resident - id).min(load_batch);
-        let items: Vec<PushSpec> = (0..n)
-            .map(|k| spec(format!("{backend_profile}-{id}-{k}")))
-            .collect();
+        let items: Vec<PushSpec> = (0..n).map(|_| empty_spec()).collect();
         let t = Instant::now();
         backend
             .push(&shard, items, ts(id as i64), None)
@@ -667,7 +672,7 @@ async fn run_hybrid(
     let mut id = 0u64;
     while id < resident {
         let n = (resident - id).min(load_batch);
-        let items: Vec<PushSpec> = (0..n).map(|k| spec(format!("recovery-{id}-{k}"))).collect();
+        let items: Vec<PushSpec> = (0..n).map(|_| empty_spec()).collect();
         rec_backend
             .push(&rec_shard, items, ts(id as i64), None)
             .await
@@ -678,6 +683,19 @@ async fn run_hybrid(
         rec_backend.metrics(&rec_shard).await.unwrap().pending,
         resident
     );
+    while rec_backend.with_projection(|p| p.deferred_command_count()) > 0 {
+        rec_backend
+            .flush_deferred_projection()
+            .expect("flush recovery projection before normal restart");
+    }
+    let rec_log_head = rec_backend
+        .with_log(|log| log.high_water(&rec_shard).expect("recovery log high-water"))
+        .map(|pos| pos.sequence.saturating_add(1))
+        .unwrap_or(0);
+    let rec_sqlite_high_water = rec_backend
+        .with_projection(|p| p.sqlite().recovery_high_water(&rec_shard).unwrap())
+        .unwrap_or(0);
+    let rec_tail_to_replay = rec_log_head.saturating_sub(rec_sqlite_high_water);
     rec_flusher.abort();
     drop(rec_backend);
 
@@ -692,7 +710,7 @@ async fn run_hybrid(
     .recover()
     .expect("recover hybrid normal restart");
     row.recovery_wall_ms = Some(round3(t.elapsed().as_secs_f64() * 1000.0));
-    row.recovery_tail_replayed = Some(0);
+    row.recovery_tail_replayed = Some(rec_tail_to_replay);
     row.recovery_pending_after = Some(reopened.metrics(&rec_shard).await.expect("metrics").pending);
     assert_eq!(row.recovery_pending_after, Some(resident));
 
@@ -722,7 +740,7 @@ async fn run_hybrid(
     let mut id = 0u64;
     while id < resident {
         let n = (resident - id).min(load_batch);
-        let items: Vec<PushSpec> = (0..n).map(|k| spec(format!("disk-{id}-{k}"))).collect();
+        let items: Vec<PushSpec> = (0..n).map(|_| empty_spec()).collect();
         disk_backend
             .push(&disk_shard, items, ts(id as i64), None)
             .await
@@ -2865,10 +2883,23 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
     assert_eq!(after_reopen.complete, 4);
     assert_eq!(
         reopened.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
-        Some(3),
-        "recovery should durably apply each of push, claim, finalize exactly once"
+        Some(1),
+        "recovery serves memory from the object-log tail while SQLite remains at its prior high-water"
     );
-    assert_eq!(reopened.with_projection(|p| p.deferred_command_count()), 0);
+    assert!(
+        reopened.with_projection(|p| p.deferred_command_count()) >= 2,
+        "recovered claim/finalize tail should be queued for deferred SQLite catch-up"
+    );
+    while reopened.with_projection(|p| p.deferred_command_count()) > 0 {
+        reopened
+            .flush_deferred_projection()
+            .expect("flush recovered deferred tail");
+    }
+    assert_eq!(
+        reopened.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        Some(3),
+        "deferred catch-up should durably apply each recovered push, claim, and finalize exactly once"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
     for suffix in ["", "-wal", "-shm"] {

@@ -125,9 +125,12 @@ impl LogStore for ObjectLog {
         limit: usize,
     ) -> EngineResult<CommandPage> {
         let from_seq = from.as_ref().map(|p| p.sequence + 1).unwrap_or(0);
-        let mut entries = self.log.read_from(shard, from_seq)?;
-        let has_more = entries.len() > limit;
-        entries.truncate(limit);
+        let page_limit = limit.max(1);
+        let mut entries = self
+            .log
+            .read_from_limited(shard, from_seq, page_limit + 1)?;
+        let has_more = entries.len() > page_limit;
+        entries.truncate(page_limit);
         let next = if has_more {
             // `from`'s contract is "last consumed sequence" (the caller re-adds +1 above), so the
             // resume cursor must carry the LAST RETURNED entry's own sequence, not one past it —
