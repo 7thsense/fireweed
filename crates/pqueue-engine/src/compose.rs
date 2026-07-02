@@ -914,34 +914,45 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         }
     }
 
-    /// Synchronously commit ONE read-modify-write command on the group-commit log: buffer it, force-seal it
-    /// (the buffer is empty — the caller force-sealed any prior batch first), advance the high-water, and
+    /// Synchronously commit a read-modify-write command batch on the group-commit log: buffer it, force-seal
+    /// it (the buffer is empty — the caller force-sealed any prior batch first), advance the high-water, and
     /// apply it. The op observes its own write before returning (ack-after-seal, but synchronous because the
     /// caller already selected/validated under the lock). Caller holds the lock.
-    fn gc_commit_sync(
+    fn gc_commit_sync_batch(
         inner: &mut Inner<L, P>,
         shard: &QueueKey,
-        env: CommandEnvelope,
+        envs: Vec<CommandEnvelope>,
         expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
-        validate_gate_command(false, &env.command)?;
-        validate_request_replay_metadata(&env)?;
-        let now_ms = ts_to_ms(env.created_at);
+        for env in &envs {
+            validate_gate_command(false, &env.command)?;
+            validate_request_replay_metadata(env)?;
+        }
+        if envs.is_empty() {
+            return Ok(());
+        }
+        let now_ms = ts_to_ms(envs[0].created_at);
         let seal_epoch = match expected_epoch {
             Some(e) => e,
             None => inner.log.current_epoch(shard)?,
         };
-        let mut positions =
-            inner
-                .log
-                .gc_enqueue(shard, std::slice::from_ref(&env), seal_epoch, now_ms)?;
+        let mut positions = inner.log.gc_enqueue(shard, &envs, seal_epoch, now_ms)?;
         if positions.is_empty() {
             positions = inner.log.gc_seal(shard, seal_epoch, now_ms)?;
         }
         if let Some(last) = positions.last() {
             inner.log.gc_advance_high_water(shard, last.clone())?;
         }
-        inner.projection.apply_live_owned(positions, vec![env])
+        inner.projection.apply_live_owned(positions, envs)
+    }
+
+    fn gc_commit_sync(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        env: CommandEnvelope,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        Self::gc_commit_sync_batch(inner, shard, vec![env], expected_epoch)
     }
 
     /// Whether the group-commit write path is active for this composition (the builder flag AND a capable
@@ -1232,17 +1243,29 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         env: CommandEnvelope,
         expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
-        validate_gate_command(false, &env.command)?;
+        Self::commit_locked_batch(inner, shard, vec![env], expected_epoch)
+    }
+
+    fn commit_locked_batch(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        envs: Vec<CommandEnvelope>,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        for env in &envs {
+            validate_gate_command(false, &env.command)?;
+        }
+        if envs.is_empty() {
+            return Ok(());
+        }
         let epoch = inner.log.current_epoch(shard)?;
         // ADR-009 / TD-003: an owner that supplies its cached acquire-time epoch (`Some`) is fenced here if
         // superseded; `None` is the degenerate sole-owner path (stamp current, never fence).
         if expected_epoch.is_some_and(|e| e != epoch) {
             return Err(EngineError::EpochFenced);
         }
-        let positions = inner.log.append(shard, std::slice::from_ref(&env), epoch)?;
-        inner
-            .projection
-            .apply_live(&positions, std::slice::from_ref(&env))
+        let positions = inner.log.append(shard, &envs, epoch)?;
+        inner.projection.apply_live(&positions, &envs)
     }
 }
 
@@ -2610,12 +2633,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 );
                 envelopes.push(e);
 
-                // Commit the entry's envelopes under the held lock. The epoch cannot change while we hold
-                // the lock, so either the first append fences (EpochFenced, before any mutation) or all of
-                // the entry's appends commit — each entry's writes are atomic.
-                for env in envelopes {
-                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
-                }
+                // Commit the entry's envelopes under the held lock as one append batch. The epoch cannot
+                // change while we hold the lock, so either the append fences (EpochFenced, before any
+                // mutation) or all of the entry's writes commit and apply together.
+                Self::commit_locked_batch(&mut g, shard, envelopes, expected_epoch)?;
                 recovery.push(EntryRecovery {
                     consumed_input_id,
                     instance,

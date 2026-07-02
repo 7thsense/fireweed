@@ -901,14 +901,17 @@ fn segment_density_objects_put_upper(resident: u64) -> u64 {
 fn segment_density_ok(row: &ProfileRun, resident: u64, target_bytes: u64) -> bool {
     let packing_bound = segment_density_max_commands(target_bytes);
     let objects_put_upper = segment_density_objects_put_upper(resident);
-    // Something sealed; PUT volume is bounded to O(resident); mean/max commands-per-segment are >= 1 and
-    // cannot exceed the byte-target packing bound.
+    // Something sealed; PUT volume is bounded to O(resident); mean/max commands-per-segment reject the
+    // one-command-per-segment failure mode for nontrivial runs and cannot exceed the byte-target packing
+    // bound.
+    let min_dense_batch = if resident > 1 { 2.0 } else { 1.0 };
+    let min_dense_max = if resident > 1 { 2 } else { 1 };
     row.segments_sealed >= 1
         && row.objects_put >= 1
         && row.objects_put <= objects_put_upper
-        && row.mean_commands_per_segment >= 1.0
+        && row.mean_commands_per_segment >= min_dense_batch
         && row.mean_commands_per_segment <= packing_bound as f64
-        && row.max_commands_per_segment >= 1
+        && row.max_commands_per_segment >= min_dense_max
         && (row.max_commands_per_segment as u64) <= packing_bound
 }
 
