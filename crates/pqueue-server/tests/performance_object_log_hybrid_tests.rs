@@ -162,6 +162,19 @@ struct ObjectStoreUtilization {
     retained_hours: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ObjectStoreCostBreakdown {
+    put_list_usd: f64,
+    get_usd: f64,
+    storage_usd: f64,
+}
+
+impl ObjectStoreCostBreakdown {
+    fn total_usd(self) -> f64 {
+        self.put_list_usd + self.get_usd + self.storage_usd
+    }
+}
+
 impl ObjectStoreUtilization {
     fn mean_object_bytes(self) -> f64 {
         if self.object_count == 0 {
@@ -177,19 +190,54 @@ impl ObjectStoreUtilization {
         }
         self.segment_bytes as f64 / capacity as f64
     }
+
+    fn api_request_count(self) -> u64 {
+        self.put_count
+            .saturating_add(self.get_count)
+            .saturating_add(self.list_count)
+    }
+
+    fn api_requests_per_resident_item(self, resident: u64) -> f64 {
+        if resident == 0 {
+            return 0.0;
+        }
+        self.api_request_count() as f64 / resident as f64
+    }
+
+    fn cost_per_million_resident_items_usd(
+        self,
+        resident: u64,
+        prices: &pqueue_release::cost::PriceInputs,
+    ) -> f64 {
+        if resident == 0 {
+            return 0.0;
+        }
+        estimate_s3_cost_usd(self, prices) * 1_000_000.0 / resident as f64
+    }
 }
 
-fn estimate_s3_cost_usd(
+fn s3_cost_breakdown(
     m: ObjectStoreUtilization,
     prices: &pqueue_release::cost::PriceInputs,
-) -> f64 {
+) -> ObjectStoreCostBreakdown {
     let put_list_cost =
         (m.put_count.saturating_add(m.list_count) as f64 / 1000.0) * prices.s3_put_per_1k;
     let get_cost = (m.get_count as f64 / 1000.0) * prices.s3_get_per_1k;
     let storage_gb = m.total_bytes as f64 / pqueue_release::cost::BYTES_PER_GB;
     let month_fraction = m.retained_hours / pqueue_release::cost::HOURS_PER_MONTH;
     let storage_cost = storage_gb * prices.s3_storage_per_gb_month * month_fraction;
-    put_list_cost + get_cost + storage_cost
+    ObjectStoreCostBreakdown {
+        put_list_usd: put_list_cost,
+        get_usd: get_cost,
+        storage_usd: storage_cost,
+    }
+}
+
+fn estimate_s3_cost_usd(
+    m: ObjectStoreUtilization,
+    prices: &pqueue_release::cost::PriceInputs,
+) -> f64 {
+    s3_cost_breakdown(m, prices).total_usd()
 }
 
 fn s3_price_inputs_json(
@@ -212,6 +260,7 @@ fn insert_object_store_utilization(
     m: ObjectStoreUtilization,
     prices: &pqueue_release::cost::PriceInputs,
 ) {
+    let cost = s3_cost_breakdown(m, prices);
     values.insert(
         format!("{prefix}_object_count"),
         serde_json::json!(m.object_count),
@@ -249,8 +298,24 @@ fn insert_object_store_utilization(
         serde_json::json!(m.list_count),
     );
     values.insert(
+        format!("{prefix}_s3_api_request_count"),
+        serde_json::json!(m.api_request_count()),
+    );
+    values.insert(
+        format!("{prefix}_s3_put_list_cost_usd"),
+        serde_json::json!(round6(cost.put_list_usd)),
+    );
+    values.insert(
+        format!("{prefix}_s3_get_cost_usd"),
+        serde_json::json!(round6(cost.get_usd)),
+    );
+    values.insert(
+        format!("{prefix}_s3_storage_cost_usd"),
+        serde_json::json!(round6(cost.storage_usd)),
+    );
+    values.insert(
         format!("{prefix}_s3_estimated_cost_usd"),
-        serde_json::json!(round6(estimate_s3_cost_usd(m, prices))),
+        serde_json::json!(round6(cost.total_usd())),
     );
     values.insert(
         format!("{prefix}_s3_price_inputs"),
@@ -262,6 +327,7 @@ fn apply_object_store_counters(
     row: &mut ProfileRun,
     c: &SegmentCounters,
     target_segment_bytes: usize,
+    resident: u64,
 ) {
     let object_store = ObjectStoreUtilization {
         object_count: c.object_count,
@@ -276,6 +342,7 @@ fn apply_object_store_counters(
         retained_hours: pqueue_release::cost::HOURS_PER_MONTH,
     };
     let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
+    let cost = s3_cost_breakdown(object_store, &prices);
     row.segments_sealed = c.segments_sealed;
     row.objects_put = c.objects_put;
     row.mean_commands_per_segment = round3(c.mean_batch_size());
@@ -289,7 +356,15 @@ fn apply_object_store_counters(
     row.put_count = object_store.put_count;
     row.get_count = object_store.get_count;
     row.list_count = object_store.list_count;
-    row.s3_estimated_cost_usd = round6(estimate_s3_cost_usd(object_store, &prices));
+    row.s3_api_request_count = object_store.api_request_count();
+    row.s3_api_requests_per_resident_item =
+        round6(object_store.api_requests_per_resident_item(resident));
+    row.s3_put_list_cost_usd = round6(cost.put_list_usd);
+    row.s3_get_cost_usd = round6(cost.get_usd);
+    row.s3_storage_cost_usd = round6(cost.storage_usd);
+    row.s3_estimated_cost_usd = round6(cost.total_usd());
+    row.s3_cost_per_million_resident_items_usd =
+        round6(object_store.cost_per_million_resident_items_usd(resident, &prices));
     row.s3_price_inputs = s3_price_inputs_json(&prices, object_store.retained_hours);
 }
 
@@ -366,7 +441,13 @@ struct ProfileRun {
     put_count: u64,
     get_count: u64,
     list_count: u64,
+    s3_api_request_count: u64,
+    s3_api_requests_per_resident_item: f64,
+    s3_put_list_cost_usd: f64,
+    s3_get_cost_usd: f64,
+    s3_storage_cost_usd: f64,
     s3_estimated_cost_usd: f64,
+    s3_cost_per_million_resident_items_usd: f64,
     s3_price_inputs: serde_json::Value,
     recovery_wall_ms: Option<f64>,
     recovery_tail_replayed: Option<u64>,
@@ -494,6 +575,7 @@ where
         retained_hours: pqueue_release::cost::HOURS_PER_MONTH,
     };
     let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
+    let cost = s3_cost_breakdown(object_store, &prices);
     let ack_p50_ms = pct(&mut ack_latencies.clone(), 0.50);
     let ack_p95_ms = pct(&mut ack_latencies.clone(), 0.95);
     let ack_p99_ms = pct(&mut ack_latencies, 0.99);
@@ -519,7 +601,17 @@ where
         put_count: object_store.put_count,
         get_count: object_store.get_count,
         list_count: object_store.list_count,
-        s3_estimated_cost_usd: round6(estimate_s3_cost_usd(object_store, &prices)),
+        s3_api_request_count: object_store.api_request_count(),
+        s3_api_requests_per_resident_item: round6(
+            object_store.api_requests_per_resident_item(resident),
+        ),
+        s3_put_list_cost_usd: round6(cost.put_list_usd),
+        s3_get_cost_usd: round6(cost.get_usd),
+        s3_storage_cost_usd: round6(cost.storage_usd),
+        s3_estimated_cost_usd: round6(cost.total_usd()),
+        s3_cost_per_million_resident_items_usd: round6(
+            object_store.cost_per_million_resident_items_usd(resident, &prices),
+        ),
         s3_price_inputs: s3_price_inputs_json(&prices, object_store.retained_hours),
         recovery_wall_ms: None,
         recovery_tail_replayed: None,
@@ -787,7 +879,7 @@ async fn run_hybrid(
     assert_eq!(row.disk_loss_pending_after, Some(resident));
     drop(disk_reopened);
 
-    apply_object_store_counters(&mut row, &c, cfg.target_bytes);
+    apply_object_store_counters(&mut row, &c, cfg.target_bytes, resident);
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&projection);
@@ -1101,9 +1193,19 @@ const MIN_COMMAND_BYTES: u64 = 8;
 
 /// Documented upper bound on object-PUT volume: a bounded constant per resident item. Each resident item
 /// drives a push, a claim, and a finalize command, and each sealed segment writes a bounded number of
-/// objects (segment + manifest), so total PUTs are `O(resident)`. This catches a regression that writes an
-/// unbounded number of objects (e.g. one object per command with no batching, or a PUT storm).
+/// objects (segment + manifest), so total PUTs are `O(resident)`. A much tighter cost gate below rejects
+/// the expensive case; this bound catches outright PUT storms.
 const OBJECTS_PUT_PER_RESIDENT_MAX: u64 = 8;
+
+/// Release/smoke cost guard normalized to resident work. At this level, a healthy batched object log stays
+/// comfortably below the cap, while one-object-per-item/command behavior lands orders of magnitude higher
+/// once S3 PUT/LIST pricing is applied.
+const S3_COST_PER_MILLION_RESIDENT_ITEMS_MAX_USD: f64 = 1.0;
+
+/// A storage shape is item-efficient when each object PUT represents enough resident work. This permits a
+/// single command per segment only when that command is itself a large batch; it rejects object-log shapes
+/// that spray tiny files for a multi-million member campaign.
+const MIN_RESIDENT_ITEMS_PER_OBJECT_PUT: f64 = 100.0;
 
 fn segment_density_max_commands(target_bytes: u64) -> u64 {
     (target_bytes / MIN_COMMAND_BYTES).max(1)
@@ -1118,18 +1220,37 @@ fn segment_density_objects_put_upper(resident: u64) -> u64 {
 fn segment_density_ok(row: &ProfileRun, resident: u64, target_bytes: u64) -> bool {
     let packing_bound = segment_density_max_commands(target_bytes);
     let objects_put_upper = segment_density_objects_put_upper(resident);
-    // Something sealed; PUT volume is bounded to O(resident); mean/max commands-per-segment reject the
-    // one-command-per-segment failure mode for nontrivial runs and cannot exceed the byte-target packing
-    // bound.
+    let resident_items_per_object_put = if row.objects_put == 0 {
+        0.0
+    } else {
+        resident as f64 / row.objects_put as f64
+    };
+    // Something sealed; PUT volume is bounded to O(resident). Command-level coalescing is preferred, but a
+    // segment with one command is valid when that command represents a large batch of resident work.
     let min_dense_batch = if resident > 1 { 2.0 } else { 1.0 };
     let min_dense_max = if resident > 1 { 2 } else { 1 };
+    let command_packing_ok = row.mean_commands_per_segment >= min_dense_batch
+        && row.max_commands_per_segment >= min_dense_max;
+    let item_batch_packing_ok = resident_items_per_object_put >= MIN_RESIDENT_ITEMS_PER_OBJECT_PUT;
     row.segments_sealed >= 1
         && row.objects_put >= 1
         && row.objects_put <= objects_put_upper
-        && row.mean_commands_per_segment >= min_dense_batch
+        && row.mean_commands_per_segment >= 1.0
         && row.mean_commands_per_segment <= packing_bound as f64
-        && row.max_commands_per_segment >= min_dense_max
+        && row.max_commands_per_segment >= 1
         && (row.max_commands_per_segment as u64) <= packing_bound
+        && (command_packing_ok || item_batch_packing_ok)
+}
+
+fn s3_cost_efficiency_ok(row: &ProfileRun) -> bool {
+    row.s3_estimated_cost_usd.is_finite()
+        && row.s3_cost_per_million_resident_items_usd.is_finite()
+        && row.s3_cost_per_million_resident_items_usd <= S3_COST_PER_MILLION_RESIDENT_ITEMS_MAX_USD
+        && row.s3_api_request_count
+            == row
+                .put_count
+                .saturating_add(row.get_count)
+                .saturating_add(row.list_count)
 }
 
 /// The bounded-debt gate (AC2): the sampled apply-lag series stayed under the documented structural ceiling
@@ -1151,6 +1272,7 @@ fn compute_bars_met(
     disk_loss_ok: bool,
     bounded_debt_ok: bool,
     segment_density_ok: bool,
+    s3_cost_efficiency_ok: bool,
     attribution_ok: bool,
 ) -> bool {
     ack_ratio_ok
@@ -1159,6 +1281,7 @@ fn compute_bars_met(
         && disk_loss_ok
         && bounded_debt_ok
         && segment_density_ok
+        && s3_cost_efficiency_ok
         && attribution_ok
 }
 
@@ -1171,6 +1294,7 @@ struct HybridGates {
     disk_loss_ok: bool,
     bounded_debt_ok: bool,
     segment_density_ok: bool,
+    s3_cost_efficiency_ok: bool,
     attribution_ok: bool,
     bars_met: bool,
     attribution: HybridAttribution,
@@ -1180,6 +1304,7 @@ struct HybridGates {
     mean_commands_per_segment: f64,
     max_commands_per_segment: usize,
     objects_put: u64,
+    s3_cost_per_million_resident_items_usd: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1231,6 +1356,7 @@ fn emit_ledger(
     // and hot-path attribution reconciliation — all folded into `bars_met`.
     let bounded_debt_ok = bounded_debt_ok(hybrid);
     let segment_density_ok = segment_density_ok(hybrid, resident, target_bytes);
+    let s3_cost_efficiency_ok = s3_cost_efficiency_ok(hybrid);
     let attribution_ok = attribution.is_reconciled(0.30, 5.0);
     let bars_met = compute_bars_met(
         ack_ratio_ok,
@@ -1239,6 +1365,7 @@ fn emit_ledger(
         disk_loss_ok,
         bounded_debt_ok,
         segment_density_ok,
+        s3_cost_efficiency_ok,
         attribution_ok,
     );
 
@@ -1336,8 +1463,32 @@ fn emit_ledger(
         values.insert(format!("{p}_get_count"), serde_json::json!(row.get_count));
         values.insert(format!("{p}_list_count"), serde_json::json!(row.list_count));
         values.insert(
+            format!("{p}_s3_api_request_count"),
+            serde_json::json!(row.s3_api_request_count),
+        );
+        values.insert(
+            format!("{p}_s3_api_requests_per_resident_item"),
+            serde_json::json!(row.s3_api_requests_per_resident_item),
+        );
+        values.insert(
+            format!("{p}_s3_put_list_cost_usd"),
+            serde_json::json!(row.s3_put_list_cost_usd),
+        );
+        values.insert(
+            format!("{p}_s3_get_cost_usd"),
+            serde_json::json!(row.s3_get_cost_usd),
+        );
+        values.insert(
+            format!("{p}_s3_storage_cost_usd"),
+            serde_json::json!(row.s3_storage_cost_usd),
+        );
+        values.insert(
             format!("{p}_s3_estimated_cost_usd"),
             serde_json::json!(row.s3_estimated_cost_usd),
+        );
+        values.insert(
+            format!("{p}_s3_cost_per_million_resident_items_usd"),
+            serde_json::json!(row.s3_cost_per_million_resident_items_usd),
         );
         values.insert(format!("{p}_s3_price_inputs"), row.s3_price_inputs.clone());
         if let Some(v) = row.recovery_wall_ms {
@@ -1425,6 +1576,10 @@ fn emit_ledger(
         serde_json::json!(hybrid.objects_put),
     );
     values.insert(
+        "segment_density_resident_items_per_object_put".into(),
+        serde_json::json!(round3(resident as f64 / hybrid.objects_put.max(1) as f64)),
+    );
+    values.insert(
         "segment_density_segments_sealed".into(),
         serde_json::json!(hybrid.segments_sealed),
     );
@@ -1443,6 +1598,22 @@ fn emit_ledger(
     values.insert(
         "segment_density_ok".into(),
         serde_json::json!(segment_density_ok),
+    );
+    values.insert(
+        "s3_cost_efficiency_cost_per_million_resident_items_usd".into(),
+        serde_json::json!(hybrid.s3_cost_per_million_resident_items_usd),
+    );
+    values.insert(
+        "s3_cost_efficiency_cost_per_million_resident_items_max_usd".into(),
+        serde_json::json!(S3_COST_PER_MILLION_RESIDENT_ITEMS_MAX_USD),
+    );
+    values.insert(
+        "s3_cost_efficiency_api_requests_per_resident_item".into(),
+        serde_json::json!(hybrid.s3_api_requests_per_resident_item),
+    );
+    values.insert(
+        "s3_cost_efficiency_ok".into(),
+        serde_json::json!(s3_cost_efficiency_ok),
     );
 
     let row = pqueue_release::LedgerRow {
@@ -1484,6 +1655,7 @@ fn emit_ledger(
         disk_loss_ok,
         bounded_debt_ok,
         segment_density_ok,
+        s3_cost_efficiency_ok,
         attribution_ok,
         bars_met,
         attribution: *attribution,
@@ -1493,6 +1665,7 @@ fn emit_ledger(
         mean_commands_per_segment: hybrid.mean_commands_per_segment,
         max_commands_per_segment: hybrid.max_commands_per_segment,
         objects_put: hybrid.objects_put,
+        s3_cost_per_million_resident_items_usd: hybrid.s3_cost_per_million_resident_items_usd,
     }
 }
 
@@ -1518,6 +1691,8 @@ async fn run_suite(release: bool) -> HybridGates {
 fn release_default_batch(release: bool, resident: u64) -> u64 {
     if release && resident <= 10_000 {
         100
+    } else if release && resident >= 1_000_000 {
+        50_000
     } else if release {
         500
     } else {
@@ -2356,6 +2531,10 @@ fn object_store_utilization_inserts_release_ledger_fields() {
         "objectlog_hybrid_put_count",
         "objectlog_hybrid_get_count",
         "objectlog_hybrid_list_count",
+        "objectlog_hybrid_s3_api_request_count",
+        "objectlog_hybrid_s3_put_list_cost_usd",
+        "objectlog_hybrid_s3_get_cost_usd",
+        "objectlog_hybrid_s3_storage_cost_usd",
         "objectlog_hybrid_s3_estimated_cost_usd",
         "objectlog_hybrid_s3_price_inputs",
     ] {
@@ -2373,6 +2552,22 @@ fn object_store_utilization_inserts_release_ledger_fields() {
     assert_eq!(values["objectlog_hybrid_put_count"], serde_json::json!(7));
     assert_eq!(values["objectlog_hybrid_get_count"], serde_json::json!(2));
     assert_eq!(values["objectlog_hybrid_list_count"], serde_json::json!(1));
+    assert_eq!(
+        values["objectlog_hybrid_s3_api_request_count"],
+        serde_json::json!(10)
+    );
+    assert_eq!(
+        values["objectlog_hybrid_s3_estimated_cost_usd"],
+        serde_json::json!(round6(
+            values["objectlog_hybrid_s3_put_list_cost_usd"]
+                .as_f64()
+                .unwrap()
+                + values["objectlog_hybrid_s3_get_cost_usd"].as_f64().unwrap()
+                + values["objectlog_hybrid_s3_storage_cost_usd"]
+                    .as_f64()
+                    .unwrap()
+        ))
+    );
 
     let price_inputs = values["objectlog_hybrid_s3_price_inputs"]
         .as_object()
@@ -2435,6 +2630,7 @@ async fn performance_object_log_hybrid_attribution() {
             gates.disk_loss_ok,
             gates.bounded_debt_ok,
             gates.segment_density_ok,
+            gates.s3_cost_efficiency_ok,
             gates.attribution_ok,
         ),
         "bars_met must fold every gate input"
@@ -2457,10 +2653,12 @@ async fn performance_object_log_hybrid_attribution() {
 
     // Attribution is a required `bars_met` input: flipping it off flips `bars_met` off.
     assert!(
-        !compute_bars_met(true, true, true, true, true, true, false),
+        !compute_bars_met(true, true, true, true, true, true, true, false),
         "attribution must be a bars_met input"
     );
-    assert!(compute_bars_met(true, true, true, true, true, true, true));
+    assert!(compute_bars_met(
+        true, true, true, true, true, true, true, true
+    ));
 
     println!(
         "attribution: serialize={:.3} lock_wait={:.3} fsync={:.3} sqlite_apply={:.3} scheduler={:.3} sum={:.3} total={:.3}",
@@ -2518,10 +2716,12 @@ async fn performance_object_log_hybrid_bounded_debt_gate() {
 
     // Bounded-debt is a required `bars_met` input: flipping it off flips `bars_met` off.
     assert!(
-        !compute_bars_met(true, true, true, true, false, true, true),
+        !compute_bars_met(true, true, true, true, false, true, true, true),
         "bounded-debt must be a bars_met input"
     );
-    assert!(compute_bars_met(true, true, true, true, true, true, true));
+    assert!(compute_bars_met(
+        true, true, true, true, true, true, true, true
+    ));
 
     println!(
         "bounded-debt: samples={} max={} ceiling={} first_window_max={} last_window_max={} ok={}",
@@ -2566,6 +2766,7 @@ async fn performance_object_log_hybrid_segment_density_gate() {
         "segment_density_mean_commands_per_segment",
         "segment_density_max_commands_per_segment",
         "segment_density_objects_put",
+        "segment_density_resident_items_per_object_put",
         "segment_density_ok",
         "objectlog_hybrid_object_count",
         "objectlog_hybrid_total_bytes",
@@ -2576,8 +2777,18 @@ async fn performance_object_log_hybrid_segment_density_gate() {
         "objectlog_hybrid_put_count",
         "objectlog_hybrid_get_count",
         "objectlog_hybrid_list_count",
+        "objectlog_hybrid_s3_api_request_count",
+        "objectlog_hybrid_s3_api_requests_per_resident_item",
+        "objectlog_hybrid_s3_put_list_cost_usd",
+        "objectlog_hybrid_s3_get_cost_usd",
+        "objectlog_hybrid_s3_storage_cost_usd",
         "objectlog_hybrid_s3_estimated_cost_usd",
+        "objectlog_hybrid_s3_cost_per_million_resident_items_usd",
         "objectlog_hybrid_s3_price_inputs",
+        "s3_cost_efficiency_cost_per_million_resident_items_usd",
+        "s3_cost_efficiency_cost_per_million_resident_items_max_usd",
+        "s3_cost_efficiency_api_requests_per_resident_item",
+        "s3_cost_efficiency_ok",
         "process_vm_hwm_kb",
         "process_vm_rss_kb",
     ] {
@@ -2598,9 +2809,31 @@ async fn performance_object_log_hybrid_segment_density_gate() {
         values["objectlog_hybrid_put_count"].as_u64().unwrap_or(0) > 0,
         "PUT request count must be populated"
     );
+    assert_eq!(
+        values["objectlog_hybrid_s3_api_request_count"]
+            .as_u64()
+            .unwrap_or(0),
+        values["objectlog_hybrid_put_count"].as_u64().unwrap_or(0)
+            + values["objectlog_hybrid_get_count"].as_u64().unwrap_or(0)
+            + values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0),
+        "S3 API request count must be PUT+GET+LIST"
+    );
     assert!(
         values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0) > 0,
         "LIST request count must be populated"
+    );
+    assert!(
+        values["s3_cost_efficiency_cost_per_million_resident_items_usd"]
+            .as_f64()
+            .unwrap_or(f64::MAX)
+            <= values["s3_cost_efficiency_cost_per_million_resident_items_max_usd"]
+                .as_f64()
+                .unwrap_or(0.0),
+        "S3 cost per resident work unit must stay under the documented cap"
+    );
+    assert!(
+        gates.s3_cost_per_million_resident_items_usd <= S3_COST_PER_MILLION_RESIDENT_ITEMS_MAX_USD,
+        "gate result must expose the measured S3 cost efficiency"
     );
     assert!(
         values["process_vm_hwm_kb"].as_u64().unwrap_or(0) > 0
@@ -2610,10 +2843,16 @@ async fn performance_object_log_hybrid_segment_density_gate() {
 
     // Segment-density is a required `bars_met` input: flipping it off flips `bars_met` off.
     assert!(
-        !compute_bars_met(true, true, true, true, true, false, true),
+        !compute_bars_met(true, true, true, true, true, false, true, true),
         "segment-density must be a bars_met input"
     );
-    assert!(compute_bars_met(true, true, true, true, true, true, true));
+    assert!(
+        !compute_bars_met(true, true, true, true, true, true, false, true),
+        "S3 cost efficiency must be a bars_met input"
+    );
+    assert!(compute_bars_met(
+        true, true, true, true, true, true, true, true
+    ));
 
     println!(
         "segment-density: mean={} max={} objects_put={} ok={}",
