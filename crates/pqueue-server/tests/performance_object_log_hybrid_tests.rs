@@ -33,7 +33,7 @@ use pqueue_engine::{
     FinalizePort, InProcessControlPlane, ProjectionRead, PushCommand, PushItem, PushPort, PushSpec,
     QueueCommand, QueueKey,
 };
-use pqueue_objectlog::{ComposedObjectLogBackend, ObjectLog};
+use pqueue_objectlog::{ComposedObjectLogBackend, ObjectLog, segmented::SegmentCounters};
 use pqueue_server::{SegmentConfig, SegmentedObjectLogSqliteBackend};
 use pqueue_sqlite::{
     CheckpointLineage, DEFAULT_DEFERRED_FLUSH_CHUNK, HybridProjectionStore, SqliteCheckpointStore,
@@ -123,6 +123,155 @@ fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }
 
+fn round6(v: f64) -> f64 {
+    (v * 1_000_000.0).round() / 1_000_000.0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ObjectStoreUtilization {
+    object_count: u64,
+    total_bytes: u64,
+    segment_bytes: u64,
+    segment_count: u64,
+    target_segment_bytes: u64,
+    max_object_bytes: u64,
+    put_count: u64,
+    get_count: u64,
+    list_count: u64,
+    retained_hours: f64,
+}
+
+impl ObjectStoreUtilization {
+    fn mean_object_bytes(self) -> f64 {
+        if self.object_count == 0 {
+            return 0.0;
+        }
+        self.total_bytes as f64 / self.object_count as f64
+    }
+
+    fn storage_utilization_ratio(self) -> f64 {
+        let capacity = self.segment_count.saturating_mul(self.target_segment_bytes);
+        if capacity == 0 {
+            return 0.0;
+        }
+        self.segment_bytes as f64 / capacity as f64
+    }
+}
+
+fn estimate_s3_cost_usd(
+    m: ObjectStoreUtilization,
+    prices: &pqueue_release::cost::PriceInputs,
+) -> f64 {
+    let put_list_cost =
+        (m.put_count.saturating_add(m.list_count) as f64 / 1000.0) * prices.s3_put_per_1k;
+    let get_cost = (m.get_count as f64 / 1000.0) * prices.s3_get_per_1k;
+    let storage_gb = m.total_bytes as f64 / pqueue_release::cost::BYTES_PER_GB;
+    let month_fraction = m.retained_hours / pqueue_release::cost::HOURS_PER_MONTH;
+    let storage_cost = storage_gb * prices.s3_storage_per_gb_month * month_fraction;
+    put_list_cost + get_cost + storage_cost
+}
+
+fn s3_price_inputs_json(
+    prices: &pqueue_release::cost::PriceInputs,
+    retained_hours: f64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "region": "us-east-1",
+        "s3_put_copy_post_list_per_1k_usd": prices.s3_put_per_1k,
+        "s3_get_per_1k_usd": prices.s3_get_per_1k,
+        "s3_standard_storage_per_gb_month_usd": prices.s3_storage_per_gb_month,
+        "retained_hours": retained_hours,
+        "source": prices.instance_source,
+    })
+}
+
+fn insert_object_store_utilization(
+    values: &mut BTreeMap<String, serde_json::Value>,
+    prefix: &str,
+    m: ObjectStoreUtilization,
+    prices: &pqueue_release::cost::PriceInputs,
+) {
+    values.insert(
+        format!("{prefix}_object_count"),
+        serde_json::json!(m.object_count),
+    );
+    values.insert(
+        format!("{prefix}_total_bytes"),
+        serde_json::json!(m.total_bytes),
+    );
+    values.insert(
+        format!("{prefix}_segment_bytes"),
+        serde_json::json!(m.segment_bytes),
+    );
+    values.insert(
+        format!("{prefix}_mean_object_bytes"),
+        serde_json::json!(round3(m.mean_object_bytes())),
+    );
+    values.insert(
+        format!("{prefix}_max_object_bytes"),
+        serde_json::json!(m.max_object_bytes),
+    );
+    values.insert(
+        format!("{prefix}_storage_utilization_ratio"),
+        serde_json::json!(round6(m.storage_utilization_ratio())),
+    );
+    values.insert(
+        format!("{prefix}_put_count"),
+        serde_json::json!(m.put_count),
+    );
+    values.insert(
+        format!("{prefix}_get_count"),
+        serde_json::json!(m.get_count),
+    );
+    values.insert(
+        format!("{prefix}_list_count"),
+        serde_json::json!(m.list_count),
+    );
+    values.insert(
+        format!("{prefix}_s3_estimated_cost_usd"),
+        serde_json::json!(round6(estimate_s3_cost_usd(m, prices))),
+    );
+    values.insert(
+        format!("{prefix}_s3_price_inputs"),
+        s3_price_inputs_json(prices, m.retained_hours),
+    );
+}
+
+fn apply_object_store_counters(
+    row: &mut ProfileRun,
+    c: &SegmentCounters,
+    target_segment_bytes: usize,
+) {
+    let object_store = ObjectStoreUtilization {
+        object_count: c.object_count,
+        total_bytes: c.total_bytes,
+        segment_bytes: c.segment_bytes,
+        segment_count: c.segments_sealed,
+        target_segment_bytes: target_segment_bytes as u64,
+        max_object_bytes: c.max_object_bytes,
+        put_count: c.put_count,
+        get_count: c.get_count,
+        list_count: c.list_count,
+        retained_hours: pqueue_release::cost::HOURS_PER_MONTH,
+    };
+    let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
+    row.segments_sealed = c.segments_sealed;
+    row.objects_put = c.objects_put;
+    row.mean_commands_per_segment = round3(c.mean_batch_size());
+    row.max_commands_per_segment = c.max_batch_size();
+    row.object_count = object_store.object_count;
+    row.total_bytes = object_store.total_bytes;
+    row.segment_bytes = object_store.segment_bytes;
+    row.mean_object_bytes = round3(object_store.mean_object_bytes());
+    row.max_object_bytes = object_store.max_object_bytes;
+    row.storage_utilization_ratio = round6(object_store.storage_utilization_ratio());
+    row.put_count = object_store.put_count;
+    row.get_count = object_store.get_count;
+    row.list_count = object_store.list_count;
+    row.s3_estimated_cost_usd = round6(estimate_s3_cost_usd(object_store, &prices));
+    row.s3_price_inputs = s3_price_inputs_json(&prices, object_store.retained_hours);
+}
+
 fn scratch(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "pqueue-hybrid-perf-{label}-{}-{}",
@@ -187,6 +336,17 @@ struct ProfileRun {
     objects_put: u64,
     mean_commands_per_segment: f64,
     max_commands_per_segment: usize,
+    object_count: u64,
+    total_bytes: u64,
+    segment_bytes: u64,
+    mean_object_bytes: f64,
+    max_object_bytes: u64,
+    storage_utilization_ratio: f64,
+    put_count: u64,
+    get_count: u64,
+    list_count: u64,
+    s3_estimated_cost_usd: f64,
+    s3_price_inputs: serde_json::Value,
     recovery_wall_ms: Option<f64>,
     recovery_tail_replayed: Option<u64>,
     recovery_pending_after: Option<u64>,
@@ -207,7 +367,8 @@ async fn exercise_profile<B>(
     resident: u64,
     load_batch: u64,
     claim_batch: usize,
-    mut counters: impl FnMut() -> (u64, u64, f64, usize),
+    target_segment_bytes: usize,
+    mut counters: impl FnMut() -> SegmentCounters,
 ) -> ProfileRun
 where
     B: ControlPlaneStore
@@ -244,41 +405,76 @@ where
 
     let mut claim_finalize_latencies = Vec::new();
     let mut claimed_total = 0u64;
+    let rmw_window = env_u64("PQUEUE_HYBRID_RMW_WINDOW", 64).max(1) as usize;
     while claimed_total < resident {
-        let token = LeaseToken::new(format!("lt-{backend_profile}-{claimed_total}")).unwrap();
         let t = Instant::now();
-        let claimed = backend
-            .claim(ClaimRequest {
-                shard: shard.clone(),
-                worker_id: WorkerId::new("w").unwrap(),
-                max_items: claim_batch.min((resident - claimed_total) as usize),
-                lease_token: token,
-                lease_expires_at: ts(60_000),
-                now: ts(0),
-                compatibility: ClaimCompatibility::default(),
-                expected_epoch: None,
+        let remaining = resident - claimed_total;
+        let claim_ops = remaining
+            .div_ceil(claim_batch.max(1) as u64)
+            .min(rmw_window as u64) as usize;
+        let claims: Vec<_> = (0..claim_ops)
+            .map(|op| {
+                let offset = claimed_total + (op as u64 * claim_batch as u64);
+                let token = LeaseToken::new(format!("lt-{backend_profile}-{offset}")).unwrap();
+                backend.claim(ClaimRequest {
+                    shard: shard.clone(),
+                    worker_id: WorkerId::new("w").unwrap(),
+                    max_items: claim_batch.min((resident - offset) as usize),
+                    lease_token: token,
+                    lease_expires_at: ts(60_000),
+                    now: ts(0),
+                    compatibility: ClaimCompatibility::default(),
+                    expected_epoch: None,
+                })
             })
-            .await
-            .expect("claim");
-        if claimed.items.is_empty() {
+            .collect();
+        let mut claimed_batches = Vec::with_capacity(claim_ops);
+        for claim in claims {
+            let claimed = claim.await.expect("claim");
+            if !claimed.items.is_empty() {
+                claimed_batches.push(claimed);
+            }
+        }
+        if claimed_batches.is_empty() {
             break;
         }
-        let outcomes: Vec<FinalizeOutcome> = claimed
-            .items
+        let claimed_in_window: u64 = claimed_batches
             .iter()
-            .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+            .map(|claimed| claimed.items.len() as u64)
+            .sum();
+        let finalizes: Vec<_> = claimed_batches
+            .iter()
+            .map(|claimed| {
+                let outcomes: Vec<FinalizeOutcome> = claimed
+                    .items
+                    .iter()
+                    .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+                    .collect();
+                backend.finalize(&shard, outcomes, ts(1), None)
+            })
             .collect();
-        backend
-            .finalize(&shard, outcomes, ts(1), None)
-            .await
-            .expect("finalize");
-        claimed_total += claimed.items.len() as u64;
+        for finalize in finalizes {
+            finalize.await.expect("finalize");
+        }
+        claimed_total += claimed_in_window;
         claim_finalize_latencies.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     assert_eq!(claimed_total, resident);
 
-    let (segments_sealed, objects_put, mean_commands_per_segment, max_commands_per_segment) =
-        counters();
+    let counters = counters();
+    let object_store = ObjectStoreUtilization {
+        object_count: counters.object_count,
+        total_bytes: counters.total_bytes,
+        segment_bytes: counters.segment_bytes,
+        segment_count: counters.segments_sealed,
+        target_segment_bytes: target_segment_bytes as u64,
+        max_object_bytes: counters.max_object_bytes,
+        put_count: counters.put_count,
+        get_count: counters.get_count,
+        list_count: counters.list_count,
+        retained_hours: pqueue_release::cost::HOURS_PER_MONTH,
+    };
+    let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
     let ack_p50_ms = pct(&mut ack_latencies.clone(), 0.50);
     let ack_p95_ms = pct(&mut ack_latencies.clone(), 0.95);
     let ack_p99_ms = pct(&mut ack_latencies, 0.99);
@@ -291,10 +487,21 @@ where
         ack_p99_ms: round3(ack_p99_ms),
         push_per_s: round3(resident as f64 / push_elapsed.max(0.001)),
         claim_finalize_p95_ms: round3(claim_finalize_p95_ms),
-        segments_sealed,
-        objects_put,
-        mean_commands_per_segment: round3(mean_commands_per_segment),
-        max_commands_per_segment,
+        segments_sealed: counters.segments_sealed,
+        objects_put: counters.objects_put,
+        mean_commands_per_segment: round3(counters.mean_batch_size()),
+        max_commands_per_segment: counters.max_batch_size(),
+        object_count: object_store.object_count,
+        total_bytes: object_store.total_bytes,
+        segment_bytes: object_store.segment_bytes,
+        mean_object_bytes: round3(object_store.mean_object_bytes()),
+        max_object_bytes: object_store.max_object_bytes,
+        storage_utilization_ratio: round6(object_store.storage_utilization_ratio()),
+        put_count: object_store.put_count,
+        get_count: object_store.get_count,
+        list_count: object_store.list_count,
+        s3_estimated_cost_usd: round6(estimate_s3_cost_usd(object_store, &prices)),
+        s3_price_inputs: s3_price_inputs_json(&prices, object_store.retained_hours),
         recovery_wall_ms: None,
         recovery_tail_replayed: None,
         recovery_pending_after: None,
@@ -417,15 +624,8 @@ async fn run_hybrid(
         resident,
         load_batch,
         claim_batch,
-        || {
-            let c = backend.with_log(|log| log.counters());
-            (
-                c.segments_sealed,
-                c.objects_put,
-                c.mean_batch_size(),
-                c.max_batch_size(),
-            )
-        },
+        cfg.target_bytes,
+        || backend.with_log(|log| log.counters()),
     )
     .await;
     sampler_stop.store(true, Ordering::Release);
@@ -553,10 +753,7 @@ async fn run_hybrid(
     row.disk_loss_pending_after = Some(disk_reopened.metrics(&disk_shard).await.unwrap().pending);
     assert_eq!(row.disk_loss_pending_after, Some(resident));
 
-    row.segments_sealed = c.segments_sealed;
-    row.objects_put = c.objects_put;
-    row.mean_commands_per_segment = round3(c.mean_batch_size());
-    row.max_commands_per_segment = c.max_batch_size();
+    apply_object_store_counters(&mut row, &c, cfg.target_bytes);
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&projection);
@@ -588,15 +785,8 @@ async fn run_inmemory(
         resident,
         load_batch,
         claim_batch,
-        || {
-            let c = backend.with_log(|log| log.counters());
-            (
-                c.segments_sealed,
-                c.objects_put,
-                c.mean_batch_size(),
-                c.max_batch_size(),
-            )
-        },
+        cfg.target_bytes,
+        || backend.with_log(|log| log.counters()),
     )
     .await;
     flusher.abort();
@@ -627,15 +817,8 @@ async fn run_sqlite(
         resident,
         load_batch,
         claim_batch,
-        || {
-            let c = backend.segment_counters();
-            (
-                c.segments_sealed,
-                c.objects_put,
-                c.mean_batch_size(),
-                c.max_batch_size(),
-            )
-        },
+        cfg.target_bytes,
+        || backend.segment_counters(),
     )
     .await;
     flusher.abort();
@@ -1083,6 +1266,38 @@ fn emit_ledger(
             format!("{p}_max_commands_per_segment"),
             serde_json::json!(row.max_commands_per_segment),
         );
+        values.insert(
+            format!("{p}_object_count"),
+            serde_json::json!(row.object_count),
+        );
+        values.insert(
+            format!("{p}_total_bytes"),
+            serde_json::json!(row.total_bytes),
+        );
+        values.insert(
+            format!("{p}_segment_bytes"),
+            serde_json::json!(row.segment_bytes),
+        );
+        values.insert(
+            format!("{p}_mean_object_bytes"),
+            serde_json::json!(row.mean_object_bytes),
+        );
+        values.insert(
+            format!("{p}_max_object_bytes"),
+            serde_json::json!(row.max_object_bytes),
+        );
+        values.insert(
+            format!("{p}_storage_utilization_ratio"),
+            serde_json::json!(row.storage_utilization_ratio),
+        );
+        values.insert(format!("{p}_put_count"), serde_json::json!(row.put_count));
+        values.insert(format!("{p}_get_count"), serde_json::json!(row.get_count));
+        values.insert(format!("{p}_list_count"), serde_json::json!(row.list_count));
+        values.insert(
+            format!("{p}_s3_estimated_cost_usd"),
+            serde_json::json!(row.s3_estimated_cost_usd),
+        );
+        values.insert(format!("{p}_s3_price_inputs"), row.s3_price_inputs.clone());
         if let Some(v) = row.recovery_wall_ms {
             values.insert(format!("{p}_recovery_wall_ms"), serde_json::json!(v));
         }
@@ -2041,6 +2256,99 @@ fn read_emitted_values(suite: &str) -> serde_json::Map<String, serde_json::Value
         .clone()
 }
 
+#[test]
+fn object_store_utilization_s3_cost_uses_request_and_storage_inputs() {
+    let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
+    let metrics = ObjectStoreUtilization {
+        object_count: 10,
+        total_bytes: 2_000_000_000,
+        segment_bytes: 1_500_000_000,
+        segment_count: 3,
+        target_segment_bytes: 1_000_000_000,
+        max_object_bytes: 400_000_000,
+        put_count: 2_000,
+        get_count: 5_000,
+        list_count: 3_000,
+        retained_hours: pqueue_release::cost::HOURS_PER_MONTH / 2.0,
+    };
+
+    let expected_put_list = 5.0 * prices.s3_put_per_1k;
+    let expected_get = 5.0 * prices.s3_get_per_1k;
+    let expected_storage = 2.0 * prices.s3_storage_per_gb_month * 0.5;
+    let cost = estimate_s3_cost_usd(metrics, &prices);
+
+    assert!(
+        (cost - (expected_put_list + expected_get + expected_storage)).abs() < f64::EPSILON,
+        "cost={cost}"
+    );
+    assert_eq!(round3(metrics.mean_object_bytes()), 200_000_000.0);
+    assert_eq!(round6(metrics.storage_utilization_ratio()), 0.5);
+}
+
+#[test]
+fn object_store_utilization_inserts_release_ledger_fields() {
+    let prices = pqueue_release::cost::PriceInputs::adr_001_us_east_1();
+    let metrics = ObjectStoreUtilization {
+        object_count: 4,
+        total_bytes: 8_000,
+        segment_bytes: 6_000,
+        segment_count: 3,
+        target_segment_bytes: 4_000,
+        max_object_bytes: 3_000,
+        put_count: 7,
+        get_count: 2,
+        list_count: 1,
+        retained_hours: 24.0,
+    };
+    let mut values = BTreeMap::new();
+
+    insert_object_store_utilization(&mut values, "objectlog_hybrid", metrics, &prices);
+
+    for key in [
+        "objectlog_hybrid_object_count",
+        "objectlog_hybrid_total_bytes",
+        "objectlog_hybrid_segment_bytes",
+        "objectlog_hybrid_mean_object_bytes",
+        "objectlog_hybrid_max_object_bytes",
+        "objectlog_hybrid_storage_utilization_ratio",
+        "objectlog_hybrid_put_count",
+        "objectlog_hybrid_get_count",
+        "objectlog_hybrid_list_count",
+        "objectlog_hybrid_s3_estimated_cost_usd",
+        "objectlog_hybrid_s3_price_inputs",
+    ] {
+        assert!(values.contains_key(key), "ledger helper must insert {key}");
+    }
+
+    assert_eq!(
+        values["objectlog_hybrid_mean_object_bytes"],
+        serde_json::json!(2000.0)
+    );
+    assert_eq!(
+        values["objectlog_hybrid_storage_utilization_ratio"],
+        serde_json::json!(0.5)
+    );
+    assert_eq!(values["objectlog_hybrid_put_count"], serde_json::json!(7));
+    assert_eq!(values["objectlog_hybrid_get_count"], serde_json::json!(2));
+    assert_eq!(values["objectlog_hybrid_list_count"], serde_json::json!(1));
+
+    let price_inputs = values["objectlog_hybrid_s3_price_inputs"]
+        .as_object()
+        .expect("price inputs are structured");
+    assert_eq!(
+        price_inputs["s3_put_copy_post_list_per_1k_usd"],
+        serde_json::json!(prices.s3_put_per_1k)
+    );
+    assert_eq!(
+        price_inputs["s3_get_per_1k_usd"],
+        serde_json::json!(prices.s3_get_per_1k)
+    );
+    assert_eq!(
+        price_inputs["s3_standard_storage_per_gb_month_usd"],
+        serde_json::json!(prices.s3_storage_per_gb_month)
+    );
+}
+
 /// AC1: attribution timers. Each `hybrid_attr_*_ms` field is emitted, non-negative, and the five phases
 /// sum to within tolerance of the measured hot-path wall time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2217,9 +2525,39 @@ async fn performance_object_log_hybrid_segment_density_gate() {
         "segment_density_max_commands_per_segment",
         "segment_density_objects_put",
         "segment_density_ok",
+        "objectlog_hybrid_object_count",
+        "objectlog_hybrid_total_bytes",
+        "objectlog_hybrid_segment_bytes",
+        "objectlog_hybrid_mean_object_bytes",
+        "objectlog_hybrid_max_object_bytes",
+        "objectlog_hybrid_storage_utilization_ratio",
+        "objectlog_hybrid_put_count",
+        "objectlog_hybrid_get_count",
+        "objectlog_hybrid_list_count",
+        "objectlog_hybrid_s3_estimated_cost_usd",
+        "objectlog_hybrid_s3_price_inputs",
     ] {
         assert!(values.contains_key(key), "ledger must emit {key}");
     }
+    assert!(
+        values["objectlog_hybrid_object_count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "object count must be populated"
+    );
+    assert!(
+        values["objectlog_hybrid_total_bytes"].as_u64().unwrap_or(0) > 0,
+        "total retained bytes must be populated"
+    );
+    assert!(
+        values["objectlog_hybrid_put_count"].as_u64().unwrap_or(0) > 0,
+        "PUT request count must be populated"
+    );
+    assert!(
+        values["objectlog_hybrid_list_count"].as_u64().unwrap_or(0) > 0,
+        "LIST request count must be populated"
+    );
 
     // Segment-density is a required `bars_met` input: flipping it off flips `bars_met` off.
     assert!(

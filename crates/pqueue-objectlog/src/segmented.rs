@@ -66,6 +66,20 @@ pub trait BlobStore: Send + Sync {
 
     /// List keys under `prefix` (lexical order not required; the caller sorts).
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>>;
+
+    /// Current object-count and byte-size stats under `prefix`. This is an
+    /// evidence/introspection helper, not part of the hot append path.
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        let mut stats = ObjectStoreStats::default();
+        for key in self.list(prefix)? {
+            if let Some(bytes) = self.get(&key)? {
+                stats.object_count += 1;
+                stats.total_bytes += bytes.len() as u64;
+                stats.max_object_bytes = stats.max_object_bytes.max(bytes.len() as u64);
+            }
+        }
+        Ok(stats)
+    }
 }
 
 /// Share one store between several owners (e.g. two competing epoch holders) — delegates through the `Arc`.
@@ -81,6 +95,9 @@ impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
     }
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         (**self).list(prefix)
+    }
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        (**self).stats(prefix)
     }
 }
 
@@ -138,6 +155,18 @@ impl BlobStore for InMemoryBlobStore {
             .filter(|k| k.starts_with(prefix))
             .cloned()
             .collect())
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        let mut stats = ObjectStoreStats::default();
+        for (key, bytes) in self.objects.lock().expect("blobstore poisoned").iter() {
+            if key.starts_with(prefix) {
+                stats.object_count += 1;
+                stats.total_bytes += bytes.len() as u64;
+                stats.max_object_bytes = stats.max_object_bytes.max(bytes.len() as u64);
+            }
+        }
+        Ok(stats)
     }
 }
 
@@ -270,6 +299,17 @@ impl BlobStore for LocalFsBlobStore {
         }
         Ok(out)
     }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        let mut stats = ObjectStoreStats::default();
+        for key in self.list(prefix)? {
+            let len = fs::metadata(self.key_path(&key)).map_err(store_err)?.len();
+            stats.object_count += 1;
+            stats.total_bytes += len;
+            stats.max_object_bytes = stats.max_object_bytes.max(len);
+        }
+        Ok(stats)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +352,14 @@ impl SegmentConfig {
 // Measured counters surface (release-ledger harness)
 // ---------------------------------------------------------------------------
 
+/// Current object-store utilization under an object prefix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObjectStoreStats {
+    pub object_count: u64,
+    pub total_bytes: u64,
+    pub max_object_bytes: u64,
+}
+
 /// Release-measurable counters: how many segments sealed, how many objects were PUT to the store (segment
 /// objects + manifest objects + fence entries), how many commands committed, and the per-segment
 /// group-commit batch sizes. Surfaced to the release ledger harness as the object-log cost evidence
@@ -326,6 +374,20 @@ pub struct SegmentCounters {
     pub commands_committed: u64,
     /// Per-segment group-commit batch size (commands per sealed segment), in seal order.
     pub group_commit_batches: Vec<usize>,
+    /// Current object/file count under the object-log store prefix.
+    pub object_count: u64,
+    /// Current total bytes retained under the object-log store prefix.
+    pub total_bytes: u64,
+    /// Bytes retained in sealed data segment objects only.
+    pub segment_bytes: u64,
+    /// Largest current object size in bytes.
+    pub max_object_bytes: u64,
+    /// Count of object-store PUT-class API calls issued by this process.
+    pub put_count: u64,
+    /// Count of object-store GET API calls issued by this process.
+    pub get_count: u64,
+    /// Count of object-store LIST API calls issued by this process.
+    pub list_count: u64,
 }
 
 impl SegmentCounters {
@@ -340,6 +402,20 @@ impl SegmentCounters {
     /// Largest sealed group-commit batch (`0` if nothing sealed).
     pub fn max_batch_size(&self) -> usize {
         self.group_commit_batches.iter().copied().max().unwrap_or(0)
+    }
+
+    pub fn mean_object_bytes(&self) -> f64 {
+        if self.object_count == 0 {
+            return 0.0;
+        }
+        self.total_bytes as f64 / self.object_count as f64
+    }
+
+    pub fn storage_utilization_ratio(&self, target_segment_bytes: usize) -> f64 {
+        if self.segments_sealed == 0 || target_segment_bytes == 0 {
+            return 0.0;
+        }
+        self.segment_bytes as f64 / (self.segments_sealed as f64 * target_segment_bytes as f64)
     }
 }
 
@@ -548,6 +624,65 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
     }
 
+    fn store_put(&self, key: &str, body: &[u8], count_object_put: bool) -> EngineResult<()> {
+        self.store.put(key, body)?;
+        let mut g = self.inner.lock().expect("segmented log poisoned");
+        g.counters.put_count += 1;
+        if count_object_put {
+            g.counters.objects_put += 1;
+        }
+        g.counters.max_object_bytes = g.counters.max_object_bytes.max(body.len() as u64);
+        Ok(())
+    }
+
+    fn store_put_segment(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.store.put(key, body)?;
+        let mut g = self.inner.lock().expect("segmented log poisoned");
+        g.counters.put_count += 1;
+        g.counters.objects_put += 1;
+        g.counters.segment_bytes += body.len() as u64;
+        g.counters.max_object_bytes = g.counters.max_object_bytes.max(body.len() as u64);
+        Ok(())
+    }
+
+    fn store_put_if_absent(
+        &self,
+        key: &str,
+        body: &[u8],
+        count_object_put: bool,
+    ) -> EngineResult<bool> {
+        let created = self.store.put_if_absent(key, body)?;
+        let mut g = self.inner.lock().expect("segmented log poisoned");
+        g.counters.put_count += 1;
+        if created {
+            if count_object_put {
+                g.counters.objects_put += 1;
+            }
+            g.counters.max_object_bytes = g.counters.max_object_bytes.max(body.len() as u64);
+        }
+        Ok(created)
+    }
+
+    fn store_get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        let out = self.store.get(key)?;
+        self.inner
+            .lock()
+            .expect("segmented log poisoned")
+            .counters
+            .get_count += 1;
+        Ok(out)
+    }
+
+    fn store_list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        let out = self.store.list(prefix)?;
+        self.inner
+            .lock()
+            .expect("segmented log poisoned")
+            .counters
+            .list_count += 1;
+        Ok(out)
+    }
+
     /// Register a queue and recover its committed position + epoch from the manifest (idempotent).
     pub fn create_queue(&self, def: &QueueDefinition) -> EngineResult<()> {
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
@@ -576,10 +711,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// (the previous full scan made a sustained push O(n^2)). `read_all` still does a full scan for recovery.
     fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64)> {
         let prefix = format!("{}manifest/", shard_prefix(shard));
-        let Some(tail_key) = self.store.list(&prefix)?.into_iter().max() else {
+        let Some(tail_key) = self.store_list(&prefix)?.into_iter().max() else {
             return Ok((0, 0, 0));
         };
-        let Some(bytes) = self.store.get(&tail_key)? else {
+        let Some(bytes) = self.store_get(&tail_key)? else {
             return Ok((0, 0, 0));
         };
         let tail: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
@@ -596,8 +731,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     fn read_manifest(&self, shard: &QueueKey) -> EngineResult<Vec<ManifestEntry>> {
         let prefix = format!("{}manifest/", shard_prefix(shard));
         let mut entries = Vec::new();
-        for key in self.store.list(&prefix)? {
-            if let Some(bytes) = self.store.get(&key)? {
+        for key in self.store_list(&prefix)? {
+            if let Some(bytes) = self.store_get(&key)? {
                 let entry: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
                 entries.push(entry);
             }
@@ -643,9 +778,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 committed_at_ms: now_ms,
             };
             let key = format!("{prefix}manifest/{next_index:020}.json");
-            if self.store.put_if_absent(&key, &to_json(&entry)?)? {
+            if self.store_put_if_absent(&key, &to_json(&entry)?, true)? {
                 let mut g = self.inner.lock().expect("segmented log poisoned");
-                g.counters.objects_put += 1;
                 if let Some(buf) = g.shards.get_mut(shard) {
                     buf.committed_epoch = new_epoch;
                     buf.next_manifest_index = next_index + 1;
@@ -772,11 +906,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let last_seq = first_seq + n as u64 - 1;
         let (seg_bytes, seg_checksum) = build_segment_object(cur_epoch, first_seq, &drained);
         let seg_key = format!("{prefix}seg/{first_seq:020}.seg");
-        self.store.put(&seg_key, &seg_bytes)?;
-        {
-            let mut g = self.inner.lock().expect("segmented log poisoned");
-            g.counters.objects_put += 1;
-        }
+        self.store_put_segment(&seg_key, &seg_bytes)?;
 
         // 4. Commit the manifest entry via the create-only CAS at the next index.
         let entry = ManifestEntry {
@@ -790,7 +920,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             committed_at_ms: now_ms,
         };
         let manifest_key = format!("{prefix}manifest/{cur_index:020}.json");
-        let won = self.store.put_if_absent(&manifest_key, &to_json(&entry)?)?;
+        let won = self.store_put_if_absent(&manifest_key, &to_json(&entry)?, true)?;
         if !won {
             // CAS lost: a peer extended the manifest from the same tail. Re-read to learn the new epoch.
             let observed_epoch = self.recover_manifest(shard)?.2;
@@ -817,7 +947,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         {
             let mut g = self.inner.lock().expect("segmented log poisoned");
-            g.counters.objects_put += 1;
             g.counters.segments_sealed += 1;
             g.counters.commands_committed += n as u64;
             g.counters.group_commit_batches.push(n);
@@ -858,8 +987,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 continue;
             };
             let bytes = self
-                .store
-                .get(seg_key)?
+                .store_get(seg_key)?
                 .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
             let (epoch, first_seq, commands) =
                 parse_segment_object(&bytes, seg_key, entry.checksum)?;
@@ -896,8 +1024,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 continue;
             };
             let bytes = self
-                .store
-                .get(seg_key)?
+                .store_get(seg_key)?
                 .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
             let (epoch, first_seq, commands) =
                 parse_segment_object(&bytes, seg_key, entry.checksum)?;
@@ -914,11 +1041,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// A snapshot of the measured segment/object counters (release-ledger harness surface).
     pub fn counters(&self) -> SegmentCounters {
-        self.inner
+        let mut counters = self
+            .inner
             .lock()
             .expect("segmented log poisoned")
             .counters
-            .clone()
+            .clone();
+        if let Ok(stats) = self.store.stats("") {
+            counters.object_count = stats.object_count;
+            counters.total_bytes = stats.total_bytes;
+            counters.max_object_bytes = counters.max_object_bytes.max(stats.max_object_bytes);
+        }
+        counters
     }
 
     // -- high-water + snapshots (ADR-012 LogStore facets stored as blobs in the object store) ----------
@@ -932,7 +1066,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Read the durable high-water mark blob (`None` if no commit/set has advanced it yet).
     pub fn read_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         let key = format!("{}high_water.json", shard_prefix(shard));
-        match self.store.get(&key)? {
+        match self.store_get(&key)? {
             Some(bytes) => {
                 let hw: HighWaterBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
                 Ok(Some(CommandPosition::new(shard.clone(), hw.epoch, hw.seq)))
@@ -953,7 +1087,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             epoch: position.backend_epoch,
             seq: position.sequence,
         };
-        self.store.put(&key, &to_json(&blob)?)
+        self.store_put(&key, &to_json(&blob)?, false)
     }
 
     /// Monotonically set the high-water blob (snapshot-truncation setter): reject a position that does not
@@ -976,7 +1110,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         payload: &[u8],
     ) -> EngineResult<String> {
         let prefix = format!("{}snap/", shard_prefix(shard));
-        let n = self.store.list(&prefix)?.len();
+        let n = self.store_list(&prefix)?.len();
         let ref_id = format!("snap-{n}");
         let blob = SnapshotBlob {
             epoch: position.backend_epoch,
@@ -984,7 +1118,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             payload: payload.to_vec(),
         };
         let key = format!("{prefix}{ref_id}.json");
-        self.store.put(&key, &to_json(&blob)?)?;
+        self.store_put(&key, &to_json(&blob)?, false)?;
         Ok(ref_id)
     }
 
@@ -996,7 +1130,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ) -> EngineResult<Option<(String, CommandPosition)>> {
         let prefix = format!("{}snap/", shard_prefix(shard));
         let mut best: Option<(u64, String)> = None;
-        for key in self.store.list(&prefix)? {
+        for key in self.store_list(&prefix)? {
             let ref_id = key
                 .rsplit('/')
                 .next()
@@ -1030,8 +1164,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     fn read_snapshot_blob(&self, shard: &QueueKey, ref_id: &str) -> EngineResult<SnapshotBlob> {
         let key = format!("{}snap/{ref_id}.json", shard_prefix(shard));
         let bytes = self
-            .store
-            .get(&key)?
+            .store_get(&key)?
             .ok_or_else(|| EngineError::Storage(format!("missing snapshot {ref_id}")))?;
         serde_json::from_slice(&bytes).map_err(store_err)
     }
@@ -1060,17 +1193,17 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     pub fn persist_definition(&self, def: &QueueDefinition) -> EngineResult<()> {
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
         let key = format!("{}queue.json", shard_prefix(&shard));
-        self.store.put(&key, &to_json(def)?)
+        self.store_put(&key, &to_json(def)?, false)
     }
 
     /// Enumerate every durable queue definition catalogued under the store root (the `queue.json` objects).
     pub fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         let mut out = Vec::new();
-        for key in self.store.list("t/")? {
+        for key in self.store_list("t/")? {
             if !key.ends_with("/queue.json") {
                 continue;
             }
-            if let Some(bytes) = self.store.get(&key)? {
+            if let Some(bytes) = self.store_get(&key)? {
                 out.push(serde_json::from_slice(&bytes).map_err(store_err)?);
             }
         }
