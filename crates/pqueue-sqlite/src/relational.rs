@@ -52,12 +52,13 @@ use std::sync::{Arc, Mutex};
 use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp,
-    GroupKey, GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexType,
-    ItemId, ItemState, LeaseToken, Metadata, OrderField, PriorityModel, PriorityValue, QueryCursor,
-    QueryFilter, QueueDefinition, QueueId, QueueIndex, RangeScanRequest, RangeScanResponse,
-    RangeScanRow, RequestId, SortDirection, TenantId, TypedValue, UtcTimestamp, is_retry_exhausted,
-    priority_sort,
+    BoundedMutationRequest, BoundedMutationResponse, ClientItemKey, CohortId,
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
+    GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexType, ItemId,
+    ItemState, LeaseToken, Metadata, MutationOutcome, MutationResult, OrderField, PriorityModel,
+    PriorityValue, QueryCursor, QueryFilter, QueueDefinition, QueueId, QueueIndex,
+    RangeScanRequest, RangeScanResponse, RangeScanRow, RequestId, SortDirection, TenantId,
+    TypedValue, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
@@ -1130,6 +1131,130 @@ fn typed_value_compare(a: &TypedValue, b: &TypedValue) -> EngineResult<Ordering>
             "typed index value is not valid for declared type",
         )),
     }
+}
+
+fn merge_entity_document(
+    entity: Option<&JsonValue>,
+    set_fields: &BTreeMap<String, TypedValue>,
+) -> EngineResult<JsonValue> {
+    let mut object = match entity {
+        Some(JsonValue::Object(map)) => map.clone(),
+        Some(_) => {
+            return Err(EngineError::Invalid("typed index entity is not an object"));
+        }
+        None => serde_json::Map::new(),
+    };
+    for (field, value) in set_fields {
+        object.insert(
+            field.clone(),
+            match value {
+                TypedValue::String(v) => JsonValue::String(v.clone()),
+                TypedValue::Integer(v) => JsonValue::Number((*v).into()),
+                TypedValue::Float(v) => {
+                    JsonValue::Number(serde_json::Number::from_f64(*v).ok_or_else(|| {
+                        EngineError::Invalid("typed index value is not valid for declared type")
+                    })?)
+                }
+                TypedValue::Bool(v) => JsonValue::Bool(*v),
+                TypedValue::DateTime(v) => JsonValue::Number(v.seconds.into()),
+            },
+        );
+    }
+    Ok(JsonValue::Object(object))
+}
+
+fn typed_index_row_from_entity(
+    spec: &QueueIndex,
+    item_id: ItemId,
+    entity: &JsonValue,
+) -> EngineResult<Option<RangeScanRow>> {
+    let mut fields = BTreeMap::new();
+    match &spec.declaration {
+        IndexDeclaration::Single(def) => {
+            let Some(value) = typed_value_for_json(
+                entity.get(&def.field).unwrap_or(&JsonValue::Null),
+                &def.index_type,
+            )?
+            else {
+                return Ok(None);
+            };
+            fields.insert(def.field.clone(), value);
+        }
+        IndexDeclaration::Compound(def) => {
+            for field in &def.fields {
+                let Some(value) = typed_value_for_json(
+                    entity.get(&field.field).unwrap_or(&JsonValue::Null),
+                    &field.index_type,
+                )?
+                else {
+                    return Ok(None);
+                };
+                fields.insert(field.field.clone(), value);
+            }
+        }
+    }
+    Ok(Some(RangeScanRow { item_id, fields }))
+}
+
+fn typed_index_row_matches(
+    spec: &QueueIndex,
+    filters: &[QueryFilter],
+    row: &RangeScanRow,
+) -> EngineResult<bool> {
+    let fields: Vec<(&str, &IndexType)> = match &spec.declaration {
+        IndexDeclaration::Single(def) => vec![(def.field.as_str(), &def.index_type)],
+        IndexDeclaration::Compound(def) => def
+            .fields
+            .iter()
+            .map(|field| (field.field.as_str(), &field.index_type))
+            .collect(),
+    };
+    let mut filter_map: BTreeMap<&str, &QueryFilter> = BTreeMap::new();
+    for filter in filters {
+        filter_map.insert(filter.field.as_str(), filter);
+    }
+    let mut prefix_len = 0usize;
+    for (field_name, index_type) in &fields {
+        let Some(filter) = filter_map.get(field_name).copied() else {
+            break;
+        };
+        let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+        let Some(value) = row.fields.get(*field_name) else {
+            return Ok(false);
+        };
+        if filter.op != FilterOp::Eq || !typed_value_matches_query(value, &typed) {
+            break;
+        }
+        prefix_len += 1;
+    }
+    for filter in filters {
+        let Some((idx, (_, index_type))) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, (field_name, _))| *field_name == filter.field.as_str())
+        else {
+            return Err(EngineError::Invalid("unindexed-field"));
+        };
+        if idx < prefix_len {
+            continue;
+        }
+        let Some(value) = row.fields.get(filter.field.as_str()) else {
+            return Ok(false);
+        };
+        let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+        let ord = typed_value_compare(value, &typed)?;
+        let ok = match filter.op {
+            FilterOp::Eq => ord.is_eq(),
+            FilterOp::Gte => ord.is_ge(),
+            FilterOp::Gt => ord.is_gt(),
+            FilterOp::Lte => ord.is_le(),
+            FilterOp::Lt => ord.is_lt(),
+        };
+        if !ok {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn compare_rows(
@@ -7012,6 +7137,136 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             query_projection_image(&definition, image, |projection, shard| {
                 projection.declared_bucket_segment(shard, request)
             })
+        })();
+        std::future::ready(result)
+    }
+
+    fn bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
+        let result = (|| {
+            if request.max_scan_rows == 0 {
+                return Err(EngineError::Invalid("invalid page size"));
+            }
+
+            let mut g = self.inner.lock().expect("projection store poisoned");
+            let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let spec = if let Some(name) = request.index.as_deref() {
+                definition
+                    .typed_indexes
+                    .iter()
+                    .find(|qi| qi.name == name)
+                    .ok_or(EngineError::Invalid("unknown secondary index"))?
+            } else {
+                definition
+                    .typed_indexes
+                    .first()
+                    .ok_or(EngineError::Invalid("unknown secondary index"))?
+            };
+            if request
+                .filters
+                .iter()
+                .any(|filter| match &spec.declaration {
+                    IndexDeclaration::Single(def) => filter.field != def.field,
+                    IndexDeclaration::Compound(def) => {
+                        !def.fields.iter().any(|field| field.field == filter.field)
+                    }
+                })
+            {
+                return Err(EngineError::Invalid("unindexed-field"));
+            }
+
+            let (t, q) = parts(shard);
+            let mut matches = {
+                let mut stmt = st(g.conn.prepare(
+                    "SELECT item_id,lifecycle_state,fenced,superseded,entity_document \
+                     FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2",
+                ))?;
+                let rows = st(stmt.query_map(params![t, q], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                }))?;
+                let mut matches = Vec::new();
+                for row in rows {
+                    let (item_id, lifecycle_state, fenced, superseded, entity_json) = st(row)?;
+                    let item_id =
+                        ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
+                    let entity_json = match entity_json {
+                        Some(raw) => serde_json::from_str::<JsonValue>(&raw)
+                            .map_err(|e| EngineError::Storage(e.to_string()))?,
+                        None => continue,
+                    };
+                    let row = typed_index_row_from_entity(spec, item_id, &entity_json)?;
+                    let Some(row) = row else {
+                        continue;
+                    };
+                    if !typed_index_row_matches(spec, &request.filters, &row)? {
+                        continue;
+                    }
+                    matches.push((
+                        item_id,
+                        lifecycle_state,
+                        fenced != 0,
+                        superseded != 0,
+                        entity_json,
+                    ));
+                }
+                matches
+            };
+            matches.sort_by_key(|(item_id, ..)| *item_id);
+
+            let mut results = Vec::with_capacity(matches.len());
+            for (item_id, lifecycle_state, fenced, superseded, entity) in matches {
+                let outcome =
+                    if fenced || superseded || parse_state(&lifecycle_state)?.is_terminal() {
+                        MutationOutcome::Conflict
+                    } else if parse_state(&lifecycle_state)? != ItemState::Pending {
+                        MutationOutcome::Conflict
+                    } else {
+                        let new_entity = merge_entity_document(Some(&entity), &request.set_fields)?;
+                        validate_entity(g.schemas.get(shard), Some(&new_entity))?;
+                        let now = {
+                            let d = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default();
+                            UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos())
+                                .expect("valid ts")
+                        };
+                        g.commit_command(
+                            shard,
+                            QueueCommand::UpdateFields(UpdateFieldsCommand {
+                                item_id,
+                                field_ops: request
+                                    .set_fields
+                                    .iter()
+                                    .map(|(field, value)| {
+                                        serde_json::to_vec(value)
+                                            .map(Bytes::from)
+                                            .map_err(|e| EngineError::Storage(e.to_string()))
+                                            .map(|bytes| (field.clone(), Some(bytes)))
+                                    })
+                                    .collect::<EngineResult<BTreeMap<_, _>>>()?,
+                                payload: PayloadUpdate::Keep,
+                                set_priority: Default::default(),
+                                set_not_before: Default::default(),
+                                set_entity_document: Some(new_entity),
+                            }),
+                            now,
+                            None,
+                        )?;
+                        MutationOutcome::Updated
+                    };
+                results.push(MutationResult { item_id, outcome });
+            }
+
+            Ok(BoundedMutationResponse { results })
         })();
         std::future::ready(result)
     }

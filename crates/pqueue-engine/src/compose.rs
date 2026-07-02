@@ -30,10 +30,11 @@ use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use pqueue_core::{
-    BodyHash, ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
-    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
-    OrderingMode, PriorityValue, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse,
-    RequestId, TenantId, UtcTimestamp,
+    BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClientItemKey,
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey, GroupedAggregateRequest,
+    GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata, OrderingMode, PriorityValue,
+    QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId, TenantId,
+    UtcTimestamp,
 };
 
 use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
@@ -599,6 +600,14 @@ pub trait ProjectionStore: Send {
         _shard: &QueueKey,
         _request: DeclaredBucketSegmentRequest,
     ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn bounded_mutation(
+        &mut self,
+        _shard: &QueueKey,
+        _request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationResponse> {
         Err(EngineError::Unavailable)
     }
 
@@ -2653,6 +2662,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
             .expect("poisoned")
             .projection
             .declared_bucket_segment(shard, request);
+        std::future::ready(result)
+    }
+
+    fn bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            g.projection.bounded_mutation(shard, request)
+        };
         std::future::ready(result)
     }
 }

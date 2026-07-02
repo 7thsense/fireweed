@@ -27,13 +27,14 @@ pub use compose_impls::{InMemoryProjection, MemoryLog};
 
 use bytes::Bytes;
 use pqueue_core::{
-    AggregateGroup, BucketCount, ClientItemKey, DeclaredBucketSegmentRequest,
-    DeclaredBucketSegmentResponse, FilterOp, GroupKey, GroupedAggregateRequest,
-    GroupedAggregateResponse, IndexDeclaration, IndexSpec, IndexType, ItemEvent, ItemId, ItemState,
-    LeaseToken, Metadata, OrderField, OrderingMode, PriorityModel, PriorityValue, QueryCursor,
-    QueryFilter, QueueDefinition, QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow,
-    RecurrenceMode, RecurrencePolicy, SortDirection, TimeBucket, TypedValue, UtcTimestamp,
-    apply_transition, failure_event, priority_sort,
+    AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, ClientItemKey,
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
+    GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexSpec, IndexType,
+    ItemEvent, ItemId, ItemState, LeaseToken, Metadata, MutationOutcome, MutationResult,
+    OrderField, OrderingMode, PriorityModel, PriorityValue, QueryCursor, QueryFilter,
+    QueueDefinition, QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow, RecurrenceMode,
+    RecurrencePolicy, SortDirection, TimeBucket, TypedValue, UtcTimestamp, apply_transition,
+    failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
@@ -930,6 +931,54 @@ fn matches_filters_on_entity(entity: &Value, filters: &[QueryFilter]) -> EngineR
         }
     }
     Ok(true)
+}
+
+fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
+    Ok(match value {
+        TypedValue::String(v) => Value::String(v.clone()),
+        TypedValue::Integer(v) => Value::Number((*v).into()),
+        TypedValue::Float(v) => {
+            Value::Number(serde_json::Number::from_f64(*v).ok_or_else(|| {
+                EngineError::Invalid("typed index value is not valid for declared type")
+            })?)
+        }
+        TypedValue::Bool(v) => Value::Bool(*v),
+        TypedValue::DateTime(v) => Value::Number(v.seconds.into()),
+    })
+}
+
+fn typed_value_to_field_bytes(value: &TypedValue) -> EngineResult<Bytes> {
+    serde_json::to_vec(value)
+        .map(Bytes::from)
+        .map_err(|e| EngineError::Storage(e.to_string()))
+}
+
+fn merge_entity_document(
+    entity: Option<&Value>,
+    set_fields: &BTreeMap<String, TypedValue>,
+) -> EngineResult<Value> {
+    let mut object = match entity {
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => {
+            return Err(EngineError::Invalid("typed index entity is not an object"));
+        }
+        None => serde_json::Map::new(),
+    };
+    for (field, value) in set_fields {
+        object.insert(field.clone(), typed_value_to_json(value)?);
+    }
+    Ok(Value::Object(object))
+}
+
+fn merge_field_bytes(
+    fields: &BTreeMap<String, Bytes>,
+    set_fields: &BTreeMap<String, TypedValue>,
+) -> EngineResult<BTreeMap<String, Bytes>> {
+    let mut merged = fields.clone();
+    for (field, value) in set_fields {
+        merged.insert(field.clone(), typed_value_to_field_bytes(value)?);
+    }
+    Ok(merged)
 }
 
 // ---------------------------------------------------------------------------
@@ -2618,6 +2667,85 @@ impl ProjectionData {
             count: null_count,
         });
         Ok(DeclaredBucketSegmentResponse { buckets })
+    }
+
+    /// Scan a declared-index predicate and apply typed field updates to every matching record.
+    /// Matching records that are not currently pending are treated as conflicts, preserving the
+    /// active-lease fence required by API-004 bounded mutation.
+    pub fn bounded_mutation(
+        &mut self,
+        request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationResponse> {
+        if request.max_scan_rows == 0 {
+            return Err(EngineError::Invalid("invalid page size"));
+        }
+        let spec = self.typed_range_index(request.index.as_deref())?;
+
+        let mut matches = Vec::new();
+        for rec in self.items.values() {
+            let Some(entity) = rec.entity_document.as_ref() else {
+                continue;
+            };
+            let Some(row) = self.range_scan_row(spec, rec.item_id, entity)? else {
+                continue;
+            };
+            if !self.range_scan_matches(spec, &request.filters, &row)? {
+                continue;
+            }
+            matches.push((rec.item_id, rec.item_version));
+        }
+        matches.sort_by_key(|(item_id, _)| *item_id);
+
+        let mut results = Vec::with_capacity(matches.len());
+        for (item_id, seen_version) in matches {
+            let outcome = match self.items.get(&item_id) {
+                None => MutationOutcome::NotFound,
+                Some(rec)
+                    if rec.state != ItemState::Pending
+                        || rec.fenced
+                        || rec.superseded
+                        || rec.state.is_terminal() =>
+                {
+                    MutationOutcome::Conflict
+                }
+                Some(rec) if rec.item_version != seen_version => MutationOutcome::Conflict,
+                Some(rec) => {
+                    let new_entity =
+                        merge_entity_document(rec.entity_document.as_ref(), &request.set_fields)?;
+                    let new_fields = merge_field_bytes(&rec.fields, &request.set_fields)?;
+                    self.index_validate_with_entity(
+                        &item_id,
+                        &new_fields,
+                        Some(&new_entity),
+                        None,
+                    )?;
+                    let old_keys =
+                        self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+                    let new_keys = self.record_index_keys(&new_fields, Some(&new_entity))?;
+
+                    let rec = self.items.get_mut(&item_id).ok_or(EngineError::NotFound)?;
+                    rec.fields = new_fields;
+                    rec.entity_document = Some(new_entity);
+                    rec.item_version += 1;
+                    let removed: Vec<(String, Vec<u8>)> = old_keys
+                        .iter()
+                        .filter(|key| !new_keys.contains(key))
+                        .cloned()
+                        .collect();
+                    let added: Vec<(String, Vec<u8>)> = new_keys
+                        .iter()
+                        .filter(|key| !old_keys.contains(key))
+                        .cloned()
+                        .collect();
+                    self.index_remove_keys(item_id, &removed);
+                    self.index_insert_keys(item_id, &added);
+                    MutationOutcome::Updated
+                }
+            };
+            results.push(MutationResult { item_id, outcome });
+        }
+
+        Ok(BoundedMutationResponse { results })
     }
 
     /// Shared "every id is present + Leased + not fenced + not superseded" check used by finalize/renew.

@@ -1,24 +1,18 @@
-//! API-004 hot projection query surface: every backend advertises the v1 capability set as
-//! unavailable and every operation rejects with a structured [`EngineError::Unavailable`] rather
-//! than silently degrading to a full scan. No backend bead in epic pqueue-45e13e4d implements the
-//! substrate yet (this bead ships only the typed request/response shapes + compile-tested stubs).
+//! API-004 hot projection query surface: typed range/group/bucket queries are exercised over the
+//! scheduled-action fixture, and bounded mutation is verified against the same typed index surface.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use pqueue::{
-    AggregateGroup, BoundedMutationRequest, ClaimByQueryRequest, DeclaredBucketSegmentRequest,
-    EligibilityPolicy, EngineError, FilterOp, GroupByField, GroupedAggregateRequest, ItemId,
-    LibBackend, NewItem, OrderField, OrderingMode, Pqueue, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, QueryCapabilityFlags, QueryFilter, QueueDefinition,
-    QueueId, RangeScanRequest, RangeScanRow, RecurrencePolicy, RetryPolicy, SortDirection,
-    TenantId, TypedValue, UtcTimestamp,
+    AggregateGroup, BoundedMutationRequest, DeclaredBucketSegmentRequest, EligibilityPolicy,
+    FilterOp, GroupByField, GroupedAggregateRequest, ItemId, LibBackend, MutationOutcome, NewItem,
+    OrderField, OrderingMode, Pqueue, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, QueryFilter, QueueDefinition, QueueId, RangeScanRequest, RangeScanRow,
+    RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue, UtcTimestamp,
 };
-use pqueue_core::{
-    CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex, WorkerId,
-};
+use pqueue_core::{CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex};
 use pqueue_memory::{ManualClock, composed_memory_backend};
-use pqueue_objectlog::ObjectLogBackend;
 use pqueue_sqlite::SqliteRelationalBackend;
 use serde_json::{Value, json};
 
@@ -55,28 +49,6 @@ fn queue_definition() -> QueueDefinition {
     }
 }
 
-fn grouped_aggregate_request() -> GroupedAggregateRequest {
-    GroupedAggregateRequest {
-        index: Some("by_status".to_string()),
-        filters: vec![],
-        group_by: vec![GroupByField {
-            field: "status".to_string(),
-            time_bucket: None,
-        }],
-        max_groups: 100,
-    }
-}
-
-fn declared_bucket_segment_request() -> DeclaredBucketSegmentRequest {
-    DeclaredBucketSegmentRequest {
-        index: Some("by_engagement_probability".to_string()),
-        filters: vec![],
-        field: "engagement_probability".to_string(),
-        buckets: vec![],
-        null_bucket_label: "no-activity".to_string(),
-    }
-}
-
 fn bounded_mutation_request() -> BoundedMutationRequest {
     let mut set_fields = BTreeMap::new();
     set_fields.insert(
@@ -84,94 +56,110 @@ fn bounded_mutation_request() -> BoundedMutationRequest {
         TypedValue::Bool(true),
     );
     BoundedMutationRequest {
-        index: Some("by_status".to_string()),
-        filters: vec![],
+        index: Some("by_status_enrollment".to_string()),
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "status".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("scheduled".to_string()),
+            },
+            QueryFilter {
+                field: "is_enrolled_using_open_rate_filter".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::Bool(false),
+            },
+        ],
         set_fields,
         max_scan_rows: 500,
     }
 }
 
-fn claim_by_query_request() -> ClaimByQueryRequest {
-    ClaimByQueryRequest {
-        index: Some("by_scheduled_at".to_string()),
-        filters: vec![],
-        order_by: OrderField {
-            field: "scheduled_at".to_string(),
-            direction: SortDirection::Ascending,
-        },
-        max_items: 10,
-        lease_duration_ms: 30_000,
-        worker_id: WorkerId::new("worker-1").unwrap(),
-        request_id: None,
+fn claim_conflict_bounded_mutation_request() -> BoundedMutationRequest {
+    let mut set_fields = BTreeMap::new();
+    set_fields.insert(
+        "suppressed_by_recycling".to_string(),
+        TypedValue::Bool(true),
+    );
+    BoundedMutationRequest {
+        index: Some("by_target_key".to_string()),
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "target_key".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("contact:001".to_string()),
+            },
+        ],
+        set_fields,
+        max_scan_rows: 500,
     }
 }
 
 #[tokio::test]
-async fn capability_defaults_are_explicitly_unavailable() {
-    let q = qkey();
-
-    let memory_backend = Arc::new(composed_memory_backend());
-    let memory_pq = Pqueue::new(memory_backend, Arc::new(ManualClock::at(0)));
-    memory_pq.create_queue(queue_definition()).await.unwrap();
-    assert_eq!(
-        memory_pq
-            .grouped_aggregate(&q, grouped_aggregate_request())
-            .await,
-        Err(EngineError::Unavailable)
+async fn safe_recycling_rule_update_marks_only_act_001() {
+    let memory_pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
     );
-    assert_eq!(
-        memory_pq
-            .declared_bucket_segment(&q, declared_bucket_segment_request())
-            .await,
-        Err(EngineError::Unavailable)
-    );
-    assert_eq!(
-        memory_pq
-            .bounded_mutation(&q, bounded_mutation_request())
-            .await,
-        Err(EngineError::Unavailable)
-    );
-    assert_eq!(
-        memory_pq
-            .claim_by_query(&q, claim_by_query_request())
-            .await
-            .unwrap_err(),
-        EngineError::Unavailable
-    );
+    assert_safe_recycling_rule_update_on_backend(&memory_pq).await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-{}.db",
+            "pqueue-hot-projection-queries-bounded-{}.db",
             std::process::id()
         ))
         .to_str()
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_backend = Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap());
-    let sqlite_pq = Pqueue::new(sqlite_backend, Arc::new(ManualClock::at(0)));
-    sqlite_pq.create_queue(queue_definition()).await.unwrap();
-    assert!(matches!(
-        sqlite_pq.claim_by_query(&q, claim_by_query_request()).await,
-        Err(EngineError::Unavailable)
-    ));
+    let sqlite_pq = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_safe_recycling_rule_update_on_backend(&sqlite_pq).await;
+}
 
-    let root = std::env::temp_dir().join(format!(
-        "pqueue-hot-projection-queries-objlog-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let objectlog_backend = Arc::new(ObjectLogBackend::open(&root).unwrap());
-    let objectlog_pq = Pqueue::new(objectlog_backend, Arc::new(ManualClock::at(0)));
-    objectlog_pq.create_queue(queue_definition()).await.unwrap();
-    assert!(matches!(
-        objectlog_pq
-            .claim_by_query(&q, claim_by_query_request())
-            .await,
-        Err(EngineError::Unavailable)
-    ));
+#[tokio::test]
+async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
+    let memory_pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&memory_pq).await;
 
-    assert!(!QueryCapabilityFlags::default().side_record_query);
+    let sqlite_path = std::env::temp_dir()
+        .join(format!(
+            "pqueue-hot-projection-queries-bounded-claim-{}.db",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&sqlite_path);
+    let sqlite_pq = Pqueue::new(
+        Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
+        Arc::new(ManualClock::at(0)),
+    );
+    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&sqlite_pq).await;
 }
 
 #[tokio::test]
@@ -291,6 +279,18 @@ fn scheduled_action_typed_indexes() -> Vec<QueueIndex> {
                     compound_field("run_id", IndexType::String),
                     compound_field("status", IndexType::String),
                     compound_field("scheduled_at", IndexType::Datetime),
+                ],
+                unique: false,
+            }),
+        ),
+        typed_index(
+            "by_status_enrollment",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("status", IndexType::String),
+                    compound_field("is_enrolled_using_open_rate_filter", IndexType::Boolean),
                 ],
                 unique: false,
             }),
@@ -624,6 +624,84 @@ async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(pq: &P
             .sum::<u64>(),
         5
     );
+}
+
+async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+    let q = qkey();
+    seed_scheduled_action_fixture(pq).await;
+    let before = pq
+        .query_index_unique_typed(
+            &q,
+            "by_target_key",
+            &[json!("tenant_7s"), json!("job_9001"), json!("contact:001")],
+        )
+        .await
+        .unwrap()
+        .expect("contact:001 should be indexed");
+
+    let response = pq
+        .bounded_mutation(&q, bounded_mutation_request())
+        .await
+        .unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].item_id, before.item_id);
+    assert_eq!(response.results[0].outcome, MutationOutcome::Updated);
+
+    let after = pq
+        .query_index_unique_typed(
+            &q,
+            "by_target_key",
+            &[json!("tenant_7s"), json!("job_9001"), json!("contact:001")],
+        )
+        .await
+        .unwrap()
+        .expect("contact:001 should stay indexed");
+    assert_eq!(
+        after.item_version,
+        before.item_version + 1,
+        "bounded mutation must bump item_version for the touched record"
+    );
+    let touched = response
+        .results
+        .iter()
+        .map(|result| result.item_id)
+        .collect::<Vec<_>>();
+    assert_eq!(touched, vec![before.item_id]);
+}
+
+async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim<B: LibBackend>(
+    pq: &Pqueue<B>,
+) {
+    let q = qkey();
+    seed_scheduled_action_fixture(pq).await;
+    let target = pq
+        .query_index_unique_typed(
+            &q,
+            "by_target_key",
+            &[json!("tenant_7s"), json!("job_9001"), json!("contact:001")],
+        )
+        .await
+        .unwrap()
+        .expect("contact:001 should be indexed");
+    let claimed = pq.claim(&q, 6, 30_000).await.unwrap();
+    assert_eq!(claimed.len(), 6);
+    let claimed_item = claimed
+        .iter()
+        .find(|item| item.item_id == target.item_id)
+        .expect("contact:001 should be claimed");
+    let claimed_version = claimed_item.item_version;
+
+    let conflict = pq
+        .bounded_mutation(&q, claim_conflict_bounded_mutation_request())
+        .await
+        .unwrap();
+    assert_eq!(conflict.results.len(), 1);
+    assert_eq!(conflict.results[0].item_id, target.item_id);
+    assert_eq!(conflict.results[0].outcome, MutationOutcome::Conflict);
+
+    let still_claimed = pq.claimed(&q, &[target.item_id]).await.unwrap();
+    assert_eq!(still_claimed.len(), 1);
+    assert_eq!(still_claimed[0].item_version, claimed_version);
 }
 
 fn hourly_distribution_request() -> GroupedAggregateRequest {
