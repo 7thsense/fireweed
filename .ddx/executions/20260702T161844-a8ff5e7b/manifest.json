@@ -1,0 +1,63 @@
+{
+  "attempt_id": "20260702T161844-a8ff5e7b",
+  "bead_id": "pqueue-5c5353f7",
+  "base_rev": "999c826dc75589eb06009f27fb993791073d9164",
+  "created_at": "2026-07-02T16:18:44.975214421Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-5c5353f7",
+    "title": "Implement claim-due-work by typed projection query",
+    "description": "PROBLEM\nSnorri needs to claim due scheduled actions by indexed fields and due time while preserving pqueue lease tokens, item versions, and existing finalize/commit boundaries. Current claim selection is queue eligibility oriented, not caller-supplied typed query oriented.\n\nPROPOSED FIX\nAdd a domain-neutral claim-by-query API over typed indexes for memory and sqlite. It must select `message.send` actions with `status=scheduled` and `scheduled_at \u003c= as_of` in scheduled order, lease them using normal claim semantics, and return rich claimed items compatible with existing finalize/commit claim refs. Suppressed, failed, future, and non-message records must not be claimed.\n\nIN-SCOPE FILES\n- crates/pqueue-engine/src/port.rs and claim validation if needed.\n- crates/pqueue-projection/src/lib.rs.\n- crates/pqueue-sqlite/src/relational.rs.\n- crates/pqueue/src/lib.rs.\n- crates/pqueue/tests/hot_projection_queries.rs.\n\nOUT-OF-SCOPE\n- Workflow-specific action types beyond fixture values.\n- New lease semantics separate from existing pqueue claims.",
+    "acceptance": "1. `cargo test -p pqueue --test hot_projection_queries claim_due_scheduled_actions_by_query -- --nocapture` passes and claims due `message.send` actions where `scheduled_at \u003c= 2026-07-02T15:00:00Z` in scheduled order (expected: act_001 then act_002; nothing else).\n2. The test finalizes or commits through the existing claimed-work path using returned claim refs/lease tokens.\n3. The test proves future (act_004), failed (act_005), suppressed (act_003), and non-message (act_006) actions are not claimed.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-45e13e4d",
+    "labels": [
+      "area:projection",
+      "area:claim",
+      "kind:feature",
+      "backend:memory",
+      "backend:sqlite",
+      "system:pqueue",
+      "plan-2026-07-02-snorri-hot-projection"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-02T16:18:04.599708626Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-02T16:18:41.181875205Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ],
+      "spec-id": "api-hot-projection-query-surface"
+    }
+  },
+  "governing": [
+    {
+      "id": "api-hot-projection-query-surface",
+      "path": "docs/helix/02-design/contracts/API-004-hot-projection-query-surface.md",
+      "title": "Contract"
+    }
+  ],
+  "paths": {
+    "dir": ".ddx/executions/20260702T161844-a8ff5e7b",
+    "prompt": ".ddx/executions/20260702T161844-a8ff5e7b/prompt.md",
+    "manifest": ".ddx/executions/20260702T161844-a8ff5e7b/manifest.json",
+    "result": ".ddx/executions/20260702T161844-a8ff5e7b/result.json",
+    "checks": ".ddx/executions/20260702T161844-a8ff5e7b/checks.json",
+    "usage": ".ddx/executions/20260702T161844-a8ff5e7b/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-5c5353f7-20260702T161844-a8ff5e7b"
+  },
+  "prompt_sha": "81ef531cea223718462f919f1c4c715d3766a25ccc89f4c724c7c4562a23707c"
+}
