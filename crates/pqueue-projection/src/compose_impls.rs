@@ -15,11 +15,12 @@ use std::collections::BTreeMap;
 use rustc_hash::FxHashMap;
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
 use pqueue_core::{
-    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupedAggregateRequest,
-    GroupedAggregateResponse, RangeScanRequest, RangeScanResponse,
+    BoundedMutationRequest, BoundedMutationResponse, DeclaredBucketSegmentRequest,
+    DeclaredBucketSegmentResponse, GroupedAggregateRequest, GroupedAggregateResponse,
+    RangeScanRequest, RangeScanResponse,
 };
+use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, EngineError,
     EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore,
@@ -172,6 +173,10 @@ impl InMemoryProjection {
 
     fn get(&self, shard: &QueueKey) -> EngineResult<&ProjectionData> {
         self.projections.get(shard).ok_or(EngineError::NotFound)
+    }
+
+    fn get_mut(&mut self, shard: &QueueKey) -> EngineResult<&mut ProjectionData> {
+        self.projections.get_mut(shard).ok_or(EngineError::NotFound)
     }
 
     pub fn observe_item_counters(
@@ -400,6 +405,14 @@ impl ProjectionStore for InMemoryProjection {
         request: DeclaredBucketSegmentRequest,
     ) -> EngineResult<DeclaredBucketSegmentResponse> {
         Ok(self.get(shard)?.declared_bucket_segment(request)?)
+    }
+
+    fn bounded_mutation(
+        &mut self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationResponse> {
+        Ok(self.get_mut(shard)?.bounded_mutation(request)?)
     }
 
     fn index_get_unique(
