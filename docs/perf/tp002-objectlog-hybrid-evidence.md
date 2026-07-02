@@ -35,12 +35,13 @@ partial batch restart, and proof that readers/claims/metrics are served from
 memory while SQLite lags. Object-storage release evidence must show packed
 segments (`mean_commands_per_segment > 1` and `max_commands_per_segment > 1`)
 for normal data-plane traffic; one command per object-log segment is a blocker.
-If claim/finalize or another high-churn transactional path cannot safely batch
-before acknowledgement, that path must use a local transactional log/checkpoint
-layer or another non-object-storage log implementation rather than writing tiny
-object-storage segments. `sqlite_high_water` is a logical high-water for applied
-commands only; SQLite WAL, checkpoint, page-cache, and fsync state are local
-durability details and never authorize object-log trimming.
+Claim/finalize and other high-churn transactional paths must be made durable by
+packed object-log group commit before acknowledgement. Rare explicit sync or
+control-path flushes may write a small segment, but they must be identified in
+metrics and must not dominate the release workload. `sqlite_high_water` is a
+logical high-water for applied commands only; SQLite WAL, checkpoint,
+page-cache, and fsync state are local durability details and never authorize
+object-log trimming.
 The async evidence row must additionally include lineage validation from
 manifest entry to segment checksum/range, command `request_id` fingerprint,
 memory `ProjectionImage`, and SQLite `ProjectionImage`; it must report the
@@ -125,7 +126,11 @@ hybrid/inmemory hot-path ratios, restart hydrate + tail time, restart pending
 count, disk-loss reconstruction wall time, disk-loss pending count, and
 `bars_met`. It must also record segment density as a hard release gate:
 `objectlog_hybrid_mean_commands_per_segment > 1` and
-`objectlog_hybrid_max_commands_per_segment > 1` for object-storage output.
+`objectlog_hybrid_max_commands_per_segment > 1` for object-storage output. The
+same row must report object-storage file/object count, segment bytes, total
+stored bytes, mean/max object size, storage-utilization ratio versus configured
+target segment size, PUT/LIST/GET counts, and an estimated S3-style request plus
+storage cost with the price inputs used for the calculation.
 
 Raw ledger: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl`.
 
@@ -269,5 +274,5 @@ after roughly an hour. A CPU sample showed the hot thread dominated by
 during claim/finalize. This was a symptom of the same granularity failure:
 object storage was receiving one tiny segment per batch command. 10M evidence
 cannot be produced until `pqueue-5f2302e3` changes the append/storage contract so
-object-storage output is packed, or routes high-churn transactional mutations to
-a non-object-storage log while preserving recovery.
+object-storage output is packed before durable acknowledgement for normal
+data-plane traffic.

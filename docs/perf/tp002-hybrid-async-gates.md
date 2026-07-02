@@ -64,10 +64,14 @@ committed commands — a few in-flight batches of slack.
   (non-growing: the last third of the series is not meaningfully above the first
   third).
 
-## AC3 — segment density / object-PUT volume (`segment_density_*`)
+## AC3 — segment density / object-store utilization (`segment_density_*`)
 
 The suite already emitted `segments_sealed`, `objects_put`,
 `mean_commands_per_segment`, and `max_commands_per_segment`; this bead gates them.
+Release evidence must also emit object-store file count, object-log bytes,
+mean/max object size, utilization against configured target segment size, GET
+count, LIST count, PUT count, and an estimated S3 request/storage cost for the
+run.
 
 **Documented bounds:**
 
@@ -82,11 +86,23 @@ The suite already emitted `segments_sealed`, `objects_put`,
   writes a bounded number of objects (segment + manifest), so total PUTs are
   `O(resident)`. This catches a PUT storm / one-object-per-command regression.
 - `segments_sealed >= 1` and `objects_put >= 1` (something sealed).
+- Utilization bound: release evidence must report average segment-object size
+  and `objectlog_hybrid_storage_utilization_ratio = segment_bytes /
+  (segments_sealed * target_segment_bytes)`. This ratio is expected to move up
+  as batching improves; low utilization is a release blocker when paired with
+  high object/file count.
+- Cost bound: release evidence must report estimated S3-style cost from the
+  measured request counts and bytes: PUT/COPY/POST/LIST request count, GET
+  request count, stored bytes, and retained-byte-month projection. The exact
+  price inputs must be written into the evidence row so cost changes are
+  explainable.
 
-If a transactional path cannot safely batch before acknowledgement, that path must
-use a local transactional log/checkpoint layer or another non-object-storage log
-implementation. It must not force one command per object-storage segment under the
-`objectlog/hybrid-async` release profile.
+For the object-storage profile, durable acknowledgement is allowed only after the
+command's packed object-log segment and manifest are committed. Normal
+data-plane traffic must wait for group commit rather than force a tiny segment.
+Rare explicit sync/control flushes are permitted, but they must be identified in
+metrics and must not dominate object count, request count, or storage
+utilization.
 
 ## Running the gates
 
