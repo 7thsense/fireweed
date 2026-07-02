@@ -206,6 +206,8 @@ struct EligKey {
     sort: Vec<u8>,
     created_seq: u64,
     item: ItemId,
+    not_before: Option<UtcTimestamp>,
+    group_key: Option<GroupKey>,
 }
 
 fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
@@ -221,13 +223,19 @@ fn elig_key(rec: &ItemRecord, model: &PriorityModel) -> EligKey {
         sort,
         created_seq: rec.created_seq,
         item: rec.item_id,
+        not_before: rec.not_before,
+        group_key: rec.group_key.clone(),
     }
 }
 
 /// Bounded-relaxed locality key: items sharing a `group_key` cluster together; ungrouped items (None) sort
 /// last so grouped work batches ahead within a rank window. Total + `Ord` so selection is deterministic.
-fn locality_key(rec: &ItemRecord) -> (bool, Option<&GroupKey>) {
-    (rec.group_key.is_none(), rec.group_key.as_ref())
+fn locality_key(key: &EligKey) -> (bool, Option<&GroupKey>) {
+    (key.group_key.is_none(), key.group_key.as_ref())
+}
+
+fn due_at(key: &EligKey, now: UtcTimestamp) -> bool {
+    key.not_before.map(|nb| nb <= now).unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -665,7 +673,7 @@ impl ProjectionData {
                     projection.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
                 projection.index_insert_keys(rec.item_id, &keys);
             }
-            if rec.state == ItemState::Pending {
+            if rec.state == ItemState::Pending && !rec.superseded {
                 projection
                     .eligible
                     .insert(elig_key(&rec, &projection.priority_model));
@@ -868,7 +876,8 @@ impl ProjectionData {
                     );
                     let old_keys =
                         self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
-                    let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_));
+                    let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
+                        || matches!(c.set_not_before, ScheduleUpdate::Set(_));
                     let was_pending = rec.state == ItemState::Pending;
                     let old_elig = (repricing && was_pending).then(|| elig_key(rec, &model));
 
@@ -948,8 +957,8 @@ impl ProjectionData {
                     .collect();
                 self.index_remove_keys(item_id, &removed);
                 self.index_insert_keys(item_id, &added);
-                // Re-key the eligibility index for a repriced Pending item (no-op otherwise — a non-reprice
-                // or a Leased item leaves the eligibility set unchanged).
+                // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
+                // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
                 if let Some(old) = old_elig {
                     self.eligible.remove(&old);
                 }
@@ -1008,8 +1017,12 @@ impl ProjectionData {
                     rec.fenced = false;
                     // A rearm that returned to Pending (within `until`) resets the delivery count and, when
                     // the caller supplied the next-occurrence time, defers re-eligibility to that new
-                    // `not_before` (the idle interval). `eligible_candidates` filters `not_before <= now`
-                    // and `elig_key` is not_before-independent, so no eligibility-index update is needed.
+                    // `not_before` (the idle interval). `not_before` is part of `EligKey`, so re-key after
+                    // the transition inserted the newly pending item.
+                    let old_elig = (rec.state == ItemState::Pending).then(|| {
+                        let model = self.priority_model;
+                        elig_key(rec, &model)
+                    });
                     if matches!(o.kind, FinalizeKind::Rearm) && rec.state == ItemState::Pending {
                         rec.attempt_count = 0;
                         if let Some(nb) = o.not_before {
@@ -1017,14 +1030,21 @@ impl ProjectionData {
                         }
                     }
                     // Queue-native retry backoff: a Retry that returned the item to Pending (still under the
-                    // attempt bound) defers its re-eligibility to `not_before`. `eligible_candidates` filters
-                    // `not_before <= now`, and `elig_key` is not_before-independent, so no index update is
-                    // needed. Guarded on Pending so an exhausted Retry (-> Failed) gets no backoff.
+                    // attempt bound) defers its re-eligibility to `not_before`. Guarded on Pending so an
+                    // exhausted Retry (-> Failed) gets no backoff.
                     if matches!(o.kind, FinalizeKind::Retry)
                         && rec.state == ItemState::Pending
                         && let Some(nb) = o.not_before
                     {
                         rec.not_before = Some(nb);
+                    }
+                    if let Some(old) = old_elig {
+                        let model = self.priority_model;
+                        let new = elig_key(rec, &model);
+                        if old != new {
+                            self.eligible.remove(&old);
+                            self.eligible.insert(new);
+                        }
                     }
                 }
                 Ok(())
@@ -1179,21 +1199,52 @@ impl ProjectionData {
             OrderingMode::Strict => 0,
         };
         if bound == 0 {
-            // Strict / 0-bound: byte-for-byte the original strict selection (no relaxation).
+            // Strict / 0-bound: byte-for-byte the original strict selection (no relaxation). `eligible`
+            // contains only pending, non-superseded items; due-time lives on the key so the claim hot path
+            // does not need one HashMap lookup per candidate.
             return self
                 .eligible
                 .iter()
-                .filter_map(|k| self.items.get(&k.item))
-                .filter(|r| {
-                    r.state == ItemState::Pending
-                        && !r.superseded
-                        && r.not_before.map(|nb| nb <= now).unwrap_or(true)
-                })
+                .filter(|k| due_at(k, now))
                 .take(max)
-                .map(|r| r.item_id)
+                .map(|k| k.item)
                 .collect();
         }
         self.relaxed_candidates(now, max, bound)
+    }
+
+    /// Strict/0-bound candidate page after a previously selected item. Used by group-commit claim
+    /// reservation to avoid rescanning the same reserved prefix for every queued claim.
+    pub fn eligible_candidates_after(
+        &self,
+        now: UtcTimestamp,
+        after: Option<ItemId>,
+        max: usize,
+    ) -> Vec<ItemId> {
+        if self.paused || max == 0 {
+            return Vec::new();
+        }
+        let bound = match self.ordering_mode {
+            OrderingMode::BoundedRelaxed => self.max_rank_error,
+            OrderingMode::Strict => 0,
+        };
+        if bound != 0 {
+            return self.eligible_candidates(now, max);
+        }
+        let Some(after) = after else {
+            return self.eligible_candidates(now, max);
+        };
+        let Some(rec) = self.items.get(&after) else {
+            return self.eligible_candidates(now, max);
+        };
+        let after_key = elig_key(rec, &self.priority_model);
+        use std::ops::Bound::{Excluded, Unbounded};
+        self.eligible
+            .range((Excluded(&after_key), Unbounded))
+            .filter(|k| due_at(k, now))
+            .take(max)
+            .map(|k| k.item)
+            .collect()
     }
 
     /// Bounded-relaxed claim selection (TP-003 INV-6 + INV-4). Takes the strict-priority eligible prefix
@@ -1216,15 +1267,10 @@ impl ProjectionData {
             return Vec::new();
         }
         // Strict-priority eligible prefix (the reference order the rank error is measured against).
-        let mut selected: Vec<&ItemRecord> = self
+        let mut selected: Vec<&EligKey> = self
             .eligible
             .iter()
-            .filter_map(|k| self.items.get(&k.item))
-            .filter(|r| {
-                r.state == ItemState::Pending
-                    && !r.superseded
-                    && r.not_before.map(|nb| nb <= now).unwrap_or(true)
-            })
+            .filter(|k| due_at(k, now))
             .take(max)
             .collect();
 
@@ -1234,7 +1280,7 @@ impl ProjectionData {
         for chunk in selected.chunks_mut(block) {
             chunk.sort_by(|a, b| locality_key(a).cmp(&locality_key(b)));
         }
-        selected.into_iter().map(|r| r.item_id).collect()
+        selected.into_iter().map(|k| k.item).collect()
     }
 
     /// `ProjectionRead::select_eligible`.
@@ -1658,7 +1704,7 @@ mod tests {
     use pqueue_engine::{
         AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandId, FinalizeCommand,
         FinalizeKind, FinalizeOutcome, PushCommand, RenewLeaseCommand, SideRecord,
-        WriteSideRecordsCommand,
+        UpdateFieldsCommand, WriteSideRecordsCommand,
     };
 
     fn shard() -> QueueKey {
@@ -1907,6 +1953,147 @@ mod tests {
             rank_error <= bound as u64,
             "INV-6: rank error {rank_error} exceeds bound {bound}"
         );
+    }
+
+    #[test]
+    fn eligibility_key_rekeys_when_not_before_changes() {
+        let mut log = LogData::default();
+        let mut proj = ProjectionData::new(
+            model(),
+            OrderingMode::Strict,
+            0,
+            RecurrencePolicy::default(),
+            &[],
+        );
+        for p in [push_item("1", "k1", 1), push_item("2", "k2", 2)] {
+            commit(
+                &mut log,
+                &mut proj,
+                &shard(),
+                env(QueueCommand::Push(PushCommand { items: vec![p] })),
+                None,
+            )
+            .unwrap();
+        }
+
+        commit(
+            &mut log,
+            &mut proj,
+            &shard(),
+            env(QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id: iid("1"),
+                field_ops: BTreeMap::new(),
+                payload: PayloadUpdate::Keep,
+                set_priority: ScheduleUpdate::Keep,
+                set_not_before: ScheduleUpdate::Set(Some(ts(5_000))),
+                set_entity_document: None,
+            })),
+            None,
+        )
+        .unwrap();
+        assert_eq!(proj.eligible_candidates(ts(1_000), 10), vec![iid("2")]);
+        assert_eq!(
+            proj.eligible_candidates(ts(6_000), 10),
+            vec![iid("1"), iid("2")]
+        );
+
+        let lease = LeaseToken::new("lease-1").unwrap();
+        commit(
+            &mut log,
+            &mut proj,
+            &shard(),
+            env(QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("1")],
+                lease_token: lease,
+                lease_expires_at: ts(7_000),
+            })),
+            None,
+        )
+        .unwrap();
+        commit(
+            &mut log,
+            &mut proj,
+            &shard(),
+            env(QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome {
+                    item_id: iid("1"),
+                    kind: FinalizeKind::Retry,
+                    not_before: Some(ts(10_000)),
+                }],
+            })),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(proj.eligible_candidates(ts(9_000), 10), vec![iid("2")]);
+        assert_eq!(
+            proj.eligible_candidates(ts(11_000), 10),
+            vec![iid("1"), iid("2")]
+        );
+    }
+
+    #[test]
+    fn projection_image_does_not_rehydrate_superseded_pending_as_eligible() {
+        let definition = qdef();
+        let mut image = ProjectionImage {
+            high_water: None,
+            paused: false,
+            next_seq: 2,
+            items: vec![
+                ProjectionImageItem {
+                    item_id: iid("10"),
+                    client_item_key: ClientItemKey::new("k-old").unwrap(),
+                    priority: Some(PriorityValue::Int64(1)),
+                    not_before: None,
+                    group_key: None,
+                    payload: None,
+                    fields: BTreeMap::new(),
+                    metadata: Metadata::default(),
+                    gate_keys: Vec::new(),
+                    entity_document: None,
+                    state: ItemState::Pending,
+                    item_version: 1,
+                    attempt_count: 0,
+                    max_attempts: 3,
+                    created_seq: 0,
+                    lease_token: None,
+                    lease_expires_at: None,
+                    fenced: false,
+                    superseded: true,
+                },
+                ProjectionImageItem {
+                    item_id: iid("11"),
+                    client_item_key: ClientItemKey::new("k-live").unwrap(),
+                    priority: Some(PriorityValue::Int64(2)),
+                    not_before: None,
+                    group_key: None,
+                    payload: None,
+                    fields: BTreeMap::new(),
+                    metadata: Metadata::default(),
+                    gate_keys: Vec::new(),
+                    entity_document: None,
+                    state: ItemState::Pending,
+                    item_version: 1,
+                    attempt_count: 0,
+                    max_attempts: 3,
+                    created_seq: 1,
+                    lease_token: None,
+                    lease_expires_at: None,
+                    fenced: false,
+                    superseded: false,
+                },
+            ],
+            side_records: BTreeMap::new(),
+            instance_fences: BTreeMap::new(),
+            metrics: QueueMetrics::default(),
+        };
+        image
+            .items
+            .sort_by_key(|item| (item.created_seq, item.item_id));
+
+        let restored = ProjectionData::from_image(&definition, image).unwrap();
+        assert_eq!(restored.eligible_candidates(ts(1_000), 10), vec![iid("11")]);
+        assert!(restored.live_items_by_key(&[ClientItemKey::new("k-old").unwrap()])[0].is_none());
     }
 
     /// BQ-20: an epoch advance fences future appends to the new epoch but does NOT rewind the log; a

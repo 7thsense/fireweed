@@ -201,6 +201,16 @@ impl ProjectionStore for InMemoryProjection {
         Ok(self.get(shard)?.eligible_candidates(now, max))
     }
 
+    fn eligible_candidates_after(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        after: Option<ItemId>,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        Ok(self.get(shard)?.eligible_candidates_after(now, after, max))
+    }
+
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
         Ok(self.get(shard)?.render_claimed(ids))
     }

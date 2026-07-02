@@ -30,8 +30,8 @@ use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use pqueue_core::{
-    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
-    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OrderingMode,
+    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
@@ -324,6 +324,9 @@ struct ShardCoord {
     /// Claim commands that have selected candidates and are waiting for durable object-log seal. Until the
     /// seal applies them to the projection, later claims must exclude these ids to avoid duplicate leases.
     in_flight_claims: BTreeSet<ItemId>,
+    /// Last item reserved by an in-flight claim in strict eligibility order. Strict queues can resume
+    /// candidate selection after this key instead of rescanning and filtering the full reserved prefix.
+    in_flight_claim_tail: Option<ItemId>,
 }
 
 /// `UtcTimestamp` → epoch milliseconds (the substrate's latency-trigger clock unit).
@@ -459,6 +462,16 @@ pub trait ProjectionStore: Send {
         now: UtcTimestamp,
         max: usize,
     ) -> EngineResult<Vec<ItemId>>;
+    fn eligible_candidates_after(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        after: Option<ItemId>,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        let _ = after;
+        self.eligible_candidates(shard, now, max)
+    }
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>>;
     fn lookup_by_key(
         &self,
@@ -916,6 +929,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             for id in in_flight_claims {
                 coord.in_flight_claims.remove(&id);
             }
+            if coord.in_flight_claims.is_empty() {
+                coord.in_flight_claim_tail = None;
+            }
         }
         for w in waiters {
             w.complete(result.clone());
@@ -929,6 +945,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         if let Some(coord) = inner.coords.get_mut(shard) {
             coord.pending.clear();
             coord.in_flight_claims.clear();
+            coord.in_flight_claim_tail = None;
             for w in coord.waiters.drain(..) {
                 w.complete(Err(err.clone()));
             }
@@ -1748,10 +1765,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
             // Resolve the claim unit from the compatibility options. Item-level (the default) is unchanged;
             // this log-replay composition refuses richer claim units with `Unavailable` rather than
             // silently downgrading them (BQ-14a).
+            let def = self.control.queue_definition(&req.shard)?;
             if req.compatibility != ClaimCompatibility::default() {
-                let def = self.control.queue_definition(&req.shard)?;
                 require_item_level_claim(&req.compatibility, req.max_items as u64, &def)?;
             }
+            let strict_candidate_cursor =
+                def.ordering_mode == OrderingMode::Strict || def.max_rank_error == 0;
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
             if gc {
@@ -1768,19 +1787,27 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                     Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
                 }
             }
-            let in_flight_claims = g
-                .coords
-                .get(&req.shard)
-                .map(|coord| coord.in_flight_claims.clone())
-                .unwrap_or_default();
-            let candidate_limit = req.max_items.saturating_add(in_flight_claims.len()).max(1);
-            let candidates: Vec<ItemId> = g
-                .projection
-                .eligible_candidates(&req.shard, req.now, candidate_limit)?
-                .into_iter()
-                .filter(|id| !in_flight_claims.contains(id))
-                .take(req.max_items)
-                .collect();
+            let candidates: Vec<ItemId> = if gc && strict_candidate_cursor {
+                let after = g
+                    .coords
+                    .get(&req.shard)
+                    .and_then(|coord| coord.in_flight_claim_tail);
+                g.projection
+                    .eligible_candidates_after(&req.shard, req.now, after, req.max_items)?
+            } else {
+                let in_flight_claims = g
+                    .coords
+                    .get(&req.shard)
+                    .map(|coord| coord.in_flight_claims.clone())
+                    .unwrap_or_default();
+                let candidate_limit = req.max_items.saturating_add(in_flight_claims.len()).max(1);
+                g.projection
+                    .eligible_candidates(&req.shard, req.now, candidate_limit)?
+                    .into_iter()
+                    .filter(|id| !in_flight_claims.contains(id))
+                    .take(req.max_items)
+                    .collect()
+            };
             if candidates.is_empty() {
                 return Ok(ClaimStart::Ready(Claimed::default()));
             }
@@ -1796,11 +1823,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 req.now,
             );
             if gc {
-                g.coords
-                    .entry(req.shard.clone())
-                    .or_default()
-                    .in_flight_claims
-                    .extend(candidates.iter().copied());
+                let coord = g.coords.entry(req.shard.clone()).or_default();
+                coord.in_flight_claims.extend(candidates.iter().copied());
+                coord.in_flight_claim_tail = candidates.last().copied();
                 let slot = Self::gc_buffer(&mut g, &req.shard, env, req.expected_epoch, req.now)?;
                 return Ok(ClaimStart::Wait {
                     slot,
@@ -3092,6 +3117,20 @@ mod ordered_tests {
                 .copied()
                 .take(max)
                 .collect())
+        }
+
+        fn eligible_candidates_after(
+            &self,
+            _shard: &QueueKey,
+            _now: UtcTimestamp,
+            after: Option<ItemId>,
+            max: usize,
+        ) -> EngineResult<Vec<ItemId>> {
+            let state = self.state.lock().expect("fake projection poisoned");
+            let skip = after
+                .and_then(|id| state.pending.iter().position(|pending| *pending == id))
+                .map_or(0, |pos| pos + 1);
+            Ok(state.pending.iter().skip(skip).copied().take(max).collect())
         }
 
         fn render_claimed(

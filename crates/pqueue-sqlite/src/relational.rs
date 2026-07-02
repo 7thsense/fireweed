@@ -7183,6 +7183,18 @@ impl ProjectionStore for HybridProjectionStore {
         self.memory.eligible_candidates(shard, now, max)
     }
 
+    fn eligible_candidates_after(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        after: Option<ItemId>,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        self.require_hydrated(shard)?;
+        self.memory
+            .eligible_candidates_after(shard, now, after, max)
+    }
+
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
         self.require_hydrated(shard)?;
         self.memory.render_claimed(shard, ids)

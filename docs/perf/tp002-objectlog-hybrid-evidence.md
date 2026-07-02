@@ -304,7 +304,39 @@ Representative post-fix CPU sample:
 | `SegmentedObjectLog::seal` / `build_segment_object` | about 1.5% in sample |
 | `recover_manifest` / `current_epoch` / `walk_keys` | absent from filtered hot-path sample |
 
-The next release blocker is therefore projection-side 10M claim/finalize CPU,
-not object-storage file count or manifest recovery. The broader 10M release
-evidence bead remains open until that projection bottleneck is fixed and the
-uncapped 10M row is committed with `bars_met=true`.
+The next release blocker was therefore projection-side 10M claim/finalize CPU,
+not object-storage file count or manifest recovery. `pqueue-dfa34097` addressed
+that by keeping due-time on the eligibility key and by letting strict
+group-commit claims resume candidate selection after the last in-flight claim
+instead of repeatedly scanning/filtering the reserved prefix.
+
+### 10M — second preflight timeout, recovery replay parsing now dominates (`pqueue-dfa34097`)
+
+The 10M preflight was rerun after the projection cursor optimization:
+
+```text
+PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 \
+  timeout 15m cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+  performance_object_log_hybrid_release_10m -- --ignored --nocapture
+```
+
+Result: **timeout at 15m**, no 10M ledger row emitted. The hot path moved again:
+early samples no longer showed `ProjectionData::eligible_candidates` as the top
+CPU bucket. Later samples showed the run inside `ComposedBackend::recover`,
+dominated by `SegmentedObjectLog::read_from` /
+`pqueue_objectlog::segmented::parse_segment_object` and serde deserialization of
+large push segments.
+
+Representative post-cursor CPU sample:
+
+| symbol/path | observation |
+|---|---|
+| `SegmentedObjectLog::read_from -> parse_segment_object` | dominant recovery CPU bucket |
+| `PushItem` / `CommandEnvelope` serde deserialization | secondary recovery CPU bucket |
+| `ProjectionData::eligible_candidates` | no longer the top sampled blocker |
+| `recover_manifest` / `current_epoch` / `walk_keys` | still absent from filtered hot-path samples |
+
+The next release blocker is therefore recovery-tail replay volume/parsing, filed
+as `pqueue-06f8e380`. The broader 10M release evidence bead remains open until
+that recovery blocker is fixed and the uncapped 10M row is committed with
+`bars_met=true`.
