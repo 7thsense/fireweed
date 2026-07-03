@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260703T054048-2f999158",
+  "bead_id": "pqueue-a51d53c7",
+  "base_rev": "5d2e0092b26943acb51ab3b17dbdb8f9563a0f4a",
+  "created_at": "2026-07-03T05:40:49.25324343Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-a51d53c7",
+    "title": "Implement RecoveryReadPort for postgres",
+    "description": "PROBLEM\nRecoveryReadPort (explain_commit, side_record) is not implemented on postgres (empty impl inherits Unavailable), so a committed transition's side records / instance fence / per-entry outcomes cannot be recovered or audited after the fact on postgres, unlike sqlite-relational (crates/pqueue-sqlite/tests/relational_commit.rs: relational_explain_commit_recovers_transition_and_survives_reopen).\n\nPROPOSED FIX\nImplement explain_commit (reconstruct a CommitRecovery from the retained request-id idempotency record plus current durable state: consumed input id, advanced instance fence, side-record keys, lifecycle item ids, per-entry status) and side_record (point read of an opaque non-work record by key) on the in-scope postgres backend(s), matching sqlite-relational's semantics.\n\nIN-SCOPE FILES\n- crates/pqueue-postgres/src/relational.rs (and/or lib.rs per scope decision)\n\nOUT-OF-SCOPE\n- commit_transition itself (sibling bead, can run in parallel since both read the tables added in pqueue-593007ee).",
+    "acceptance": "1. A live-DB test (env-gated PQUEUE_PG_TEST_URL) proves explain_commit reconstructs a previously committed transition (request id, instance fence, side-record keys, lifecycle ids, per-entry status) and the record survives a reconnect.\n2. A live-DB test proves side_record returns the correct opaque payload by key, and Ok(None) for an unwritten key.\n3. `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-44995583",
+    "labels": [
+      "area:postgres",
+      "kind:feature",
+      "system:pqueue",
+      "consumer:snorri",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"A live-DB test (env-gated PQUEUE_PG_TEST_URL) proves explain_commit reconstructs a previously committed transition (request id, instance fence, side-record keys, lifecycle ids, per-entry status) and the record survives a reconnect.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"A live-DB test proves side_record returns the correct opaque payload by key, and Ok(None) for an unwritten key.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"`cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T05:38:17.883521405Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/3"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T054048-2f999158",
+    "prompt": ".ddx/executions/20260703T054048-2f999158/prompt.md",
+    "manifest": ".ddx/executions/20260703T054048-2f999158/manifest.json",
+    "result": ".ddx/executions/20260703T054048-2f999158/result.json",
+    "checks": ".ddx/executions/20260703T054048-2f999158/checks.json",
+    "usage": ".ddx/executions/20260703T054048-2f999158/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-a51d53c7-20260703T054048-2f999158"
+  },
+  "prompt_sha": "71f43d20b3d4496b7bd3a2dd5b7719933d6d70926d7f27a41e36c6c8ba5d6665"
+}
