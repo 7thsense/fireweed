@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260703T051014-39b649ef",
+  "bead_id": "pqueue-593007ee",
+  "base_rev": "1cb893a12bc1d40380c43468a6c5f134076213f6",
+  "created_at": "2026-07-03T05:10:15.039234423Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-593007ee",
+    "title": "Add side-record and instance-fence tables to the in-scope postgres backend(s)",
+    "description": "PROBLEM\nWriteSideRecords and AdvanceInstanceFence commands are rejected with EngineError::Unavailable on postgres (crates/pqueue-postgres/src/relational.rs, comments at the WriteSideRecords/AdvanceInstanceFence match arms) because no storage exists for them.\n\nPROPOSED FIX\nAdd the postgres tables/schema for opaque non-work side records and per-instance-key fences, for the backend flavor(s) settled in pqueue-ab2e0b21, mirroring sqlite-relational's schema and migration approach. Wire schema creation into the same migration path sqlite-relational uses (see the existing `open_upgrades_existing_relational_items_table_with_metadata_column`-style reconnect test for the pattern this project expects).\n\nIN-SCOPE FILES\n- crates/pqueue-postgres/src/relational.rs (and/or lib.rs per pqueue-ab2e0b21's scope decision)\n\nOUT-OF-SCOPE\n- The commit_transition orchestration method itself (next bead).\n- RecoveryReadPort (separate bead).",
+    "acceptance": "1. `rg -n 'CREATE TABLE.*side_record|CREATE TABLE.*instance_fence' crates/pqueue-postgres/src/relational.rs` finds the new schema.\n2. A live-DB test (env-gated PQUEUE_PG_TEST_URL, matching the existing convention in crates/pqueue-postgres/tests/) proves WriteSideRecords/AdvanceInstanceFence commands persist and survive reconnect.\n3. `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-44995583",
+    "labels": [
+      "area:postgres",
+      "kind:feature",
+      "system:pqueue",
+      "consumer:snorri",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"`rg -n 'CREATE TABLE.*side_record|CREATE TABLE.*instance_fence' crates/pqueue-postgres/src/relational.rs` finds the new schema.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"A live-DB test (env-gated PQUEUE_PG_TEST_URL, matching the existing convention in crates/pqueue-postgres/tests/) proves WriteSideRecords/AdvanceInstanceFence commands persist and survive reconnect.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"`cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T05:08:48.890061485Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/3"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T051014-39b649ef",
+    "prompt": ".ddx/executions/20260703T051014-39b649ef/prompt.md",
+    "manifest": ".ddx/executions/20260703T051014-39b649ef/manifest.json",
+    "result": ".ddx/executions/20260703T051014-39b649ef/result.json",
+    "checks": ".ddx/executions/20260703T051014-39b649ef/checks.json",
+    "usage": ".ddx/executions/20260703T051014-39b649ef/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-593007ee-20260703T051014-39b649ef"
+  },
+  "prompt_sha": "6c554f749ee3f6263279499e5a0b675b31a469f1423586832a85e572e83da712"
+}
