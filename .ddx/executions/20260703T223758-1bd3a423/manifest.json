@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260703T223758-1bd3a423",
+  "bead_id": "pqueue-01791e62",
+  "base_rev": "2a8ce793d912f6d702b2fd8a78553f21e3134797",
+  "created_at": "2026-07-03T22:37:59.013266331Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-01791e62",
+    "title": "Branch-at-position: copy-on-write queue fork on the object-log manifest",
+    "description": "PROBLEM\nThere is no way to fork a live queue to test a workflow variant and discard it. The motivating scenario (operator, 2026-07-03): \"what if I changed the delivery workflow from x to y\" — pause a production delivery queue, branch it at a position, run the variant against the branch, compare, discard. TD-009 (docs/helix/02-design/technical-designs/TD-009-experimentation-pause-branch-read-as-of.md) designs the mechanics.\n\nCURRENT STATE\n- Object-log manifest and segment objects are immutable and per-(tenant,queue): ManifestEntry (crates/pqueue-objectlog/src/segmented.rs:539-549), shard_prefix (:582) — already copy-on-write-shaped.\n- Leases/epochs are per-queue with a single-active-lease invariant (crates/pqueue-engine/src/control_plane.rs:14,59-89).\n- Segment retention/expiry exists per TD-004 and is unaware of cross-queue references.\n- read_as_of and intake-blocking pause land in dependency beads.\n\nPROPOSED FIX\nPer TD-009 section 3-4: branch(source_shard, at: CommandPosition) -\u003e new QueueKey. Object-log: allocate a new queue identity Q-prime (new prefix + manifest series) whose manifest references the parent's immutable segment objects for sequences \u003c= P (no data copy), diverging with its own segments after; Q-prime acquires its own control-plane lease/epoch (parent fence untouched); emit_change_records=false by default on branches; branch carries a TTL and pins the parent's segments \u003c= P against expiry until the branch is discarded. Relational family: structured capability-unavailable until the ADR-013 rebuild-from-log migration. Document the inherited-lease behavior (reconstructed Leased items expire on the normal clock in the branch) and the shared idempotency namespace \u003c= P.\n\nNON-SCOPE\n- Comparison/diff tooling. Automatic branch GC beyond TTL. Relational branch implementation.",
+    "acceptance": "1. branch_shares_segments_and_diverges: a branch at P sees state identical to the parent at P (verified via read_as_of), post-P writes to the branch do not appear in the parent and vice versa, and no parent segment objects are duplicated in storage. cargo test -p pqueue-objectlog branch_shares_segments_and_diverges\n2. branch_gets_own_lease_no_parent_fence_change: the branch acquires its own assignment epoch; the parent's epoch is unchanged. cargo test -p pqueue-objectlog branch_gets_own_lease_no_parent_fence_change\n3. branch_suppresses_emission_by_default: no change records are emitted for branch activity unless explicitly enabled. cargo test -p pqueue-objectlog branch_suppresses_emission_by_default\n4. branch_pins_parent_segments_against_expiry: parent segment expiry does not delete segments referenced by a live branch; discarding the branch releases the pins. cargo test -p pqueue-objectlog branch_pins_parent_segments_against_expiry\n5. cargo test -p pqueue-objectlog passes.",
+    "labels": [
+      "activity:build",
+      "kind:build",
+      "area:pqueue-objectlog",
+      "suite:segmented_s3_substrate_tests",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"branch_shares_segments_and_diverges: a branch at P sees state identical to the parent at P (verified via read_as_of), post-P writes to the branch do not appear in the parent and vice versa, and no parent segment objects are duplicated in storage. cargo test -p pqueue-objectlog branch_shares_segments_and_diverges\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":2,\"text\":\"branch_gets_own_lease_no_parent_fence_change: the branch acquires its own assignment epoch; the parent's epoch is unchanged. cargo test -p pqueue-objectlog branch_gets_own_lease_no_parent_fence_change\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"branch_suppresses_emission_by_default: no change records are emitted for branch activity unless explicitly enabled. cargo test -p pqueue-objectlog branch_suppresses_emission_by_default\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":4,\"text\":\"branch_pins_parent_segments_against_expiry: parent segment expiry does not delete segments referenced by a live branch; discarding the branch releases the pins. cargo test -p pqueue-objectlog branch_pins_parent_segments_against_expiry\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":5,\"text\":\"cargo test -p pqueue-objectlog passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T22:35:26.89839919Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.40 threshold=0.50 verifiable=2/5"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T223758-1bd3a423",
+    "prompt": ".ddx/executions/20260703T223758-1bd3a423/prompt.md",
+    "manifest": ".ddx/executions/20260703T223758-1bd3a423/manifest.json",
+    "result": ".ddx/executions/20260703T223758-1bd3a423/result.json",
+    "checks": ".ddx/executions/20260703T223758-1bd3a423/checks.json",
+    "usage": ".ddx/executions/20260703T223758-1bd3a423/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-01791e62-20260703T223758-1bd3a423"
+  },
+  "prompt_sha": "4819bbbc4ce63678f64285c13dd36c0a8b16b899b5d2d70780704e34b788c538"
+}
