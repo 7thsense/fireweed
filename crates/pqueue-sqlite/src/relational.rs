@@ -1070,19 +1070,29 @@ fn typed_value_for_json(
         IndexType::String => value
             .as_str()
             .map(|s| TypedValue::String(s.to_string()))
-            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
-        IndexType::Integer => value
-            .as_i64()
-            .map(TypedValue::Integer)
-            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+            .ok_or(EngineError::Invalid(
+                "typed index value is not valid for declared type",
+            ))?,
+        IndexType::Integer => {
+            value
+                .as_i64()
+                .map(TypedValue::Integer)
+                .ok_or(EngineError::Invalid(
+                    "typed index value is not valid for declared type",
+                ))?
+        }
         IndexType::Float => value
             .as_f64()
             .map(TypedValue::Float)
-            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+            .ok_or(EngineError::Invalid(
+                "typed index value is not valid for declared type",
+            ))?,
         IndexType::Boolean => value
             .as_bool()
             .map(TypedValue::Bool)
-            .ok_or({ EngineError::Invalid("typed index value is not valid for declared type") })?,
+            .ok_or(EngineError::Invalid(
+                "typed index value is not valid for declared type",
+            ))?,
         IndexType::Datetime => match value {
             JsonValue::String(s) => TypedValue::DateTime(parse_utc_timestamp(s)?),
             JsonValue::Number(n) => {
