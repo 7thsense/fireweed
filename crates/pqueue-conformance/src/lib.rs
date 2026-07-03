@@ -25,6 +25,12 @@
 //! that inspect an adapter's private state (e.g. item_version straight from the projection, or
 //! simulating log compaction) stay in that adapter's own crate.
 //!
+//! Rule for new engine ports that are intended for more than one backend: they MUST add a
+//! capability-gated conformance scenario here, not a bespoke per-backend test file. That scenario
+//! should prove the advertised behavior when the capability is present, and prove explicit decline
+//! plus capability-flag consistency when it is absent. The CommitTransitionPort gap in this epic is
+//! the concrete precedent for why this rule exists.
+//!
 //! ## Conformance matrix (BQ-13 / ADR-008 §2 / TD-001 capability classes)
 //!
 //! Every backend runs the classes its durability + recovery model supports. The CORE class is the SAME
