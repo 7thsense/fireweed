@@ -217,6 +217,24 @@ CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
 CREATE UNIQUE INDEX IF NOT EXISTS pqueue_item_index_unique_key_idx
     ON pqueue_item_index (tenant_id, queue_id, index_name, index_key)
     WHERE is_unique = true;
+-- C9 (epic pqueue-2201fd37): opaque NON-WORK side records written by the authoritative vectorized
+-- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `pqueue_items`: a side
+-- record carries no lifecycle/lease/priority/eligibility, so it is never claimable, eligible, peekable, or
+-- counted as work. `key`/`payload` are opaque bytes pqueue stores verbatim; the apply arm upserts by key.
+-- Mirrors `pqueue-sqlite`'s `pqueue_side_records` (`crates/pqueue-sqlite/src/relational.rs:234-237`).
+CREATE TABLE IF NOT EXISTS pqueue_side_records (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BYTEA NOT NULL, payload BYTEA NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, key)
+);
+-- C6 (epic pqueue-2201fd37): caller-supplied opaque instance/state fences advanced by the authoritative
+-- vectorized claimed-work commit (Snorri StateStore boundary). SEPARATE from `pqueue_items`: a fence carries
+-- no lifecycle/lease and is never claimable/eligible/peekable. `instance_key` is opaque bytes; an absent key
+-- reads as fence 0 (the unset convention). The commit upserts the row to `next` only after validation.
+-- Mirrors `pqueue-sqlite`'s `pqueue_instance_fences` (`crates/pqueue-sqlite/src/relational.rs:242-245`).
+CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BYTEA NOT NULL, fence BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, instance_key)
+);
 "#;
 
 const COHORT_EXPIRY_SWEEP_LIMIT: i64 = 128;
@@ -1839,15 +1857,35 @@ fn apply_command_sql(
             }
             Ok(())
         }
-        // Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37) are not
-        // yet implemented on the relational family — the durable parity slice is deferred (C9). This backend
-        // does not implement `CommitTransitionPort` (it inherits the `Unavailable` default), so a side-record
-        // command is never appended here; reject defensively if one is ever replayed.
-        QueueCommand::WriteSideRecords(_) => Err(EngineError::Unavailable),
-        // Caller-supplied instance/state fences (epic pqueue-2201fd37) are likewise not yet implemented on the
-        // relational family (this backend inherits the `Unavailable` commit default), so the command is never
-        // appended here; reject defensively if one is ever replayed.
-        QueueCommand::AdvanceInstanceFence(_) => Err(EngineError::Unavailable),
+        // C9 (epic pqueue-2201fd37): opaque NON-WORK side records (Snorri authoritative-commit boundary).
+        // Upsert each (key,payload) into `pqueue_side_records` — a table disjoint from `pqueue_items`, so a
+        // side record is never claimable/eligible/peekable nor counted as work. Apply is infallible
+        // (insert-or-overwrite by key), mirroring `pqueue-sqlite`'s arm. `CommitTransitionPort` itself is not
+        // yet wired on this backend (a separate bead) — this arm only makes the storage ready for it.
+        QueueCommand::WriteSideRecords(c) => {
+            for rec in &c.records {
+                st(tx.execute(
+                    "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                     VALUES ($1,$2,$3,$4) \
+                     ON CONFLICT(tenant_id,queue_id,key) DO UPDATE SET payload=EXCLUDED.payload",
+                    &[&t, &q, &rec.key, &rec.payload.as_ref()],
+                ))?;
+            }
+            Ok(())
+        }
+        // C6 (epic pqueue-2201fd37): advance a caller-supplied opaque instance/state fence. Validated
+        // pre-commit (stored==expected, next>expected), so the upsert is infallible. Disjoint from
+        // `pqueue_items` — a fence is never claimable/peekable work. `CommitTransitionPort` itself is not
+        // yet wired on this backend (a separate bead) — this arm only makes the storage ready for it.
+        QueueCommand::AdvanceInstanceFence(c) => {
+            st(tx.execute(
+                "INSERT INTO pqueue_instance_fences (tenant_id,queue_id,instance_key,fence) \
+                 VALUES ($1,$2,$3,$4) \
+                 ON CONFLICT(tenant_id,queue_id,instance_key) DO UPDATE SET fence=EXCLUDED.fence",
+                &[&t, &q, &c.instance_key, &(c.next as i64)],
+            ))?;
+            Ok(())
+        }
     }
 }
 
