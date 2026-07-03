@@ -22,6 +22,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_conformance::{envelope, item, qdef, shard};
+use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
     BlobStore, InMemoryBlobStore, ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
@@ -39,6 +40,20 @@ fn pushes(n: u64) -> Vec<pqueue_engine::CommandEnvelope> {
             )
         })
         .collect()
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn branch_qdef(suffix: &str) -> pqueue_core::QueueDefinition {
+    let mut def = qdef();
+    def.queue_id = QueueId::new(format!("branch-{}-{suffix}", std::process::id())).unwrap();
+    def
 }
 
 #[derive(Default)]
@@ -80,6 +95,10 @@ impl BlobStore for CountingBlobStore {
         self.inner.get(key)
     }
 
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.inner.delete(key)
+    }
+
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         self.list_count.fetch_add(1, Ordering::Relaxed);
         self.inner.list(prefix)
@@ -115,6 +134,10 @@ impl BlobStore for PaginatedListBlobStore {
 
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
         self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.inner.delete(key)
     }
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
@@ -382,6 +405,202 @@ fn one_command_per_segment_config_is_rejected_unless_dev_flag() {
         out.committed.len(),
         1,
         "dev flag seals each command immediately"
+    );
+}
+
+#[test]
+fn branch_shares_segments_and_diverges() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let parent = SegmentedObjectLog::open(store.clone(), cfg);
+    let parent_def = qdef();
+    let parent_shard = shard();
+    parent.create_queue(&parent_def).unwrap();
+
+    parent.enqueue(&parent_shard, &pushes(4), 0, 10).unwrap();
+    parent.seal(&parent_shard, 0, 11).unwrap();
+
+    let cut = CommandPosition::new(parent_shard.clone(), 0, 1);
+    let branch_def = branch_qdef("shares");
+    let branch_shard = pqueue_engine::QueueKey::new(
+        branch_def.tenant_id.clone(),
+        branch_def.queue_id.clone(),
+    );
+    let branch_epoch = parent
+        .branch(&parent_shard, &branch_def, &cut, 60_000, 20)
+        .unwrap();
+    assert_eq!(branch_epoch, 1);
+
+    let parent_prefix = parent.read_as_of(&parent_shard, &cut).unwrap();
+    let branch_prefix = parent.read_as_of(&branch_shard, &cut).unwrap();
+    assert_eq!(
+        parent_prefix
+            .iter()
+            .map(|(_, env)| format!("{:?}", env.command))
+            .collect::<Vec<_>>(),
+        branch_prefix
+            .iter()
+            .map(|(_, env)| format!("{:?}", env.command))
+            .collect::<Vec<_>>(),
+        "branch view matches the parent at the cut position"
+    );
+
+    let source_seg_key = format!(
+        "t/{}/q/{}/seg/00000000000000000000.seg",
+        hex_lower(parent_shard.tenant_id.as_str().as_bytes()),
+        hex_lower(parent_shard.queue_id.as_str().as_bytes())
+    );
+    assert!(
+        store.get(&source_seg_key).unwrap().is_some(),
+        "parent segment remains stored"
+    );
+    assert!(
+        store
+            .list(&format!(
+                "t/{}/q/{}/seg/",
+                hex_lower(branch_shard.tenant_id.as_str().as_bytes()),
+                hex_lower(branch_shard.queue_id.as_str().as_bytes())
+            ))
+            .unwrap()
+            .is_empty(),
+        "branch creation does not duplicate parent segment objects"
+    );
+
+    parent
+        .enqueue(&parent_shard, &pushes(1), 0, 30)
+        .unwrap();
+    parent.seal(&parent_shard, 0, 31).unwrap();
+    parent
+        .enqueue(&branch_shard, &pushes(1), branch_epoch, 32)
+        .unwrap();
+    parent.seal(&branch_shard, branch_epoch, 33).unwrap();
+
+    let parent_tail = parent.read_all(&parent_shard).unwrap();
+    let branch_tail = parent.read_all(&branch_shard).unwrap();
+    assert_eq!(parent_tail.len(), 5);
+    assert_eq!(branch_tail.len(), 3);
+    assert_ne!(
+        parent_tail
+            .iter()
+            .map(|(_, env)| format!("{:?}", env.command))
+            .collect::<Vec<_>>(),
+        branch_tail
+            .iter()
+            .map(|(_, env)| format!("{:?}", env.command))
+            .collect::<Vec<_>>(),
+        "post-cut writes diverge independently"
+    );
+}
+
+#[test]
+fn branch_gets_own_lease_no_parent_fence_change() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store, cfg);
+    let parent_def = qdef();
+    let parent_shard = shard();
+    log.create_queue(&parent_def).unwrap();
+    log.enqueue(&parent_shard, &pushes(2), 0, 10).unwrap();
+    log.seal(&parent_shard, 0, 11).unwrap();
+
+    let parent_epoch = log.current_epoch(&parent_shard).unwrap();
+    let branch_def = branch_qdef("lease");
+    let branch_shard = pqueue_engine::QueueKey::new(
+        branch_def.tenant_id.clone(),
+        branch_def.queue_id.clone(),
+    );
+    let branch_epoch = log
+        .branch(
+            &parent_shard,
+            &branch_def,
+            &CommandPosition::new(parent_shard.clone(), parent_epoch, 1),
+            60_000,
+            20,
+        )
+        .unwrap();
+
+    assert_eq!(log.current_epoch(&parent_shard).unwrap(), parent_epoch);
+    assert_eq!(log.current_epoch(&branch_shard).unwrap(), branch_epoch);
+    assert_eq!(branch_epoch, parent_epoch + 1);
+}
+
+#[test]
+fn branch_suppresses_emission_by_default() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store, cfg);
+    let parent_def = qdef();
+    let parent_shard = shard();
+    log.create_queue(&parent_def).unwrap();
+    log.enqueue(&parent_shard, &pushes(1), 0, 10).unwrap();
+    log.seal(&parent_shard, 0, 11).unwrap();
+
+    let branch_def = branch_qdef("emit");
+    let branch_epoch = log
+        .branch(
+            &parent_shard,
+            &branch_def,
+            &CommandPosition::new(parent_shard.clone(), 0, 0),
+            60_000,
+            20,
+        )
+        .unwrap();
+    assert_eq!(branch_epoch, 1);
+    assert!(
+        !log
+            .branch_emits_change_records(&pqueue_engine::QueueKey::new(
+                branch_def.tenant_id.clone(),
+                branch_def.queue_id.clone(),
+            ))
+            .unwrap(),
+        "branch activity is emission-suppressed unless explicitly enabled"
+    );
+}
+
+#[test]
+fn branch_pins_parent_segments_against_expiry() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let parent_def = qdef();
+    let parent_shard = shard();
+    log.create_queue(&parent_def).unwrap();
+    log.enqueue(&parent_shard, &pushes(4), 0, 10).unwrap();
+    log.seal(&parent_shard, 0, 11).unwrap();
+
+    let branch_def = branch_qdef("pins");
+    let branch_shard = pqueue_engine::QueueKey::new(
+        branch_def.tenant_id.clone(),
+        branch_def.queue_id.clone(),
+    );
+    log.branch(
+        &parent_shard,
+        &branch_def,
+        &CommandPosition::new(parent_shard.clone(), 0, 1),
+        60_000,
+        20,
+    )
+    .unwrap();
+
+    let deleted = log.expire_segments_through(&parent_shard, 3, 21).unwrap();
+    assert_eq!(deleted, 0, "live branch pins parent segments against expiry");
+
+    let parent_seg_key = format!(
+        "t/{}/q/{}/seg/00000000000000000000.seg",
+        hex_lower(parent_shard.tenant_id.as_str().as_bytes()),
+        hex_lower(parent_shard.queue_id.as_str().as_bytes())
+    );
+    assert!(
+        store.get(&parent_seg_key).unwrap().is_some(),
+        "pinned segment remains present while the branch is live"
+    );
+
+    log.discard_branch(&parent_shard, &branch_shard).unwrap();
+    let deleted_after = log.expire_segments_through(&parent_shard, 3, 22).unwrap();
+    assert_eq!(deleted_after, 1, "discarding the branch releases the pin");
+    assert!(
+        store.get(&parent_seg_key).unwrap().is_none(),
+        "expired parent segment is removed once no branch references it"
     );
 }
 

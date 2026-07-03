@@ -54,8 +54,9 @@ use pqueue_engine::{
     UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
     require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
     validate_purge_force, HistoricalProjectionRead,
+    ProjectionStore,
 };
-use pqueue_projection::{ProjectionData, ProjectionImage};
+use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 
 fn store<E: std::fmt::Display>(e: E) -> EngineError {
     EngineError::Storage(e.to_string())
@@ -1729,7 +1730,7 @@ impl SnapshotStore for ObjectLogBackend {
 }
 
 impl HistoricalProjectionRead for ObjectLogBackend {
-    type AsOfProjection = ProjectionData;
+    type AsOfProjection = InMemoryProjection;
 
     fn current_position(
         &self,
@@ -1763,20 +1764,12 @@ impl HistoricalProjectionRead for ObjectLogBackend {
                 }
                 None => None,
             };
-            let mut as_of = if let Some(snapshot) = snapshot {
+            let mut as_of = InMemoryProjection::new();
+            as_of.ensure_shard(&definition)?;
+            if let Some(snapshot) = snapshot {
                 let image = ProjectionImage::from_bytes(&snapshot.payload)?;
-                ProjectionData::from_image(&definition, image)?
-            } else {
-                let mut projection = ProjectionData::new(
-                    definition.priority_model,
-                    definition.ordering_mode,
-                    definition.max_rank_error,
-                    definition.recurrence,
-                    &definition.secondary_indexes,
-                )
-                .with_typed_indexes(&definition.typed_indexes);
-                projection
-            };
+                as_of.hydrate_shard(&definition, image)?;
+            }
             let mut from = snapshot_ref.map(|s| s.position);
             loop {
                 let page = futures::executor::block_on(self.read_from(shard, from.clone(), 8192))?;
@@ -1796,7 +1789,7 @@ impl HistoricalProjectionRead for ObjectLogBackend {
                     }
                 }
                 if !positions.is_empty() {
-                    as_of.apply_recovery(&positions, &envelopes)?;
+                    as_of.apply_borrowed(&positions, &envelopes)?;
                 }
                 if reached_target || page.next.is_none() {
                     break;

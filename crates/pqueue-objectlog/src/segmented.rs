@@ -64,6 +64,9 @@ pub trait BlobStore: Send + Sync {
     /// GET an object. `Ok(None)` if it does not exist.
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>>;
 
+    /// Delete an object. `Ok(true)` if the object existed and was removed, `Ok(false)` otherwise.
+    fn delete(&self, key: &str) -> EngineResult<bool>;
+
     /// List keys under `prefix` (lexical order not required; the caller sorts).
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>>;
 
@@ -101,6 +104,9 @@ impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
     }
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
         (**self).get(key)
+    }
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        (**self).delete(key)
     }
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         (**self).list(prefix)
@@ -156,6 +162,15 @@ impl BlobStore for InMemoryBlobStore {
             .expect("blobstore poisoned")
             .get(key)
             .cloned())
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        Ok(self
+            .objects
+            .lock()
+            .expect("blobstore poisoned")
+            .remove(key)
+            .is_some())
     }
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
@@ -292,6 +307,14 @@ impl BlobStore for LocalFsBlobStore {
         match fs::read(self.key_path(key)) {
             Ok(b) => Ok(Some(b)),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(store_err(e)),
+        }
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        match fs::remove_file(self.key_path(key)) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
             Err(e) => Err(store_err(e)),
         }
     }
@@ -526,7 +549,7 @@ fn parse_segment_object(
             return Err(EngineError::Storage(format!("segment {seg_key} truncated")));
         }
         let env: CommandEnvelope =
-            postcard::from_bytes(&blob[cursor..cursor + len]).map_err(store_err)?;
+            serde_json::from_slice(&blob[cursor..cursor + len]).map_err(store_err)?;
         commands.push(env);
         cursor += len;
     }
@@ -544,9 +567,24 @@ struct ManifestEntry {
     segment_key: Option<String>,
     first_seq: u64,
     last_seq: u64,
+    /// For branched views, the same immutable segment object may be shared while only a prefix of the
+    /// commands is visible. `None` means the full segment is visible.
+    #[serde(default)]
+    visible_last_seq: Option<u64>,
     /// Per-segment checksum over the serialized commands (TD-004 step 2 segment checksum), validated on read.
     checksum: u64,
     committed_at_ms: i64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct BranchMetadata {
+    source: QueueKey,
+    branch: QueueKey,
+    cut_sequence: u64,
+    ttl_ms: u64,
+    created_at_ms: i64,
+    expires_at_ms: i64,
+    emit_change_records: bool,
 }
 
 /// FNV-1a 64-bit checksum (small, dependency-free) over a segment's serialized bytes.
@@ -583,6 +621,19 @@ fn shard_prefix(shard: &QueueKey) -> String {
         hex_lower(shard.tenant_id.as_str().as_bytes()),
         hex_lower(shard.queue_id.as_str().as_bytes())
     )
+}
+
+fn branch_registry_key(source: &QueueKey, branch: &QueueKey) -> String {
+    format!(
+        "{}branches/{}/{}.json",
+        shard_prefix(source),
+        hex_lower(branch.tenant_id.as_str().as_bytes()),
+        hex_lower(branch.queue_id.as_str().as_bytes())
+    )
+}
+
+fn branch_metadata_key(branch: &QueueKey) -> String {
+    format!("{}branch.json", shard_prefix(branch))
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +755,22 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(out)
     }
 
+    fn store_delete(&self, key: &str) -> EngineResult<bool> {
+        let deleted = self.store.delete(key)?;
+        let mut g = self.inner.lock().expect("segmented log poisoned");
+        g.counters.delete_count += 1;
+        if deleted && let Some(len) = g.object_sizes.remove(key) {
+            g.counters.object_count = g.counters.object_count.saturating_sub(1);
+            g.counters.total_bytes = g.counters.total_bytes.saturating_sub(len);
+            if g.object_sizes.is_empty() {
+                g.counters.max_object_bytes = 0;
+            } else if len == g.counters.max_object_bytes {
+                g.counters.max_object_bytes = g.object_sizes.values().copied().max().unwrap_or(0);
+            }
+        }
+        Ok(deleted)
+    }
+
     fn store_list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         let (out, request_count) = self.store.list_with_request_count(prefix)?;
         self.inner
@@ -730,6 +797,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(())
     }
 
+    fn visible_last_seq(entry: &ManifestEntry) -> u64 {
+        entry.visible_last_seq.unwrap_or(entry.last_seq)
+    }
+
     /// Read the manifest from the store and derive `(next_seq, next_manifest_index, current_epoch)`.
     ///
     /// HOT PATH: every seal (and epoch fence) calls this to read the authoritative tail. Manifest objects
@@ -753,7 +824,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let next_seq = if tail.fence {
             tail.first_seq
         } else {
-            tail.last_seq + 1
+            Self::visible_last_seq(&tail) + 1
         };
         Ok((next_seq, next_index, tail.epoch))
     }
@@ -805,6 +876,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 segment_key: None,
                 first_seq: next_seq,
                 last_seq: next_seq.saturating_sub(1),
+                visible_last_seq: None,
                 checksum: 0,
                 committed_at_ms: now_ms,
             };
@@ -845,7 +917,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             for env in commands {
                 // Serialize ONCE, here; keep the bytes. `buffered_bytes` is the size of the kept bytes (free)
                 // rather than a throwaway serialize-just-to-measure (Fix A: kills the double serialization).
-                let bytes = postcard::to_allocvec(env).map_err(store_err)?;
+                let bytes = serde_json::to_vec(env).map_err(store_err)?;
                 buf.buffered_bytes += bytes.len();
                 buf.buffered.push(bytes);
                 buf.oldest_buffered_ms.get_or_insert(now_ms);
@@ -943,6 +1015,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             segment_key: Some(seg_key),
             first_seq,
             last_seq,
+            visible_last_seq: None,
             checksum: seg_checksum,
             committed_at_ms: now_ms,
         };
@@ -1013,13 +1086,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let Some(seg_key) = entry.segment_key.as_ref() else {
                 continue;
             };
+            let visible_last_seq = Self::visible_last_seq(&entry);
             let bytes = self
                 .store_get(seg_key)?
                 .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
             let (epoch, first_seq, commands) =
                 parse_segment_object(&bytes, seg_key, entry.checksum)?;
             for (i, env) in commands.into_iter().enumerate() {
-                let pos = CommandPosition::new(shard.clone(), epoch, first_seq + i as u64);
+                let seq = first_seq + i as u64;
+                if seq > visible_last_seq {
+                    continue;
+                }
+                let pos = CommandPosition::new(shard.clone(), epoch, seq);
                 out.push((pos, env));
             }
         }
@@ -1059,7 +1137,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 continue;
             }
             // The bounded-tail saving: a fully-applied segment is skipped without a GET/parse of its object.
-            if entry.last_seq < from_seq {
+            let visible_last_seq = Self::visible_last_seq(&entry);
+            if visible_last_seq < from_seq {
                 continue;
             }
             let Some(seg_key) = entry.segment_key.as_ref() else {
@@ -1072,7 +1151,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 parse_segment_object(&bytes, seg_key, entry.checksum)?;
             for (i, env) in commands.into_iter().enumerate() {
                 let seq = first_seq + i as u64;
-                if seq < from_seq {
+                if seq < from_seq || seq > visible_last_seq {
                     continue;
                 }
                 out.push((CommandPosition::new(shard.clone(), epoch, seq), env));
@@ -1082,6 +1161,201 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
         }
         Ok(out)
+    }
+
+    /// Read the committed command prefix at or before `position`.
+    pub fn read_as_of(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> EngineResult<Vec<(CommandPosition, CommandEnvelope)>> {
+        let mut out = Vec::new();
+        for (pos, env) in self.read_all(shard)? {
+            if pos.sequence <= position.sequence {
+                out.push((pos, env));
+            }
+        }
+        Ok(out)
+    }
+
+    fn read_branch_registry(&self, source: &QueueKey) -> EngineResult<Vec<BranchMetadata>> {
+        let prefix = format!("{}branches/", shard_prefix(source));
+        let mut out = Vec::new();
+        for key in self.store_list(&prefix)? {
+            if let Some(bytes) = self.store_get(&key)? {
+                out.push(serde_json::from_slice(&bytes).map_err(store_err)?);
+            }
+        }
+        Ok(out)
+    }
+
+    fn live_branch_registry(
+        &self,
+        source: &QueueKey,
+        now_ms: i64,
+    ) -> EngineResult<Vec<BranchMetadata>> {
+        Ok(self
+            .read_branch_registry(source)?
+            .into_iter()
+            .filter(|meta| now_ms < meta.expires_at_ms)
+            .collect())
+    }
+
+    fn branch_pins_segment(
+        &self,
+        source: &QueueKey,
+        first_seq: u64,
+        now_ms: i64,
+    ) -> EngineResult<bool> {
+        Ok(self
+            .live_branch_registry(source, now_ms)?
+            .into_iter()
+            .any(|meta| first_seq <= meta.cut_sequence))
+    }
+
+    fn delete_prefix(&self, prefix: &str) -> EngineResult<u64> {
+        let mut deleted = 0u64;
+        for key in self.store_list(prefix)? {
+            if self.store_delete(&key)? {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// Create a copy-on-write branch rooted at `source` and cut at `position`.
+    pub fn branch(
+        &self,
+        source: &QueueKey,
+        branch_def: &QueueDefinition,
+        position: &CommandPosition,
+        ttl_ms: u64,
+        now_ms: i64,
+    ) -> EngineResult<u64> {
+        self.branch_with_emission(source, branch_def, position, ttl_ms, now_ms, false)
+    }
+
+    /// Same as [`Self::branch`], but allows opting in to change-record emission for the branch metadata.
+    pub fn branch_with_emission(
+        &self,
+        source: &QueueKey,
+        branch_def: &QueueDefinition,
+        position: &CommandPosition,
+        ttl_ms: u64,
+        now_ms: i64,
+        emit_change_records: bool,
+    ) -> EngineResult<u64> {
+        let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+        if branch == *source {
+            return Err(EngineError::Invalid("branch queue must differ from source"));
+        }
+
+        self.create_queue(branch_def)?;
+
+        let branch_prefix = shard_prefix(&branch);
+        let mut next_index = 0u64;
+        let entries = self.read_manifest(source)?;
+        for entry in entries {
+            if entry.fence {
+                if entry.first_seq > position.sequence + 1 {
+                    break;
+                }
+                let mut copied = entry.clone();
+                copied.index = next_index;
+                let key = format!("{branch_prefix}manifest/{next_index:020}.json");
+                self.store_put(&key, &to_json(&copied)?, true)?;
+                next_index += 1;
+                continue;
+            }
+
+            if entry.first_seq > position.sequence {
+                break;
+            }
+
+            let mut copied = entry.clone();
+            copied.index = next_index;
+            if entry.last_seq > position.sequence {
+                copied.visible_last_seq = Some(position.sequence);
+            }
+            let key = format!("{branch_prefix}manifest/{next_index:020}.json");
+            self.store_put(&key, &to_json(&copied)?, true)?;
+            next_index += 1;
+            if entry.last_seq >= position.sequence {
+                break;
+            }
+        }
+
+        let (next_seq, next_manifest_index, committed_epoch) = self.recover_manifest(&branch)?;
+        {
+            let mut g = self.inner.lock().expect("segmented log poisoned");
+            let buf = g.shards.get_mut(&branch).ok_or(EngineError::NotFound)?;
+            buf.next_seq = next_seq;
+            buf.next_manifest_index = next_manifest_index;
+            buf.committed_epoch = committed_epoch;
+        }
+
+        let metadata = BranchMetadata {
+            source: source.clone(),
+            branch: branch.clone(),
+            cut_sequence: position.sequence,
+            ttl_ms,
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(ttl_ms as i64),
+            emit_change_records,
+        };
+        self.store_put(&format!("{branch_prefix}branch.json"), &to_json(&metadata)?, true)?;
+        self.store_put(
+            &branch_registry_key(source, &branch),
+            &to_json(&metadata)?,
+            true,
+        )?;
+
+        // Own lease / epoch: the branch gets its own fence entry without mutating the parent queue.
+        self.acquire_epoch(&branch, now_ms)
+    }
+
+    /// Whether a live branch defaults to emitting change records.
+    pub fn branch_emits_change_records(&self, branch: &QueueKey) -> EngineResult<bool> {
+        let key = branch_metadata_key(branch);
+        let Some(bytes) = self.store_get(&key)? else {
+            return Err(EngineError::NotFound);
+        };
+        let meta: BranchMetadata = serde_json::from_slice(&bytes).map_err(store_err)?;
+        Ok(meta.emit_change_records)
+    }
+
+    /// Discard a branch and release its pins.
+    pub fn discard_branch(&self, source: &QueueKey, branch: &QueueKey) -> EngineResult<()> {
+        let _ = self.store_delete(&branch_registry_key(source, branch))?;
+        let _ = self.delete_prefix(&shard_prefix(branch))?;
+        Ok(())
+    }
+
+    /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.
+    pub fn expire_segments_through(
+        &self,
+        source: &QueueKey,
+        through_seq: u64,
+        now_ms: i64,
+    ) -> EngineResult<u64> {
+        let mut deleted = 0u64;
+        for entry in self.read_manifest(source)? {
+            if entry.fence {
+                continue;
+            }
+            if Self::visible_last_seq(&entry) > through_seq {
+                continue;
+            }
+            if self.branch_pins_segment(source, entry.first_seq, now_ms)? {
+                continue;
+            }
+            if let Some(seg_key) = entry.segment_key.as_ref()
+                && self.store_delete(seg_key)?
+            {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 
     /// A snapshot of the measured segment/object counters (release-ledger harness surface).
@@ -1493,6 +1767,18 @@ impl BlobStore for S3BlobStore {
             404 => Ok(None),
             _ => Err(EngineError::Storage(format!(
                 "S3 GET {key} failed: HTTP {status}"
+            ))),
+        }
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        let (status, resp) = self.request("DELETE", &self.object_path(key), &[], &[], &[])?;
+        match status {
+            204 | 200 => Ok(true),
+            404 => Ok(false),
+            _ => Err(EngineError::Storage(format!(
+                "S3 DELETE {key} failed: HTTP {status}: {}",
+                String::from_utf8_lossy(&resp)
             ))),
         }
     }
