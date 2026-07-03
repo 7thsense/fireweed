@@ -11,17 +11,17 @@ use pqueue_core::{
     Metadata, MetadataValue, PriorityValue, QueueDefinition, QueueIndex, RequestId,
 };
 use pqueue_engine::{
-    ClaimCommand, ClaimCompatibility, ClaimRequest, CommandPosition, EngineError, EngineResult,
-    FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
-    PayloadUpdate, ProjectionSnapshot, PushCommand, PushSpec, QueueCommand, ReplacePendingCommand,
-    UnfenceLeaseCommand, UpsertOutcome,
+    ClaimCommand, ClaimCompatibility, ClaimRef, ClaimRequest, CommandPosition, EngineError,
+    EngineResult, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
+    InstanceFence, PayloadUpdate, ProjectionSnapshot, PushCommand, PushSpec, QueueCommand,
+    ReplacePendingCommand, SideRecord, UnfenceLeaseCommand, UpsertOutcome,
 };
 
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
 // traits need not be imported here.
 use crate::{
-    Adr011ConformanceBackend, ConformanceBackend, ConformanceCore, claim_req, commit, envelope,
-    item, item_max, qdef, qkey, shard, ts,
+    Adr011ConformanceBackend, ConformanceBackend, ConformanceCommitTransition, ConformanceCore,
+    claim_req, commit, envelope, item, item_max, qdef, qkey, shard, ts,
 };
 
 fn adr011_qdef_with_entity_schema() -> QueueDefinition {
@@ -136,6 +136,453 @@ fn adr011_typed_push(entity: serde_json::Value) -> PushSpec {
         entity: Some(entity),
         ..Default::default()
     }
+}
+
+fn commit_transition_capable(caps: &pqueue_engine::CommitCapabilities) -> bool {
+    caps.atomic_transition_commit
+        && caps.vectorized_commit
+        && caps.lease_validation
+        && caps.retained_commit_idempotency
+        && caps.non_work_side_records
+        && caps.authoritative_recovery_reads
+        && matches!(
+            caps.durability_class,
+            pqueue_engine::DurabilityClass::Atomic
+        )
+}
+
+async fn commit_transition_declines_consistently<B: ConformanceCommitTransition>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    assert_eq!(
+        b.commit_capabilities(),
+        pqueue_engine::CommitCapabilities::default()
+    );
+
+    let err = b
+        .commit_transition(
+            &shard(),
+            pqueue_engine::CommitTransition {
+                request_id: None,
+                entries: vec![],
+            },
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+
+    let err = b
+        .explain_commit(&shard(), RequestId::new("decline").unwrap())
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+
+    let err = b.side_record(&shard(), b"state/run").await.unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+}
+
+async fn commit_transition_claim_ref<B: ConformanceCore>(backend: &B, now: i64) -> ClaimRef {
+    backend
+        .push(&shard(), vec![PushSpec::default()], ts(now), None)
+        .await
+        .unwrap();
+    let claimed = backend.claim(claim_req(1, now + 60, now)).await.unwrap();
+    let c = &claimed.items[0];
+    ClaimRef {
+        item_id: c.item_id,
+        lease_token: c.lease_token.clone().expect("claimed item carries a token"),
+        lease_expires_at: c.lease_expires_at,
+        item_version: c.item_version,
+    }
+}
+
+fn commit_transition_entry(
+    claim_ref: ClaimRef,
+    finalize: FinalizeKind,
+    side_key: &str,
+    side_value: &str,
+    lifecycle_priority: i64,
+    instance_fence: Option<InstanceFence>,
+) -> pqueue_engine::CommitTransitionEntry {
+    pqueue_engine::CommitTransitionEntry {
+        claim_ref,
+        finalize,
+        side_records: vec![SideRecord {
+            key: side_key.as_bytes().to_vec(),
+            payload: bytes::Bytes::copy_from_slice(side_value.as_bytes()),
+        }],
+        lifecycle_items: vec![PushSpec {
+            priority: Some(pqueue_core::PriorityValue::Int64(lifecycle_priority)),
+            ..Default::default()
+        }],
+        instance_fence,
+    }
+}
+
+/// Commit-transition positive path: a single entry writes side records, enqueues lifecycle work, finalizes
+/// the input, and survives reopen through the recovery/read ports.
+pub async fn commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen<
+    B: ConformanceCommitTransition,
+>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    if !commit_transition_capable(&b.commit_capabilities()) {
+        commit_transition_declines_consistently(make).await;
+        return;
+    }
+
+    b.create_queue(qdef()).await.unwrap();
+    let claim_ref = commit_transition_claim_ref(&b, 0).await;
+    let input_id = claim_ref.item_id;
+    let lifecycle_key = "state/run-1";
+    let rid = RequestId::new("txn-commit-transition-1").unwrap();
+    let outcomes = b
+        .commit_transition(
+            &shard(),
+            pqueue_engine::CommitTransition {
+                request_id: Some(rid.clone()),
+                entries: vec![commit_transition_entry(
+                    claim_ref.clone(),
+                    FinalizeKind::Complete,
+                    lifecycle_key,
+                    "audit-bytes",
+                    20,
+                    Some(InstanceFence {
+                        instance_key: b"wf-1".to_vec(),
+                        expected: 0,
+                        next: 1,
+                    }),
+                )],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let lifecycle_id = match &outcomes[0] {
+        pqueue_engine::CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+            assert_eq!(lifecycle_item_ids.len(), 1);
+            lifecycle_item_ids[0]
+        }
+        other => panic!("expected Committed, got {other:?}"),
+    };
+    assert_ne!(lifecycle_id, input_id);
+
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!(
+        (m.pending, m.leased, m.complete),
+        (1, 0, 1),
+        "input completes and only the lifecycle item remains pending"
+    );
+    let peeked = b.peek(&qkey(), 10).await.unwrap();
+    assert_eq!(peeked.len(), 1);
+    assert_eq!(peeked[0].item_id, lifecycle_id);
+    assert_eq!(
+        b.side_record(&qkey(), lifecycle_key.as_bytes())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"audit-bytes".as_slice())
+    );
+    let claimed = b.claim(claim_req(10, 600, 2)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(claimed.items[0].item_id, lifecycle_id);
+
+    drop(b);
+    let b = make();
+    assert_eq!(
+        b.side_record(&qkey(), lifecycle_key.as_bytes())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"audit-bytes".as_slice())
+    );
+    let recovery = b
+        .explain_commit(&qkey(), rid.clone())
+        .await
+        .unwrap()
+        .expect("committed transition survives reopen");
+    assert_eq!(recovery.request_id, rid);
+    assert_eq!(recovery.entries.len(), 1);
+    assert_eq!(recovery.entries[0].consumed_input_id, input_id);
+    assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
+    assert_eq!(
+        recovery.entries[0].side_record_keys,
+        vec![lifecycle_key.as_bytes().to_vec()]
+    );
+    assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().complete,
+        1,
+        "finalized input survives reopen"
+    );
+}
+
+/// Rejection path: a bad lease token rejects atomically without writing side records or enqueuing
+/// lifecycle work.
+pub async fn commit_transition_rejects_bad_token_without_writing<B: ConformanceCommitTransition>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    if !commit_transition_capable(&b.commit_capabilities()) {
+        commit_transition_declines_consistently(make).await;
+        return;
+    }
+
+    b.create_queue(qdef()).await.unwrap();
+    let mut claim_ref = commit_transition_claim_ref(&b, 0).await;
+    claim_ref.lease_token = LeaseToken::new("not-the-real-token").unwrap();
+    let outcomes = b
+        .commit_transition(
+            &shard(),
+            pqueue_engine::CommitTransition {
+                request_id: None,
+                entries: vec![commit_transition_entry(
+                    claim_ref,
+                    FinalizeKind::Complete,
+                    "state/x",
+                    "v",
+                    20,
+                    None,
+                )],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes,
+        vec![pqueue_engine::CommitEntryOutcome::Rejected(
+            EngineError::StaleLease
+        )]
+    );
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!((m.pending, m.leased, m.complete), (0, 1, 0));
+    assert_eq!(
+        b.side_record(&qkey(), b"state/x").await.unwrap(),
+        None,
+        "bad token writes no side record"
+    );
+}
+
+/// Rejection path: a bad item version rejects atomically without writing side records or enqueuing
+/// lifecycle work.
+pub async fn commit_transition_rejects_bad_version_without_writing<
+    B: ConformanceCommitTransition,
+>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    if !commit_transition_capable(&b.commit_capabilities()) {
+        commit_transition_declines_consistently(make).await;
+        return;
+    }
+
+    b.create_queue(qdef()).await.unwrap();
+    let mut claim_ref = commit_transition_claim_ref(&b, 0).await;
+    claim_ref.item_version += 99;
+    let outcomes = b
+        .commit_transition(
+            &shard(),
+            pqueue_engine::CommitTransition {
+                request_id: None,
+                entries: vec![commit_transition_entry(
+                    claim_ref,
+                    FinalizeKind::Complete,
+                    "state/y",
+                    "v",
+                    20,
+                    None,
+                )],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes,
+        vec![pqueue_engine::CommitEntryOutcome::Rejected(
+            EngineError::Conflict
+        )]
+    );
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!((m.pending, m.leased, m.complete), (0, 1, 0));
+    assert_eq!(
+        b.side_record(&qkey(), b"state/y").await.unwrap(),
+        None,
+        "bad version writes no side record"
+    );
+}
+
+/// Request-id replay path: identical bodies return prior outcomes without duplicating side records or
+/// lifecycle items; a body change under the same id conflicts.
+pub async fn commit_transition_request_id_replays_without_double_write<
+    B: ConformanceCommitTransition,
+>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    if !commit_transition_capable(&b.commit_capabilities()) {
+        commit_transition_declines_consistently(make).await;
+        return;
+    }
+
+    b.create_queue(qdef()).await.unwrap();
+    let claim_ref = commit_transition_claim_ref(&b, 0).await;
+    let rid = RequestId::new("txn-replay-1").unwrap();
+    let body = |claim_ref: ClaimRef| pqueue_engine::CommitTransition {
+        request_id: Some(rid.clone()),
+        entries: vec![commit_transition_entry(
+            claim_ref,
+            FinalizeKind::Complete,
+            "state/run-1",
+            "v1",
+            20,
+            None,
+        )],
+    };
+
+    let first = b
+        .commit_transition(&shard(), body(claim_ref.clone()), ts(1), None)
+        .await
+        .unwrap();
+    let lifecycle_id = match &first[0] {
+        pqueue_engine::CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+            lifecycle_item_ids[0]
+        }
+        other => panic!("expected Committed, got {other:?}"),
+    };
+    let replay = b
+        .commit_transition(&shard(), body(claim_ref.clone()), ts(1), None)
+        .await
+        .unwrap();
+    assert_eq!(first, replay);
+    let m = b.metrics(&qkey()).await.unwrap();
+    assert_eq!((m.pending, m.leased, m.complete), (1, 0, 1));
+    assert_eq!(
+        b.side_record(&qkey(), b"state/run-1")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"v1".as_slice())
+    );
+    assert_eq!(b.peek(&qkey(), 10).await.unwrap()[0].item_id, lifecycle_id);
+
+    let conflict = b
+        .commit_transition(
+            &shard(),
+            pqueue_engine::CommitTransition {
+                request_id: Some(rid.clone()),
+                entries: vec![pqueue_engine::CommitTransitionEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Fail,
+                    side_records: vec![SideRecord {
+                        key: b"state/run-1".to_vec(),
+                        payload: Bytes::copy_from_slice(b"v1"),
+                    }],
+                    lifecycle_items: vec![PushSpec::default()],
+                    instance_fence: None,
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict, EngineError::RequestIdConflict);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
+    assert_eq!(
+        b.side_record(&qkey(), b"state/run-1")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"v1".as_slice())
+    );
+}
+
+/// Recovery path: explain_commit reconstructs the committed transition, and the retained recovery state
+/// survives reopen.
+pub async fn commit_transition_explain_commit_recovers_transition_and_survives_reopen<
+    B: ConformanceCommitTransition,
+>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    if !commit_transition_capable(&b.commit_capabilities()) {
+        commit_transition_declines_consistently(make).await;
+        return;
+    }
+
+    b.create_queue(qdef()).await.unwrap();
+    let claim_ref = commit_transition_claim_ref(&b, 0).await;
+    let input_id = claim_ref.item_id;
+    let rid = RequestId::new("recover-1").unwrap();
+    let instance_key = b"instance/run-1".to_vec();
+    let outcomes = b
+        .commit_transition(
+            &shard(),
+            pqueue_engine::CommitTransition {
+                request_id: Some(rid.clone()),
+                entries: vec![pqueue_engine::CommitTransitionEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![SideRecord {
+                        key: b"audit/run-1".to_vec(),
+                        payload: Bytes::copy_from_slice(b"audit-bytes"),
+                    }],
+                    lifecycle_items: vec![PushSpec::default()],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: instance_key.clone(),
+                        expected: 0,
+                        next: 5,
+                    }),
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let lifecycle_id = match &outcomes[0] {
+        pqueue_engine::CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+            lifecycle_item_ids[0]
+        }
+        other => panic!("expected Committed, got {other:?}"),
+    };
+
+    drop(b);
+    let b = make();
+    let recovery = b
+        .explain_commit(&shard(), rid.clone())
+        .await
+        .unwrap()
+        .expect("record survives reopen");
+    assert_eq!(recovery.request_id, rid);
+    assert_eq!(recovery.entries.len(), 1);
+    let entry = &recovery.entries[0];
+    assert_eq!(entry.consumed_input_id, input_id);
+    assert_eq!(entry.instance, Some((instance_key.clone(), 5)));
+    assert_eq!(entry.side_record_keys, vec![b"audit/run-1".to_vec()]);
+    assert_eq!(entry.lifecycle_item_ids, vec![lifecycle_id]);
+    assert_eq!(entry.status, pqueue_engine::CommitEntryStatus::Committed);
+    assert_eq!(
+        b.side_record(&shard(), b"audit/run-1")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"audit-bytes".as_slice())
+    );
+    assert_eq!(b.metrics(&qkey()).await.unwrap().complete, 1);
+    let claimed = b.claim(claim_req(10, 600, 2)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(claimed.items[0].item_id, lifecycle_id);
 }
 
 /// ADR-011 entity schemas reject invalid documents before visible state or request-id replay records.
@@ -3273,4 +3720,70 @@ pub async fn epoch_fence_closes_pre_segment_window<B: ConformanceCore>(make: imp
     append_at_epoch(&b, e1, QueueCommand::ResumeQueue)
         .await
         .expect("the new owner writes the first new-epoch segment");
+}
+
+#[cfg(test)]
+mod commit_transition_scenario_tests {
+    use super::*;
+    use pqueue_sqlite::SqliteRelationalBackend;
+    use std::path::PathBuf;
+
+    fn temp_db_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "pqueue-conformance-commit-transition-{tag}-{}.db",
+            std::process::id()
+        ))
+    }
+
+    fn sqlite_relational_make(path: &str) -> impl Fn() -> SqliteRelationalBackend + '_ {
+        move || SqliteRelationalBackend::open(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sqlite_relational_commit_transition_writes_and_recovers() {
+        let path = temp_db_path("writes");
+        let _ = std::fs::remove_file(&path);
+        let make = sqlite_relational_make(path.to_str().unwrap());
+        commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(
+            make,
+        )
+        .await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_relational_commit_transition_rejects_bad_token() {
+        let path = temp_db_path("bad-token");
+        let _ = std::fs::remove_file(&path);
+        let make = sqlite_relational_make(path.to_str().unwrap());
+        commit_transition_rejects_bad_token_without_writing(make).await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_relational_commit_transition_rejects_bad_version() {
+        let path = temp_db_path("bad-version");
+        let _ = std::fs::remove_file(&path);
+        let make = sqlite_relational_make(path.to_str().unwrap());
+        commit_transition_rejects_bad_version_without_writing(make).await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_relational_commit_transition_request_id_replays() {
+        let path = temp_db_path("replay");
+        let _ = std::fs::remove_file(&path);
+        let make = sqlite_relational_make(path.to_str().unwrap());
+        commit_transition_request_id_replays_without_double_write(make).await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_relational_commit_transition_explain_commit_recovers() {
+        let path = temp_db_path("recover");
+        let _ = std::fs::remove_file(&path);
+        let make = sqlite_relational_make(path.to_str().unwrap());
+        commit_transition_explain_commit_recovers_transition_and_survives_reopen(make).await;
+        let _ = std::fs::remove_file(&path);
+    }
 }

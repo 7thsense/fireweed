@@ -57,9 +57,10 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
-    CommandId, ControlPlaneStore, FinalizePort, IndexQueryPort, LogRead, ProjectionRead, PurgePort,
-    PushItem, PushPort, QueueCommand, QueueKey, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, SnapshotStore, UpdateFieldsPort, UpsertPort,
+    CommandId, CommitTransitionPort, ControlPlaneStore, FinalizePort, IndexQueryPort, LogRead,
+    ProjectionRead, PurgePort, PushItem, PushPort, QueueCommand, QueueKey, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, SnapshotStore, UpdateFieldsPort,
+    UpsertPort,
 };
 
 pub mod scenarios;
@@ -112,6 +113,18 @@ impl<T> ConformanceCore for T where
 pub trait ConformanceBackend: ConformanceCore + SnapshotStore + LogRead {}
 
 impl<T> ConformanceBackend for T where T: ConformanceCore + SnapshotStore + LogRead {}
+
+/// A backend that participates in the shared Snorri commit-transition scenarios:
+/// [`ConformanceCore`] plus the authoritative commit and recovery read ports.
+pub trait ConformanceCommitTransition:
+    ConformanceCore + CommitTransitionPort + RecoveryReadPort
+{
+}
+
+impl<T> ConformanceCommitTransition for T where
+    T: ConformanceCore + CommitTransitionPort + RecoveryReadPort
+{
+}
 
 /// ADR-011 typed-schema/index conformance backend. This is separate from [`ConformanceCore`] so
 /// ADR-010-only backends can still satisfy the core queue contract without typed index lookup.
