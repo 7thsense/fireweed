@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260703T050528-88e19dd9",
+  "bead_id": "pqueue-ab2e0b21",
+  "base_rev": "2947696a19b777a3ae58da34115fb96b9f3be13e",
+  "created_at": "2026-07-03T05:05:29.349790943Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-ab2e0b21",
+    "title": "Specify postgres commit-transition parity scope (backend flavor, tables)",
+    "description": "PROBLEM\npqueue-postgres ships two backend flavors: PostgresBackend (log-replay, crates/pqueue-postgres/src/lib.rs) and PostgresRelationalBackend (DB-authoritative, crates/pqueue-postgres/src/relational.rs). Both currently no-op CommitTransitionPort. It is not yet decided in writing which flavor(s) Snorri's Lakebase production deployment actually needs commit-transition parity on, or what the side-record/instance-fence table schema should look like on postgres (sqlite-relational's schema, added under epic pqueue-2201fd37, is the reference implementation).\n\nPROPOSED FIX\nWrite a short decision doc (or an addendum to docs/helix/04-build/DEPLOYMENT-READINESS.md) settling: (a) which backend flavor(s) this epic covers -- relational only, log-replay only, or both, referencing which flavor Lakebase/Snorri production actually runs (see docs/helix/04-build/DEPLOYMENT-READINESS.md and ADR-008); (b) the postgres table schema for side records and instance fences, mirroring sqlite-relational's approach; (c) whether request-id retained-idempotency reuses an existing postgres idempotency mechanism or needs a new table.\n\nIN-SCOPE FILES\n- docs/helix/04-build/DEPLOYMENT-READINESS.md or a new docs/helix/02-design/technical-designs/ note.\n\nOUT-OF-SCOPE\n- Any code changes.",
+    "acceptance": "1. `rg -n 'commit-transition|CommitTransitionPort' docs/helix/04-build/DEPLOYMENT-READINESS.md docs/helix/02-design/technical-designs/` finds the new decision text naming exactly which postgres backend flavor(s) are in scope.\n2. `cargo fmt --check` passes (no code touched).",
+    "parent": "pqueue-44995583",
+    "labels": [
+      "area:postgres",
+      "kind:spec",
+      "system:pqueue",
+      "consumer:snorri"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T050528-88e19dd9",
+    "prompt": ".ddx/executions/20260703T050528-88e19dd9/prompt.md",
+    "manifest": ".ddx/executions/20260703T050528-88e19dd9/manifest.json",
+    "result": ".ddx/executions/20260703T050528-88e19dd9/result.json",
+    "checks": ".ddx/executions/20260703T050528-88e19dd9/checks.json",
+    "usage": ".ddx/executions/20260703T050528-88e19dd9/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-ab2e0b21-20260703T050528-88e19dd9"
+  },
+  "prompt_sha": "42a83c1d133247fcf28a0b7248a12ad9f9a39eca62932981e979486dd35921fb"
+}
