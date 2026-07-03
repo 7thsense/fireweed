@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-conformance"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axon-esf",
  "proptest",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-engine"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-loadgen"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "pqueue-release",
  "serde",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-memory"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1272,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "postcard",
@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-projection"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-release"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-resp"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-server"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "axon-esf",
  "bytes",
