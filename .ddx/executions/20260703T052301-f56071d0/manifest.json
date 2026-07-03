@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260703T052301-f56071d0",
+  "bead_id": "pqueue-30765e65",
+  "base_rev": "5a508b8f36c35cd6defa59c8a8896b2f7bb8db47",
+  "created_at": "2026-07-03T05:23:02.342443855Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-30765e65",
+    "title": "Implement commit_transition (vectorized atomic commit) for postgres",
+    "description": "PROBLEM\nCommitTransitionPort::commit_transition is not implemented on postgres (empty impl inherits Unavailable).\n\nPROPOSED FIX\nImplement commit_transition on the in-scope postgres backend(s) (pqueue-ab2e0b21): per entry, atomically (single postgres transaction) validate the claim ref (lease token + lease expiry + item_version fence), write the entry's side_records, push its lifecycle_items as ordinary claimable work, advance/validate its instance_fence if present, and finalize the consumed claim -- returning per-entry Committed/Rejected outcomes. Support request_id-scoped retained replay/conflict idempotency over the whole commit body, matching sqlite-relational's semantics (crates/pqueue-sqlite/tests/relational_commit.rs: relational_commit_request_id_replays_without_double_write).\n\nIN-SCOPE FILES\n- crates/pqueue-postgres/src/relational.rs (and/or lib.rs per scope decision)\n\nOUT-OF-SCOPE\n- RecoveryReadPort (next bead).\n- commit_capabilities() advertisement (final bead, once this and RecoveryReadPort are proven).",
+    "acceptance": "1. The shared pqueue-conformance commit-transition scenario (pqueue-c42136f3 / wired in pqueue-d2f0b763) passes its POSITIVE path against the in-scope postgres backend, env-gated on PQUEUE_PG_TEST_URL.\n2. A live-DB test proves: bad token/bad version rejects without writing anything; request-id replay does not double-write; a concurrent claim/commit race resolves via per-entry Conflict, not a whole-body failure.\n3. `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-44995583",
+    "labels": [
+      "area:postgres",
+      "kind:feature",
+      "system:pqueue",
+      "consumer:snorri",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"The shared pqueue-conformance commit-transition scenario (pqueue-c42136f3 / wired in pqueue-d2f0b763) passes its POSITIVE path against the in-scope postgres backend, env-gated on PQUEUE_PG_TEST_URL.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"A live-DB test proves: bad token/bad version rejects without writing anything; request-id replay does not double-write; a concurrent claim/commit race resolves via per-entry Conflict, not a whole-body failure.\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":3,\"text\":\"`cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T05:20:10.584739388Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.33 threshold=0.50 verifiable=1/3"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T052301-f56071d0",
+    "prompt": ".ddx/executions/20260703T052301-f56071d0/prompt.md",
+    "manifest": ".ddx/executions/20260703T052301-f56071d0/manifest.json",
+    "result": ".ddx/executions/20260703T052301-f56071d0/result.json",
+    "checks": ".ddx/executions/20260703T052301-f56071d0/checks.json",
+    "usage": ".ddx/executions/20260703T052301-f56071d0/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-30765e65-20260703T052301-f56071d0"
+  },
+  "prompt_sha": "e200a33f789b3cf487285ebb1c24a0728c0234a1ec44e2620036dc0eed4f904b"
+}
