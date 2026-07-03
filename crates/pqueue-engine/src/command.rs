@@ -547,6 +547,7 @@ fn queue_scoped_change_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn item_change_record(
     shard: &QueueKey,
     item_id: ItemId,

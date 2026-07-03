@@ -617,19 +617,19 @@ fn commit_validate_sql(
         return Err(EngineError::NotFound);
     };
     let state: String = row.get(0);
-    let fenced: i64 = row.get(1);
-    let superseded: i64 = row.get(2);
+    let fenced: bool = row.get(1);
+    let superseded: bool = row.get(2);
     let lease_token_hash: Option<Vec<u8>> = row.get(3);
     let lease_expires_at: Option<i64> = row.get(4);
     let item_version: i64 = row.get(5);
     let state = parse_state(&state)?;
-    if fenced != 0 {
+    if fenced {
         return Err(EngineError::StaleLease);
     }
     if state.is_terminal() {
         return Err(EngineError::Terminal);
     }
-    if superseded != 0 {
+    if superseded {
         return Err(EngineError::Superseded);
     }
     if state != ItemState::Leased {

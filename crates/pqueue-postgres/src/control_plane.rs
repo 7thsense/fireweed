@@ -147,11 +147,20 @@ fn upsert_lease(
     Ok(())
 }
 
-fn table_exists(tx: &mut postgres::Transaction<'_>, table_name: &str) -> EngineResult<bool> {
+/// Whether `table_name` exists in the current schema AND carries `column_name`. Both the log-replay
+/// `queues` table and the relational family's own (differently-shaped) `queues` table share a name, so a
+/// table-existence check alone cannot tell which schema flavor is present -- only the relational family's
+/// `relational_cursor.assignment_epoch` / log-replay's `queues.assignment_epoch` column actually
+/// distinguishes them.
+fn column_exists(
+    tx: &mut postgres::Transaction<'_>,
+    table_name: &str,
+    column_name: &str,
+) -> EngineResult<bool> {
     let row = st(tx.query_one(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
-         WHERE table_schema = current_schema() AND table_name = $1)",
-        &[&table_name],
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2)",
+        &[&table_name, &column_name],
     ))?;
     Ok(row.get(0))
 }
@@ -163,7 +172,7 @@ fn bind_storage_epoch_if_present(
     epoch: u64,
 ) -> EngineResult<()> {
     let epoch = epoch as i64;
-    if table_exists(tx, "queues")? {
+    if column_exists(tx, "queues", "assignment_epoch")? {
         let updated = st(tx.execute(
             "UPDATE queues SET assignment_epoch=$3 WHERE tenant=$1 AND queue=$2",
             &[&t, &q, &epoch],
@@ -172,7 +181,7 @@ fn bind_storage_epoch_if_present(
             return Err(EngineError::NotFound);
         }
     }
-    if table_exists(tx, "relational_cursor")? {
+    if column_exists(tx, "relational_cursor", "assignment_epoch")? {
         let updated = st(tx.execute(
             "UPDATE relational_cursor SET assignment_epoch=$3 WHERE tenant=$1 AND queue=$2",
             &[&t, &q, &epoch],

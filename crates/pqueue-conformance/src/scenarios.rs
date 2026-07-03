@@ -17,6 +17,11 @@ use pqueue_engine::{
     ReplacePendingCommand, SideRecord, UnfenceLeaseCommand, UpsertOutcome,
 };
 
+// Re-exported so callers that address every scenario through the `scenarios::` path uniformly (e.g. the
+// `pg_conformance!` macro in crates/pqueue-postgres/tests/conformance.rs) can reach the capability-gated
+// wrapper the same way they reach every other scenario, instead of needing a special case for this one.
+pub use crate::claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported;
+
 // Method calls resolve through the `ConformanceBackend` bound's supertraits, so the individual port
 // traits need not be imported here.
 use crate::{

@@ -3746,9 +3746,11 @@ mod ordered_tests {
         );
     }
 
+    type SeenKey = (TenantId, pqueue_core::QueueId, Option<ItemId>, u64, u64);
+
     #[derive(Default)]
     struct DedupSink {
-        seen: Mutex<BTreeSet<(TenantId, pqueue_core::QueueId, Option<ItemId>, u64, u64)>>,
+        seen: Mutex<BTreeSet<SeenKey>>,
     }
 
     impl crate::port::ChangeRecordSink for DedupSink {
@@ -3815,7 +3817,7 @@ mod ordered_tests {
         let positions = log
             .append(&shard, std::slice::from_ref(&env), epoch)
             .expect("append");
-        let page_entries = vec![(positions[0].clone(), env.clone())];
+        let page_entries = [(positions[0].clone(), env.clone())];
         let sink = DedupSink::default();
         let records = page_entries
             .iter()
