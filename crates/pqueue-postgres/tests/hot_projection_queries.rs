@@ -7,12 +7,13 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue::RangeScanRequest;
+use pqueue_conformance::qdef;
 use pqueue_conformance::qkey;
 use pqueue_core::{ItemId, LeaseToken, RequestId};
 use pqueue_engine::{
     Backend, ClaimRef, CommitCapabilities, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, EngineError, FinalizeKind, HotProjectionQueryPort, RecoveryReadPort,
-    SideRecord,
+    CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind, HotProjectionQueryPort,
+    RecoveryReadPort, SideRecord,
 };
 use pqueue_postgres::{PostgresBackend, PostgresRelationalBackend};
 
@@ -72,6 +73,39 @@ where
     assert_eq!(err, EngineError::Unavailable);
 }
 
+fn assert_commit_transition_is_supported(backend: &PostgresRelationalBackend) {
+    assert!(backend.commit_capabilities().atomic_transition_commit);
+    assert!(backend.commit_capabilities().vectorized_commit);
+    assert!(backend.commit_capabilities().retained_commit_idempotency);
+
+    let q = qkey();
+    futures::executor::block_on(async {
+        backend.create_queue(qdef()).await.unwrap();
+        let transition = CommitTransition {
+            request_id: Some(RequestId::new("txn-supported").unwrap()),
+            entries: vec![],
+        };
+        let outcomes = backend
+            .commit_transition(&q, transition.clone(), pqueue_conformance::ts(0), None)
+            .await
+            .unwrap();
+        assert!(outcomes.is_empty());
+        let recovery = backend
+            .explain_commit(&q, transition.request_id.clone().unwrap())
+            .await
+            .unwrap()
+            .expect("retained replay record");
+        assert!(recovery.entries.is_empty());
+        assert!(
+            backend
+                .side_record(&q, b"state/run")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
 #[test]
 fn hot_projection_capabilities_are_explicit() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
@@ -116,5 +150,5 @@ fn commit_transition_capabilities_are_explicit() {
 
     let relational = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
         .expect("connect postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
-    assert_commit_transition_is_explicitly_declined(&relational);
+    assert_commit_transition_is_supported(&relational);
 }

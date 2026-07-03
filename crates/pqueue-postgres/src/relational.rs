@@ -59,19 +59,22 @@ use pqueue_core::{
     TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
-    ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit,
-    Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand,
-    CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand, CohortRenewLeasePort,
-    CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity,
-    DiscoveryPort, DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand,
-    LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand,
-    SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    build_push_items, compile_entity_schema, project_scopes, validate_claim_compatibility,
-    validate_entity, validate_gate_push, validate_purge_force,
+    ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
+    ClaimRequest, ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand,
+    CohortFinalizeCommand, CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand,
+    CohortRenewLeasePort, CommandEnvelope, CommandPosition, CommitCapabilities, CommitEntryOutcome,
+    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
+    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity,
+    DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand,
+    FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView,
+    LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead,
+    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort,
+    ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
+    compile_entity_schema, project_scopes, validate_claim_compatibility, validate_entity,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
@@ -380,6 +383,267 @@ fn record_request_idempotency(
             &ts_nanos(now),
         ],
     ))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// C9: authoritative vectorized claimed-work commit — idempotency + validation helpers
+// ---------------------------------------------------------------------------
+
+const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
+
+fn commit_request_fingerprint(entries: &[CommitTransitionEntry]) -> EngineResult<Vec<u8>> {
+    let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredEntryRecovery {
+    consumed_input_id: String,
+    #[serde(default)]
+    instance: Option<(Vec<u8>, u64)>,
+    #[serde(default)]
+    side_record_keys: Vec<Vec<u8>>,
+    #[serde(default)]
+    lifecycle_item_ids: Vec<String>,
+    #[serde(default)]
+    rejected: Option<(String, Option<String>)>,
+}
+
+fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
+    match e {
+        EngineError::NotFound => ("not_found", None),
+        EngineError::QueueDefinitionConflict => ("queue_definition_conflict", None),
+        EngineError::Invalid(why) => ("invalid", Some((*why).to_string())),
+        EngineError::Terminal => ("terminal", None),
+        EngineError::StaleLease => ("stale_lease", None),
+        EngineError::Superseded => ("superseded", None),
+        EngineError::Unavailable => ("unavailable", None),
+        EngineError::Conflict => ("conflict", None),
+        EngineError::BatchTooLarge => ("batch_too_large", None),
+        EngineError::RequestIdConflict => ("request_id_conflict", None),
+        EngineError::RequestExpired => ("request_expired", None),
+        EngineError::EpochFenced => ("epoch_fenced", None),
+        EngineError::Forbidden(why) => ("forbidden", Some((*why).to_string())),
+        EngineError::Storage(msg) => ("storage", Some(msg.clone())),
+        EngineError::EntitySchemaViolation(msg) => ("entity_schema_violation", Some(msg.clone())),
+    }
+}
+
+fn decode_engine_error(code: &str, detail: Option<String>) -> EngineError {
+    match code {
+        "not_found" => EngineError::NotFound,
+        "queue_definition_conflict" => EngineError::QueueDefinitionConflict,
+        "invalid" => EngineError::Invalid(match detail.as_deref() {
+            Some("item is not leased") => "item is not leased",
+            _ => "invalid",
+        }),
+        "terminal" => EngineError::Terminal,
+        "stale_lease" => EngineError::StaleLease,
+        "superseded" => EngineError::Superseded,
+        "unavailable" => EngineError::Unavailable,
+        "conflict" => EngineError::Conflict,
+        "batch_too_large" => EngineError::BatchTooLarge,
+        "request_id_conflict" => EngineError::RequestIdConflict,
+        "request_expired" => EngineError::RequestExpired,
+        "epoch_fenced" => EngineError::EpochFenced,
+        "forbidden" => EngineError::Forbidden("forbidden"),
+        _ => EngineError::Storage(detail.unwrap_or_else(|| code.to_string())),
+    }
+}
+
+fn recovery_to_outcomes(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
+    recovery
+        .iter()
+        .map(|r| match &r.status {
+            CommitEntryStatus::Committed => CommitEntryOutcome::Committed {
+                lifecycle_item_ids: r.lifecycle_item_ids.clone(),
+            },
+            CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
+        })
+        .collect()
+}
+
+fn encode_commit_recovery(recovery: &[EntryRecovery]) -> EngineResult<String> {
+    let stored: Vec<StoredEntryRecovery> = recovery
+        .iter()
+        .map(|r| StoredEntryRecovery {
+            consumed_input_id: r.consumed_input_id.to_string(),
+            instance: r.instance.clone(),
+            side_record_keys: r.side_record_keys.clone(),
+            lifecycle_item_ids: r
+                .lifecycle_item_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            rejected: match &r.status {
+                CommitEntryStatus::Committed => None,
+                CommitEntryStatus::Rejected(e) => {
+                    let (code, detail) = encode_engine_error(e);
+                    Some((code.to_string(), detail))
+                }
+            },
+        })
+        .collect();
+    to_json(&stored)
+}
+
+fn decode_commit_recovery(raw: &str) -> EngineResult<Vec<EntryRecovery>> {
+    let stored: Vec<StoredEntryRecovery> =
+        serde_json::from_str(raw).map_err(|e| EngineError::Storage(e.to_string()))?;
+    stored
+        .into_iter()
+        .map(|s| {
+            let lifecycle_item_ids = s
+                .lifecycle_item_ids
+                .into_iter()
+                .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+                .collect::<EngineResult<Vec<_>>>()?;
+            let status = match s.rejected {
+                None => CommitEntryStatus::Committed,
+                Some((code, detail)) => {
+                    CommitEntryStatus::Rejected(decode_engine_error(&code, detail))
+                }
+            };
+            Ok(EntryRecovery {
+                consumed_input_id: ItemId::new(s.consumed_input_id)
+                    .map_err(|e| EngineError::Storage(e.to_string()))?,
+                instance: s.instance,
+                side_record_keys: s.side_record_keys,
+                lifecycle_item_ids,
+                status,
+            })
+        })
+        .collect()
+}
+
+fn check_commit_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    now_n: i64,
+) -> EngineResult<Option<Vec<EntryRecovery>>> {
+    let (t, q) = parts(shard);
+    let prior = st(tx.query_opt(
+        "SELECT request_fingerprint, response_payload, expires_at \
+         FROM pqueue_request_idempotency \
+         WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+        &[&t, &q, &IDEMPOTENCY_OPERATION_COMMIT, &request_id.as_str()],
+    ))?;
+    let Some(row) = prior else {
+        return Ok(None);
+    };
+    let prior_fingerprint: Vec<u8> = row.get(0);
+    let response_payload: String = row.get(1);
+    let expires_at: i64 = row.get(2);
+    if expires_at <= now_n {
+        st(tx.execute(
+            "DELETE FROM pqueue_request_idempotency \
+             WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+            &[&t, &q, &IDEMPOTENCY_OPERATION_COMMIT, &request_id.as_str()],
+        ))?;
+        return Ok(None);
+    }
+    if prior_fingerprint == fingerprint {
+        return Ok(Some(decode_commit_recovery(&response_payload)?));
+    }
+    Err(EngineError::RequestIdConflict)
+}
+
+fn read_commit_recovery(
+    client: &mut Client,
+    shard: &QueueKey,
+    request_id: &RequestId,
+) -> EngineResult<Option<Vec<EntryRecovery>>> {
+    let (t, q) = parts(shard);
+    let payload: Option<String> = st(client.query_opt(
+        "SELECT response_payload FROM pqueue_request_idempotency \
+         WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+        &[&t, &q, &IDEMPOTENCY_OPERATION_COMMIT, &request_id.as_str()],
+    ))?
+    .map(|row| row.get(0));
+    match payload {
+        Some(raw) => Ok(Some(decode_commit_recovery(&raw)?)),
+        None => Ok(None),
+    }
+}
+
+fn record_commit_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    recovery: &[EntryRecovery],
+    now: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    st(tx.execute(
+        "INSERT INTO pqueue_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
+         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+          request_fingerprint=EXCLUDED.request_fingerprint, \
+          response_payload=EXCLUDED.response_payload, \
+          expires_at=EXCLUDED.expires_at",
+        &[
+            &t,
+            &q,
+            &IDEMPOTENCY_OPERATION_COMMIT,
+            &request_id.as_str(),
+            &fingerprint,
+            &encode_commit_recovery(recovery)?,
+            &expires_at,
+            &ts_nanos(now),
+        ],
+    ))?;
+    Ok(())
+}
+
+fn commit_validate_sql(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    claim_ref: &pqueue_engine::ClaimRef,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let row = st(tx.query_opt(
+        "SELECT lifecycle_state, fenced, superseded, lease_token_hash, lease_expires_at, item_version \
+         FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+        &[&t, &q, &claim_ref.item_id.to_string()],
+    ))?;
+    let Some(row) = row else {
+        return Err(EngineError::NotFound);
+    };
+    let state: String = row.get(0);
+    let fenced: i64 = row.get(1);
+    let superseded: i64 = row.get(2);
+    let lease_token_hash: Option<Vec<u8>> = row.get(3);
+    let lease_expires_at: Option<i64> = row.get(4);
+    let item_version: i64 = row.get(5);
+    let state = parse_state(&state)?;
+    if fenced != 0 {
+        return Err(EngineError::StaleLease);
+    }
+    if state.is_terminal() {
+        return Err(EngineError::Terminal);
+    }
+    if superseded != 0 {
+        return Err(EngineError::Superseded);
+    }
+    if state != ItemState::Leased {
+        return Err(EngineError::Invalid("item is not leased"));
+    }
+    if lease_token_hash.as_deref() != Some(lease_hash(&claim_ref.lease_token).as_slice()) {
+        return Err(EngineError::StaleLease);
+    }
+    if lease_expires_at.is_some_and(|exp| exp < ts_nanos(now)) {
+        return Err(EngineError::StaleLease);
+    }
+    if item_version as u64 != claim_ref.item_version {
+        return Err(EngineError::Conflict);
+    }
     Ok(())
 }
 
@@ -2691,6 +2955,20 @@ impl Backend for PostgresRelationalBackend {
         true
     }
 
+    fn commit_capabilities(&self) -> CommitCapabilities {
+        CommitCapabilities {
+            atomic_transition_commit: true,
+            vectorized_commit: true,
+            lease_validation: true,
+            retained_commit_idempotency: true,
+            non_work_side_records: true,
+            authoritative_recovery_reads: true,
+            delayed_awaits_timers: false,
+            durability_class: DurabilityClass::Atomic,
+            consistency: "atomic postgres transaction over the relational projection",
+        }
+    }
+
     fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
     where
         F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
@@ -3487,13 +3765,238 @@ impl UpsertPort for PostgresRelationalBackend {
     }
 }
 
-/// Snorri authoritative vectorized claimed-work commit (epic pqueue-2201fd37). The durable relational
-/// parity slice is deferred (C9); this backend inherits the default impl, which returns
-/// [`EngineError::Unavailable`] so a caller rejects it before activation.
-impl pqueue_engine::CommitTransitionPort for PostgresRelationalBackend {}
+impl CommitTransitionPort for PostgresRelationalBackend {
+    fn commit_transition(
+        &self,
+        shard: &QueueKey,
+        transition: CommitTransition,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
+        let result = (|| {
+            let CommitTransition {
+                request_id,
+                entries,
+            } = transition;
+            let fingerprint = commit_request_fingerprint(&entries)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let max_attempts = g
+                .queues
+                .get(shard)
+                .map(|d| d.retry_policy.max_attempts)
+                .ok_or(EngineError::NotFound)?;
+            let expires_at = request_expires_at(&g.queues, shard, now)?;
+            let epoch = expected_epoch.unwrap_or(0);
+            let schema = g.schemas.get(shard).cloned();
+            let Inner {
+                client,
+                queues,
+                live_tokens,
+                ..
+            } = &mut *g;
+            let (t, q) = parts(shard);
+            let mut tx = st(client.transaction())?;
+            let row = st(tx.query_opt(
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?
+            .ok_or(EngineError::NotFound)?;
+            let seq0: i64 = row.get(0);
+            let cursor_epoch: i64 = row.get(1);
+            if expected_epoch.is_some_and(|e| e != cursor_epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
+            if let Some(rid) = &request_id
+                && let Some(stored) =
+                    check_commit_idempotency(&mut tx, shard, rid, &fingerprint, ts_nanos(now))?
+            {
+                return Ok(recovery_to_outcomes(&stored));
+            }
 
-/// Recovery/explain reads inherit the `Unavailable` default until the relational parity slice lands.
-impl pqueue_engine::RecoveryReadPort for PostgresRelationalBackend {}
+            let mut seq = seq0 as u64;
+            let mut token_ops = Vec::new();
+
+            let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let consumed_input_id = entry.claim_ref.item_id;
+                let reject = |e: EngineError| EntryRecovery {
+                    consumed_input_id,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(e),
+                };
+                if let Err(e) = commit_validate_sql(&mut tx, shard, &entry.claim_ref, now) {
+                    recovery.push(reject(e));
+                    continue;
+                }
+                if let Some(fence) = &entry.instance_fence {
+                    let (it, iq) = parts(shard);
+                    let row = st(tx.query_opt(
+                        "SELECT fence FROM pqueue_instance_fences \
+                             WHERE tenant_id=$1 AND queue_id=$2 AND instance_key=$3",
+                        &[&it, &iq, &fence.instance_key],
+                    ))?;
+                    let stored: i64 = row.map(|row| row.get(0)).unwrap_or(0);
+                    if let Err(e) = validate_instance_fence(stored as u64, fence) {
+                        recovery.push(reject(e));
+                        continue;
+                    }
+                }
+                if !entry.lifecycle_items.is_empty()
+                    && let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
+                        validate_entity(schema.as_ref(), item.entity.as_ref()).err()
+                    })
+                {
+                    recovery.push(reject(e));
+                    continue;
+                }
+
+                let side_record_keys: Vec<Vec<u8>> =
+                    entry.side_records.iter().map(|r| r.key.clone()).collect();
+                let instance = entry
+                    .instance_fence
+                    .as_ref()
+                    .map(|f| (f.instance_key.clone(), f.next));
+
+                if !entry.side_records.is_empty() {
+                    apply_command_sql(
+                        &mut tx,
+                        queues,
+                        &mut token_ops,
+                        shard,
+                        seq,
+                        now,
+                        &QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                            records: entry.side_records,
+                        }),
+                    )?;
+                    seq += 1;
+                }
+                if let Some(fence) = entry.instance_fence {
+                    apply_command_sql(
+                        &mut tx,
+                        queues,
+                        &mut token_ops,
+                        shard,
+                        seq,
+                        now,
+                        &QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                            instance_key: fence.instance_key,
+                            expected: fence.expected,
+                            next: fence.next,
+                        }),
+                    )?;
+                    seq += 1;
+                }
+                let mut lifecycle_item_ids = Vec::new();
+                if !entry.lifecycle_items.is_empty() {
+                    let counter_base =
+                        self.counters
+                            .reserve(shard, epoch, entry.lifecycle_items.len() as u32);
+                    let (push_items, ids) = build_push_items(
+                        entry.lifecycle_items,
+                        epoch,
+                        self.node_id,
+                        counter_base,
+                        max_attempts,
+                    );
+                    lifecycle_item_ids = ids;
+                    apply_command_sql(
+                        &mut tx,
+                        queues,
+                        &mut token_ops,
+                        shard,
+                        seq,
+                        now,
+                        &QueueCommand::Push(PushCommand { items: push_items }),
+                    )?;
+                    seq += 1;
+                }
+                apply_command_sql(
+                    &mut tx,
+                    queues,
+                    &mut token_ops,
+                    shard,
+                    seq,
+                    now,
+                    &QueueCommand::Finalize(FinalizeCommand {
+                        outcomes: vec![FinalizeOutcome::new(
+                            entry.claim_ref.item_id,
+                            entry.finalize,
+                        )],
+                    }),
+                )?;
+                seq += 1;
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    instance,
+                    side_record_keys,
+                    lifecycle_item_ids,
+                    status: CommitEntryStatus::Committed,
+                });
+            }
+            let outcomes = recovery_to_outcomes(&recovery);
+
+            st(tx.execute(
+                "UPDATE relational_cursor SET next_seq=$3 WHERE tenant=$1 AND queue=$2",
+                &[&t, &q, &(seq as i64)],
+            ))?;
+            if let Some(rid) = &request_id {
+                record_commit_idempotency(
+                    &mut tx,
+                    shard,
+                    rid,
+                    &fingerprint,
+                    &recovery,
+                    now,
+                    expires_at,
+                )?;
+            }
+            st(tx.commit())?;
+            apply_token_ops(live_tokens, token_ops);
+            Ok(outcomes)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl RecoveryReadPort for PostgresRelationalBackend {
+    fn explain_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let entries = read_commit_recovery(&mut g.client, shard, &request_id)?;
+            Ok(entries.map(|entries| CommitRecovery {
+                request_id,
+                entries,
+            }))
+        })();
+        std::future::ready(result)
+    }
+
+    fn side_record(
+        &self,
+        shard: &QueueKey,
+        key: &[u8],
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let (t, q) = parts(shard);
+            let payload: Option<Vec<u8>> = st(g.client.query_opt(
+                "SELECT payload FROM pqueue_side_records \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
+                &[&t, &q, &key],
+            ))?
+            .map(|row| row.get(0));
+            Ok(payload.map(Bytes::from))
+        })();
+        std::future::ready(result)
+    }
+}
 
 /// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
 /// the postgres-relational family inherits the all-`Unavailable` default.
@@ -3907,9 +4410,8 @@ impl ReclaimDriver for PostgresRelationalBackend {
 //     MINT positions. No durable write, no cursor advance.
 //   * [`ProjectionStore::apply`] COMMITS — one postgres transaction: the 14-arm `apply_command_sql` at the
 //     minted positions + the cursor `next_seq` advance, then post-commit live-token maintenance.
-// The postgres relational family carries no Snorri commit-class read model (its monolith leaves
-// `CommitTransitionPort`/`RecoveryReadPort` at the default), so the unified store keeps
-// `supports_commit_transition() == false` and inherits the safe commit-class defaults.
+// The unified relational store still only covers the log/projection seam; the Snorri commit boundary is
+// provided by the `PostgresRelationalBackend` facade below, which opts in separately.
 
 /// Active (non-superseded) item id under `client_item_key`, or `None` (the generic upsert look-then-replace).
 fn lookup_active_by_key(
@@ -4419,9 +4921,8 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
-    // The postgres relational family carries no Snorri commit-class read model (its monolith leaves
-    // `CommitTransitionPort` at the default), so `supports_commit_transition` stays `false` and the
-    // commit-class reads inherit the safe trait defaults.
+    // The store wrapper itself still delegates the commit-class boundary to the backend facade below; its
+    // own trait surface intentionally remains the default read-only shape.
 
     fn select_eligible(
         &self,
@@ -4878,5 +5379,264 @@ mod gated_group_summary_tests {
             vec!["g2"],
             "fully-leased g1 is no longer active"
         );
+    }
+}
+
+#[cfg(test)]
+mod commit_transition_tests {
+    use super::*;
+    use futures::executor::block_on;
+    use pqueue_conformance::{qdef, shard, ts};
+    use pqueue_core::{LeaseToken, PriorityValue, RequestId, WorkerId};
+    use pqueue_engine::{
+        ClaimPort, ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+        CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind, ProjectionRead,
+        PushPort, RecoveryReadPort, RenewLeasePort, SideRecord,
+    };
+
+    fn unique_schema(tag: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "pq_rel_commit_{}_{}_{}",
+            tag,
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    fn item(priority: i64) -> PushSpec {
+        PushSpec {
+            priority: Some(PriorityValue::Int64(priority)),
+            ..Default::default()
+        }
+    }
+
+    fn side(key: &str, payload: &str) -> SideRecord {
+        SideRecord {
+            key: key.as_bytes().to_vec(),
+            payload: Bytes::copy_from_slice(payload.as_bytes()),
+        }
+    }
+
+    fn claim_req(max: usize, exp: i64, now: i64) -> pqueue_engine::ClaimRequest {
+        pqueue_engine::ClaimRequest {
+            shard: shard(),
+            worker_id: WorkerId::new("w1").unwrap(),
+            max_items: max,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: ts(exp),
+            now: ts(now),
+            compatibility: Default::default(),
+            expected_epoch: None,
+        }
+    }
+
+    async fn push_and_claim(
+        backend: &PostgresRelationalBackend,
+        now: i64,
+        priority: i64,
+    ) -> ClaimRef {
+        backend
+            .push(&shard(), vec![item(priority)], ts(now), None)
+            .await
+            .unwrap();
+        let claimed = backend.claim(claim_req(1, now + 600, now)).await.unwrap();
+        let c = &claimed.items[0];
+        ClaimRef {
+            item_id: c.item_id,
+            lease_token: c.lease_token.clone().expect("claimed item carries a token"),
+            lease_expires_at: c.lease_expires_at,
+            item_version: c.item_version,
+        }
+    }
+
+    fn count_side_records(backend: &PostgresRelationalBackend) -> i64 {
+        let mut g = backend.inner.lock().unwrap();
+        g.client
+            .query_one("SELECT COUNT(*) FROM pqueue_side_records", &[])
+            .unwrap()
+            .get(0)
+    }
+
+    fn read_side_record(backend: &PostgresRelationalBackend, key: &str) -> Option<Vec<u8>> {
+        let mut g = backend.inner.lock().unwrap();
+        let q = shard();
+        let tenant = q.tenant_id.as_str().to_string();
+        let queue = q.queue_id.as_str().to_string();
+        g.client
+            .query_opt(
+                "SELECT payload FROM pqueue_side_records WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
+                &[&tenant, &queue, &key.as_bytes()],
+            )
+            .unwrap()
+            .map(|row| row.get(0))
+    }
+
+    async fn backend_for_schema(url: &str, schema: &str) -> PostgresRelationalBackend {
+        let backend = PostgresRelationalBackend::connect_in_schema(url, schema).unwrap();
+        backend.create_queue(qdef()).await.unwrap();
+        backend
+    }
+
+    #[test]
+    fn commit_transition_rejects_bad_token_bad_version_and_writes_nothing() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_rejects_bad_token_bad_version_and_writes_nothing) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = unique_schema("rejects");
+        let backend = block_on(backend_for_schema(&url, &schema));
+
+        let mut bad_token = block_on(push_and_claim(&backend, 0, 10));
+        bad_token.lease_token = LeaseToken::new("wrong").unwrap();
+        let outcomes = block_on(backend.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: None,
+                entries: vec![CommitTransitionEntry {
+                    claim_ref: bad_token,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![side("state/bad-token", "x")],
+                    lifecycle_items: vec![item(20)],
+                    instance_fence: None,
+                }],
+            },
+            ts(1),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![CommitEntryOutcome::Rejected(EngineError::StaleLease)]
+        );
+        assert_eq!(count_side_records(&backend), 0);
+
+        let mut bad_version = block_on(push_and_claim(&backend, 2, 11));
+        bad_version.item_version += 99;
+        let outcomes = block_on(backend.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: None,
+                entries: vec![CommitTransitionEntry {
+                    claim_ref: bad_version,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![side("state/bad-version", "y")],
+                    lifecycle_items: vec![item(30)],
+                    instance_fence: None,
+                }],
+            },
+            ts(3),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![CommitEntryOutcome::Rejected(EngineError::Conflict)]
+        );
+        assert_eq!(count_side_records(&backend), 0);
+    }
+
+    #[test]
+    fn commit_transition_request_id_replays_without_double_write() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_request_id_replays_without_double_write) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = unique_schema("replay");
+        let backend = block_on(backend_for_schema(&url, &schema));
+        let claim_ref = block_on(push_and_claim(&backend, 0, 10));
+        let rid = RequestId::new("txn-replay-1").unwrap();
+        let body = |cr: ClaimRef| CommitTransition {
+            request_id: Some(rid.clone()),
+            entries: vec![CommitTransitionEntry {
+                claim_ref: cr,
+                finalize: FinalizeKind::Complete,
+                side_records: vec![side("state/replay", "v1")],
+                lifecycle_items: vec![item(20)],
+                instance_fence: None,
+            }],
+        };
+
+        let first =
+            block_on(backend.commit_transition(&shard(), body(claim_ref.clone()), ts(1), None))
+                .unwrap();
+        let lifecycle_id = match &first[0] {
+            CommitEntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
+            other => panic!("expected Committed, got {other:?}"),
+        };
+        assert_eq!(count_side_records(&backend), 1);
+
+        let replay =
+            block_on(backend.commit_transition(&shard(), body(claim_ref), ts(1), None)).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(count_side_records(&backend), 1);
+        assert_eq!(
+            block_on(backend.side_record(&shard(), b"state/replay"))
+                .unwrap()
+                .as_deref(),
+            Some(&b"v1"[..])
+        );
+        assert_eq!(block_on(backend.metrics(&shard())).unwrap().pending, 1);
+        let recovery = block_on(backend.explain_commit(&shard(), rid))
+            .unwrap()
+            .expect("replay record retained");
+        assert_eq!(recovery.entries.len(), 1);
+        assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    }
+
+    #[test]
+    fn commit_transition_conflict_is_per_entry_during_race() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_conflict_is_per_entry_during_race) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = unique_schema("race");
+        let b1 = block_on(backend_for_schema(&url, &schema));
+        let b2 = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+
+        let stale = block_on(push_and_claim(&b1, 0, 10));
+        let live = block_on(push_and_claim(&b1, 2, 11));
+        block_on(b2.renew(&shard(), vec![stale.item_id], ts(500), ts(3), None)).unwrap();
+
+        let outcomes = block_on(b1.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: None,
+                entries: vec![
+                    CommitTransitionEntry {
+                        claim_ref: stale,
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![side("state/stale", "x")],
+                        lifecycle_items: vec![item(20)],
+                        instance_fence: None,
+                    },
+                    CommitTransitionEntry {
+                        claim_ref: live.clone(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![side("state/live", "y")],
+                        lifecycle_items: vec![item(30)],
+                        instance_fence: None,
+                    },
+                ],
+            },
+            ts(4),
+            None,
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            outcomes[0],
+            CommitEntryOutcome::Rejected(EngineError::Conflict)
+        ));
+        assert!(matches!(outcomes[1], CommitEntryOutcome::Committed { .. }));
+        assert!(read_side_record(&b1, "state/stale").is_none());
+        assert!(read_side_record(&b1, "state/live").is_some());
     }
 }
