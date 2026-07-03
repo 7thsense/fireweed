@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{EntitySchemaDocument, RequestId};
-use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
+use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, RecoveryReadPort};
 use pqueue_postgres::PostgresRelationalBackend;
 use serde_json::json;
 
@@ -232,6 +232,40 @@ fn commit_transition_shared_scenario_runs_against_postgres_relational() {
         Err(_) => {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (commit_transition_shared_scenario_runs_against_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+            );
+        }
+    }
+}
+
+#[test]
+fn commit_transition_explain_commit_shared_scenario_runs_against_postgres_relational() {
+    use pqueue_conformance::scenarios::commit_transition_explain_commit_recovers_transition_and_survives_reopen;
+
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let make = || {
+                    PostgresRelationalBackend::connect_in_schema(&url, &schema)
+                        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                };
+                commit_transition_explain_commit_recovers_transition_and_survives_reopen(make)
+                    .await;
+
+                let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
+                    .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                assert_eq!(
+                    backend
+                        .side_record(&pqueue_conformance::qkey(), b"missing/audit-key")
+                        .await
+                        .unwrap(),
+                    None
+                );
+            });
+        }
+        Err(_) => {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_explain_commit_shared_scenario_runs_against_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
             );
         }
     }
