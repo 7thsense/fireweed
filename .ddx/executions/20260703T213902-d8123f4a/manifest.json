@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260703T213902-d8123f4a",
+  "bead_id": "pqueue-07d68b86",
+  "base_rev": "88c6ca1f2064ca6117a6534f6c7601e9a32575b7",
+  "created_at": "2026-07-03T21:39:02.86569913Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-07d68b86",
+    "title": "Add current_position and read-as-of-position API",
+    "description": "PROBLEM\nThere is no way to read a consistent projection state at a historical position — needed for consistent external reads that never touch the hot claim path, and to compare a branched queue against its parent at the fork point (TD-009).\n\nCURRENT STATE\n- LogStore::high_water gives the current position cheaply (crates/pqueue-engine/src/compose.rs:113).\n- Snapshot-at-position storage exists: write_snapshot/latest_snapshot/read_snapshot (compose.rs:116-123).\n- No read_as_of exists; the relational family cannot reconstruct prior state at all today (\"nothing to replay\", crates/pqueue-postgres/src/relational.rs:983-987) until the ADR-013 migration.\n\nPROPOSED FIX\nPer TD-009 section 2: add current_position(shard) -\u003e CommandPosition (thin wrapper over high_water) and read_as_of(shard, position, query) that hydrates from the nearest snapshot \u003c= P, replays read_from up to P into an ephemeral projection, answers the bounded query, and discards. Relational backends return a structured capability-unavailable error until rebuildable-from-log.\n\nNON-SCOPE\n- Branch (separate bead). Relational rebuild-from-log migration (ADR-013 derived work).\n- No always-on secondary projection; the as-of projection is ephemeral per call.",
+    "acceptance": "1. read_as_of_reconstructs_prior_state: on the in-memory and object-log backends, a read at position P returns state matching what a live read returned when P was the head, ignoring later commits. cargo test -p pqueue-engine read_as_of_reconstructs_prior_state\n2. read_as_of_unavailable_relational: relational backends return the structured capability-unavailable error. cargo test -p pqueue-postgres read_as_of_unavailable_relational\n3. cargo test -p pqueue-engine passes.",
+    "labels": [
+      "activity:build",
+      "kind:build",
+      "area:pqueue-engine",
+      "suite:hot_projection_queries",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"read_as_of_reconstructs_prior_state: on the in-memory and object-log backends, a read at position P returns state matching what a live read returned when P was the head, ignoring later commits. cargo test -p pqueue-engine read_as_of_reconstructs_prior_state\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"read_as_of_unavailable_relational: relational backends return the structured capability-unavailable error. cargo test -p pqueue-postgres read_as_of_unavailable_relational\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"cargo test -p pqueue-engine passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T21:37:26.20543322Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/3"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T213902-d8123f4a",
+    "prompt": ".ddx/executions/20260703T213902-d8123f4a/prompt.md",
+    "manifest": ".ddx/executions/20260703T213902-d8123f4a/manifest.json",
+    "result": ".ddx/executions/20260703T213902-d8123f4a/result.json",
+    "checks": ".ddx/executions/20260703T213902-d8123f4a/checks.json",
+    "usage": ".ddx/executions/20260703T213902-d8123f4a/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-07d68b86-20260703T213902-d8123f4a"
+  },
+  "prompt_sha": "398259f29863479b712c8302046b34d87784739ad5e4474162cf9826b5099692"
+}
