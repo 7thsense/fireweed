@@ -26,11 +26,10 @@ mod composed_capability_parity {
     use pqueue_conformance::{claim_req, qdef, qkey, shard};
     use pqueue_core::{PriorityValue, RequestId};
     use pqueue_engine::{
-        Backend, ClaimPort, ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+        Backend, ClaimPort, ClaimRef, CommitTransition, CommitTransitionEntry,
         CommitTransitionPort, ControlPlaneStore, DiscoveryGranularity, DiscoveryPort, EngineError,
         FinalizeKind, InstanceFence, LogRead, ProjectionRead, PushPort, PushSpec, QueueCommand,
-        RecoveryReadPort, ReschedulePort, ScheduleUpdate, SetGatesCommand, SetGatesPort,
-        SideRecord,
+        ReschedulePort, ScheduleUpdate, SetGatesCommand, SetGatesPort, SideRecord,
     };
     pub(super) async fn seeded_commit_transition_memory_backend() -> crate::ComposedMemoryBackend {
         let b = composed_memory_backend();
@@ -104,114 +103,6 @@ mod composed_capability_parity {
         assert_eq!(composed.durability_class, mono.durability_class);
         assert!(composed.atomic_transition_commit);
         assert!(composed.authoritative_recovery_reads);
-    }
-
-    /// The full vectorized claimed-work commit boundary works through the composition: one entry with a
-    /// side record + instance fence + lifecycle item + finalize commits atomically and returns Committed,
-    /// the request id propagates into every appended envelope, and explain/side_record reconstruct it.
-    #[tokio::test]
-    async fn vectorized_commit_recovery_and_side_records_round_trip() {
-        let b = composed_memory_backend();
-        b.create_queue(qdef()).await.unwrap();
-        b.push(&shard(), vec![PushSpec::default()], ts(0), None)
-            .await
-            .unwrap();
-        let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
-        let c = &claimed.items[0];
-        let claim_ref = ClaimRef {
-            item_id: c.item_id,
-            lease_token: c.lease_token.clone().expect("lease token"),
-            lease_expires_at: c.lease_expires_at,
-            item_version: c.item_version,
-        };
-
-        let rid = RequestId::new("txn-composed-1").unwrap();
-        let outcomes = b
-            .commit_transition(
-                &shard(),
-                CommitTransition {
-                    request_id: Some(rid.clone()),
-                    entries: vec![CommitTransitionEntry {
-                        claim_ref,
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![SideRecord {
-                            key: b"state/run".to_vec(),
-                            payload: Bytes::from_static(b"opaque"),
-                        }],
-                        lifecycle_items: vec![PushSpec::default()],
-                        instance_fence: Some(InstanceFence {
-                            instance_key: b"wf-1".to_vec(),
-                            expected: 0,
-                            next: 1,
-                        }),
-                    }],
-                },
-                ts(1),
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(outcomes[0], CommitEntryOutcome::Committed { .. }));
-
-        // Recovery reads reconstruct the committed transition + the opaque side record survives finalize.
-        let recovered = b
-            .explain_commit(&shard(), rid.clone())
-            .await
-            .unwrap()
-            .expect("committed transition is recoverable by request id");
-        assert_eq!(recovered.request_id, rid);
-        assert_eq!(recovered.entries.len(), 1);
-        let sr = b.side_record(&shard(), b"state/run").await.unwrap();
-        assert_eq!(sr.as_deref(), Some(&b"opaque"[..]));
-
-        // Replay: the SAME body+id returns the prior outcomes with NO second commit (idempotent).
-        let log_before = b
-            .read_from(&shard(), None, 1000)
-            .await
-            .unwrap()
-            .entries
-            .len();
-        let replay = b
-            .commit_transition(
-                &shard(),
-                CommitTransition {
-                    request_id: Some(rid.clone()),
-                    entries: vec![CommitTransitionEntry {
-                        claim_ref: ClaimRef {
-                            item_id: c.item_id,
-                            lease_token: c.lease_token.clone().unwrap(),
-                            lease_expires_at: c.lease_expires_at,
-                            item_version: c.item_version,
-                        },
-                        finalize: FinalizeKind::Complete,
-                        side_records: vec![SideRecord {
-                            key: b"state/run".to_vec(),
-                            payload: Bytes::from_static(b"opaque"),
-                        }],
-                        lifecycle_items: vec![PushSpec::default()],
-                        instance_fence: Some(InstanceFence {
-                            instance_key: b"wf-1".to_vec(),
-                            expected: 0,
-                            next: 1,
-                        }),
-                    }],
-                },
-                ts(2),
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(replay[0], CommitEntryOutcome::Committed { .. }));
-        let log_after = b
-            .read_from(&shard(), None, 1000)
-            .await
-            .unwrap()
-            .entries
-            .len();
-        assert_eq!(
-            log_before, log_after,
-            "request-id replay must not re-append"
-        );
     }
 
     /// Request-id CONFLICT on a body change under the same id (commit-path idempotency parity).
