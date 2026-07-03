@@ -76,6 +76,8 @@ struct ItemRecord {
     lease_expires_at: Option<UtcTimestamp>,
     fenced: bool,
     superseded: bool,
+    terminal_at: Option<UtcTimestamp>,
+    terminal_position: Option<CommandPosition>,
 }
 
 /// Portable, typed representation of one item in a [`ProjectionImage`].
@@ -100,6 +102,8 @@ pub struct ProjectionImageItem {
     pub lease_expires_at: Option<UtcTimestamp>,
     pub fenced: bool,
     pub superseded: bool,
+    pub terminal_at: Option<UtcTimestamp>,
+    pub terminal_position: Option<CommandPosition>,
 }
 
 impl From<&ItemRecord> for ProjectionImageItem {
@@ -124,6 +128,8 @@ impl From<&ItemRecord> for ProjectionImageItem {
             lease_expires_at: rec.lease_expires_at,
             fenced: rec.fenced,
             superseded: rec.superseded,
+            terminal_at: rec.terminal_at,
+            terminal_position: rec.terminal_position.clone(),
         }
     }
 }
@@ -151,8 +157,17 @@ impl From<ProjectionImageItem> for ItemRecord {
             lease_expires_at: item.lease_expires_at,
             fenced: item.fenced,
             superseded: item.superseded,
+            terminal_at: item.terminal_at,
+            terminal_position: item.terminal_position,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalEmissionMetrics {
+    pub resident_terminal_count: u64,
+    pub emission_lag_commands: u64,
+    pub emission_oldest_unemitted_age_ms: u64,
 }
 
 /// Complete queue projection image at a durable high-water.
@@ -423,6 +438,17 @@ fn locality_key(key: &EligKey) -> (bool, Option<&GroupKey>) {
 
 fn due_at(key: &EligKey, now: UtcTimestamp) -> bool {
     key.not_before.map(|nb| nb <= now).unwrap_or(true)
+}
+
+fn timestamp_to_ms(ts: UtcTimestamp) -> i128 {
+    ts.seconds as i128 * 1_000 + (ts.nanoseconds as i128 / 1_000_000)
+}
+
+fn add_millis(ts: UtcTimestamp, ms: u64) -> UtcTimestamp {
+    let total_ms = timestamp_to_ms(ts) + ms as i128;
+    let seconds = total_ms.div_euclid(1_000) as i64;
+    let nanoseconds = (total_ms.rem_euclid(1_000) as u32) * 1_000_000;
+    UtcTimestamp::new(seconds, nanoseconds).expect("valid timestamp arithmetic")
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,6 +1414,8 @@ impl ProjectionData {
             lease_expires_at: None,
             fenced: false,
             superseded: false,
+            terminal_at: None,
+            terminal_position: None,
         };
         self.eligible
             .insert(&rec, &self.items, &self.priority_model);
@@ -1428,7 +1456,13 @@ impl ProjectionData {
 
     /// Drive the lifecycle state machine for one item, keeping the eligibility index in sync and
     /// bumping `item_version` (API-001: version bumps on every committed mutation).
-    fn transition(&mut self, id: &ItemId, ev: ItemEvent) -> EngineResult<ItemState> {
+    fn transition(
+        &mut self,
+        id: &ItemId,
+        ev: ItemEvent,
+        terminal_at: Option<UtcTimestamp>,
+        terminal_position: Option<&CommandPosition>,
+    ) -> EngineResult<ItemState> {
         let model = self.priority_model;
         let (old_key, new_key, old_state, new_state) = {
             let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
@@ -1444,6 +1478,13 @@ impl ProjectionData {
                 .map_err(|_| EngineError::Invalid("illegal lifecycle transition"))?;
             rec.state = new;
             rec.item_version += 1;
+            if new.is_terminal() {
+                rec.terminal_at = terminal_at;
+                rec.terminal_position = terminal_position.cloned();
+            } else if old_state.is_terminal() {
+                rec.terminal_at = None;
+                rec.terminal_position = None;
+            }
             let nk = (new == ItemState::Pending).then(|| EligibilityIndex::token(rec, &model));
             (old, nk, old_state, new)
         };
@@ -1459,6 +1500,15 @@ impl ProjectionData {
     }
 
     pub fn apply_command(&mut self, cmd: &QueueCommand) -> EngineResult<()> {
+        self.apply_command_at(None, None, cmd)
+    }
+
+    fn apply_command_at(
+        &mut self,
+        terminal_at: Option<UtcTimestamp>,
+        terminal_position: Option<&CommandPosition>,
+        cmd: &QueueCommand,
+    ) -> EngineResult<()> {
         match cmd {
             // Queue creation is handled by the control plane; idempotent no-op if replayed here.
             QueueCommand::CreateQueue(_) => Ok(()),
@@ -1479,7 +1529,7 @@ impl ProjectionData {
             }
             QueueCommand::Claim(c) => {
                 for id in &c.item_ids {
-                    self.transition(id, ItemEvent::Claim)?;
+                    self.transition(id, ItemEvent::Claim, None, None)?;
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = Some(c.lease_token.clone());
                     rec.lease_expires_at = Some(c.lease_expires_at);
@@ -1489,7 +1539,7 @@ impl ProjectionData {
             }
             QueueCommand::CohortClaim(c) => {
                 for id in &c.item_ids {
-                    self.transition(id, ItemEvent::Claim)?;
+                    self.transition(id, ItemEvent::Claim, None, None)?;
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = Some(c.lease_token.clone());
                     rec.lease_expires_at = Some(c.lease_expires_at);
@@ -1683,7 +1733,7 @@ impl ProjectionData {
                             }
                         }
                     };
-                    self.transition(&o.item_id, ev)?;
+                    self.transition(&o.item_id, ev, terminal_at, terminal_position)?;
                     let should_reinsert = {
                         let rec = self
                             .items
@@ -1768,7 +1818,7 @@ impl ProjectionData {
             }
             QueueCommand::LeaseExpired(c) => {
                 for id in &c.item_ids {
-                    self.transition(id, ItemEvent::LeaseExpired)?;
+                    self.transition(id, ItemEvent::LeaseExpired, None, None)?;
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = None;
                     rec.lease_expires_at = None;
@@ -1797,6 +1847,8 @@ impl ProjectionData {
                         let old_state = rec.state;
                         rec.state = ItemState::Failed; // forced terminal (cohort-incomplete)
                         rec.item_version += 1;
+                        rec.terminal_at = terminal_at;
+                        rec.terminal_position = terminal_position.cloned();
                         if let Some(k) = old {
                             self.eligible.remove(k);
                         }
@@ -1851,21 +1903,9 @@ impl ProjectionData {
                 Ok(())
             }
             QueueCommand::PurgeItems(c) => {
-                let model = self.priority_model;
                 for id in &c.item_ids {
                     if let Some(rec) = self.items.remove(id) {
-                        if !rec.superseded {
-                            self.metrics_dec(rec.state);
-                        }
-                        if let Some(key) = &rec.explicit_client_item_key {
-                            self.by_key.remove(key);
-                        }
-                        if rec.state == ItemState::Pending {
-                            self.eligible.remove(EligibilityIndex::token(&rec, &model));
-                        }
-                        let keys =
-                            self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
-                        self.index_remove_keys(rec.item_id, &keys);
+                        self.remove_record(rec)?;
                     }
                 }
                 Ok(())
@@ -2003,6 +2043,128 @@ impl ProjectionData {
     /// `ProjectionRead::metrics` — per-state counts (superseded items excluded).
     pub fn metrics(&self) -> QueueMetrics {
         self.metrics.clone()
+    }
+
+    fn remove_record(&mut self, rec: ItemRecord) -> EngineResult<()> {
+        if !rec.superseded {
+            self.metrics_dec(rec.state);
+        }
+        if let Some(key) = &rec.explicit_client_item_key {
+            self.by_key.remove(key);
+        }
+        if rec.state == ItemState::Pending {
+            self.eligible
+                .remove(EligibilityIndex::token(&rec, &self.priority_model));
+        }
+        let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+        self.index_remove_keys(rec.item_id, &keys);
+        Ok(())
+    }
+
+    fn terminal_records(&self) -> impl Iterator<Item = &ItemRecord> {
+        self.items
+            .values()
+            .filter(|rec| rec.state.is_terminal() && !rec.superseded)
+    }
+
+    fn terminal_is_reapable(
+        rec: &ItemRecord,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> bool {
+        let Some(terminal_at) = rec.terminal_at else {
+            return false;
+        };
+        if add_millis(terminal_at, terminal_retention_ms) > now {
+            return false;
+        }
+        if !emit_change_records {
+            return true;
+        }
+        let Some(terminal_position) = rec.terminal_position.as_ref() else {
+            return false;
+        };
+        emission_cursor.is_some_and(|cursor| !cursor.precedes(terminal_position))
+    }
+
+    pub fn terminal_emission_metrics(
+        &self,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> TerminalEmissionMetrics {
+        let resident_terminal_count = self.terminal_records().count() as u64;
+        if !emit_change_records {
+            return TerminalEmissionMetrics {
+                resident_terminal_count,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
+            };
+        }
+
+        let mut emission_lag_commands = 0u64;
+        let mut emission_oldest_unemitted_age_ms = 0u64;
+        for rec in self.terminal_records() {
+            let Some(terminal_position) = rec.terminal_position.as_ref() else {
+                continue;
+            };
+            let behind = match emission_cursor {
+                None => true,
+                Some(cursor) => cursor.precedes(terminal_position),
+            };
+            if !behind {
+                continue;
+            }
+            emission_lag_commands += 1;
+            if let Some(terminal_at) = rec.terminal_at {
+                let now_ms = timestamp_to_ms(now);
+                let terminal_ms = timestamp_to_ms(terminal_at);
+                let age_ms = if now_ms > terminal_ms {
+                    (now_ms - terminal_ms) as u64
+                } else {
+                    0
+                };
+                emission_oldest_unemitted_age_ms = emission_oldest_unemitted_age_ms.max(age_ms);
+            }
+        }
+        TerminalEmissionMetrics {
+            resident_terminal_count,
+            emission_lag_commands,
+            emission_oldest_unemitted_age_ms,
+        }
+    }
+
+    pub fn reap_terminal_items(
+        &mut self,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> Vec<ItemId> {
+        let ids: Vec<ItemId> = self
+            .terminal_records()
+            .filter(|rec| {
+                Self::terminal_is_reapable(
+                    rec,
+                    now,
+                    terminal_retention_ms,
+                    emit_change_records,
+                    emission_cursor,
+                )
+            })
+            .map(|rec| rec.item_id)
+            .collect();
+        let mut reaped = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(rec) = self.items.remove(&id) {
+                reaped.push(id);
+                self.remove_record(rec)
+                    .expect("terminal reap record removal must remain infallible");
+            }
+        }
+        reaped
     }
 
     /// Render the given ids into the rich claimed-item shape (lease fields must be `Some`). Used right
@@ -2925,6 +3087,36 @@ mod tests {
         proj.items.get(&iid(id)).unwrap().item_version
     }
 
+    fn terminal_record(
+        id: &str,
+        terminal_at: UtcTimestamp,
+        terminal_position: CommandPosition,
+    ) -> ItemRecord {
+        ItemRecord {
+            item_id: iid(id),
+            explicit_client_item_key: None,
+            priority: None,
+            not_before: None,
+            group_key: None,
+            payload: None,
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            gate_keys: Vec::new(),
+            entity_document: None,
+            state: ItemState::Complete,
+            item_version: 2,
+            attempt_count: 0,
+            max_attempts: 3,
+            created_seq: 0,
+            lease_token: None,
+            lease_expires_at: None,
+            fenced: false,
+            superseded: false,
+            terminal_at: Some(terminal_at),
+            terminal_position: Some(terminal_position),
+        }
+    }
+
     #[test]
     fn default_client_keys_are_derived_without_by_key_entries() {
         let definition = qdef();
@@ -3094,6 +3286,8 @@ mod tests {
             lease_expires_at: None,
             fenced: false,
             superseded: false,
+            terminal_at: None,
+            terminal_position: None,
         };
         let priced = ItemRecord {
             item_id: iid("2"),
@@ -3172,6 +3366,116 @@ mod tests {
                 force: true,
             }))
             .unwrap();
+        assert_eq!(projection.metrics(), QueueMetrics::default());
+    }
+
+    #[test]
+    fn reap_waits_for_emission() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let item_id = iid("1");
+        let terminal_at = ts(0);
+        let terminal_position = CommandPosition::new(shard(), 0, 3);
+        projection.items.insert(
+            item_id,
+            terminal_record("1", terminal_at, terminal_position.clone()),
+        );
+        projection.metrics.complete = 1;
+
+        let now = ts(90);
+        let cursor_behind = CommandPosition::new(shard(), 0, 2);
+        assert!(
+            projection
+                .reap_terminal_items(
+                    now,
+                    definition.terminal_retention_ms,
+                    true,
+                    Some(&cursor_behind),
+                )
+                .is_empty()
+        );
+        assert!(projection.items.contains_key(&item_id));
+        assert_eq!(
+            projection.terminal_emission_metrics(now, true, Some(&cursor_behind)),
+            TerminalEmissionMetrics {
+                resident_terminal_count: 1,
+                emission_lag_commands: 1,
+                emission_oldest_unemitted_age_ms: 90_000,
+            }
+        );
+
+        let cursor_passed = CommandPosition::new(shard(), 0, 3);
+        assert_eq!(
+            projection.terminal_emission_metrics(now, true, Some(&cursor_passed)),
+            TerminalEmissionMetrics {
+                resident_terminal_count: 1,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
+            }
+        );
+
+        let reaped = projection.reap_terminal_items(
+            now,
+            definition.terminal_retention_ms,
+            true,
+            Some(&cursor_passed),
+        );
+        assert_eq!(reaped, vec![item_id]);
+        assert!(!projection.items.contains_key(&item_id));
+        assert_eq!(
+            projection.terminal_emission_metrics(now, true, Some(&cursor_passed)),
+            TerminalEmissionMetrics {
+                resident_terminal_count: 0,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn reap_ignores_emission_when_disabled() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let item_id = iid("1");
+        let terminal_at = ts(0);
+        let terminal_position = CommandPosition::new(shard(), 0, 7);
+        projection.items.insert(
+            item_id,
+            terminal_record("1", terminal_at, terminal_position),
+        );
+        projection.metrics.complete = 1;
+
+        let now = ts(90);
+        let cursor_behind = CommandPosition::new(shard(), 0, 2);
+        assert_eq!(
+            projection.terminal_emission_metrics(now, false, Some(&cursor_behind)),
+            TerminalEmissionMetrics {
+                resident_terminal_count: 1,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
+            }
+        );
+
+        let reaped = projection.reap_terminal_items(
+            now,
+            definition.terminal_retention_ms,
+            false,
+            Some(&cursor_behind),
+        );
+        assert_eq!(reaped, vec![item_id]);
+        assert!(!projection.items.contains_key(&item_id));
         assert_eq!(projection.metrics(), QueueMetrics::default());
     }
 
@@ -3428,6 +3732,8 @@ mod tests {
                     lease_expires_at: None,
                     fenced: false,
                     superseded: true,
+                    terminal_at: None,
+                    terminal_position: None,
                 },
                 ProjectionImageItem {
                     item_id: iid("11"),
@@ -3449,6 +3755,8 @@ mod tests {
                     lease_expires_at: None,
                     fenced: false,
                     superseded: false,
+                    terminal_at: None,
+                    terminal_position: None,
                 },
             ],
             side_records: BTreeMap::new(),

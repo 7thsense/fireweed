@@ -166,7 +166,7 @@ impl InMemoryProjection {
             self.projections
                 .get_mut(&pos.queue)
                 .ok_or(EngineError::NotFound)?
-                .apply_command(&cmd.command)?;
+                .apply_command_at(Some(cmd.created_at), Some(pos), &cmd.command)?;
         }
         Ok(())
     }
