@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260703T054729-d145e77c",
+  "bead_id": "pqueue-815011a1",
+  "base_rev": "2e73c1f467da29e79828a2bf94dcbe481852622e",
+  "created_at": "2026-07-03T05:47:29.907579262Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-815011a1",
+    "title": "Advertise real commit_capabilities() for postgres, matching sqlite-relational",
+    "description": "PROBLEM\nPostgres does not override commit_capabilities(), so it reports CommitCapabilities::default() (all false) even once commit_transition and RecoveryReadPort are implemented (pqueue-30765e65, pqueue-a51d53c7) -- the capability flags would still lie by omission, and Snorri's pre-activation capability check (epic pqueue-2201fd37) would reject a backend that actually works.\n\nPROPOSED FIX\nOverride commit_capabilities() on the in-scope postgres backend(s) to report the capabilities actually implemented (atomic_transition_commit, vectorized_commit, lease_validation, retained_commit_idempotency, non_work_side_records, authoritative_recovery_reads, delayed_awaits_timers as applicable, DurabilityClass::Atomic, and an honest consistency string), matching sqlite-relational's declared set (crates/pqueue-sqlite/src/relational.rs:5731) unless a specific capability is legitimately not yet true on postgres -- in which case declare it false and note why.\n\nIN-SCOPE FILES\n- crates/pqueue-postgres/src/relational.rs (and/or lib.rs per scope decision)\n\nOUT-OF-SCOPE\n- Nothing left after this bead closes -- this is the epic's final gate.",
+    "acceptance": "1. `rg -n 'atomic_transition_commit: true' crates/pqueue-postgres/src/relational.rs` finds the new override.\n2. The shared pqueue-conformance commit-transition scenario's positive path passes against postgres purely by capability detection (no test-specific branching needed) -- i.e. the harness picks the positive path automatically because commit_capabilities() now reports true.\n3. `cargo test --workspace --all-targets --all-features` passes.\n4. `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-44995583",
+    "labels": [
+      "area:postgres",
+      "kind:feature",
+      "system:pqueue",
+      "consumer:snorri",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"`rg -n 'atomic_transition_commit: true' crates/pqueue-postgres/src/relational.rs` finds the new override.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"The shared pqueue-conformance commit-transition scenario's positive path passes against postgres purely by capability detection (no test-specific branching needed) -- i.e. the harness picks the positive path automatically because commit_capabilities() now reports true.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"`cargo test --workspace --all-targets --all-features` passes.\",\"kind\":\"command\",\"verifiable\":true},{\"ac\":4,\"text\":\"`cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T05:45:05.911352492Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.25 threshold=0.50 verifiable=1/4"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T054729-d145e77c",
+    "prompt": ".ddx/executions/20260703T054729-d145e77c/prompt.md",
+    "manifest": ".ddx/executions/20260703T054729-d145e77c/manifest.json",
+    "result": ".ddx/executions/20260703T054729-d145e77c/result.json",
+    "checks": ".ddx/executions/20260703T054729-d145e77c/checks.json",
+    "usage": ".ddx/executions/20260703T054729-d145e77c/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-815011a1-20260703T054729-d145e77c"
+  },
+  "prompt_sha": "fcca8dc77f6d392047d3c8ac99fcb03aed26171da7718a29cd80b3aa06213ee0"
+}
