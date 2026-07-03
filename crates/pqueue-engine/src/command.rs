@@ -6,12 +6,13 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
-    QueueDefinition, RequestId, UtcTimestamp,
+    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OwnerId,
+    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::QueueKey;
 use crate::error::{EngineError, EngineResult};
+use crate::types::CommandPosition;
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -440,6 +441,454 @@ pub struct SetGatesCommand {
     pub blocked: bool,
 }
 
+/// The durable change-record position: the log epoch plus sequence that produced the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ChangeRecordPosition {
+    pub backend_epoch: u64,
+    pub sequence: u64,
+}
+
+impl From<&CommandPosition> for ChangeRecordPosition {
+    fn from(value: &CommandPosition) -> Self {
+        Self {
+            backend_epoch: value.backend_epoch,
+            sequence: value.sequence,
+        }
+    }
+}
+
+/// Change-record command classification. One committed command can fan out to many records, but the
+/// command kind stays the same across the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ChangeRecordKind {
+    Push,
+    Claim,
+    CohortClaim,
+    RenewLease,
+    CohortRenewLease,
+    ReassignLease,
+    Finalize,
+    CohortFinalize,
+    ReplacePending,
+    UpdateFields,
+    LeaseExpired,
+    CohortExpired,
+    FenceLease,
+    UnfenceLease,
+    PauseQueue,
+    ResumeQueue,
+    PurgeItems,
+    SetGates,
+}
+
+/// Serde-safe lifecycle state for emitted history records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChangeRecordState {
+    Pending,
+    Leased,
+    Complete,
+    Failed,
+}
+
+/// One emitted history record derived from a committed command.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChangeRecord {
+    pub tenant_id: TenantId,
+    pub queue_id: QueueId,
+    pub item_id: Option<ItemId>,
+    pub position: ChangeRecordPosition,
+    pub command_kind: ChangeRecordKind,
+    #[serde(default)]
+    pub new_state: Option<ChangeRecordState>,
+    pub item_version: Option<u64>,
+    pub terminal_at: Option<UtcTimestamp>,
+    #[serde(default)]
+    pub emitted_at: Option<UtcTimestamp>,
+    #[serde(default)]
+    pub source_owner_id: Option<OwnerId>,
+    pub source_epoch: u64,
+}
+
+impl ChangeRecord {
+    pub fn idempotency_key(
+        &self,
+        shard: &QueueKey,
+    ) -> (TenantId, QueueId, Option<ItemId>, u64, u64) {
+        (
+            shard.tenant_id.clone(),
+            shard.queue_id.clone(),
+            self.item_id,
+            self.position.backend_epoch,
+            self.position.sequence,
+        )
+    }
+}
+
+fn queue_scoped_change_record(
+    shard: &QueueKey,
+    position: &CommandPosition,
+    command_kind: ChangeRecordKind,
+    emitted_at: UtcTimestamp,
+    source_owner_id: Option<OwnerId>,
+    source_epoch: u64,
+) -> ChangeRecord {
+    ChangeRecord {
+        tenant_id: shard.tenant_id.clone(),
+        queue_id: shard.queue_id.clone(),
+        item_id: None,
+        position: position.into(),
+        command_kind,
+        new_state: None,
+        item_version: None,
+        terminal_at: None,
+        emitted_at: Some(emitted_at),
+        source_owner_id,
+        source_epoch,
+    }
+}
+
+fn item_change_record(
+    shard: &QueueKey,
+    item_id: ItemId,
+    position: &CommandPosition,
+    command_kind: ChangeRecordKind,
+    new_state: Option<ChangeRecordState>,
+    item_version: Option<u64>,
+    terminal_at: Option<UtcTimestamp>,
+    emitted_at: UtcTimestamp,
+    source_owner_id: Option<OwnerId>,
+    source_epoch: u64,
+) -> ChangeRecord {
+    ChangeRecord {
+        tenant_id: shard.tenant_id.clone(),
+        queue_id: shard.queue_id.clone(),
+        item_id: Some(item_id),
+        position: position.into(),
+        command_kind,
+        new_state,
+        item_version,
+        terminal_at,
+        emitted_at: Some(emitted_at),
+        source_owner_id,
+        source_epoch,
+    }
+}
+
+fn finalize_state(kind: FinalizeKind, attempt_count: Option<u32>) -> Option<ItemState> {
+    match kind {
+        FinalizeKind::Complete => Some(ItemState::Complete),
+        FinalizeKind::Fail => Some(ItemState::Failed),
+        FinalizeKind::Retry => attempt_count.map_or(Some(ItemState::Pending), |attempts| {
+            if attempts == u32::MAX {
+                Some(ItemState::Failed)
+            } else {
+                Some(ItemState::Pending)
+            }
+        }),
+        FinalizeKind::Release | FinalizeKind::Rearm => Some(ItemState::Pending),
+    }
+}
+
+fn change_record_state(state: ItemState) -> ChangeRecordState {
+    match state {
+        ItemState::Pending => ChangeRecordState::Pending,
+        ItemState::Leased => ChangeRecordState::Leased,
+        ItemState::Complete => ChangeRecordState::Complete,
+        ItemState::Failed => ChangeRecordState::Failed,
+    }
+}
+
+/// Map one committed command envelope to zero or more history records.
+pub fn command_envelope_change_records(
+    shard: &QueueKey,
+    position: &CommandPosition,
+    env: &CommandEnvelope,
+    emitted_at: UtcTimestamp,
+    source_owner_id: Option<OwnerId>,
+) -> Vec<ChangeRecord> {
+    let source_epoch = position.backend_epoch;
+    match &env.command {
+        QueueCommand::Push(push) => push
+            .items
+            .iter()
+            .map(|item| {
+                item_change_record(
+                    shard,
+                    item.item_id,
+                    position,
+                    ChangeRecordKind::Push,
+                    Some(ChangeRecordState::Pending),
+                    Some(1),
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::Claim(claim) => claim
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::Claim,
+                    Some(ChangeRecordState::Leased),
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::CohortClaim(claim) => claim
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::CohortClaim,
+                    Some(ChangeRecordState::Leased),
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::RenewLease(c) => c
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::RenewLease,
+                    Some(ChangeRecordState::Leased),
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::CohortRenewLease(_) => vec![queue_scoped_change_record(
+            shard,
+            position,
+            ChangeRecordKind::CohortRenewLease,
+            emitted_at,
+            source_owner_id,
+            source_epoch,
+        )],
+        QueueCommand::ReassignLease(c) => c
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::ReassignLease,
+                    Some(ChangeRecordState::Leased),
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::Finalize(c) => c
+            .outcomes
+            .iter()
+            .map(|outcome| {
+                item_change_record(
+                    shard,
+                    outcome.item_id,
+                    position,
+                    ChangeRecordKind::Finalize,
+                    finalize_state(outcome.kind, None).map(change_record_state),
+                    None,
+                    matches!(outcome.kind, FinalizeKind::Complete | FinalizeKind::Fail)
+                        .then_some(env.created_at),
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::CohortFinalize(_c) => vec![queue_scoped_change_record(
+            shard,
+            position,
+            ChangeRecordKind::CohortFinalize,
+            emitted_at,
+            source_owner_id,
+            source_epoch,
+        )],
+        QueueCommand::ReplacePending(c) => vec![
+            item_change_record(
+                shard,
+                c.superseded_item_id,
+                position,
+                ChangeRecordKind::ReplacePending,
+                Some(ChangeRecordState::Pending),
+                None,
+                None,
+                emitted_at,
+                source_owner_id.clone(),
+                source_epoch,
+            ),
+            item_change_record(
+                shard,
+                c.replacement.item_id,
+                position,
+                ChangeRecordKind::ReplacePending,
+                Some(ChangeRecordState::Pending),
+                Some(1),
+                None,
+                emitted_at,
+                source_owner_id,
+                source_epoch,
+            ),
+        ],
+        QueueCommand::UpdateFields(c) => vec![item_change_record(
+            shard,
+            c.item_id,
+            position,
+            ChangeRecordKind::UpdateFields,
+            None,
+            None,
+            None,
+            emitted_at,
+            source_owner_id,
+            source_epoch,
+        )],
+        QueueCommand::LeaseExpired(c) => c
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::LeaseExpired,
+                    Some(ChangeRecordState::Pending),
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::CohortExpired(_) => vec![queue_scoped_change_record(
+            shard,
+            position,
+            ChangeRecordKind::CohortExpired,
+            emitted_at,
+            source_owner_id,
+            source_epoch,
+        )],
+        QueueCommand::FenceLease(c) => c
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::FenceLease,
+                    None,
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::UnfenceLease(c) => c
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::UnfenceLease,
+                    None,
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::PauseQueue => vec![queue_scoped_change_record(
+            shard,
+            position,
+            ChangeRecordKind::PauseQueue,
+            emitted_at,
+            source_owner_id,
+            source_epoch,
+        )],
+        QueueCommand::ResumeQueue => vec![queue_scoped_change_record(
+            shard,
+            position,
+            ChangeRecordKind::ResumeQueue,
+            emitted_at,
+            source_owner_id,
+            source_epoch,
+        )],
+        QueueCommand::PurgeItems(c) => c
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::PurgeItems,
+                    None,
+                    None,
+                    Some(env.created_at),
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
+        QueueCommand::SetGates(_) => vec![queue_scoped_change_record(
+            shard,
+            position,
+            ChangeRecordKind::SetGates,
+            emitted_at,
+            source_owner_id,
+            source_epoch,
+        )],
+        QueueCommand::CreateQueue(_)
+        | QueueCommand::WriteSideRecords(_)
+        | QueueCommand::AdvanceInstanceFence(_) => Vec::new(),
+    }
+}
+
 /// A durable command record — the append unit for the log.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommandEnvelope {
@@ -530,6 +979,13 @@ mod serde_tests {
             checksum: CommandChecksum(42),
             created_at: ts(1),
         }
+    }
+
+    fn shard() -> QueueKey {
+        QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        )
     }
 
     fn all_variants() -> Vec<QueueCommand> {
@@ -652,5 +1108,56 @@ mod serde_tests {
         env.request_fingerprint = Some(7);
         env.request_outcome = Some(RequestOutcome::Push { item_ids: vec![] });
         assert_eq!(validate_request_replay_metadata(&env), Ok(()));
+    }
+
+    #[test]
+    fn change_record_mapping() {
+        let shard = shard();
+        let position = CommandPosition::new(shard.clone(), 7, 11);
+        let emitted_at = ts(99);
+        let records = command_envelope_change_records(
+            &shard,
+            &position,
+            &envelope(QueueCommand::Push(PushCommand {
+                items: vec![
+                    item(),
+                    PushItem {
+                        item_id: iid("b"),
+                        ..item()
+                    },
+                ],
+            })),
+            emitted_at,
+            None,
+        );
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0].idempotency_key(&shard),
+            (
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(iid("a")),
+                7,
+                11
+            )
+        );
+        assert_eq!(records[0].item_id, Some(iid("a")));
+        assert_eq!(records[0].new_state, Some(ChangeRecordState::Pending));
+        assert_eq!(records[0].command_kind, ChangeRecordKind::Push);
+        assert_eq!(records[0].emitted_at, Some(emitted_at));
+
+        let gates = command_envelope_change_records(
+            &shard,
+            &position,
+            &envelope(QueueCommand::SetGates(SetGatesCommand {
+                gate_keys: vec!["hold".to_string()],
+                blocked: true,
+            })),
+            emitted_at,
+            None,
+        );
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].item_id, None);
+        assert_eq!(gates[0].command_kind, ChangeRecordKind::SetGates);
     }
 }

@@ -47,14 +47,15 @@ pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liv
 
 pub use axon_esf::CompiledSchema;
 pub use command::{
-    AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
+    AdvanceInstanceFenceCommand, ChangeRecord, ChangeRecordKind, ChangeRecordPosition,
+    ChangeRecordState, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
     LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
     QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome,
     ScheduleUpdate, SetGatesCommand, SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand,
-    WriteSideRecordsCommand, build_push_items, validate_gate_command, validate_gate_push,
-    validate_request_replay_metadata,
+    WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
+    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{
@@ -62,9 +63,9 @@ pub use finalize_validation::{
     validate_rearm,
 };
 pub use port::{
-    Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, Clock, CohortFinalizePort,
-    CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitCapabilities, CommitEntryOutcome,
-    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
+    Backend, ChangeRecordSink, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, Clock,
+    CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitCapabilities,
+    CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery,
     FinalizePort, HotProjectionQueryPort, IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView,
     LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,

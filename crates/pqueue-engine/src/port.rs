@@ -19,7 +19,8 @@ use pqueue_core::{
 
 use crate::claim_validation::ClaimCompatibility;
 use crate::command::{
-    CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand, SideRecord,
+    ChangeRecord, CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand,
+    SideRecord,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -108,6 +109,11 @@ pub trait LogRead: Send + Sync {
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send;
+}
+
+/// Durable change-record sink. The engine emits ordered batches to one queue shard at a time.
+pub trait ChangeRecordSink: Send + Sync {
+    fn emit(&self, shard: &QueueKey, records: &[ChangeRecord]) -> EngineResult<()>;
 }
 
 /// A non-destructive view of an eligible item (RESP `peek` / library read).

@@ -43,8 +43,8 @@ use crate::command::{
     FinalizeCommand, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand,
     PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
     ReplacePendingCommand, RequestOutcome, ScheduleUpdate, UpdateFieldsCommand,
-    WriteSideRecordsCommand, build_push_items, validate_gate_command, validate_gate_push,
-    validate_request_replay_metadata,
+    WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
+    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
@@ -112,6 +112,20 @@ pub trait LogStore: Send {
 
     fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>>;
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()>;
+
+    /// Durable tail cursor for change-record emission. Default: no stored cursor yet.
+    fn emission_cursor(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        Ok(None)
+    }
+
+    /// Persist the change-record emission cursor after a successful sink emit.
+    fn set_emission_cursor(
+        &mut self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
 
     fn write_snapshot(
         &mut self,
@@ -871,6 +885,42 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// Observability/test seam: run `f` against the projection axis under the unit-of-work lock.
     pub fn with_projection<R>(&self, f: impl FnOnce(&P) -> R) -> R {
         f(&self.inner.lock().expect("poisoned").projection)
+    }
+
+    /// Read, emit, and durably advance the change-record tail cursor for one shard.
+    pub fn emit_change_record_tail<S: crate::port::ChangeRecordSink>(
+        &self,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: UtcTimestamp,
+        source_owner_id: Option<pqueue_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        let (page, _cursor) = {
+            let g = self.inner.lock().expect("composed backend poisoned");
+            let cursor = g.log.emission_cursor(shard)?;
+            let page = g.log.read_from(shard, cursor.clone(), limit)?;
+            (page, cursor)
+        };
+        if page.entries.is_empty() {
+            return Ok(0);
+        }
+        let mut records = Vec::new();
+        for (position, env) in &page.entries {
+            records.extend(command_envelope_change_records(
+                shard,
+                position,
+                env,
+                emitted_at,
+                source_owner_id.clone(),
+            ));
+        }
+        sink.emit(shard, &records)?;
+        if let Some((position, _)) = page.entries.last() {
+            let mut g = self.inner.lock().expect("composed backend poisoned");
+            g.log.set_emission_cursor(shard, position.clone())?;
+        }
+        Ok(records.len())
     }
 
     // -- group-commit write-path helpers (ADR-012 P2) -----------------------
@@ -3049,11 +3099,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortRenewL
 #[cfg(test)]
 mod ordered_tests {
     use super::*;
-    use crate::port::{ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
+    use crate::port::{ChangeRecordSink, ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
     use pqueue_core::{
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-        PriorityTieBreaker, RecurrencePolicy, RetryPolicy, WorkerId,
+        PriorityTieBreaker, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
     };
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
     use std::task::{Poll, Wake};
 
@@ -3063,6 +3114,7 @@ mod ordered_tests {
         next_sequence: u64,
         buffered: Vec<CommandEnvelope>,
         sealed_batches: Vec<usize>,
+        emission_cursor: Option<CommandPosition>,
     }
 
     #[derive(Default)]
@@ -3151,6 +3203,27 @@ mod ordered_tests {
             _shard: &QueueKey,
             _position: CommandPosition,
         ) -> EngineResult<()> {
+            Ok(())
+        }
+
+        fn emission_cursor(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+            Ok(self
+                .state
+                .lock()
+                .expect("fake log poisoned")
+                .emission_cursor
+                .clone())
+        }
+
+        fn set_emission_cursor(
+            &mut self,
+            _shard: &QueueKey,
+            position: CommandPosition,
+        ) -> EngineResult<()> {
+            self.state
+                .get_mut()
+                .expect("fake log poisoned")
+                .emission_cursor = Some(position);
             Ok(())
         }
 
@@ -3671,6 +3744,115 @@ mod ordered_tests {
                 .apply_batches(),
             vec![vec!["push", "push"], vec!["claim", "claim"]]
         );
+    }
+
+    #[derive(Default)]
+    struct DedupSink {
+        seen: Mutex<BTreeSet<(TenantId, pqueue_core::QueueId, Option<ItemId>, u64, u64)>>,
+    }
+
+    impl crate::port::ChangeRecordSink for DedupSink {
+        fn emit(
+            &self,
+            shard: &QueueKey,
+            records: &[crate::command::ChangeRecord],
+        ) -> EngineResult<()> {
+            let mut seen = self.seen.lock().expect("sink poisoned");
+            for record in records {
+                seen.insert(record.idempotency_key(shard));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn emission_cursor_at_least_once() {
+        let mut log = FakeGroupCommitLog::default();
+        let shard = queue();
+        let emitted_at = ts(123);
+        let epoch = log.acquire_epoch(&shard).expect("epoch");
+        let env = CommandEnvelope {
+            command_id: CommandId::new("cmd-1"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![ItemId::from_u64(1), ItemId::from_u64(2)],
+            command: QueueCommand::Push(PushCommand {
+                items: vec![
+                    PushItem {
+                        client_item_key: pqueue_core::ClientItemKey::new("k-1").unwrap(),
+                        item_id: ItemId::from_u64(1),
+                        priority: None,
+                        not_before: None,
+                        group_key: None,
+                        max_attempts: 3,
+                        payload: None,
+                        fields: Default::default(),
+                        metadata: Default::default(),
+                        cohort_size: None,
+                        gate_keys: Vec::new(),
+                        entity_document: None,
+                    },
+                    PushItem {
+                        client_item_key: pqueue_core::ClientItemKey::new("k-2").unwrap(),
+                        item_id: ItemId::from_u64(2),
+                        priority: None,
+                        not_before: None,
+                        group_key: None,
+                        max_attempts: 3,
+                        payload: None,
+                        fields: Default::default(),
+                        metadata: Default::default(),
+                        cohort_size: None,
+                        gate_keys: Vec::new(),
+                        entity_document: None,
+                    },
+                ],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: emitted_at,
+        };
+        let positions = log
+            .append(&shard, std::slice::from_ref(&env), epoch)
+            .expect("append");
+        let page_entries = vec![(positions[0].clone(), env.clone())];
+        let sink = DedupSink::default();
+        let records = page_entries
+            .iter()
+            .flat_map(|(position, env)| {
+                command_envelope_change_records(&shard, position, env, emitted_at, None)
+            })
+            .collect::<Vec<_>>();
+        sink.emit(&shard, &records).expect("first emit");
+        let replay_records = page_entries
+            .iter()
+            .flat_map(|(position, env)| {
+                command_envelope_change_records(&shard, position, env, emitted_at, None)
+            })
+            .collect::<Vec<_>>();
+        sink.emit(&shard, &replay_records).expect("second emit");
+        log.set_emission_cursor(&shard, positions.last().cloned().expect("position"))
+            .expect("advance");
+        assert_eq!(
+            log.emission_cursor(&shard).unwrap(),
+            positions.last().cloned()
+        );
+        let seen = sink.seen.lock().expect("sink poisoned").clone();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.contains(&(
+            shard.tenant_id.clone(),
+            shard.queue_id.clone(),
+            Some(ItemId::from_u64(1)),
+            epoch,
+            positions[0].sequence,
+        )));
+        assert!(seen.contains(&(
+            shard.tenant_id.clone(),
+            shard.queue_id.clone(),
+            Some(ItemId::from_u64(2)),
+            epoch,
+            positions[0].sequence,
+        )));
     }
 }
 
