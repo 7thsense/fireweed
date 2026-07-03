@@ -318,6 +318,37 @@ impl LogStore for SqliteLog {
         }))
     }
 
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> EngineResult<Option<SnapshotRef>> {
+        let (t, q) = parts(shard);
+        let row = opt(self.conn.query_row(
+            "SELECT ref_id, epoch, seq FROM snapshots \
+             WHERE tenant=?1 AND queue=?2 AND (epoch, seq) <= (?3, ?4) \
+             ORDER BY epoch DESC, seq DESC LIMIT 1",
+            params![
+                t,
+                q,
+                position.backend_epoch as i64,
+                position.sequence as i64
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        ))?;
+        Ok(row.map(|(ref_id, epoch, seq)| SnapshotRef {
+            queue: shard.clone(),
+            position: CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
+            ref_id,
+        }))
+    }
+
     fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
         let (t, q) = parts(&snapshot_ref.queue);
         let payload: Option<Vec<u8>> = opt(self.conn.query_row(

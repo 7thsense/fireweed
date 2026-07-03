@@ -19,6 +19,7 @@ pqueue-projection = { path = "../pqueue-projection" }
 serde = "1"
 serde_json = "1"
 bytes = "1"
+futures = "0.3"
 # Compact binary codec for the segmented substrate's per-command segment records (Fix A): each envelope is
 # postcard-encoded ONCE when buffered (size measured from the kept bytes, never a throwaway serialize), and a
 # sealed segment is the framed concatenation of those bytes — no JSON, no re-serialize on seal. Tiny, pure-Rust,

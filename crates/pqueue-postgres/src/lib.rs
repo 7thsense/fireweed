@@ -55,15 +55,16 @@ use pqueue_engine::{
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand,
     LeaseView, LiveItemView, LogRead, LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
-    SnapshotRef, SnapshotStore, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
-    validate_gate_command, validate_gate_push, validate_purge_force,
+    ProjectionStore, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
+    RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
+    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
+    validate_gate_push, validate_purge_force, HistoricalProjectionRead,
 };
 use pqueue_engine::{ComposedBackend, InProcessControlPlane};
-use pqueue_projection::{InMemoryProjection, ProjectionData};
+use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 use sha2::{Digest, Sha256};
 
 mod compose_log;
@@ -1507,6 +1508,39 @@ impl SnapshotStore for PostgresBackend {
         std::future::ready(result)
     }
 
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let result = (|| {
+            let (t, q) = parts(shard);
+            let mut g = self.inner.lock().expect("poisoned");
+            let row = st(g.client.query_opt(
+                "SELECT ref_id, epoch, seq FROM snapshots \
+                 WHERE tenant=$1 AND queue=$2 AND (epoch, seq) <= ($3, $4) \
+                 ORDER BY epoch DESC, seq DESC LIMIT 1",
+                &[
+                    &t,
+                    &q,
+                    &(position.backend_epoch as i64),
+                    &(position.sequence as i64),
+                ],
+            ))?;
+            Ok(row.map(|row| {
+                let ref_id: String = row.get(0);
+                let epoch: i64 = row.get(1);
+                let seq: i64 = row.get(2);
+                SnapshotRef {
+                    queue: shard.clone(),
+                    position: CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
+                    ref_id,
+                }
+            }))
+        })();
+        std::future::ready(result)
+    }
+
     fn read_snapshot(
         &self,
         snapshot_ref: &SnapshotRef,
@@ -1571,6 +1605,78 @@ impl SnapshotStore for PostgresBackend {
                 return Err(EngineError::Invalid("high-water regression"));
             }
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl HistoricalProjectionRead for PostgresBackend {
+    type AsOfProjection = InMemoryProjection;
+
+    fn current_position(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
+        let result = (|| futures::executor::block_on(self.high_water(shard))?.ok_or(EngineError::NotFound))();
+        std::future::ready(result)
+    }
+
+    fn read_as_of<T, F>(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        query: F,
+    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    where
+        T: Send,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
+    {
+        let result = (|| {
+            let definition = {
+                let g = self.inner.lock().expect("poisoned");
+                g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
+            };
+            let snapshot_ref =
+                futures::executor::block_on(self.snapshot_at_or_before(shard, &position))?;
+            let snapshot = match snapshot_ref.as_ref() {
+                Some(snapshot_ref) => {
+                    Some(futures::executor::block_on(self.read_snapshot(snapshot_ref))?)
+                }
+                None => None,
+            };
+            let mut as_of = InMemoryProjection::new();
+            as_of.ensure_shard(&definition)?;
+            if let Some(snapshot) = snapshot {
+                let image = ProjectionImage::from_bytes(&snapshot.payload)?;
+                as_of.hydrate_shard(&definition, image)?;
+            }
+            let mut from = snapshot_ref.map(|s| s.position);
+            loop {
+                let page = futures::executor::block_on(self.read_from(shard, from.clone(), 8192))?;
+                if page.entries.is_empty() {
+                    break;
+                }
+                let mut positions = Vec::new();
+                let mut envelopes = Vec::new();
+                let mut reached_target = false;
+                for (entry_position, env) in page.entries {
+                    if entry_position == position || entry_position.precedes(&position) {
+                        positions.push(entry_position.clone());
+                        envelopes.push(env);
+                    } else {
+                        reached_target = true;
+                        break;
+                    }
+                }
+                if !positions.is_empty() {
+                    as_of.apply_recovery(&positions, &envelopes)?;
+                }
+                if reached_target || page.next.is_none() {
+                    break;
+                }
+                from = page.next;
+            }
+            query(&as_of)
         })();
         std::future::ready(result)
     }

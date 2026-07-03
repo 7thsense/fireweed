@@ -21,11 +21,11 @@ use axon_esf::encode_index_value;
 use pqueue_core::{IndexDeclaration, QueueIndex, WorkerId};
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome, FinalizePort,
-    HotProjectionQueryPort, IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome,
-    ProjectionRead, PurgePort, PushPort, PushSpec, QueueControlPlane, ReassignLeasePort,
-    ReclaimPort, RecoveryReadPort, RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort,
-    UpdateFieldsPort, UpsertPort, acquire_and_fence,
+    CommitTransitionPort, CommandPosition, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
+    FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort, IndexQueryPort, LeaseState,
+    OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
+    QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort, acquire_and_fence,
 };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +89,7 @@ pub trait LibBackend:
     + PurgePort
     + SetGatesPort
     + ProjectionRead
+    + HistoricalProjectionRead
     + IndexQueryPort
     + DiscoveryPort
     + HotProjectionQueryPort
@@ -114,6 +115,7 @@ impl<T> LibBackend for T where
         + PurgePort
         + SetGatesPort
         + ProjectionRead
+        + HistoricalProjectionRead
         + IndexQueryPort
         + DiscoveryPort
         + HotProjectionQueryPort
@@ -849,6 +851,25 @@ impl<B: LibBackend> Pqueue<B> {
     /// Non-destructive priority-ordered view of eligible items.
     pub async fn peek(&self, queue: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
         self.backend.peek(queue, limit).await
+    }
+
+    /// The current durable command position for `queue` (thin wrapper over `high_water`).
+    pub async fn current_position(&self, queue: &QueueKey) -> EngineResult<CommandPosition> {
+        self.backend.current_position(queue).await
+    }
+
+    /// Reconstruct `queue`'s projection as of `position`, run `query` against it, and discard it.
+    pub async fn read_as_of<T, F>(
+        &self,
+        queue: &QueueKey,
+        position: CommandPosition,
+        query: F,
+    ) -> EngineResult<T>
+    where
+        T: Send,
+        F: FnOnce(&<B as HistoricalProjectionRead>::AsOfProjection) -> EngineResult<T> + Send,
+    {
+        self.backend.read_as_of(queue, position, query).await
     }
 
     /// Discover `queue`'s **active scopes** — the scopes (the queue rolled up, or its per-group detail at

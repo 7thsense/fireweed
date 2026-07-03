@@ -12,10 +12,12 @@ use pqueue_conformance::qkey;
 use pqueue_core::{ItemId, LeaseToken, RequestId};
 use pqueue_engine::{
     Backend, ClaimRef, CommitCapabilities, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind, HotProjectionQueryPort,
-    RecoveryReadPort, SideRecord,
+    CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind, HistoricalProjectionRead,
+    HotProjectionQueryPort, RecoveryReadPort, SideRecord,
 };
-use pqueue_postgres::{PostgresBackend, PostgresRelationalBackend};
+use pqueue_postgres::{
+    PostgresBackend, PostgresRelationalBackend, composed_postgres_relational_in_schema,
+};
 
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -129,6 +131,42 @@ fn hot_projection_capabilities_are_explicit() {
             order_by: vec![],
             page_size: 1,
             cursor: None,
+        },
+    ))
+    .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+}
+
+#[test]
+fn read_as_of_unavailable_relational() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "POSTGRES READ-AS-OF SKIPPED (read_as_of_unavailable_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+
+    let relational = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
+        .expect("connect postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
+    let shard = qkey();
+    let position = pqueue_engine::CommandPosition::new(shard.clone(), 0, 0);
+    let err = futures::executor::block_on(relational.read_as_of(
+        &shard,
+        position.clone(),
+        |_projection| -> pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>> {
+            unreachable!("the relational backend should decline before querying")
+        },
+    ))
+    .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+
+    let composed = composed_postgres_relational_in_schema(&url, &fresh_schema())
+        .expect("compose postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
+    let err = futures::executor::block_on(composed.read_as_of(
+        &shard,
+        position,
+        |_projection| -> pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>> {
+            unreachable!("the composed relational backend should decline before querying")
         },
     ))
     .unwrap_err();

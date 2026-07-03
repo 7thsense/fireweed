@@ -12,7 +12,7 @@ use pqueue_core::{QueueId, TenantId};
 /// log, projection, and ownership lease are all keyed by `(tenant_id, queue_id)`. A relational backend
 /// MAY internally hash-partition its item table (`hash(tenant,queue) % N`, TD-002) for vacuum/index-size
 /// isolation, but that partition is client-invisible and never an ownership/routing key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct QueueKey {
     pub tenant_id: TenantId,
     pub queue_id: QueueId,
@@ -47,7 +47,7 @@ impl Ord for QueueKey {
 /// The engine derives `item_version` and the monotonic `command_position` high-water mark from
 /// committed positions; per TD-007 §4 the high-water mark is persisted in the projection/snapshot
 /// (not recomputed from a compacted log), so replay is monotonic under retention.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CommandPosition {
     pub queue: QueueKey,
     pub backend_epoch: u64,

@@ -1111,7 +1111,7 @@ fn encode_decimal_ascending(mantissa: i128, scale: u32) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Lifecycle state of a pqueue item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ItemState {
     Pending,
     Leased,

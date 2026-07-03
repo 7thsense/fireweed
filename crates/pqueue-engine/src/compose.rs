@@ -57,7 +57,7 @@ use crate::port::{
     ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec,
     QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
     ReschedulePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, validate_instance_fence,
+    UpsertPort, AsOfProjectionStore, HistoricalProjectionRead, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -112,6 +112,28 @@ pub trait LogStore: Send {
 
     fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>>;
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()>;
+
+    /// The current durable command position for `shard` (thin wrapper over `high_water`).
+    fn current_position(&self, shard: &QueueKey) -> EngineResult<CommandPosition> {
+        self.high_water(shard)?.ok_or(EngineError::NotFound)
+    }
+
+    /// Find the newest snapshot whose position is `<= position`.
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> EngineResult<Option<SnapshotRef>> {
+        let latest = self.latest_snapshot(shard)?;
+        Ok(match latest {
+            Some(snapshot)
+                if snapshot.position.precedes(position) || snapshot.position == *position =>
+            {
+                Some(snapshot)
+            }
+            _ => None,
+        })
+    }
 
     /// Durable tail cursor for change-record emission. Default: no stored cursor yet.
     fn emission_cursor(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
@@ -2505,6 +2527,78 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
             .expect("poisoned")
             .projection
             .metrics(queue);
+        std::future::ready(result)
+    }
+}
+
+impl<L, P, C> HistoricalProjectionRead for ComposedBackend<L, P, C>
+where
+    L: LogStore,
+    P: AsOfProjectionStore,
+    C: ControlPlane,
+{
+    type AsOfProjection = P::AsOfProjection;
+
+    fn current_position(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .log
+            .current_position(shard);
+        std::future::ready(result)
+    }
+
+    fn read_as_of<T, F>(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        query: F,
+    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    where
+        T: Send,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
+    {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let definition = self.control.queue_definition(shard)?;
+            let snapshot_ref = g.log.snapshot_at_or_before(shard, &position)?;
+            let snapshot = match snapshot_ref.as_ref() {
+                Some(snapshot_ref) => Some(g.log.read_snapshot(snapshot_ref)?),
+                None => None,
+            };
+            let mut as_of = g.projection.reconstruct_as_of(&definition, snapshot)?;
+            let mut from = snapshot_ref.map(|s| s.position);
+            loop {
+                let page = g.log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
+                if page.entries.is_empty() {
+                    break;
+                }
+                let mut positions = Vec::new();
+                let mut envelopes = Vec::new();
+                let mut reached_target = false;
+                for (entry_position, env) in page.entries {
+                    if entry_position == position || entry_position.precedes(&position) {
+                        positions.push(entry_position.clone());
+                        envelopes.push(env);
+                    } else {
+                        reached_target = true;
+                        break;
+                    }
+                }
+                if !positions.is_empty() {
+                    as_of.apply_recovery(&positions, &envelopes)?;
+                }
+                if reached_target || page.next.is_none() {
+                    break;
+                }
+                from = page.next;
+            }
+            query(&as_of)
+        })();
         std::future::ready(result)
     }
 }

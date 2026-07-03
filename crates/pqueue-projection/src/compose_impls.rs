@@ -25,7 +25,7 @@ use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, EngineError,
     EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore,
     ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey, QueueMetrics,
-    SnapshotRef,
+    SnapshotRef, AsOfProjectionStore,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -125,6 +125,17 @@ impl LogStore for MemoryLog {
             .get(&snapshot_ref.queue)
             .ok_or(EngineError::NotFound)?
             .read_snapshot(snapshot_ref)
+    }
+
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> EngineResult<Option<SnapshotRef>> {
+        Ok(self
+            .logs
+            .get(shard)
+            .and_then(|log| log.snapshot_at_or_before(position)))
     }
 }
 
@@ -431,5 +442,23 @@ impl ProjectionStore for InMemoryProjection {
         key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
         self.get(shard)?.index_lookup(index, key)
+    }
+}
+
+impl AsOfProjectionStore for InMemoryProjection {
+    type AsOfProjection = InMemoryProjection;
+
+    fn reconstruct_as_of(
+        &self,
+        definition: &QueueDefinition,
+        snapshot: Option<ProjectionSnapshot>,
+    ) -> EngineResult<Self::AsOfProjection> {
+        let mut projection = InMemoryProjection::new();
+        projection.ensure_shard(definition)?;
+        if let Some(snapshot) = snapshot {
+            let image = ProjectionImage::from_bytes(&snapshot.payload)?;
+            projection.hydrate_shard(definition, image)?;
+        }
+        Ok(projection)
     }
 }

@@ -23,6 +23,7 @@ use crate::command::{
     SideRecord,
 };
 use crate::error::{EngineError, EngineResult};
+use crate::ProjectionStore;
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
 // ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ pub struct LeaseView {
 }
 
 /// Lifecycle counts + bound metrics (RESP `XLEN`/`XINFO` basic; rich is library-only).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueMetrics {
     pub pending: u64,
     pub leased: u64,
@@ -1036,6 +1037,26 @@ pub trait SnapshotStore: Send + Sync {
         snapshot_ref: &SnapshotRef,
     ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send;
 
+    /// Find the newest snapshot whose position is `<= position`.
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let latest = self.latest_snapshot(shard);
+        async move {
+            let latest = latest.await?;
+            Ok(match latest {
+                Some(snapshot)
+                    if snapshot.position.precedes(position) || snapshot.position == *position =>
+                {
+                    Some(snapshot)
+                }
+                _ => None,
+            })
+        }
+    }
+
     /// The persisted monotonic `command_position` high-water for `shard` (TD-007 §4).
     fn high_water(
         &self,
@@ -1048,4 +1069,40 @@ pub trait SnapshotStore: Send + Sync {
         shard: &QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
+}
+
+/// An in-memory projection store that can reconstruct an ephemeral read view as of a historical
+/// position.
+///
+/// The associated `AsOfProjection` is the ephemeral projection instance used to answer the bounded
+/// query. Implementations hydrate from the supplied snapshot if present, then allow the caller to
+/// replay the remaining log tail into the returned projection before running the query.
+pub trait AsOfProjectionStore: ProjectionStore {
+    type AsOfProjection: ProjectionStore + Send;
+
+    fn reconstruct_as_of(
+        &self,
+        definition: &QueueDefinition,
+        snapshot: Option<ProjectionSnapshot>,
+    ) -> EngineResult<Self::AsOfProjection>;
+}
+
+/// Historical read access at a specific durable command position.
+pub trait HistoricalProjectionRead: Send + Sync {
+    type AsOfProjection: ProjectionStore + Send;
+
+    fn current_position(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send;
+
+    fn read_as_of<T, F>(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        query: F,
+    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    where
+        T: Send,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send;
 }
