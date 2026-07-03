@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260703T204711-95002e32",
+  "bead_id": "pqueue-955f1831",
+  "base_rev": "1c39b25fbe0e703d31338b634ae8a4bdc0807a31",
+  "created_at": "2026-07-03T20:47:11.861845522Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-955f1831",
+    "title": "Add ChangeRecord type, ChangeRecordSink port, and durable emission cursor",
+    "description": "PROBLEM\npqueue emits no history: terminal items purge after retention and downstream systems (niflheim history projection, cayce delivery audit) have no ordered record of item lifecycle. TD-008 (docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md) specifies change-record emission as a committed-log tail consumer; this bead builds the engine-side foundation.\n\nCURRENT STATE\n- No emission seam exists in pqueue-engine (no sink/emit/cdc surface).\n- The tail-consumer pattern to reuse: recovery replay reads LogStore::read_from (crates/pqueue-engine/src/compose.rs:1207); the group-commit facet shows the minimal runtime-free port style (compose.rs:158-205).\n- QueueCommand variants to map are enumerated at crates/pqueue-engine/src/command.rs:49-60.\n\nPROPOSED FIX\nPer TD-008: add ChangeRecord (grain = per item x position; fields tenant_id, queue_id, item_id Option, position (epoch,seq), command_kind, new_state, item_version, terminal_at, emitted_at, source_owner_id, source_epoch; idempotency key = (tenant, queue, item, epoch, seq)); add trait ChangeRecordSink { fn emit(\u0026self, shard, records) -\u003e EngineResult\u003c()\u003e } as a runtime-free engine port; add a durable per-queue emission_cursor persisted like high_water, advanced only after successful emit (at-least-once). Implement CommandEnvelope -\u003e Vec\u003cChangeRecord\u003e mapping including queue-scoped records (SetGates/Pause/Resume with null item). Add emit_change_records: bool (serde default true) to QueueDefinition (crates/pqueue-core/src/domain.rs:629-632 region).\n\nNON-SCOPE\n- HTTP sink implementation and server wiring (sibling bead).\n- Reap/emission-frontier coupling and metrics (sibling bead).\n- Never touch commit_locked_batch (compose.rs:1346-1366) — emission is fully off the commit path.",
+    "acceptance": "1. change_record_mapping: a batch push of N items at one position yields N records keyed (tenant,queue,item,epoch,seq); a queue-scoped SetGates yields one item-null record. cargo test -p pqueue-engine change_record_mapping\n2. emission_cursor_at_least_once: simulated crash before cursor advance re-emits the same positions; a mock idempotent sink dedupes to the exact expected set. cargo test -p pqueue-engine emission_cursor_at_least_once\n3. cargo test -p pqueue-engine and cargo test -p pqueue-core pass.",
+    "labels": [
+      "activity:build",
+      "kind:build",
+      "area:pqueue-engine",
+      "suite:coordination",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"change_record_mapping: a batch push of N items at one position yields N records keyed (tenant,queue,item,epoch,seq); a queue-scoped SetGates yields one item-null record. cargo test -p pqueue-engine change_record_mapping\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"emission_cursor_at_least_once: simulated crash before cursor advance re-emits the same positions; a mock idempotent sink dedupes to the exact expected set. cargo test -p pqueue-engine emission_cursor_at_least_once\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"cargo test -p pqueue-engine and cargo test -p pqueue-core pass.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T20:45:24.991016852Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/3"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T204711-95002e32",
+    "prompt": ".ddx/executions/20260703T204711-95002e32/prompt.md",
+    "manifest": ".ddx/executions/20260703T204711-95002e32/manifest.json",
+    "result": ".ddx/executions/20260703T204711-95002e32/result.json",
+    "checks": ".ddx/executions/20260703T204711-95002e32/checks.json",
+    "usage": ".ddx/executions/20260703T204711-95002e32/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-955f1831-20260703T204711-95002e32"
+  },
+  "prompt_sha": "97bb7c97332f5c7c94b80177b72b3bb069ef5db5825819f5c5a7b66033dba8dc"
+}
