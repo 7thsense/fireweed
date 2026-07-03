@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260703T221527-91629e0e",
+  "bead_id": "pqueue-9e4f8866",
+  "base_rev": "50a8c030f32b7c0e1bfc5eb1b11a28b1afdc02c0",
+  "created_at": "2026-07-03T22:15:27.614162308Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-9e4f8866",
+    "title": "Harden pause semantics: optional intake quiesce and documented lease behavior",
+    "description": "PROBLEM\nPause exists but its semantics are under-specified for the experimentation workflow (TD-009): claims stop, but whether intake (push) is blocked is undefined, and lease behavior under pause is undocumented. Branching needs a queue that can be quiesced to a stable position.\n\nCURRENT STATE\n- QueueCommand::PauseQueue/ResumeQueue are durable log commands (crates/pqueue-engine/src/command.rs:59-60,584-585).\n- Projection carries paused: bool (crates/pqueue-projection/src/lib.rs:165), is_paused (:1882), select_eligible returns empty while paused (:1887), round-trips through ProjectionImage (:1266,1286).\n- Push is not obviously blocked by pause; discovery stays pause-agnostic (crates/pqueue-engine/src/port.rs:818-819).\n\nPROPOSED FIX\nPer TD-009 section 1: extend PauseQueue with an intake mode (drain_intake flag or variant) so pause can optionally reject/queue pushes, enabling full quiesce-to-position before branch; keep claim-stop behavior; document that in-flight leases continue on their normal clock (pause neither extends nor cancels) and that discovery reports eligibility buildup during pause. Pause/resume emit change records once the emission foundation lands (no hard dependency; the log commands already exist).\n\nNON-SCOPE\n- Branch (separate bead). Changes to lease/renewal semantics.",
+    "acceptance": "1. pause_blocks_claims_and_optionally_intake: while paused, claims return empty; with intake-blocking pause, push is rejected with a structured error (or deferred per the chosen mode); with plain pause, push still lands. cargo test -p pqueue-engine pause_blocks_claims_and_optionally_intake\n2. pause_does_not_alter_lease_clock: an in-flight lease expires on its normal clock during pause and the item becomes claimable after resume. cargo test -p pqueue-engine pause_does_not_alter_lease_clock\n3. cargo test -p pqueue-engine and cargo test -p pqueue-projection pass.",
+    "labels": [
+      "activity:build",
+      "kind:build",
+      "area:pqueue-engine",
+      "suite:core_lifecycle_transition_tests",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"pause_blocks_claims_and_optionally_intake: while paused, claims return empty; with intake-blocking pause, push is rejected with a structured error (or deferred per the chosen mode); with plain pause, push still lands. cargo test -p pqueue-engine pause_blocks_claims_and_optionally_intake\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"pause_does_not_alter_lease_clock: an in-flight lease expires on its normal clock during pause and the item becomes claimable after resume. cargo test -p pqueue-engine pause_does_not_alter_lease_clock\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"cargo test -p pqueue-engine and cargo test -p pqueue-projection pass.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T22:13:00.150053046Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/3"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T221527-91629e0e",
+    "prompt": ".ddx/executions/20260703T221527-91629e0e/prompt.md",
+    "manifest": ".ddx/executions/20260703T221527-91629e0e/manifest.json",
+    "result": ".ddx/executions/20260703T221527-91629e0e/result.json",
+    "checks": ".ddx/executions/20260703T221527-91629e0e/checks.json",
+    "usage": ".ddx/executions/20260703T221527-91629e0e/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-9e4f8866-20260703T221527-91629e0e"
+  },
+  "prompt_sha": "0dd69831494d7d541fcd7610f0c464175410e1eb95a6fcdf7d340a2e51d82b94"
+}
