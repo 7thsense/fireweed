@@ -177,6 +177,72 @@ Until the TLS/runtime work and live run exist, releases may claim only
 chart/render support for the Lakebase Postgres storage axes unless the service
 runtime and `kind` gate prove the combination.
 
+## Postgres Commit-Transition Parity Scope
+
+This section settles the scope for the Snorri authoritative vectorized claimed-work
+commit boundary (`CommitTransitionPort`, epic pqueue-2201fd37, C9) on the postgres
+storage axis. Both `pqueue-postgres` backend flavors currently no-op the port
+(inherit the `Unavailable` default): `PostgresBackend` (log-replay,
+`crates/pqueue-postgres/src/lib.rs`) and `PostgresRelationalBackend`
+(DB-authoritative relational family, `crates/pqueue-postgres/src/relational.rs`).
+
+**(a) Backend flavor in scope: `PostgresRelationalBackend` only.**
+
+- The Managed Postgres Boundary above targets `storage.log.backend=postgres` +
+  `storage.projection.backend=postgres` together — TD-002's `postgres_native`
+  mode, which TD-002 defines as the **relational projection family**, not the
+  log-replay adapter. Lakebase/Snorri production runs this combination.
+- `PostgresRelationalBackend` already implements both `LogStore` and
+  `ProjectionStore` as one unified store (the ADR-012 composition, mirroring
+  `SqliteRelationalBackend`), so it is the one postgres artifact that can carry
+  an atomic per-entry commit boundary.
+- `PostgresBackend` (log-replay) is out of scope. It already refuses every
+  relational-only feature at the port default (`SetGatesPort`, `ReschedulePort`,
+  `DiscoveryPort` all stay `Unavailable`; `crates/pqueue-postgres/src/lib.rs:906-917`),
+  and sqlite's own C9 parity landed only on `SqliteRelationalBackend`, never on
+  the plain sqlite log adapter. Postgres mirrors that split.
+
+**(b) Postgres schema for side records and instance fences**, mirroring
+sqlite-relational (`crates/pqueue-sqlite/src/relational.rs:234-245`), applying
+this crate's existing postgres-vs-sqlite type convention (`BLOB`→`BYTEA`,
+`INTEGER`→`BIGINT`, e.g. `pqueue_request_idempotency.expires_at`):
+
+```sql
+CREATE TABLE IF NOT EXISTS pqueue_side_records (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BYTEA NOT NULL, payload BYTEA NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BYTEA NOT NULL, fence BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, instance_key)
+);
+```
+
+Same primary-key shape and semantics as sqlite: both tables are point
+lookup/upsert by primary key only, opaque `key`/`payload`/`instance_key`/`fence`
+bytes, no claimable/eligible/peekable surface. No additional indexes.
+
+**(c) Request-id retained idempotency: reuse the existing
+`pqueue_request_idempotency` table** (`crates/pqueue-postgres/src/relational.rs:187-197`);
+no new table.
+
+- That table is already keyed `(tenant_id, queue_id, operation, request_id)`, so
+  commit-transition idempotency is a new `operation` value (mirroring sqlite's
+  `IDEMPOTENCY_OPERATION_COMMIT` constant), not a new table.
+- Postgres's existing table lacks sqlite's `command_positions` column. That
+  column is not required for the commit-transition read path: sqlite's
+  `check_commit_idempotency` (`crates/pqueue-sqlite/src/relational.rs:561-593`)
+  decodes the retained record from `response_payload` alone. Adding
+  `command_positions` (or an equivalent) to the postgres table is deferred to
+  whichever later change wires `RecoveryReadPort`'s authoritative recovery reads
+  for postgres, if that read needs more than `response_payload` provides.
+
+Out of scope for this note: the actual `commit_transition` implementation,
+`CommitCapabilities` advertisement, `RecoveryReadPort` wiring, and delayed/timer
+lifecycle-item support for `PostgresRelationalBackend` remain open follow-on
+work tracked under epic pqueue-2201fd37.
+
 ## Object-Log Boundary
 
 `storage.log.backend=objectlog` selects the fjord object-log runtime path. In
