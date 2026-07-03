@@ -9,9 +9,14 @@
 //!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres cargo test -p pqueue-postgres
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use pqueue_core::{EntitySchemaDocument, RequestId};
-use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
+use pqueue_engine::{
+    CommandPosition, ControlPlaneStore, EngineError, LogRead, ProjectionRead, PushPort,
+    SnapshotStore,
+};
 use pqueue_postgres::PostgresBackend;
 use serde_json::json;
 
@@ -24,6 +29,10 @@ fn fresh_schema() -> String {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+fn pg_url() -> Option<String> {
+    std::env::var("PQUEUE_PG_TEST_URL").ok()
 }
 
 /// Generate one `#[test]` per conformance scenario, each env-gated + schema-isolated. Driven by a
@@ -220,4 +229,178 @@ fn commit_transition_shared_scenario_runs_against_postgres_log_replay() {
             );
         }
     }
+}
+
+#[test]
+fn postgres_high_water_concurrent_monotonic() {
+    let Some(url) = pg_url() else {
+        eprintln!(
+            "POSTGRES CONFORMANCE SKIPPED (postgres_high_water_concurrent_monotonic) — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+    let schema = fresh_schema();
+    futures::executor::block_on(async {
+        let backend = PostgresBackend::connect_in_schema(&url, &schema)
+            .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+        backend
+            .create_queue(pqueue_conformance::qdef())
+            .await
+            .unwrap();
+        let shard = pqueue_conformance::shard();
+        let base = CommandPosition::new(shard.clone(), 0, 0);
+        backend.set_high_water(&shard, base.clone()).await.unwrap();
+    });
+
+    let shard = pqueue_conformance::shard();
+    for seq in 0..8u64 {
+        let current = CommandPosition::new(shard.clone(), 0, seq);
+        let next = CommandPosition::new(shard.clone(), 0, seq + 1);
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = [
+            {
+                let barrier = barrier.clone();
+                let url = url.clone();
+                let schema = schema.clone();
+                let shard = shard.clone();
+                let current = current.clone();
+                thread::spawn(move || {
+                    let backend = PostgresBackend::connect_in_schema(&url, &schema)
+                        .expect("connect postgres");
+                    let observed = futures::executor::block_on(backend.high_water(&shard))
+                        .expect("read high_water")
+                        .expect("seeded high_water");
+                    assert_eq!(
+                        observed, current,
+                        "both writers must race from the same prior value"
+                    );
+                    barrier.wait();
+                    futures::executor::block_on(backend.set_high_water(&shard, current))
+                })
+            },
+            {
+                let barrier = barrier.clone();
+                let url = url.clone();
+                let schema = schema.clone();
+                let shard = shard.clone();
+                let current = current.clone();
+                let next = next.clone();
+                thread::spawn(move || {
+                    let backend = PostgresBackend::connect_in_schema(&url, &schema)
+                        .expect("connect postgres");
+                    let observed = futures::executor::block_on(backend.high_water(&shard))
+                        .expect("read high_water")
+                        .expect("seeded high_water");
+                    assert_eq!(
+                        observed, current,
+                        "both writers must race from the same prior value"
+                    );
+                    barrier.wait();
+                    futures::executor::block_on(backend.set_high_water(&shard, next))
+                })
+            },
+        ];
+
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("writer thread panicked"))
+            .collect::<Vec<_>>();
+        assert!(
+            results.iter().any(|r| r.is_ok()),
+            "at least one writer should advance the high-water"
+        );
+        for result in results {
+            match result {
+                Ok(()) => {}
+                Err(EngineError::Invalid(msg)) if msg == "high-water regression" => {}
+                Err(err) => panic!("unexpected high-water result: {err:?}"),
+            }
+        }
+
+        let verifier = PostgresBackend::connect_in_schema(&url, &schema).expect("connect postgres");
+        let stored = futures::executor::block_on(verifier.high_water(&shard))
+            .expect("read final high_water")
+            .expect("high_water must exist");
+        assert_eq!(stored, next, "the stored high-water must never regress");
+    }
+}
+
+#[test]
+fn postgres_append_concurrent_sequence_no_gap_no_dup() {
+    let Some(url) = pg_url() else {
+        eprintln!(
+            "POSTGRES CONFORMANCE SKIPPED (postgres_append_concurrent_sequence_no_gap_no_dup) — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+    let schema = fresh_schema();
+    futures::executor::block_on(async {
+        let backend = PostgresBackend::connect_in_schema(&url, &schema)
+            .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+        backend
+            .create_queue(pqueue_conformance::qdef())
+            .await
+            .unwrap();
+    });
+
+    let shard = pqueue_conformance::shard();
+    for round in 0..8u64 {
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = [
+            {
+                let barrier = barrier.clone();
+                let url = url.clone();
+                let schema = schema.clone();
+                let shard = shard.clone();
+                thread::spawn(move || {
+                    let backend = PostgresBackend::connect_in_schema(&url, &schema)
+                        .expect("connect postgres")
+                        .with_node_id(1);
+                    barrier.wait();
+                    futures::executor::block_on(backend.push(
+                        &shard,
+                        vec![typed_item(true)],
+                        pqueue_conformance::ts(round as i64),
+                        None,
+                    ))
+                })
+            },
+            {
+                let barrier = barrier.clone();
+                let url = url.clone();
+                let schema = schema.clone();
+                let shard = shard.clone();
+                thread::spawn(move || {
+                    let backend = PostgresBackend::connect_in_schema(&url, &schema)
+                        .expect("connect postgres")
+                        .with_node_id(2);
+                    barrier.wait();
+                    futures::executor::block_on(backend.push(
+                        &shard,
+                        vec![typed_item(true)],
+                        pqueue_conformance::ts(round as i64 + 1),
+                        None,
+                    ))
+                })
+            },
+        ];
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("append thread panicked")
+                .expect("concurrent append must succeed");
+        }
+    }
+
+    let verifier = PostgresBackend::connect_in_schema(&url, &schema).expect("connect postgres");
+    let page = futures::executor::block_on(verifier.read_from(&shard, None, 64)).expect("read log");
+    assert_eq!(page.entries.len(), 16, "two successful appends per round");
+    for (expected_seq, (position, _)) in page.entries.iter().enumerate() {
+        assert_eq!(
+            position.sequence, expected_seq as u64,
+            "log sequences must be contiguous"
+        );
+    }
+    assert!(page.next.is_none(), "the read should consume the full log");
 }

@@ -32,16 +32,12 @@
 //! ## Serialization caveat for the future pooling work (recorded from the Chunk-4 fresh-eyes review)
 //!
 //! Three write paths are serialized today ONLY by the process-wide `self.inner` Mutex (one connection per
-//! backend instance), NOT by the database: the `MAX(seq)+1` log-sequence read-then-insert
-//! ([`Inner::append_durable`]), and the read-check-then-write high-water guard
+//! backend instance), NOT by the database: the per-queue log-sequence allocator
+//! ([`Inner::append_durable`]), and the persisted high-water guard
 //! ([`SnapshotStore::set_high_water`]). Sqlite serializes these implicitly via its whole-db write lock;
 //! postgres under default `READ COMMITTED` does NOT. While single-connection this is correct (the Mutex
-//! is the lock); the worst case even under a race is a clean PK-conflict rollback BEFORE the projection is
-//! touched, so the durability invariant cannot be violated and the log cannot corrupt. BUT the high-water
-//! guard is a genuine TOCTOU: under a connection pool two callers could both pass the `precedes` check and
-//! regress the stored high-water. So the pooling/`spawn_blocking` refinement above MUST also add
-//! row-level locking (`SELECT … FOR UPDATE` / a `SERIALIZABLE` txn, or fold the monotonic check into a
-//! single conditional `UPDATE`) before introducing a second concurrent connection.
+//! is the lock), the backend now folds both writes into single conditional statements so the safety
+//! property holds across multiple connections as well.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -101,6 +97,10 @@ CREATE TABLE IF NOT EXISTS log_entries (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch BIGINT NOT NULL, seq BIGINT NOT NULL,
     envelope TEXT NOT NULL,
     PRIMARY KEY (tenant, queue, epoch, seq)
+);
+CREATE TABLE IF NOT EXISTS log_counters (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, next_seq BIGINT NOT NULL,
+    PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS high_water (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch BIGINT NOT NULL, seq BIGINT NOT NULL,
@@ -226,10 +226,13 @@ impl Inner {
         if expected_epoch.is_some_and(|e| e != epoch as u64) {
             return Err(EngineError::EpochFenced);
         }
-        // Next sequence is MAX(seq)+1, NOT COUNT(*): it must survive log compaction/retention so a
-        // persisted position never collides or regresses (TD-007 §4). Empty log → -1+1 = 0.
+        // Atomically allocate the next per-queue sequence number. The counter row survives log
+        // compaction/retention, and increment-and-return happens in a single statement, so concurrent
+        // connections cannot read the same value.
         let seq: i64 = st(tx.query_one(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=$1 AND queue=$2",
+            "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,1) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET next_seq = log_counters.next_seq + 1 \
+             RETURNING next_seq - 1",
             &[&t, &q],
         ))?
         .get(0);
@@ -239,7 +242,8 @@ impl Inner {
         ))?;
         st(tx.execute(
             "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+             WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)",
             &[&t, &q, &epoch, &seq],
         ))?;
         st(tx.commit())?;
@@ -571,7 +575,9 @@ impl LogWriter for PgLogWriter<'_> {
         for env in commands {
             let json = to_json(env)?;
             let seq: i64 = st(tx.query_one(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=$1 AND queue=$2",
+                "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,1) \
+                 ON CONFLICT(tenant,queue) DO UPDATE SET next_seq = log_counters.next_seq + 1 \
+                 RETURNING next_seq - 1",
                 &[&t, &q],
             ))?
             .get(0);
@@ -581,7 +587,8 @@ impl LogWriter for PgLogWriter<'_> {
             ))?;
             st(tx.execute(
                 "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+                 WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)",
                 &[&t, &q, &epoch, &seq],
             ))?;
             positions.push(CommandPosition::new(
@@ -1547,22 +1554,12 @@ impl SnapshotStore for PostgresBackend {
         let result = (|| {
             let (t, q) = parts(shard);
             let mut g = self.inner.lock().expect("poisoned");
-            // Monotonic: reject a position that does not advance the stored one (TD-007 §4).
-            let current = st(g.client.query_opt(
-                "SELECT epoch, seq FROM high_water WHERE tenant=$1 AND queue=$2",
-                &[&t, &q],
-            ))?;
-            if let Some(row) = current {
-                let epoch: i64 = row.get(0);
-                let seq: i64 = row.get(1);
-                let cur = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
-                if !cur.precedes(&position) && cur != position {
-                    return Err(EngineError::Invalid("high-water regression"));
-                }
-            }
-            st(g.client.execute(
+            // Fold the monotonic guard into the write so concurrent connections cannot regress it.
+            let updated = st(g.client.query_opt(
                 "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+                 WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq) \
+                 RETURNING epoch, seq",
                 &[
                     &t,
                     &q,
@@ -1570,6 +1567,9 @@ impl SnapshotStore for PostgresBackend {
                     &(position.sequence as i64),
                 ],
             ))?;
+            if updated.is_none() {
+                return Err(EngineError::Invalid("high-water regression"));
+            }
             Ok(())
         })();
         std::future::ready(result)

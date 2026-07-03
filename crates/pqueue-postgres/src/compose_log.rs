@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS log_entries (
     envelope TEXT NOT NULL,
     PRIMARY KEY (tenant, queue, epoch, seq)
 );
+CREATE TABLE IF NOT EXISTS log_counters (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, next_seq BIGINT NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
 CREATE TABLE IF NOT EXISTS high_water (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch BIGINT NOT NULL, seq BIGINT NOT NULL,
     PRIMARY KEY (tenant, queue)
@@ -185,10 +189,12 @@ impl LogStore for PostgresLog {
         }
         for env in commands {
             let json = to_json(env)?;
-            // MAX(seq)+1, NOT COUNT(*): must survive compaction/retention so a position never collides or
-            // regresses (TD-007 §4). Empty log → -1+1 = 0.
+            // Atomically allocate the next per-queue sequence number so concurrent connections cannot
+            // read the same value.
             let seq: i64 = st(tx.query_one(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=$1 AND queue=$2",
+                "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,1) \
+                 ON CONFLICT(tenant,queue) DO UPDATE SET next_seq = log_counters.next_seq + 1 \
+                 RETURNING next_seq - 1",
                 &[&t, &q],
             ))?
             .get(0);
@@ -198,7 +204,8 @@ impl LogStore for PostgresLog {
             ))?;
             st(tx.execute(
                 "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+                 WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)",
                 &[&t, &q, &epoch, &seq],
             ))?;
             positions.push(CommandPosition::new(
@@ -268,22 +275,12 @@ impl LogStore for PostgresLog {
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()> {
         let (t, q) = parts(shard);
         let client = self.client.get_mut();
-        // Monotonic: reject a position that does not advance the stored one (TD-007 §4).
-        let current = st(client.query_opt(
-            "SELECT epoch, seq FROM high_water WHERE tenant=$1 AND queue=$2",
-            &[&t, &q],
-        ))?;
-        if let Some(row) = current {
-            let epoch: i64 = row.get(0);
-            let seq: i64 = row.get(1);
-            let cur = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
-            if !cur.precedes(&position) && cur != position {
-                return Err(EngineError::Invalid("high-water regression"));
-            }
-        }
-        st(client.execute(
+        // Fold the monotonic guard into the write so concurrent connections cannot regress it.
+        let updated = st(client.query_opt(
             "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+             WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq) \
+             RETURNING epoch, seq",
             &[
                 &t,
                 &q,
@@ -291,6 +288,9 @@ impl LogStore for PostgresLog {
                 &(position.sequence as i64),
             ],
         ))?;
+        if updated.is_none() {
+            return Err(EngineError::Invalid("high-water regression"));
+        }
         Ok(())
     }
 
