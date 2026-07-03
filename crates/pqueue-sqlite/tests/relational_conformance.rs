@@ -2214,3 +2214,76 @@ async fn typed_index_schema_less_queue_unaffected() {
         .await;
     assert!(res.is_err(), "unknown index name must error");
 }
+
+async fn seeded_commit_transition_sqlite_relational_backend() -> SqliteRelationalBackend {
+    use bytes::Bytes;
+    use pqueue_conformance::{claim_req, qdef, shard, ts};
+    use pqueue_core::RequestId;
+    use pqueue_engine::{
+        ClaimPort, ClaimRef, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
+        FinalizeKind, InstanceFence, PushPort, PushSpec, SideRecord,
+    };
+
+    let b = SqliteRelationalBackend::in_memory().unwrap();
+    b.create_queue(qdef()).await.unwrap();
+    b.push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+    let c = &claimed.items[0];
+    let claim_ref = ClaimRef {
+        item_id: c.item_id,
+        lease_token: c.lease_token.clone().unwrap(),
+        lease_expires_at: c.lease_expires_at,
+        item_version: c.item_version,
+    };
+    let rid = RequestId::new("txn-commit-transition-1").unwrap();
+    b.commit_transition(
+        &shard(),
+        CommitTransition {
+            request_id: Some(rid),
+            entries: vec![CommitTransitionEntry {
+                claim_ref,
+                finalize: FinalizeKind::Complete,
+                side_records: vec![SideRecord {
+                    key: b"state/run-1".to_vec(),
+                    payload: Bytes::from_static(b"audit-bytes"),
+                }],
+                lifecycle_items: vec![PushSpec::default()],
+                instance_fence: Some(InstanceFence {
+                    instance_key: b"wf-1".to_vec(),
+                    expected: 0,
+                    next: 1,
+                }),
+            }],
+        },
+        ts(1),
+        None,
+    )
+    .await
+    .unwrap();
+    b
+}
+
+/// Shared commit-transition positive scenario against the durable sqlite-relational composition root.
+#[tokio::test]
+async fn commit_transition_shared_scenario_runs_against_sqlite_relational() {
+    use pqueue_conformance::scenarios::commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let make_calls = std::sync::Arc::clone(&calls);
+    let make = move || match make_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+        0 => SqliteRelationalBackend::in_memory().unwrap(),
+        _ => std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(seeded_commit_transition_sqlite_relational_backend())
+        })
+        .join()
+        .unwrap(),
+    };
+
+    commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(make)
+        .await;
+}

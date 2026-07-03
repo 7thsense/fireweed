@@ -32,6 +32,50 @@ mod composed_capability_parity {
         RecoveryReadPort, ReschedulePort, ScheduleUpdate, SetGatesCommand, SetGatesPort,
         SideRecord,
     };
+    pub(super) async fn seeded_commit_transition_memory_backend() -> crate::ComposedMemoryBackend {
+        let b = composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        b.push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+        let c = &claimed.items[0];
+        let claim_ref = ClaimRef {
+            item_id: c.item_id,
+            lease_token: c.lease_token.clone().unwrap(),
+            lease_expires_at: c.lease_expires_at,
+            item_version: c.item_version,
+        };
+        let rid = RequestId::new("txn-commit-transition-1").unwrap();
+        b.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: Some(rid),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![SideRecord {
+                        key: b"state/run-1".to_vec(),
+                        payload: Bytes::from_static(b"audit-bytes"),
+                    }],
+                    lifecycle_items: vec![PushSpec {
+                        priority: Some(PriorityValue::Int64(20)),
+                        ..Default::default()
+                    }],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: b"wf-1".to_vec(),
+                        expected: 0,
+                        next: 1,
+                    }),
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+        b
+    }
 
     /// Capability descriptors: the composed memory backend advertises the SAME full vectorized-commit
     /// boundary as `MemoryBackend` (atomic class, the Snorri StateStore guarantees).
@@ -783,4 +827,32 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
         saw_claim_without_rid,
         "the non-commit claim envelope is a second negative control"
     );
+}
+
+/// Shared commit-transition positive scenario wired through the composed memory backend.
+///
+/// The reopen leg is reconstructed on the second `make()` call because the composed memory backend is
+/// in-process only; the point of the test is to exercise the shared contract against the backend, not to
+/// change its storage model.
+#[tokio::test]
+async fn commit_transition_shared_scenario_runs_against_composed_memory() {
+    use pqueue_conformance::scenarios::commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen;
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let make_calls = std::sync::Arc::clone(&calls);
+    let make = move || match make_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+        0 => composed_memory_backend(),
+        _ => std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(composed_capability_parity::seeded_commit_transition_memory_backend())
+        })
+        .join()
+        .unwrap(),
+    };
+
+    commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(make)
+        .await;
 }
