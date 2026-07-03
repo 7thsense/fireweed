@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260703T030826-096cfac2",
+  "bead_id": "pqueue-a6058c60",
+  "base_rev": "13c9c5b418b95f965e517a2562e012332bad9c61",
+  "created_at": "2026-07-03T03:08:27.449206958Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-a6058c60",
+    "title": "Wire shared commit-transition decline scenario into postgres suites",
+    "description": "PROBLEM\nThe shared commit-transition scenario from governing artifact/dependency pqueue-c42136f3 is not invoked by the postgres log-replay or postgres-relational suites, so the decline-path contract is only covered by bespoke tests instead of the common conformance harness.\n\nROOT CAUSE\ncrates/pqueue-postgres/tests/conformance.rs:56 enumerates postgres log-replay conformance scenarios without the shared commit-transition decline scenario. crates/pqueue-postgres/tests/relational_conformance.rs:63 enumerates postgres-relational scenarios without the shared commit-transition decline scenario. crates/pqueue-postgres/tests/hot_projection_queries.rs:105 contains bespoke decline coverage that is not yet redundant with a shared harness invocation.\n\nPROPOSED FIX\nInvoke the pqueue-c42136f3 shared commit-transition scenario for PostgresBackend and PostgresRelationalBackend, preserving the existing PQUEUE_PG_TEST_URL env gate, fresh schema isolation, loud skip behavior, and non-tokio executor pattern used by the postgres conformance files. The scenario must exercise the decline path for both postgres flavors.\n\nNON-SCOPE\nDo not implement real CommitTransitionPort behavior for postgres/objectlog; that is a separate epic. Do not convert postgres from decline path to positive path. Do not remove pqueue-0ef6807b bespoke decline tests until the shared harness decline path is wired and a cleanup bead proves redundancy. Preserve all existing env-gated live-DB behavior.\n\nDEPENDENCIES\nRequires pqueue-c42136f3. Parent: pqueue-54039317.",
+    "acceptance": "1. TestPostgresLogCommitTransitionDecline: with PQUEUE_PG_TEST_URL set, `cargo test -p pqueue-postgres --test conformance --all-features commit_transition` runs the shared decline scenario against PostgresBackend and passes.\n2. TestPostgresRelationalCommitTransitionDecline: with PQUEUE_PG_TEST_URL set, `cargo test -p pqueue-postgres --test relational_conformance --all-features commit_transition` runs the shared decline scenario against PostgresRelationalBackend and passes.\n3. TestPostgresDeclineSkipGate: without PQUEUE_PG_TEST_URL, the postgres shared decline invocations print loud skips and return green, matching the existing suite policy.\n4. TestCargoWorkspaceGate: `cargo test --workspace --all-targets --all-features` passes.\n5. TestGoWorkspaceGate: `go test ./...` passes or is documented as not applicable because the repository has no Go packages.\n6. TestLefthookGate: `lefthook run pre-commit` passes.\n7. TestRustStyleGate: `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-d2f0b763",
+    "labels": [
+      "area:testing",
+      "area:conformance",
+      "kind:test",
+      "system:pqueue"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T030826-096cfac2",
+    "prompt": ".ddx/executions/20260703T030826-096cfac2/prompt.md",
+    "manifest": ".ddx/executions/20260703T030826-096cfac2/manifest.json",
+    "result": ".ddx/executions/20260703T030826-096cfac2/result.json",
+    "checks": ".ddx/executions/20260703T030826-096cfac2/checks.json",
+    "usage": ".ddx/executions/20260703T030826-096cfac2/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-a6058c60-20260703T030826-096cfac2"
+  },
+  "prompt_sha": "46527da7b68e868f7d24181944d5f2f39578d47a542310085e636b87bcaa43a0"
+}
