@@ -1,0 +1,26 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/helix/02-design/adr/ADR-001-cqrs-log-projection-storage-model.md",
+    "docs/helix/02-design/adr/ADR-008-queue-as-shard-unit-and-projection-families.md",
+    "docs/helix/02-design/adr/ADR-013-log-single-source-of-truth.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/helix/02-design/adr/ADR-001-cqrs-log-projection-storage-model.md",
+      "line": 85,
+      "rule_id": "prose.specificity.actor_action",
+      "severity": "advisory",
+      "rationale": "The sentence says something enables or supports work without naming the actor, action, artifact, or boundary.",
+      "suggested_edit": "Name the actor, action, artifact, or boundary that makes the statement concrete."
+    },
+    {
+      "file": "docs/helix/02-design/adr/ADR-008-queue-as-shard-unit-and-projection-families.md",
+      "line": 69,
+      "rule_id": "prose.specificity.actor_action",
+      "severity": "advisory",
+      "rationale": "The sentence says something enables or supports work without naming the actor, action, artifact, or boundary.",
+      "suggested_edit": "Name the actor, action, artifact, or boundary that makes the statement concrete."
+    }
+  ]
+}
