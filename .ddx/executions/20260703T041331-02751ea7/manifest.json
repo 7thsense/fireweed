@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260703T041331-02751ea7",
+  "bead_id": "pqueue-7c32ed99",
+  "base_rev": "ca867c7549fddfdc831efb5b1e7b7d50eb6fd26f",
+  "created_at": "2026-07-03T04:13:31.452354266Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-7c32ed99",
+    "title": "Remove or narrow redundant memory bespoke positive commit-transition test",
+    "description": "PROBLEM\nAfter the shared commit-transition scenario from governing artifact/dependency pqueue-c42136f3 is wired into memory backend coverage, the bespoke memory positive-path test remains and may duplicate or diverge from the shared contract.\n\nROOT CAUSE\ncrates/pqueue-memory/src/tests.rs:69 defines vectorized_commit_recovery_and_side_records_round_trip, a bespoke positive-path test intended to be covered by the shared scenario.\n\nPROPOSED FIX\nAfter pqueue-c42136f3 and the child bead wiring memory positive coverage are complete, delete vectorized_commit_recovery_and_side_records_round_trip from crates/pqueue-memory/src/tests.rs if the shared memory scenario covers the exact behavior. If any portion covers behavior outside the shared scenario, retain only that portion under a narrower test name with a comment identifying the out-of-scope behavior. Leave tests whose behavior is not covered by the shared scenario, including idempotency, bad-token/version, fence, capability, request-id propagation, or explain-commit coverage not proven redundant.\n\nNON-SCOPE\nDo not implement real CommitTransitionPort behavior for postgres/objectlog; that is a separate epic. Do not delete any bespoke test unless its exact behavior is covered by the shared harness. Do not delete schema_validation_rejects_before_append_and_idempotency_on_sqlite_relational. Do not relax any verification gate. Do not remove pqueue-0ef6807b postgres/objectlog bespoke decline tests in this bead unless the shared decline harness has already been wired and the deletion is proven behavior-preserving.\n\nDEPENDENCIES\nRequires pqueue-c42136f3 and completion of the child bead wiring memory positive coverage. Parent: pqueue-54039317. Split from parent bead pqueue-d2f0b763.",
+    "acceptance": "1. TestMemoryBespokePositiveRemovedOrJustified: `rg -c 'fn vectorized_commit_recovery_and_side_records_round_trip' crates/pqueue-memory/src/tests.rs` returns `0`, or any retained portions are renamed/narrowed with comments showing they cover behavior outside the shared scenario.\n2. TestMemoryNonScopeRetained: memory backend tests for idempotency, bad-token/version, fence, capability, request-id propagation, or explain-commit behavior not proven redundant remain present and passing.\n3. TestCargoWorkspaceGate: `cargo test --workspace --all-targets --all-features` passes after the deletion or narrowing.\n4. TestGoWorkspaceGate: `go test ./...` passes or is documented as not applicable because the repository has no Go packages.\n5. TestLefthookGate: `lefthook run pre-commit` passes.\n6. TestRustStyleGate: `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-e5c454a1",
+    "labels": [
+      "area:testing",
+      "area:conformance",
+      "kind:test",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"the shared-memory harness wiring prerequisite is still open, so the deletion proof is not yet valid.: The bead is narrowly scoped to a single-file cleanup, but it is not claimable yet because it explicitly depends on `pqueue-d2f0b763` and the completion of the shared memory positive coverage. `pqueue-c42136f3` is already closed, but the wiring bead is still open, so the exact redundancy needed to justify deletion or narrowing cannot be verified now.\",\"fingerprint\":\"2776b6f96aabdcae6b5f3567362b95e102759e8873ce8a979b1d8ca1f5139eb9\",\"policy_mode\":\"warn-only\",\"reason\":\"readiness_best_effort\",\"rule_id\":\"pre_claim_intake.readiness_best_effort\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"2776b6f96aabdcae6b5f3567362b95e102759e8873ce8a979b1d8ca1f5139eb9\"}",
+          "created_at": "2026-07-03T04:13:27.576268369Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "readiness_best_effort"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T041331-02751ea7",
+    "prompt": ".ddx/executions/20260703T041331-02751ea7/prompt.md",
+    "manifest": ".ddx/executions/20260703T041331-02751ea7/manifest.json",
+    "result": ".ddx/executions/20260703T041331-02751ea7/result.json",
+    "checks": ".ddx/executions/20260703T041331-02751ea7/checks.json",
+    "usage": ".ddx/executions/20260703T041331-02751ea7/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-7c32ed99-20260703T041331-02751ea7"
+  },
+  "prompt_sha": "25c5a30e332846dab396ed84ca0fffc5565e0d5b39dccb3693c7cb60e1731382"
+}
