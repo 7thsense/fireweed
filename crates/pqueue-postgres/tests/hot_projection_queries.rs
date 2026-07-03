@@ -8,8 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue::RangeScanRequest;
 use pqueue_conformance::qkey;
-use pqueue_engine::{EngineError, HotProjectionQueryPort};
-use pqueue_postgres::PostgresBackend;
+use pqueue_core::{ItemId, LeaseToken, RequestId};
+use pqueue_engine::{
+    Backend, ClaimRef, CommitCapabilities, CommitTransition, CommitTransitionEntry,
+    CommitTransitionPort, EngineError, FinalizeKind, HotProjectionQueryPort, RecoveryReadPort,
+    SideRecord,
+};
+use pqueue_postgres::{PostgresBackend, PostgresRelationalBackend};
 
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -18,6 +23,53 @@ fn fresh_schema() -> String {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+fn explicit_decline_transition() -> CommitTransition {
+    CommitTransition {
+        request_id: Some(RequestId::new("txn-explicit-decline").unwrap()),
+        entries: vec![CommitTransitionEntry {
+            claim_ref: ClaimRef {
+                item_id: ItemId::new("1").unwrap(),
+                lease_token: LeaseToken::new("lease-1").unwrap(),
+                lease_expires_at: pqueue_conformance::ts(1),
+                item_version: 0,
+            },
+            finalize: FinalizeKind::Complete,
+            side_records: vec![SideRecord {
+                key: b"state/run".to_vec(),
+                payload: bytes::Bytes::from_static(b"opaque"),
+            }],
+            lifecycle_items: vec![],
+            instance_fence: None,
+        }],
+    }
+}
+
+fn assert_commit_transition_is_explicitly_declined<B>(backend: &B)
+where
+    B: Backend + CommitTransitionPort + RecoveryReadPort,
+{
+    assert_eq!(backend.commit_capabilities(), CommitCapabilities::default());
+
+    let transition = explicit_decline_transition();
+    let err = futures::executor::block_on(backend.commit_transition(
+        &qkey(),
+        transition.clone(),
+        pqueue_conformance::ts(2),
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+
+    let err = futures::executor::block_on(
+        backend.explain_commit(&qkey(), transition.request_id.clone().unwrap()),
+    )
+    .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
+
+    let err = futures::executor::block_on(backend.side_record(&qkey(), b"state/run")).unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
 }
 
 #[test]
@@ -47,4 +99,22 @@ fn hot_projection_capabilities_are_explicit() {
     ))
     .unwrap_err();
     assert_eq!(err, EngineError::Unavailable);
+}
+
+#[test]
+fn commit_transition_capabilities_are_explicit() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "POSTGRES COMMIT-TRANSITION SKIPPED (commit_transition_capabilities_are_explicit) — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+
+    let postgres = PostgresBackend::connect_in_schema(&url, &fresh_schema())
+        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+    assert_commit_transition_is_explicitly_declined(&postgres);
+
+    let relational = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
+        .expect("connect postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
+    assert_commit_transition_is_explicitly_declined(&relational);
 }
