@@ -488,6 +488,12 @@ pub trait ProjectionStore: Send {
         self.apply(positions, commands)
     }
 
+    /// Whether `shard` is in the intake-blocking pause mode. The default projection family does not
+    /// track intake blocking and therefore reports `false`.
+    fn pause_blocks_intake(&self, _shard: &QueueKey) -> EngineResult<bool> {
+        Ok(false)
+    }
+
     /// Drain any deferred durable projection work. Default is a no-op for synchronous projections.
     fn flush_deferred(&mut self) -> EngineResult<()> {
         Ok(())
@@ -1750,6 +1756,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             let mut g = self.inner.lock().expect("poisoned");
             g.projection.index_validate_push(shard, &push_items)?;
+            if g.projection.pause_blocks_intake(shard)? {
+                return Err(EngineError::Paused {
+                    drain_intake: true,
+                });
+            }
             let env = Self::make_envelope(
                 &mut g,
                 self.node_id,
@@ -1823,6 +1834,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             g.projection.index_validate_push(shard, &push_items)?;
+            if g.projection.pause_blocks_intake(shard)? {
+                return Err(EngineError::Paused {
+                    drain_intake: true,
+                });
+            }
             let command_id = Self::next_command_id(&mut g, self.node_id);
             let env = CommandEnvelope {
                 command_id,
@@ -3193,6 +3209,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortRenewL
 #[cfg(test)]
 mod ordered_tests {
     use super::*;
+    use crate::PauseQueueCommand;
     use crate::port::{ChangeRecordSink, ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
     use pqueue_core::{
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
@@ -3408,6 +3425,9 @@ mod ordered_tests {
     struct FakeProjectionState {
         pending: Vec<ItemId>,
         leased: BTreeMap<ItemId, LeaseToken>,
+        lease_expires_at: BTreeMap<ItemId, UtcTimestamp>,
+        paused: bool,
+        pause_drain_intake: bool,
         apply_batches: Vec<Vec<&'static str>>,
     }
 
@@ -3450,13 +3470,34 @@ mod ordered_tests {
                             {
                                 state.pending.remove(pos);
                                 state.leased.insert(*id, claim.lease_token.clone());
+                                state.lease_expires_at.insert(*id, claim.lease_expires_at);
                             }
                         }
+                    }
+                    QueueCommand::LeaseExpired(c) => {
+                        for id in &c.item_ids {
+                            state.leased.remove(id);
+                            state.lease_expires_at.remove(id);
+                            state.pending.push(*id);
+                        }
+                    }
+                    QueueCommand::PauseQueue(c) => {
+                        state.paused = true;
+                        state.pause_drain_intake = c.drain_intake;
+                    }
+                    QueueCommand::ResumeQueue => {
+                        state.paused = false;
+                        state.pause_drain_intake = false;
                     }
                     _ => {}
                 }
             }
             Ok(())
+        }
+
+        fn pause_blocks_intake(&self, _shard: &QueueKey) -> EngineResult<bool> {
+            let state = self.state.lock().expect("fake projection poisoned");
+            Ok(state.paused && state.pause_drain_intake)
         }
 
         fn eligible_candidates(
@@ -3465,15 +3506,11 @@ mod ordered_tests {
             _now: UtcTimestamp,
             max: usize,
         ) -> EngineResult<Vec<ItemId>> {
-            Ok(self
-                .state
-                .lock()
-                .expect("fake projection poisoned")
-                .pending
-                .iter()
-                .copied()
-                .take(max)
-                .collect())
+            let state = self.state.lock().expect("fake projection poisoned");
+            if state.paused {
+                return Ok(Vec::new());
+            }
+            Ok(state.pending.iter().copied().take(max).collect())
         }
 
         fn eligible_candidates_after(
@@ -3484,6 +3521,9 @@ mod ordered_tests {
             max: usize,
         ) -> EngineResult<Vec<ItemId>> {
             let state = self.state.lock().expect("fake projection poisoned");
+            if state.paused {
+                return Ok(Vec::new());
+            }
             let skip = after
                 .and_then(|id| state.pending.iter().position(|pending| *pending == id))
                 .map_or(0, |pos| pos + 1);
@@ -3499,6 +3539,7 @@ mod ordered_tests {
             Ok(ids
                 .iter()
                 .filter_map(|id| {
+                    let lease_expires_at = state.lease_expires_at.get(id).copied().unwrap_or(ts(60));
                     state.leased.get(id).map(|token| ClaimedItem {
                         item_id: *id,
                         client_item_key: ClientItemKey::new(id.to_string()).unwrap(),
@@ -3507,7 +3548,7 @@ mod ordered_tests {
                         group_key: None,
                         not_before: None,
                         lease_token: Some(token.clone()),
-                        lease_expires_at: ts(60),
+                        lease_expires_at,
                         attempt_count: 1,
                         payload: None,
                         fields: BTreeMap::new(),
@@ -3537,9 +3578,14 @@ mod ordered_tests {
         fn expired_leases(
             &self,
             _shard: &QueueKey,
-            _now: UtcTimestamp,
+            now: UtcTimestamp,
         ) -> EngineResult<Vec<ItemId>> {
-            Ok(Vec::new())
+            let state = self.state.lock().expect("fake projection poisoned");
+            Ok(state
+                .lease_expires_at
+                .iter()
+                .filter_map(|(id, exp)| (*exp < now).then_some(*id))
+                .collect())
         }
 
         fn all_expired_leases(&self, _now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)> {
@@ -3726,6 +3772,19 @@ mod ordered_tests {
         UtcTimestamp::new(seconds, 0).unwrap()
     }
 
+    fn pause_envelope(drain_intake: bool, seq: &str, item_id: ItemId, now: UtcTimestamp) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::new(seq),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::PauseQueue(PauseQueueCommand { drain_intake }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        }
+    }
+
     struct NoopWake;
 
     impl Wake for NoopWake {
@@ -3838,6 +3897,243 @@ mod ordered_tests {
                 .apply_batches(),
             vec![vec!["push", "push"], vec!["claim", "claim"]]
         );
+    }
+
+    #[test]
+    fn pause_blocks_claims_and_optionally_intake() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        );
+        let shard = queue();
+        assert!(matches!(
+            poll_once(&mut backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+
+        let mut push_one = backend.push(&shard, vec![PushSpec::default()], ts(0), None);
+        assert!(matches!(poll_once(&mut push_one), Poll::Ready(Ok(ids)) if ids.len() == 1));
+        drop(push_one);
+
+        let pause_env = pause_envelope(true, "pause-intake", ItemId::from_u64(1), ts(1));
+        let pause_shard = shard.clone();
+        let mut pause_write = backend.write(move |lw, pw| {
+            let pos = lw.append(&pause_shard, std::slice::from_ref(&pause_env), 0)?;
+            pw.apply(&pos, std::slice::from_ref(&pause_env))?;
+            Ok(())
+        });
+        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
+
+        let mut paused_claim = backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-paused").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(
+            matches!(poll_once(&mut paused_claim), Poll::Ready(Ok(claimed)) if claimed.items.is_empty()),
+            "paused queue returns no claims"
+        );
+
+        let mut blocked_push = backend.push(&shard, vec![PushSpec::default()], ts(2), None);
+        assert!(
+            matches!(poll_once(&mut blocked_push), Poll::Ready(Err(EngineError::Paused { drain_intake: true }))),
+            "intake-blocking pause rejects pushes"
+        );
+
+        let resume_shard = shard.clone();
+        let mut resume_write = backend.write(move |lw, pw| {
+            let env = CommandEnvelope {
+                command_id: CommandId::new("resume-1"),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: vec![],
+                command: QueueCommand::ResumeQueue,
+                checksum: CommandChecksum(0),
+                created_at: ts(3),
+            };
+            let pos = lw.append(&resume_shard, std::slice::from_ref(&env), 0)?;
+            pw.apply(&pos, std::slice::from_ref(&env))?;
+            Ok(())
+        });
+        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
+
+        let mut resumed_claim = backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer-2").unwrap(),
+            max_items: 2,
+            lease_token: LeaseToken::new("lease-resumed").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(4),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(matches!(poll_once(&mut resumed_claim), Poll::Ready(Ok(claimed)) if claimed.items.len() == 1));
+
+        let plain_backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        );
+        let plain_shard = queue();
+        assert!(matches!(
+            poll_once(&mut plain_backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+        let pause_env = pause_envelope(false, "pause-plain", ItemId::from_u64(1), ts(0));
+        let plain_pause_shard = plain_shard.clone();
+        let mut pause_write = plain_backend.write(move |lw, pw| {
+            let pos = lw.append(&plain_pause_shard, std::slice::from_ref(&pause_env), 0)?;
+            pw.apply(&pos, std::slice::from_ref(&pause_env))?;
+            Ok(())
+        });
+        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
+
+        let mut landed_push = plain_backend.push(&plain_shard, vec![PushSpec::default()], ts(1), None);
+        assert!(matches!(poll_once(&mut landed_push), Poll::Ready(Ok(ids)) if ids.len() == 1));
+        drop(landed_push);
+
+        let mut plain_claim = plain_backend.claim(ClaimRequest {
+            shard: plain_shard.clone(),
+            worker_id: WorkerId::new("claimer-3").unwrap(),
+            max_items: 2,
+            lease_token: LeaseToken::new("lease-plain").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(
+            matches!(poll_once(&mut plain_claim), Poll::Ready(Ok(claimed)) if claimed.items.is_empty()),
+            "plain pause still stops claims"
+        );
+
+        let resume_env = CommandEnvelope {
+            command_id: CommandId::new("resume-plain"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![],
+            command: QueueCommand::ResumeQueue,
+            checksum: CommandChecksum(0),
+            created_at: ts(2),
+        };
+        let plain_resume_shard = plain_shard.clone();
+        let mut resume_write = plain_backend.write(move |lw, pw| {
+            let pos = lw.append(&plain_resume_shard, std::slice::from_ref(&resume_env), 0)?;
+            pw.apply(&pos, std::slice::from_ref(&resume_env))?;
+            Ok(())
+        });
+        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
+
+        let mut resumed_plain_claim = plain_backend.claim(ClaimRequest {
+            shard: plain_shard,
+            worker_id: WorkerId::new("claimer-4").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-plain-2").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(2),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(matches!(poll_once(&mut resumed_plain_claim), Poll::Ready(Ok(claimed)) if claimed.items.len() == 1));
+    }
+
+    #[test]
+    fn pause_does_not_alter_lease_clock() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        );
+        let shard = queue();
+        assert!(matches!(
+            poll_once(&mut backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+
+        let mut push_one = backend.push(&shard, vec![PushSpec::default()], ts(0), None);
+        let first_id = match poll_once(&mut push_one) {
+            Poll::Ready(Ok(ids)) => ids[0],
+            other => panic!("unexpected push result: {other:?}"),
+        };
+        drop(push_one);
+
+        let mut initial_claim = backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer-lease").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: ts(10),
+            now: ts(0),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(matches!(poll_once(&mut initial_claim), Poll::Ready(Ok(claimed)) if claimed.items[0].item_id == first_id));
+
+        let pause_env = pause_envelope(true, "pause-lease", ItemId::from_u64(1), ts(1));
+        let lease_pause_shard = shard.clone();
+        let mut pause_write = backend.write(move |lw, pw| {
+            let pos = lw.append(&lease_pause_shard, std::slice::from_ref(&pause_env), 0)?;
+            pw.apply(&pos, std::slice::from_ref(&pause_env))?;
+            Ok(())
+        });
+        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
+
+        let mut reclaim = backend.reclaim_expired(&shard, None, ts(20), None);
+        assert!(matches!(poll_once(&mut reclaim), Poll::Ready(Ok(ids)) if ids == vec![first_id]));
+        drop(reclaim);
+
+        let mut paused_claim = backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer-paused").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-paused").unwrap(),
+            lease_expires_at: ts(30),
+            now: ts(20),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(
+            matches!(poll_once(&mut paused_claim), Poll::Ready(Ok(claimed)) if claimed.items.is_empty()),
+            "paused queue still withholds claims"
+        );
+
+        let resume_env = CommandEnvelope {
+            command_id: CommandId::new("resume-lease"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![],
+            command: QueueCommand::ResumeQueue,
+            checksum: CommandChecksum(0),
+            created_at: ts(21),
+        };
+        let resume_lease_shard = shard.clone();
+        let mut resume_write = backend.write(move |lw, pw| {
+            let pos = lw.append(&resume_lease_shard, std::slice::from_ref(&resume_env), 0)?;
+            pw.apply(&pos, std::slice::from_ref(&resume_env))?;
+            Ok(())
+        });
+        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
+
+        let mut resumed_claim = backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer-resumed").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-resumed").unwrap(),
+            lease_expires_at: ts(40),
+            now: ts(20),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(matches!(poll_once(&mut resumed_claim), Poll::Ready(Ok(claimed)) if claimed.items[0].item_id == first_id));
     }
 
     type SeenKey = (TenantId, pqueue_core::QueueId, Option<ItemId>, u64, u64);

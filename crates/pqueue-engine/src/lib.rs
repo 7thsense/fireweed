@@ -51,11 +51,12 @@ pub use command::{
     ChangeRecordState, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
-    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome,
-    ScheduleUpdate, SetGatesCommand, SideRecord, UnfenceLeaseCommand, UpdateFieldsCommand,
-    WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
-    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
+    LeaseExpiredCommand, PayloadUpdate, PauseQueueCommand, PurgeItemsCommand, PushCommand,
+    PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
+    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand, SideRecord,
+    UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items,
+    command_envelope_change_records, validate_gate_command, validate_gate_push,
+    validate_request_replay_metadata,
 };
 pub use error::{EngineError, EngineResult};
 pub use finalize_validation::{
@@ -157,6 +158,17 @@ mod tests {
             )
             .unwrap_err(),
             EngineError::Unavailable
+        );
+    }
+
+    #[test]
+    fn pause_error_is_structured() {
+        assert_eq!(
+            EngineError::Paused {
+                drain_intake: true
+            }
+            .resp_token(),
+            Some("-ERR pqueue paused")
         );
     }
 

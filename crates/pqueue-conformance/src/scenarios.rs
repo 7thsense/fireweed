@@ -13,8 +13,8 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRef, ClaimRequest, CommandPosition, EngineError,
     EngineResult, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
-    InstanceFence, PayloadUpdate, ProjectionSnapshot, PushCommand, PushSpec, QueueCommand,
-    ReplacePendingCommand, SideRecord, UnfenceLeaseCommand, UpsertOutcome,
+    InstanceFence, PayloadUpdate, PauseQueueCommand, ProjectionSnapshot, PushCommand, PushSpec,
+    QueueCommand, ReplacePendingCommand, SideRecord, UnfenceLeaseCommand, UpsertOutcome,
 };
 
 // Re-exported so callers that address every scenario through the `scenarios::` path uniformly (e.g. the
@@ -2294,7 +2294,11 @@ pub async fn paused_queue_yields_no_claims<B: ConformanceCore>(make: impl Fn() -
     )
     .await;
     // Pause: nothing eligible/claimable.
-    commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
+    commit(
+        &b,
+        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+    )
+    .await;
     assert!(
         b.claim(claim_req(10, 500, 10))
             .await
@@ -2879,7 +2883,11 @@ pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: i
         ),
     )
     .await;
-    commit(&a, envelope(QueueCommand::PauseQueue, vec![])).await;
+    commit(
+        &a,
+        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+    )
+    .await;
 
     // Replay A's full log into a fresh backend B (TD-007 §4 replay reconstruction).
     let page = a.read_from(&shard(), None, 1000).await.unwrap();
@@ -3564,7 +3572,12 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     parity(&a, &b, 600, "after purge a").await;
 
     // Pause hides eligibility on both; resume restores it.
-    commit_both(&a, &b, QueueCommand::PauseQueue).await;
+    commit_both(
+        &a,
+        &b,
+        QueueCommand::PauseQueue(PauseQueueCommand::default()),
+    )
+    .await;
     parity(&a, &b, 600, "after pause").await;
     commit_both(&a, &b, QueueCommand::ResumeQueue).await;
     parity(&a, &b, 600, "after resume").await;
@@ -3664,7 +3677,11 @@ pub async fn stale_epoch_append_is_fenced<B: ConformanceCore>(make: impl Fn() ->
     let e0 = b.current_epoch(&shard()).await.unwrap();
 
     // An append at the current epoch is admitted.
-    append_at_epoch(&b, e0, QueueCommand::PauseQueue)
+    append_at_epoch(
+        &b,
+        e0,
+        QueueCommand::PauseQueue(PauseQueueCommand::default()),
+    )
         .await
         .expect("append at the current epoch is admitted");
 
@@ -3706,7 +3723,11 @@ pub async fn epoch_fence_closes_pre_segment_window<B: ConformanceCore>(make: imp
     b.create_queue(qdef()).await.unwrap();
     let e0 = b.current_epoch(&shard()).await.unwrap();
     // An epoch-E segment exists (the previous owner wrote data at E).
-    append_at_epoch(&b, e0, QueueCommand::PauseQueue)
+    append_at_epoch(
+        &b,
+        e0,
+        QueueCommand::PauseQueue(PauseQueueCommand::default()),
+    )
         .await
         .unwrap();
 

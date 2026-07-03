@@ -178,6 +178,8 @@ pub struct TerminalEmissionMetrics {
 pub struct ProjectionImage {
     pub high_water: Option<CommandPosition>,
     pub paused: bool,
+    #[serde(default)]
+    pub pause_drain_intake: bool,
     pub next_seq: u64,
     pub items: Vec<ProjectionImageItem>,
     pub side_records: BTreeMap<Vec<u8>, Bytes>,
@@ -1228,6 +1230,7 @@ pub struct ProjectionData {
     /// ends the series (the item goes terminal) instead of re-arming. Defaults to `Oneshot`/no-`until`.
     recurrence: RecurrencePolicy,
     paused: bool,
+    pause_drain_intake: bool,
     /// Per-queue secondary indexes, keyed by declaration name. Built once from the queue's specs and
     /// maintained in the same `apply_command` arms that maintain `eligible`.
     indexes: BTreeMap<String, SecondaryIndex>,
@@ -1274,6 +1277,7 @@ impl ProjectionData {
             max_rank_error,
             recurrence,
             paused: false,
+            pause_drain_intake: false,
             indexes,
             index_specs: specs.to_vec(),
             typed_index_specs: Vec::new(),
@@ -1308,6 +1312,7 @@ impl ProjectionData {
         ProjectionImage {
             high_water,
             paused: self.paused,
+            pause_drain_intake: self.pause_drain_intake,
             next_seq: self.next_seq,
             items,
             side_records: self.side_records.clone(),
@@ -1328,6 +1333,7 @@ impl ProjectionData {
         )
         .with_typed_indexes(&definition.typed_indexes);
         projection.paused = image.paused;
+        projection.pause_drain_intake = image.pause_drain_intake;
         projection.next_seq = image.next_seq;
         projection.side_records = image.side_records;
         projection.instance_fences = image.instance_fences;
@@ -1891,12 +1897,14 @@ impl ProjectionData {
                 }
                 Ok(())
             }
-            QueueCommand::PauseQueue => {
+            QueueCommand::PauseQueue(c) => {
                 self.paused = true;
+                self.pause_drain_intake = c.drain_intake;
                 Ok(())
             }
             QueueCommand::ResumeQueue => {
                 self.paused = false;
+                self.pause_drain_intake = false;
                 Ok(())
             }
             // Gates (BQ-14d) are a relational-mode feature; the in-memory family stores no gate state and
@@ -1939,6 +1947,10 @@ impl ProjectionData {
 impl ProjectionData {
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    pub fn is_intake_blocked(&self) -> bool {
+        self.paused && self.pause_drain_intake
     }
 
     /// Priority-ordered eligible candidates (pending, not superseded, due at `now`), capped at `max`.
@@ -3008,8 +3020,8 @@ mod tests {
     };
     use pqueue_engine::{
         AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandId, FinalizeCommand,
-        FinalizeKind, FinalizeOutcome, PurgeItemsCommand, PushCommand, RenewLeaseCommand,
-        SideRecord, UpdateFieldsCommand, WriteSideRecordsCommand,
+        FinalizeKind, FinalizeOutcome, PauseQueueCommand, PurgeItemsCommand, PushCommand,
+        RenewLeaseCommand, SideRecord, UpdateFieldsCommand, WriteSideRecordsCommand,
     };
 
     fn shard() -> QueueKey {
@@ -3522,7 +3534,9 @@ mod tests {
                 lease_expires_at: ts(60),
             }))
             .unwrap();
-        projection.apply_command(&QueueCommand::PauseQueue).unwrap();
+        projection
+            .apply_command(&QueueCommand::PauseQueue(PauseQueueCommand::default()))
+            .unwrap();
         projection
             .apply_command(&QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
                 records: vec![SideRecord {
@@ -3728,6 +3742,7 @@ mod tests {
         let mut image = ProjectionImage {
             high_water: None,
             paused: false,
+            pause_drain_intake: false,
             next_seq: 2,
             items: vec![
                 ProjectionImageItem {
@@ -3798,14 +3813,22 @@ mod tests {
     fn read_from_carries_true_per_entry_epoch_across_an_advance() {
         let mut log = LogData::default();
         // Two appends at epoch 0.
-        log.append(&shard(), &[env(QueueCommand::PauseQueue)], 0)
+        log.append(
+            &shard(),
+            &[env(QueueCommand::PauseQueue(PauseQueueCommand::default()))],
+            0,
+        )
             .unwrap();
         log.append(&shard(), &[env(QueueCommand::ResumeQueue)], 0)
             .unwrap();
         // Acquire E+1 (durable fence), then one append at epoch 1.
         assert_eq!(log.advance_epoch(), 1);
         let pos = log
-            .append(&shard(), &[env(QueueCommand::PauseQueue)], 1)
+            .append(
+                &shard(),
+                &[env(QueueCommand::PauseQueue(PauseQueueCommand::default()))],
+                1,
+            )
             .unwrap();
         // A stale epoch-0 append is now fenced (the seq counter is unchanged — no rewind).
         assert_eq!(

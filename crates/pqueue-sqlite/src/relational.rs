@@ -455,6 +455,10 @@ fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
         EngineError::RequestIdConflict => ("request_id_conflict", None),
         EngineError::RequestExpired => ("request_expired", None),
         EngineError::EpochFenced => ("epoch_fenced", None),
+        EngineError::Paused { drain_intake } => (
+            "paused",
+            Some((if *drain_intake { "true" } else { "false" }).to_string()),
+        ),
         EngineError::Forbidden(why) => ("forbidden", Some((*why).to_string())),
         EngineError::Storage(msg) => ("storage", Some(msg.clone())),
         EngineError::EntitySchemaViolation(msg) => ("entity_schema_violation", Some(msg.clone())),
@@ -2997,7 +3001,7 @@ fn apply_command_sql(
             )?;
             Ok(())
         }
-        QueueCommand::PauseQueue => {
+        QueueCommand::PauseQueue(_) => {
             st(tx.execute(
                 "UPDATE queues SET paused=1 WHERE tenant=?1 AND queue=?2",
                 params![t, q],
@@ -5431,6 +5435,8 @@ fn export_projection_image_sql(
             lease_expires_at: lease_expires_at.map(nanos_ts),
             fenced: fenced != 0,
             superseded: superseded != 0,
+            terminal_at: None,
+            terminal_position: None,
         });
     }
 
@@ -5465,6 +5471,7 @@ fn export_projection_image_sql(
     Ok(ProjectionImage {
         high_water,
         paused: paused != 0,
+        pause_drain_intake: false,
         next_seq: next_item_seq as u64,
         items,
         side_records,

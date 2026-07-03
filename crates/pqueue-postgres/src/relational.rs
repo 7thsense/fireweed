@@ -424,6 +424,10 @@ fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
         EngineError::RequestIdConflict => ("request_id_conflict", None),
         EngineError::RequestExpired => ("request_expired", None),
         EngineError::EpochFenced => ("epoch_fenced", None),
+        EngineError::Paused { drain_intake } => (
+            "paused",
+            Some((if *drain_intake { "true" } else { "false" }).to_string()),
+        ),
         EngineError::Forbidden(why) => ("forbidden", Some((*why).to_string())),
         EngineError::Storage(msg) => ("storage", Some(msg.clone())),
         EngineError::EntitySchemaViolation(msg) => ("entity_schema_violation", Some(msg.clone())),
@@ -2010,7 +2014,7 @@ fn apply_command_sql(
             ))?;
             Ok(())
         }
-        QueueCommand::PauseQueue => {
+        QueueCommand::PauseQueue(_) => {
             st(tx.execute(
                 "UPDATE queues SET paused=true WHERE tenant=$1 AND queue=$2",
                 &[&t, &q],

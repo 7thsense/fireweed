@@ -23,9 +23,10 @@ use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand,
     CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, ControlPlaneStore,
     DiscoveryGranularity, DiscoveryPort, FenceLeaseCommand, FinalizeKind, FinalizeOutcome,
-    FinalizePort, GroupBatching, PayloadUpdate, ProjectionRead, PurgePort, PushCommand, PushItem,
-    PushPort, PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
-    SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    FinalizePort, GroupBatching, PayloadUpdate, PauseQueueCommand, ProjectionRead, PurgePort,
+    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver,
+    RenewLeasePort, SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -952,7 +953,11 @@ async fn group_claim_yields_nothing_while_paused() {
     )
     .await
     .unwrap();
-    commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
+    commit(
+        &b,
+        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+    )
+    .await;
 
     let compat = ClaimCompatibility {
         group_batching: Some(GroupBatching { max_groups: 2 }),
@@ -1661,7 +1666,11 @@ async fn discover_reports_scopes_on_a_paused_queue() {
     b.push(&shard(), vec![gspec(10, "g1")], ts(10), None)
         .await
         .unwrap();
-    commit(&b, envelope(QueueCommand::PauseQueue, vec![])).await;
+    commit(
+        &b,
+        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+    )
+    .await;
 
     // A claim on the paused queue leases nothing...
     assert!(

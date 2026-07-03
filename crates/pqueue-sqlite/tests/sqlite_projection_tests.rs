@@ -8,8 +8,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
-    CommandPosition, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead,
-    PushCommand, PushItem, QueueCommand, SideRecord, WriteSideRecordsCommand,
+    CommandPosition, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome, PauseQueueCommand,
+    ProjectionRead, PushCommand, PushItem, QueueCommand, SideRecord, WriteSideRecordsCommand,
 };
 use pqueue_projection::InMemoryProjection;
 use pqueue_sqlite::{HybridProjectionStore, SqliteProjectionStore};
@@ -255,7 +255,12 @@ async fn sqlite_projection_image_exports_hydratable_recovery_image() {
             vec![item_id],
             1,
         ),
-        envelope("pause-1", QueueCommand::PauseQueue, vec![], 2),
+        envelope(
+            "pause-1",
+            QueueCommand::PauseQueue(PauseQueueCommand::default()),
+            vec![],
+            2,
+        ),
         envelope(
             "side-1",
             QueueCommand::WriteSideRecords(WriteSideRecordsCommand {

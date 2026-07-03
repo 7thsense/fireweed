@@ -224,6 +224,10 @@ impl ProjectionStore for InMemoryProjection {
         self.apply_borrowed(positions, commands)
     }
 
+    fn pause_blocks_intake(&self, shard: &QueueKey) -> EngineResult<bool> {
+        Ok(self.get(shard)?.is_intake_blocked())
+    }
+
     fn eligible_candidates(
         &self,
         shard: &QueueKey,

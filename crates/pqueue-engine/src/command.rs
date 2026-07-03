@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OwnerId,
     PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
@@ -57,7 +58,7 @@ pub enum QueueCommand {
     // --- durable state (TD-007 §4) ---
     FenceLease(FenceLeaseCommand),
     UnfenceLease(UnfenceLeaseCommand),
-    PauseQueue,
+    PauseQueue(PauseQueueCommand),
     ResumeQueue,
     PurgeItems(PurgeItemsCommand),
     /// Operator gate flip (BQ-14d, API-001 g2 `SetGates`): block or unblock the given gate keys for the
@@ -439,6 +440,76 @@ pub struct SetGatesCommand {
     pub gate_keys: Vec<String>,
     /// `true` blocks the keys (items carrying them become ineligible); `false` unblocks them.
     pub blocked: bool,
+}
+
+/// Durable queue pause state. `drain_intake = false` is the legacy "claims stop, pushes still land"
+/// mode. `drain_intake = true` additionally blocks intake so the queue can quiesce to a stable
+/// position before branching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PauseQueueCommand {
+    pub drain_intake: bool,
+}
+
+impl Serialize for PauseQueueCommand {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if !self.drain_intake {
+            return serializer.serialize_unit();
+        }
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("drain_intake", &self.drain_intake)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PauseQueueCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PauseQueueCommandVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PauseQueueCommandVisitor {
+            type Value = PauseQueueCommand;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("null or an object with drain_intake")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(PauseQueueCommand::default())
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(PauseQueueCommand::default())
+            }
+
+            fn visit_bool<E>(self, drain_intake: bool) -> Result<Self::Value, E> {
+                Ok(PauseQueueCommand { drain_intake })
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut drain_intake = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "drain_intake" => drain_intake = map.next_value()?,
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                Ok(PauseQueueCommand { drain_intake })
+            }
+        }
+
+        deserializer.deserialize_any(PauseQueueCommandVisitor)
+    }
 }
 
 /// The durable change-record position: the log epoch plus sequence that produced the record.
@@ -841,7 +912,7 @@ pub fn command_envelope_change_records(
                 )
             })
             .collect(),
-        QueueCommand::PauseQueue => vec![queue_scoped_change_record(
+        QueueCommand::PauseQueue(_) => vec![queue_scoped_change_record(
             shard,
             position,
             ChangeRecordKind::PauseQueue,
@@ -1038,7 +1109,7 @@ mod serde_tests {
             QueueCommand::UnfenceLease(UnfenceLeaseCommand {
                 item_ids: vec![iid("a")],
             }),
-            QueueCommand::PauseQueue,
+            QueueCommand::PauseQueue(PauseQueueCommand::default()),
             QueueCommand::ResumeQueue,
             QueueCommand::PurgeItems(PurgeItemsCommand {
                 item_ids: vec![iid("a")],
@@ -1099,8 +1170,22 @@ mod serde_tests {
     }
 
     #[test]
+    fn intake_blocking_pause_round_trips_through_json() {
+        let env = envelope(QueueCommand::PauseQueue(PauseQueueCommand {
+            drain_intake: true,
+        }));
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains(r#""drain_intake":true"#));
+        let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
+        let QueueCommand::PauseQueue(c) = decoded.command else {
+            panic!("expected pause command");
+        };
+        assert!(c.drain_intake);
+    }
+
+    #[test]
     fn hybrid_request_id_envelopes_require_replay_metadata() {
-        let mut env = envelope(QueueCommand::PauseQueue);
+        let mut env = envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()));
         assert_eq!(
             validate_request_replay_metadata(&env),
             Err(EngineError::Unavailable)

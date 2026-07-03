@@ -28,6 +28,9 @@ pub enum EngineError {
     /// A retried `request_id` carried a different body (API-001 `request-id-conflict`).
     /// Distinct from the generic `Conflict`. Maps to `-ERR pqueue request_id_conflict`.
     RequestIdConflict,
+    /// Intake is blocked by a paused queue. The `drain_intake` flag distinguishes the fully-quiesced
+    /// branch-prep mode from the legacy "claims stop, pushes still land" pause.
+    Paused { drain_intake: bool },
     /// A `request_id` replay arrived after its retention window (API-001 `request-expired`).
     /// Maps to `-ERR pqueue request_expired`.
     RequestExpired,
@@ -59,6 +62,7 @@ impl EngineError {
             EngineError::Conflict => Some("-ERR pqueue conflict"),
             EngineError::BatchTooLarge => Some("-ERR pqueue batch_too_large"),
             EngineError::RequestIdConflict => Some("-ERR pqueue request_id_conflict"),
+            EngineError::Paused { .. } => Some("-ERR pqueue paused"),
             EngineError::RequestExpired => Some("-ERR pqueue request_expired"),
             EngineError::EpochFenced => Some("-ERR pqueue epoch_stale"),
             EngineError::EntitySchemaViolation(_) => Some("-ERR pqueue entity_schema_violation"),
@@ -84,6 +88,9 @@ impl std::fmt::Display for EngineError {
             EngineError::Conflict => write!(f, "conflict"),
             EngineError::BatchTooLarge => write!(f, "batch too large"),
             EngineError::RequestIdConflict => write!(f, "request-id conflict"),
+            EngineError::Paused { drain_intake } => {
+                write!(f, "paused (drain_intake={drain_intake})")
+            }
             EngineError::RequestExpired => write!(f, "request expired"),
             EngineError::EpochFenced => write!(f, "epoch fenced (stale owner)"),
             EngineError::EntitySchemaViolation(msg) => {
