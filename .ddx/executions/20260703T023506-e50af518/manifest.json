@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260703T023506-e50af518",
+  "bead_id": "pqueue-63f8ed26",
+  "base_rev": "719175a64548c5ce69dc67cc2b4d484bf8ffb4f0",
+  "created_at": "2026-07-03T02:35:06.587208138Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-63f8ed26",
+    "title": "Wire shared commit-transition positive scenario into memory and sqlite",
+    "description": "PROBLEM\nThe shared commit-transition scenario from governing artifact/dependency pqueue-c42136f3 is not invoked by the positive-capability backends, so memory, sqlite log-replay, and sqlite-relational can drift from the shared contract while still passing their local suites.\n\nROOT CAUSE\ncrates/pqueue-memory/src/tests.rs:14 invokes the existing conformance suite but not the new shared commit-transition scenario. crates/pqueue-sqlite/tests/conformance.rs:7 invokes the sqlite log conformance suite without the new scenario. crates/pqueue-sqlite/tests/relational_conformance.rs:63 enumerates sqlite-relational scenarios without the new scenario.\n\nPROPOSED FIX\nInvoke the pqueue-c42136f3 shared commit-transition scenario on composed memory, sqlite log-replay, and sqlite-relational using each backend's existing conformance entry point or equivalent local invocation site. Ensure the scenario runs the positive path for all three backends and uses the same helper contract as the shared harness.\n\nNON-SCOPE\nDo not implement real CommitTransitionPort behavior for postgres/objectlog; that is a separate epic. Do not remove postgres/objectlog bespoke decline tests in this bead except where a later cleanup bead explicitly proves them redundant with the shared harness decline path. Do not delete sqlite or memory bespoke positive tests until the shared scenario is wired and proven equivalent. Preserve pqueue-0ef6807b decline behavior as the known baseline for postgres/objectlog.\n\nDEPENDENCIES\nRequires pqueue-c42136f3. Parent: pqueue-54039317.",
+    "acceptance": "1. TestMemoryCommitTransitionPositive: `cargo test -p pqueue-memory --all-targets --all-features commit_transition` runs the shared pqueue-c42136f3 positive scenario against composed memory and passes.\n2. TestSqliteLogCommitTransitionPositive: `cargo test -p pqueue-sqlite --test conformance --all-features commit_transition` runs the shared positive scenario against sqlite log-replay and passes.\n3. TestSqliteRelationalCommitTransitionPositive: `cargo test -p pqueue-sqlite --test relational_conformance --all-features commit_transition` runs the shared positive scenario against sqlite-relational and passes.\n4. TestCargoWorkspaceGate: `cargo test --workspace --all-targets --all-features` passes.\n5. TestGoWorkspaceGate: `go test ./...` passes or is documented as not applicable because the repository has no Go packages.\n6. TestLefthookGate: `lefthook run pre-commit` passes.\n7. TestRustStyleGate: `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-d2f0b763",
+    "labels": [
+      "area:testing",
+      "area:conformance",
+      "kind:test",
+      "system:pqueue"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T023506-e50af518",
+    "prompt": ".ddx/executions/20260703T023506-e50af518/prompt.md",
+    "manifest": ".ddx/executions/20260703T023506-e50af518/manifest.json",
+    "result": ".ddx/executions/20260703T023506-e50af518/result.json",
+    "checks": ".ddx/executions/20260703T023506-e50af518/checks.json",
+    "usage": ".ddx/executions/20260703T023506-e50af518/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-63f8ed26-20260703T023506-e50af518"
+  },
+  "prompt_sha": "4c6385fd943634ff0ca7f220de4ac888bc56cc2b6f92fd2ecd5002784e15ccea"
+}
