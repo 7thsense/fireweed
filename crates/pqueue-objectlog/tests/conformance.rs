@@ -17,6 +17,23 @@ pqueue_conformance::eventual_apply_suite!(
     || pqueue_objectlog::ObjectLogBackend::open(tmp_root()).expect("open object log")
 );
 
+/// Shared commit-transition scenario (governing bead pqueue-c42136f3) against the object-log backend.
+/// `ObjectLogBackend` keeps the all-false default `CommitCapabilities` (NON-SCOPE: no real
+/// `CommitTransitionPort` behavior for this eventual-apply class), so the shared scenario's capability
+/// check routes it through the decline path — proving objectlog's decline behavior against the SAME
+/// conformance contract every other backend runs, not just the bespoke coverage in
+/// `hot_projection_queries.rs`. Each invocation opens a fresh temp-directory root (no shared durable
+/// state between scenario runs).
+#[tokio::test]
+async fn commit_transition_shared_scenario_declines_for_objectlog() {
+    use pqueue_conformance::scenarios::commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen;
+
+    commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(|| {
+        pqueue_objectlog::ObjectLogBackend::open(tmp_root()).expect("open object log")
+    })
+    .await;
+}
+
 /// ADR-012 Phase 1b-i: the SAME shared eventual-apply suite against the COMPOSED object-log backend
 /// (`ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>` over the production segmented
 /// group-commit substrate). Passing identically to the monolith above proves the orthogonal composition is
