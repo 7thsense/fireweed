@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260703T020421-152f2d29",
+  "bead_id": "pqueue-0ef6807b",
+  "base_rev": "b1602fcb710e4e4eca3c1037a8e6ea24b66813e3",
+  "created_at": "2026-07-03T02:04:21.973534832Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-0ef6807b",
+    "title": "Add explicit-decline tests for commit-transition on postgres and objectlog",
+    "description": "PROBLEM\nPostgresBackend, PostgresRelationalBackend, and ObjectLogBackend all inherit CommitTransitionPort's Unavailable default via an empty `impl CommitTransitionPort for X {}` (crates/pqueue-postgres/src/lib.rs:904, crates/pqueue-postgres/src/relational.rs:3455, crates/pqueue-objectlog/src/lib.rs:1047). None of them has a single test proving this -- not even a negative one. This is a quick, independent stop-gap ahead of the fuller conformance-harness refactor (sibling epic beads): lock today's known-good \"explicitly declines\" state in as an asserted, checkable fact so a future silent regression (e.g. someone flips a capability flag to true without wiring real behavior) fails CI immediately.\n\nPROPOSED FIX\nAdd one test per backend, following the existing `hot_projection_capabilities_are_explicit` convention (crates/pqueue-postgres/tests/hot_projection_queries.rs) that:\n1. Asserts `commit_capabilities() == CommitCapabilities::default()` (all-false, `DurabilityClass::EventualApply`).\n2. Calls commit_transition, explain_commit, and side_record and asserts each returns `Err(EngineError::Unavailable)`.\n\nIN-SCOPE FILES\n- crates/pqueue-postgres/tests/ (new test file or addition to an existing one, for both PostgresBackend and PostgresRelationalBackend)\n- crates/pqueue-objectlog/tests/ (new test file or addition to an existing one)\n\nOUT-OF-SCOPE\n- Implementing real CommitTransitionPort behavior for any backend (separate epic).\n- Folding this into the shared pqueue-conformance harness (sibling bead in this epic).",
+    "acceptance": "1. `cargo test -p pqueue-postgres commit_transition_capabilities_are_explicit` passes for both PostgresBackend and PostgresRelationalBackend (or equivalently named tests covering both).\n2. `cargo test -p pqueue-objectlog commit_transition_capabilities_are_explicit` passes.\n3. `rg -n 'CommitCapabilities::default\\(\\)' crates/pqueue-postgres/tests crates/pqueue-objectlog/tests` finds the new assertions.\n4. `cargo fmt --check` passes.",
+    "parent": "pqueue-54039317",
+    "labels": [
+      "area:testing",
+      "area:conformance",
+      "kind:test",
+      "backend:postgres",
+      "backend:objectlog",
+      "system:pqueue"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T020421-152f2d29",
+    "prompt": ".ddx/executions/20260703T020421-152f2d29/prompt.md",
+    "manifest": ".ddx/executions/20260703T020421-152f2d29/manifest.json",
+    "result": ".ddx/executions/20260703T020421-152f2d29/result.json",
+    "checks": ".ddx/executions/20260703T020421-152f2d29/checks.json",
+    "usage": ".ddx/executions/20260703T020421-152f2d29/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-0ef6807b-20260703T020421-152f2d29"
+  },
+  "prompt_sha": "c9ed5d5b49dcfa936483cd8b603e582db75fa586238866e058c111bb23041d72"
+}
