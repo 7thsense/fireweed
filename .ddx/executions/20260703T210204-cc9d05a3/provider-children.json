@@ -1,0 +1,25 @@
+{
+  "attempt_id": "20260703T210204-cc9d05a3",
+  "bead_id": "pqueue-6f8d85db",
+  "trigger": "superseded_provider_child",
+  "active_route": "claude",
+  "scanned_at": "2026-07-03T21:02:10.992055447Z",
+  "survivors": [
+    {
+      "pid": 1575012,
+      "provider": "claude",
+      "harness": "claude",
+      "age_seconds": 0
+    }
+  ],
+  "reaped": [
+    {
+      "pid": 1573885,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 6,
+      "action": "terminated",
+      "reason": "superseded_provider_child"
+    }
+  ]
+}
