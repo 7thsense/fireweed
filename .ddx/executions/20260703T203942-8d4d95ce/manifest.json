@@ -1,0 +1,31 @@
+{
+  "attempt_id": "20260703T203942-8d4d95ce",
+  "bead_id": "pqueue-08222258",
+  "base_rev": "75ca78b0bf334f432d250ab60e152c2c87454065",
+  "created_at": "2026-07-03T20:39:43.032591386Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-08222258",
+    "title": "Land ADR-013: the log is the single source of truth; relational projections become rebuildable views",
+    "description": "PROBLEM\nTwo contradictory durability contracts share the pqueue-postgres crate: log-authoritative (lib.rs:6-13) vs DB-authoritative (relational.rs:3,983-987,2767 — \"pqueue_items is DB-authoritative\", \"nothing to replay\"). This blocks branch-at-position, read-as-of-position, and change-record emission guarantees for the relational family. Operator decision (2026-07-03): the log is the system of truth, period; the Postgres projection is just another projection; a null-log mode may exist with expected, documented functionality loss.\n\nCURRENT STATE\nDraft ADR exists at docs/helix/02-design/adr/ADR-013-log-single-source-of-truth.md (status Proposed). ADR-001:123-130 already states the intent; ADR-008 legitimized the drift as \"two projection families.\"\n\nPROPOSED FIX\nReview, finalize, and mark ADR-013 accepted: relational family becomes a materialized cache with persisted applied-high-water, must implement recovery_high_water + tail replay, \"authoritative\" language retired; null-log mode documented as named/telemetry-surfaced degraded configuration with the five enumerated losses. Add amendment notes to ADR-001 and ADR-008 pointing at ADR-013. Code migration of relational.rs is follow-up work derived from the accepted ADR, not this bead.\n\nNON-SCOPE\n- relational.rs code migration (file follow-up beads after acceptance).\n- Implementing null-log mode.",
+    "acceptance": "1. docs/helix/02-design/adr/ADR-013-log-single-source-of-truth.md finalized with Status: Accepted, stating the relational-projection change and the five null-log losses (no replay, no branch, no read-as-of, no emission guarantee, weakened idempotency recovery).\n2. ADR-001 and ADR-008 carry amendment cross-references to ADR-013.\n3. Follow-up implementation beads for the relational rebuild-from-log migration are listed in the ADR as derived work (not filed by this bead).\n4. Repo docs checks pass.",
+    "labels": [
+      "helix",
+      "activity:design",
+      "kind:adr",
+      "area:docs"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T203942-8d4d95ce",
+    "prompt": ".ddx/executions/20260703T203942-8d4d95ce/prompt.md",
+    "manifest": ".ddx/executions/20260703T203942-8d4d95ce/manifest.json",
+    "result": ".ddx/executions/20260703T203942-8d4d95ce/result.json",
+    "checks": ".ddx/executions/20260703T203942-8d4d95ce/checks.json",
+    "usage": ".ddx/executions/20260703T203942-8d4d95ce/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-08222258-20260703T203942-8d4d95ce"
+  },
+  "prompt_sha": "f788d4e5084703b82e0ea4b1401ed9395698c043684af6e1e6b1b57ebfc95363"
+}
