@@ -1,0 +1,53 @@
+{
+  "attempt_id": "20260703T021448-2a94521d",
+  "bead_id": "pqueue-c42136f3",
+  "base_rev": "07868cd0b66f3289cdfa1a1898af1c10f9227f7f",
+  "created_at": "2026-07-03T02:14:48.724327746Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-c42136f3",
+    "title": "Extract commit-transition scenarios into shared pqueue-conformance scenarios",
+    "description": "PROBLEM\nThe behavioral proof that CommitTransitionPort actually works (side records written, lifecycle items enqueued, instance fence advanced, claim finalized, all atomically; request-id replay/conflict; recovery reads) lives only in crates/pqueue-sqlite/tests/relational_commit.rs (7 tests) and crates/pqueue-memory/src/tests.rs (14 tests), copy-pasted per backend rather than shared. A new backend (or postgres, once it implements this port) would need someone to remember to copy/adapt these tests by hand.\n\nPROPOSED FIX\nAdd scenario functions to crates/pqueue-conformance/src/scenarios.rs generalizing the sqlite/memory tests: writes side records + enqueues lifecycle items + advances instance fence + finalizes claim atomically; rejects bad token/version without writing; request-id replay does not double-write; explain_commit recovers the transition and survives reopen. Gate each scenario on the backend's advertised `commit_capabilities()`: when a capability is true, run the full positive scenario; when false, run the decline-consistency check from the sibling bead (pqueue-0ef6807b) instead, so the SAME call site exercises whichever path is correct for that backend -- no separate \"skip\" branching left to the test author.\nExtend ConformanceBackend (or add a sibling trait, e.g. ConformanceCommitTransition: ConformanceBackend + CommitTransitionPort + RecoveryReadPort) so any backend that already runs the shared conformance macros picks this up automatically.\n\nIN-SCOPE FILES\n- crates/pqueue-conformance/src/scenarios.rs\n- crates/pqueue-conformance/src/lib.rs (new trait bound / macro if needed)\n\nOUT-OF-SCOPE\n- Wiring the new scenario into each backend's test files (next bead).\n- Deleting the existing sqlite/memory bespoke test files in this bead (do that in the wiring bead once the shared version is proven equivalent, to avoid a window with no coverage).",
+    "acceptance": "1. `rg -n 'fn commit_transition' crates/pqueue-conformance/src/scenarios.rs` finds new capability-gated scenario function(s).\n2. A local invocation of the new scenario against `pqueue_sqlite::composed_sqlite_relational_backend` (or equivalent) passes and reproduces the same assertions as the existing crates/pqueue-sqlite/tests/relational_commit.rs suite.\n3. `cargo test -p pqueue-conformance` (or the crate exercising the new scenario) passes.\n4. `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-54039317",
+    "labels": [
+      "area:testing",
+      "area:conformance",
+      "kind:refactor",
+      "system:pqueue",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"`rg -n 'fn commit_transition' crates/pqueue-conformance/src/scenarios.rs` finds new capability-gated scenario function(s).\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"A local invocation of the new scenario against `pqueue_sqlite::composed_sqlite_relational_backend` (or equivalent) passes and reproduces the same assertions as the existing crates/pqueue-sqlite/tests/relational_commit.rs suite.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"`cargo test -p pqueue-conformance` (or the crate exercising the new scenario) passes.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":4,\"text\":\"`cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T02:09:43.310947862Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/4"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness check timed out after 5m0s (pqueue-c42136f3)\",\"fingerprint\":\"fee66d0488f56c040482f3abd542d065ca4609a6bac3a9cf6f86657b8a498432\",\"policy_mode\":\"warn-only\",\"reason\":\"timeout\",\"rule_id\":\"pre_claim_intake.timeout\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"fee66d0488f56c040482f3abd542d065ca4609a6bac3a9cf6f86657b8a498432\"}",
+          "created_at": "2026-07-03T02:14:43.295706539Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "timeout"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T021448-2a94521d",
+    "prompt": ".ddx/executions/20260703T021448-2a94521d/prompt.md",
+    "manifest": ".ddx/executions/20260703T021448-2a94521d/manifest.json",
+    "result": ".ddx/executions/20260703T021448-2a94521d/result.json",
+    "checks": ".ddx/executions/20260703T021448-2a94521d/checks.json",
+    "usage": ".ddx/executions/20260703T021448-2a94521d/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-c42136f3-20260703T021448-2a94521d"
+  },
+  "prompt_sha": "308444a301e96c45b73980580715f59a7a631c223b6b43dd714b28640d12f6b0"
+}
