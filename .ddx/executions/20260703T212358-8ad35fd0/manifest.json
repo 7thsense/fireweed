@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260703T212358-8ad35fd0",
+  "bead_id": "pqueue-45d2fac7",
+  "base_rev": "c760fced61aea207efec7525eb5642c77a141a45",
+  "created_at": "2026-07-03T21:23:58.64222475Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-45d2fac7",
+    "title": "Couple terminal reap to the emission frontier and expose emission lag metrics",
+    "description": "PROBLEM\nA terminal item reaped before its terminal change record is durably emitted silently drops the terminal transition from downstream history — the subtlest correctness rule in TD-008. Separately, emission lag must be observable so operators can see history debt.\n\nCURRENT STATE\n- Terminal reap is governed by terminal_retention_ms alone (crates/pqueue-core/src/domain.rs:599,631; purge/tombstone paths in the relational stores).\n- Debt-metric pattern to mirror: TD-004 async-apply debt metrics.\n- Emission cursor lands with the engine foundation bead.\n\nPROPOSED FIX\nPer TD-008 Retention section: reap frontier = min(terminal_at + retention, emission_cursor_position) — a terminal item past retention is NOT reaped while the emission cursor is behind its terminal record; it becomes reapable once the cursor durably passes it. Queues with emit_change_records=false keep the pure retention frontier. Add emission_lag_commands and emission_oldest_unemitted_age_ms metrics, plus a resident-terminal-count metric so the 1h-retention memory cost is visible.\n\nNON-SCOPE\n- Sink/transport (sibling bead). Retention default change (already its own bead).",
+    "acceptance": "1. reap_waits_for_emission: a terminal item past terminal_retention_ms is NOT reaped while the emission cursor is behind its position, and is reaped after the cursor passes. cargo test -p pqueue-projection reap_waits_for_emission\n2. reap_ignores_emission_when_disabled: with emit_change_records=false the pure retention frontier applies. cargo test -p pqueue-projection reap_ignores_emission_when_disabled\n3. Metrics assertions: emission lag and resident-terminal-count are observable and bounded in the test scenario.\n4. cargo test -p pqueue-projection passes.",
+    "labels": [
+      "activity:build",
+      "kind:build",
+      "area:pqueue-projection",
+      "suite:hybrid_async",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"reap_waits_for_emission: a terminal item past terminal_retention_ms is NOT reaped while the emission cursor is behind its position, and is reaped after the cursor passes. cargo test -p pqueue-projection reap_waits_for_emission\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"reap_ignores_emission_when_disabled: with emit_change_records=false the pure retention frontier applies. cargo test -p pqueue-projection reap_ignores_emission_when_disabled\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":3,\"text\":\"Metrics assertions: emission lag and resident-terminal-count are observable and bounded in the test scenario.\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":4,\"text\":\"cargo test -p pqueue-projection passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T21:22:07.926405345Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.00 threshold=0.50 verifiable=0/4"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T212358-8ad35fd0",
+    "prompt": ".ddx/executions/20260703T212358-8ad35fd0/prompt.md",
+    "manifest": ".ddx/executions/20260703T212358-8ad35fd0/manifest.json",
+    "result": ".ddx/executions/20260703T212358-8ad35fd0/result.json",
+    "checks": ".ddx/executions/20260703T212358-8ad35fd0/checks.json",
+    "usage": ".ddx/executions/20260703T212358-8ad35fd0/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-45d2fac7-20260703T212358-8ad35fd0"
+  },
+  "prompt_sha": "749c6cc437f835707425ed91317052ffb9509911c09ad672f54a5c92a02726ce"
+}
