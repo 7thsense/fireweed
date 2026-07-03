@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260703T055249-7ebac23f",
+  "bead_id": "pqueue-0e079d1b",
+  "base_rev": "514a2531a5019641cc8119ee999bf7eadd36a173",
+  "created_at": "2026-07-03T05:52:49.708909444Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-0e079d1b",
+    "title": "Document the cross-backend scenario rule for new engine ports",
+    "description": "PROBLEM\nNothing written down told the epic that shipped CommitTransitionPort (pqueue-2201fd37) that a new port needs a pqueue-conformance scenario, not a bespoke per-backend test file. The crate-level \"no-stub\" philosophy is documented (crates/pqueue-conformance/src/lib.rs module doc) but does not say this explicitly, so the same gap can recur for the next new port (e.g. a future DiscoveryPort-style addition).\n\nPROPOSED FIX\nAdd a short, explicit rule to the pqueue-conformance module doc (crates/pqueue-conformance/src/lib.rs top comment, alongside the existing conformance matrix table): any new engine port intended for more than one backend MUST add a capability-gated scenario to pqueue-conformance (positive behavioral proof when advertised, explicit-decline + capability-flag-consistency proof when not) rather than a bespoke test file scoped to a single backend crate. Cite the CommitTransitionPort gap (this epic) as the concrete precedent for why the rule exists.\n\nIN-SCOPE FILES\n- crates/pqueue-conformance/src/lib.rs (module doc only)\n\nOUT-OF-SCOPE\n- Any code changes.\n- Auditing other ports for the same gap (separate follow-up if wanted; the hot-projection substrate's `*_capabilities_are_explicit` convention is already a reasonable analog, not this bead's problem to re-litigate).",
+    "acceptance": "1. `rg -n 'MUST add a.*scenario|conformance scenario' crates/pqueue-conformance/src/lib.rs` finds the new rule text.\n2. `cargo fmt --check` passes (doc-comment-only change, but keep the gate for consistency).",
+    "parent": "pqueue-54039317",
+    "labels": [
+      "area:testing",
+      "area:conformance",
+      "kind:docs",
+      "system:pqueue"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T055249-7ebac23f",
+    "prompt": ".ddx/executions/20260703T055249-7ebac23f/prompt.md",
+    "manifest": ".ddx/executions/20260703T055249-7ebac23f/manifest.json",
+    "result": ".ddx/executions/20260703T055249-7ebac23f/result.json",
+    "checks": ".ddx/executions/20260703T055249-7ebac23f/checks.json",
+    "usage": ".ddx/executions/20260703T055249-7ebac23f/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-0e079d1b-20260703T055249-7ebac23f"
+  },
+  "prompt_sha": "c6436f48b70055558f9a6958b530613d00b517e187b1564eeb9ea7ddc28e77b2"
+}
