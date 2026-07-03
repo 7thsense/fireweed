@@ -195,3 +195,29 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_log() {
         }
     }
 }
+
+#[test]
+fn commit_transition_shared_scenario_runs_against_postgres_log_replay() {
+    use pqueue_conformance::scenarios::commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen;
+
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let make = || {
+                    PostgresBackend::connect_in_schema(&url, &schema)
+                        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                };
+                commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(
+                    make,
+                )
+                .await;
+            });
+        }
+        Err(_) => {
+            eprintln!(
+                "POSTGRES CONFORMANCE SKIPPED (commit_transition_shared_scenario_runs_against_postgres_log_replay) — set PQUEUE_PG_TEST_URL to a live DB"
+            );
+        }
+    }
+}

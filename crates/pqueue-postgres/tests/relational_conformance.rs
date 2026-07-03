@@ -211,6 +211,32 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_relationa
     }
 }
 
+#[test]
+fn commit_transition_shared_scenario_runs_against_postgres_relational() {
+    use pqueue_conformance::scenarios::commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen;
+
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let make = || {
+                    PostgresRelationalBackend::connect_in_schema(&url, &schema)
+                        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                };
+                commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(
+                    make,
+                )
+                .await;
+            });
+        }
+        Err(_) => {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_shared_scenario_runs_against_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ADR-011 typed secondary index conformance — postgres relational backend
 // These tests mirror pqueue-sqlite/tests/relational_conformance.rs §9 and are
