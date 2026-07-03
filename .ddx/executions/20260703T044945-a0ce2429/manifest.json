@@ -1,0 +1,76 @@
+{
+  "attempt_id": "20260703T044945-a0ce2429",
+  "bead_id": "pqueue-3cfb6cc6",
+  "base_rev": "6d7ae60727f8fc87865cf10c9a30a13e772f16a5",
+  "created_at": "2026-07-03T04:49:46.098818491Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-3cfb6cc6",
+    "title": "Remove redundant sqlite-relational bespoke positive commit-transition test",
+    "description": "PROBLEM\nAfter the shared commit-transition scenario from governing artifact/dependency pqueue-c42136f3 is wired into sqlite-relational coverage, the bespoke sqlite-relational positive-path test remains and may duplicate or diverge from the shared contract.\n\nROOT CAUSE\ncrates/pqueue-sqlite/tests/relational_commit.rs:134 defines relational_commit_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen, a bespoke positive-path test intended to be covered by the shared scenario.\n\nPROPOSED FIX\nAfter pqueue-c42136f3 and the child bead wiring sqlite positive coverage are complete, delete only relational_commit_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen from crates/pqueue-sqlite/tests/relational_commit.rs. Confirm the shared sqlite-relational scenario covers side records, enqueue lifecycle, finalization, and reopen survival before deletion. Leave tests whose behavior is not covered by the shared scenario, including schema_validation_rejects_before_append_and_idempotency_on_sqlite_relational and other idempotency, bad-token/version, fence, capability, request-id propagation, or explain-commit coverage not proven redundant.\n\nNON-SCOPE\nDo not implement real CommitTransitionPort behavior for postgres/objectlog; that is a separate epic. Do not delete any bespoke test unless its exact behavior is covered by the shared harness. Do not delete schema_validation_rejects_before_append_and_idempotency_on_sqlite_relational. Do not relax any verification gate. Do not remove pqueue-0ef6807b postgres/objectlog bespoke decline tests in this bead unless the shared decline harness has already been wired and the deletion is proven behavior-preserving.\n\nDEPENDENCIES\nRequires pqueue-c42136f3 and completion of the child bead wiring sqlite positive coverage. Parent: pqueue-54039317. Split from parent bead pqueue-d2f0b763.",
+    "acceptance": "1. TestSqliteRelationalBespokePositiveRemoved: `rg -c 'fn relational_commit_writes_side_records' crates/pqueue-sqlite/tests/relational_commit.rs` returns `0` after the shared sqlite-relational scenario covers that positive path.\n2. TestSqliteNonScopeRetained: `rg -c 'fn schema_validation_rejects_before_append_and_idempotency_on_sqlite_relational' crates/pqueue-sqlite/tests/relational_commit.rs` returns `1`, and idempotency, bad-token/version, fence, capability, request-id propagation, and explain-commit tests not proven redundant remain present.\n3. TestCargoWorkspaceGate: `cargo test --workspace --all-targets --all-features` passes after the deletion.\n4. TestGoWorkspaceGate: `go test ./...` passes or is documented as not applicable because the repository has no Go packages.\n5. TestLefthookGate: `lefthook run pre-commit` passes.\n6. TestRustStyleGate: `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.",
+    "parent": "pqueue-e5c454a1",
+    "labels": [
+      "area:testing",
+      "area:conformance",
+      "kind:test",
+      "system:pqueue"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-03T04:10:57.64626057Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260703T035733-c9812417\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":5563563,\"output_tokens\":26628,\"total_tokens\":5590191,\"cost_usd\":0,\"duration_ms\":803153,\"exit_code\":0}",
+          "created_at": "2026-07-03T04:10:57.673780428Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=5590191 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260703T035733-c9812417\",\"bead_id\":\"pqueue-3cfb6cc6\",\"estimated_difficulty\":\"easy\",\"rejected_route_pins\":null,\"requested_power_class\":\"cheap\",\"requested_profile\":\"cheap\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"readiness\"}",
+          "created_at": "2026-07-03T04:10:58.479180661Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=readiness difficulty=easy powerClass=cheap model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"b9052c8d3a2057c190e3c5746209ad988fc4ba8b\",\"classification\":\"recoverable\",\"detail\":\"mixed_commit_and_no_changes_rationale\",\"rationale\":\"Attempt produced an implementation revision but failed lifecycle handling with mixed commit/no-change evidence; the reported blocker is environmental file-descriptor exhaustion during `go test ./...`, not bead-owned failing assertions.\",\"recommended_action\":\"release_claim_wait_retry\",\"result_rev\":\"394daf31874da41c0deb43f6823b681227153604\",\"session_id\":\"eb-a942a2fe\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-03T04:11:23.873498495Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "recoverable: release_claim_wait_retry"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\npowerClass=cheap\nrationale: status: blocked\nreason: `go test ./...` fails in this environment with `too many open files` while running `TestDeploymentReleaseGateRunsBothBackendsWhenToolsExist` and the related deployment-proof tests; the nested release-gate subprocesses exhaust file descriptors before the Go suite can complete.\ndecision_audit={\"failure_class\":\"recoverable\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"cheap\",\"routing_intent_source\":\"readiness\",\"estimated_difficulty\":\"easy\",\"inferred_power_class\":\"cheap\",\"requested_power_class\":\"cheap\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"readiness\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=394daf31874da41c0deb43f6823b681227153604\nbase_rev=b9052c8d3a2057c190e3c5746209ad988fc4ba8b\noutcome_reason=recoverable",
+          "created_at": "2026-07-03T04:11:23.910339501Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260703T044945-a0ce2429",
+    "prompt": ".ddx/executions/20260703T044945-a0ce2429/prompt.md",
+    "manifest": ".ddx/executions/20260703T044945-a0ce2429/manifest.json",
+    "result": ".ddx/executions/20260703T044945-a0ce2429/result.json",
+    "checks": ".ddx/executions/20260703T044945-a0ce2429/checks.json",
+    "usage": ".ddx/executions/20260703T044945-a0ce2429/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-3cfb6cc6-20260703T044945-a0ce2429"
+  },
+  "prompt_sha": "6798c06c2adf94ea4b236d0da9f37e184dcad5d0d7fcab52d81e210f579c0e10"
+}
