@@ -650,7 +650,7 @@ pub struct QueueDefinition {
 }
 
 fn default_terminal_retention_ms() -> u64 {
-    60_000
+    3_600_000
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1478,7 +1478,7 @@ mod coverage_tests {
     #[test]
     fn small_helpers_and_constructors() {
         assert_eq!(default_max_rank_error(), 0);
-        assert_eq!(default_terminal_retention_ms(), 60_000);
+        assert_eq!(default_terminal_retention_ms(), 3_600_000);
 
         let mut entries = BTreeMap::new();
         entries.insert("k".to_string(), MetadataValue::Bool(true));
@@ -1629,14 +1629,14 @@ mod coverage_tests {
         // A persisted definition missing terminal_retention_ms must rehydrate via the
         // serde default (exercising default_terminal_retention_ms through serde).
         let mut request = valid_create_queue();
-        request.terminal_retention_ms = 60_000;
+        request.terminal_retention_ms = 3_600_000;
         let definition = request.validate(&policy()).unwrap();
         let mut json: serde_json::Value = serde_json::to_value(&definition).unwrap();
         json.as_object_mut()
             .unwrap()
             .remove("terminal_retention_ms");
         let restored: QueueDefinition = serde_json::from_value(json).unwrap();
-        assert_eq!(restored.terminal_retention_ms, 60_000);
+        assert_eq!(restored.terminal_retention_ms, 3_600_000);
     }
 
     #[test]
