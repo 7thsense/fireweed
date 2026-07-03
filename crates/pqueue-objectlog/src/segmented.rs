@@ -1194,6 +1194,37 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
     }
 
+    /// The newest snapshot at or before `position`, or `None`.
+    pub fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> EngineResult<Option<(String, CommandPosition)>> {
+        let prefix = format!("{}snap/", shard_prefix(shard));
+        let mut best: Option<(u64, String, CommandPosition)> = None;
+        for key in self.store_list(&prefix)? {
+            let ref_id = key
+                .rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".json"))
+                .unwrap_or("");
+            let Some(n) = ref_id
+                .strip_prefix("snap-")
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let blob = self.read_snapshot_blob(shard, ref_id)?;
+            let snapshot_position = CommandPosition::new(shard.clone(), blob.epoch, blob.seq);
+            if snapshot_position.precedes(position) || snapshot_position == *position {
+                if best.as_ref().is_none_or(|(bn, _, _)| n > *bn) {
+                    best = Some((n, ref_id.to_string(), snapshot_position));
+                }
+            }
+        }
+        Ok(best.map(|(_, ref_id, position)| (ref_id, position)))
+    }
+
     /// Read a snapshot's payload by ref id.
     pub fn read_snapshot(&self, shard: &QueueKey, ref_id: &str) -> EngineResult<Vec<u8>> {
         Ok(self.read_snapshot_blob(shard, ref_id)?.payload)

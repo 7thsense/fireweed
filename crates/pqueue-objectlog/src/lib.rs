@@ -53,9 +53,9 @@ use pqueue_engine::{
     RenewLeaseCommand, RenewLeasePort, RequestOutcome, SnapshotRef, SnapshotStore, TickReport,
     UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
     require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
-    validate_purge_force,
+    validate_purge_force, HistoricalProjectionRead,
 };
-use pqueue_projection::ProjectionData;
+use pqueue_projection::{ProjectionData, ProjectionImage};
 
 fn store<E: std::fmt::Display>(e: E) -> EngineError {
     EngineError::Storage(e.to_string())
@@ -1628,6 +1628,46 @@ impl SnapshotStore for ObjectLogBackend {
         std::future::ready(result)
     }
 
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let snap_dir = g.shard_dir(shard).join("snapshots");
+            if !snap_dir.exists() {
+                return Ok(None);
+            }
+            let mut best: Option<(usize, SnapshotObject, String)> = None;
+            for entry in fs::read_dir(&snap_dir).map_err(store)? {
+                let path = entry.map_err(store)?.path();
+                let Some(ref_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let n = ref_id
+                    .strip_prefix("snap-")
+                    .and_then(|s| s.parse::<usize>().ok());
+                let obj: SnapshotObject =
+                    serde_json::from_str(&fs::read_to_string(&path).map_err(store)?)
+                        .map_err(store)?;
+                let pos = CommandPosition::new(shard.clone(), obj.epoch, obj.seq);
+                if pos.precedes(position) || pos == *position {
+                    let n = n.unwrap_or(0);
+                    if best.as_ref().map(|(bn, _, _)| n >= *bn).unwrap_or(true) {
+                        best = Some((n, obj, ref_id.to_string()));
+                    }
+                }
+            }
+            Ok(best.map(|(_, obj, ref_id)| SnapshotRef {
+                queue: shard.clone(),
+                position: CommandPosition::new(shard.clone(), obj.epoch, obj.seq),
+                ref_id,
+            }))
+        })();
+        std::future::ready(result)
+    }
+
     fn read_snapshot(
         &self,
         snapshot_ref: &SnapshotRef,
@@ -1683,6 +1723,87 @@ impl SnapshotStore for ObjectLogBackend {
             )
             .map_err(store)?;
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl HistoricalProjectionRead for ObjectLogBackend {
+    type AsOfProjection = ProjectionData;
+
+    fn current_position(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
+        let result = (|| futures::executor::block_on(self.high_water(shard))?
+            .ok_or(EngineError::NotFound))();
+        std::future::ready(result)
+    }
+
+    fn read_as_of<T, F>(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        query: F,
+    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    where
+        T: Send,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
+    {
+        let result = (|| {
+            let definition = {
+                let g = self.inner.lock().expect("poisoned");
+                g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
+            };
+            let snapshot_ref =
+                futures::executor::block_on(self.snapshot_at_or_before(shard, &position))?;
+            let snapshot = match snapshot_ref.as_ref() {
+                Some(snapshot_ref) => {
+                    Some(futures::executor::block_on(self.read_snapshot(snapshot_ref))?)
+                }
+                None => None,
+            };
+            let mut as_of = if let Some(snapshot) = snapshot {
+                let image = ProjectionImage::from_bytes(&snapshot.payload)?;
+                ProjectionData::from_image(&definition, image)?
+            } else {
+                let mut projection = ProjectionData::new(
+                    definition.priority_model,
+                    definition.ordering_mode,
+                    definition.max_rank_error,
+                    definition.recurrence,
+                    &definition.secondary_indexes,
+                )
+                .with_typed_indexes(&definition.typed_indexes);
+                projection
+            };
+            let mut from = snapshot_ref.map(|s| s.position);
+            loop {
+                let page = futures::executor::block_on(self.read_from(shard, from.clone(), 8192))?;
+                if page.entries.is_empty() {
+                    break;
+                }
+                let mut positions = Vec::new();
+                let mut envelopes = Vec::new();
+                let mut reached_target = false;
+                for (entry_position, env) in page.entries {
+                    if entry_position == position || entry_position.precedes(&position) {
+                        positions.push(entry_position.clone());
+                        envelopes.push(env);
+                    } else {
+                        reached_target = true;
+                        break;
+                    }
+                }
+                if !positions.is_empty() {
+                    as_of.apply_recovery(&positions, &envelopes)?;
+                }
+                if reached_target || page.next.is_none() {
+                    break;
+                }
+                from = page.next;
+            }
+            query(&as_of)
         })();
         std::future::ready(result)
     }

@@ -74,11 +74,11 @@ use pqueue_engine::{
     ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand,
     UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
     compile_entity_schema, project_scopes, validate_claim_compatibility, validate_entity,
-    validate_gate_push, validate_instance_fence, validate_purge_force,
+    validate_gate_push, validate_instance_fence, validate_purge_force, HistoricalProjectionRead,
 };
 use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
-    ProjectionStore, SnapshotRef,
+    ProjectionStore, SnapshotRef, AsOfProjectionStore,
 };
 use sha2::{Digest, Sha256};
 
@@ -4721,6 +4721,47 @@ impl LogStore for PostgresRelational {
     }
 }
 
+impl HistoricalProjectionRead for PostgresRelationalBackend {
+    type AsOfProjection = PostgresRelational;
+
+    fn current_position(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let (t, q) = parts(shard);
+            let row: Option<postgres::Row> = st(g.client.query_opt(
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?;
+            row.map(|row| {
+                let next: i64 = row.get(0);
+                let epoch: i64 = row.get(1);
+                (next > 0).then(|| {
+                    CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1)
+                })
+            })
+            .flatten()
+            .ok_or(EngineError::NotFound)
+        })();
+        std::future::ready(result)
+    }
+
+    fn read_as_of<T, F>(
+        &self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+        _query: F,
+    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    where
+        T: Send,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
 impl ProjectionStore for PostgresRelational {
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         let mut g = self.lock();
@@ -4974,6 +5015,18 @@ impl ProjectionStore for PostgresRelational {
         _index: &str,
         _key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
+        Err(EngineError::Unavailable)
+    }
+}
+
+impl AsOfProjectionStore for PostgresRelational {
+    type AsOfProjection = PostgresRelational;
+
+    fn reconstruct_as_of(
+        &self,
+        _definition: &QueueDefinition,
+        _snapshot: Option<ProjectionSnapshot>,
+    ) -> EngineResult<Self::AsOfProjection> {
         Err(EngineError::Unavailable)
     }
 }

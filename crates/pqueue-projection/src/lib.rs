@@ -81,7 +81,7 @@ struct ItemRecord {
 }
 
 /// Portable, typed representation of one item in a [`ProjectionImage`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectionImageItem {
     pub item_id: ItemId,
     pub client_item_key: ClientItemKey,
@@ -174,7 +174,7 @@ pub struct TerminalEmissionMetrics {
 ///
 /// The item list is the source of truth for lifecycle, ordering, fields, payloads, metadata, gates,
 /// entity documents, lease state, secondary indexes, and metrics. Derived maps are rebuilt on import.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectionImage {
     pub high_water: Option<CommandPosition>,
     pub paused: bool,
@@ -183,6 +183,16 @@ pub struct ProjectionImage {
     pub side_records: BTreeMap<Vec<u8>, Bytes>,
     pub instance_fences: BTreeMap<Vec<u8>, u64>,
     pub metrics: QueueMetrics,
+}
+
+impl ProjectionImage {
+    pub fn to_bytes(&self) -> EngineResult<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|e| EngineError::Storage(e.to_string()))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> EngineResult<Self> {
+        serde_json::from_slice(bytes).map_err(|e| EngineError::Storage(e.to_string()))
+    }
 }
 
 impl ItemRecord {
@@ -1156,6 +1166,14 @@ impl LogData {
 
     pub fn latest_snapshot(&self) -> Option<SnapshotRef> {
         self.snapshots.last().map(|(r, _)| r.clone())
+    }
+
+    pub fn snapshot_at_or_before(&self, position: &CommandPosition) -> Option<SnapshotRef> {
+        self.snapshots
+            .iter()
+            .rev()
+            .find(|(r, _)| r.position.precedes(position) || r.position == *position)
+            .map(|(r, _)| r.clone())
     }
 
     pub fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {

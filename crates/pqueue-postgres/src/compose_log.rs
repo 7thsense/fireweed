@@ -345,6 +345,35 @@ impl LogStore for PostgresLog {
         }))
     }
 
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> EngineResult<Option<SnapshotRef>> {
+        let (t, q) = parts(shard);
+        let row = st(self.client.borrow_mut().query_opt(
+            "SELECT ref_id, epoch, seq FROM snapshots \
+             WHERE tenant=$1 AND queue=$2 AND (epoch, seq) <= ($3, $4) \
+             ORDER BY epoch DESC, seq DESC LIMIT 1",
+            &[
+                &t,
+                &q,
+                &(position.backend_epoch as i64),
+                &(position.sequence as i64),
+            ],
+        ))?;
+        Ok(row.map(|row| {
+            let ref_id: String = row.get(0);
+            let epoch: i64 = row.get(1);
+            let seq: i64 = row.get(2);
+            SnapshotRef {
+                queue: shard.clone(),
+                position: CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
+                ref_id,
+            }
+        }))
+    }
+
     fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
         let (t, q) = parts(&snapshot_ref.queue);
         let row = st(self.client.borrow_mut().query_opt(

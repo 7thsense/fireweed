@@ -1241,7 +1241,10 @@ version = "0.8.0"
 dependencies = [
  "axon-esf",
  "bytes",
+ "futures",
+ "pqueue-conformance",
  "pqueue-core",
+ "pqueue-projection",
  "serde",
  "serde_json",
  "sha2",
@@ -1275,6 +1278,7 @@ name = "pqueue-objectlog"
 version = "0.8.0"
 dependencies = [
  "bytes",
+ "futures",
  "postcard",
  "pqueue-conformance",
  "pqueue-core",

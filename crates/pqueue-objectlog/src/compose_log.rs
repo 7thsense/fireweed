@@ -180,6 +180,21 @@ impl LogStore for ObjectLog {
             }))
     }
 
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> EngineResult<Option<SnapshotRef>> {
+        Ok(self
+            .log
+            .snapshot_at_or_before(shard, position)?
+            .map(|(ref_id, position)| SnapshotRef {
+                queue: shard.clone(),
+                position,
+                ref_id,
+            }))
+    }
+
     fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
         Ok(ProjectionSnapshot {
             payload: self
