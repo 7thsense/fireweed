@@ -2,7 +2,7 @@
 
 **ADR ID**: ADR-013
 **Title**: The durable command log is the single source of truth; every projection — including the relational family — is a rebuildable view
-**Status**: Proposed
+**Status**: Accepted
 **Related**: ADR-001 (CQRS log/projection — intent ratified), ADR-008 (queue as shard unit & two
 projection families — **amended**: the families remain, their authority claim does not), ADR-012
 (orthogonal composition), TD-007 (durability), TD-008 (change-record emission — depends on this ADR),
@@ -72,6 +72,18 @@ Enumerated losses, all traceable to the log being absent:
 - **Weakened idempotency/fence recovery** — request-id replay records and instance fences must be
   reconstructed from projection rows, not replayed; any gap in projection durability is a gap in the
   idempotency contract.
+
+## Derived implementation work
+
+The migration itself is intentionally out of scope for this ADR. The follow-up beads derived from this
+decision should be filed separately and linked back here:
+
+- Rework the relational backend recovery path so `recovery_high_water` returns the applied position and
+  replays the log tail instead of treating `pqueue_items` as durable truth.
+- Persist the relational family applied-high-water in both Postgres and sqlite relational projection
+  implementations so they are rebuildable caches rather than authoritative stores.
+- Add migration coverage for branch-at-position, read-as-of-position, and change-record emission against
+  the rebuilt-from-log relational family.
 
 ## Consequences
 

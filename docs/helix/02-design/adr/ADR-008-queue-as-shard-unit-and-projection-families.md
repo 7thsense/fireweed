@@ -18,7 +18,8 @@ ddx:
 **Status**: accepted
 **Related**: PRD (FR-13), ADR-001 (CQRS log/projection), ADR-004 (granularity & claim domain),
 ADR-007 (hexagonal & two interfaces), TD-001 (backend contracts), TD-002 (relational `postgres_native`),
-TD-003 (sharding & ownership), TD-006 (RESP), TD-007 (durability),
+TD-003 (sharding & ownership), TD-006 (RESP), TD-007 (durability), ADR-013 (single-source-of-truth
+amendment to the projection-family authority claim),
 `docs/helix/04-build/coordinated-log-relational-projection-plan.md`
 
 ## Context
