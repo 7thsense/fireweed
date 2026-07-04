@@ -25,7 +25,10 @@ fn owner(s: &str) -> OwnerId {
 
 /// Append `PauseQueue` under `expected_epoch` through the atomic write UoW; returns the fence outcome.
 async fn append_at(b: &ComposedMemoryBackend, epoch: u64) -> EngineResult<()> {
-    let env = envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]);
+    let env = envelope(
+        QueueCommand::PauseQueue(PauseQueueCommand::default()),
+        vec![],
+    );
     b.write(
         move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
             let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;

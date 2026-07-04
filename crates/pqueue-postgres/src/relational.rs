@@ -66,19 +66,20 @@ use pqueue_engine::{
     CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity,
     DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand,
-    FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort, ItemView,
-    LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter, PayloadUpdate, ProjectionRead,
-    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
-    compile_entity_schema, project_scopes, validate_claim_compatibility, validate_entity,
-    validate_gate_push, validate_instance_fence, validate_purge_force, HistoricalProjectionRead,
+    FinalizeKind, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IndexHit,
+    IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter,
+    PayloadUpdate, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
+    PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
+    TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
+    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
+    validate_purge_force,
 };
 use pqueue_engine::{
-    CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
-    ProjectionStore, SnapshotRef, AsOfProjectionStore,
+    AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogStore,
+    ProjectionSnapshot, ProjectionStore, SnapshotRef,
 };
 use sha2::{Digest, Sha256};
 
@@ -4742,9 +4743,8 @@ impl HistoricalProjectionRead for PostgresRelationalBackend {
             row.map(|row| {
                 let next: i64 = row.get(0);
                 let epoch: i64 = row.get(1);
-                (next > 0).then(|| {
-                    CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1)
-                })
+                (next > 0)
+                    .then(|| CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1))
             })
             .flatten()
             .ok_or(EngineError::NotFound)
@@ -5171,6 +5171,7 @@ mod gated_group_summary_tests {
             secondary_indexes: vec![],
             entity_schema: None,
             typed_indexes: vec![],
+            emit_change_records: true,
         }
     }
     fn shard() -> QueueKey {

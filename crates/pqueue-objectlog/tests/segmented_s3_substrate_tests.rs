@@ -422,10 +422,8 @@ fn branch_shares_segments_and_diverges() {
 
     let cut = CommandPosition::new(parent_shard.clone(), 0, 1);
     let branch_def = branch_qdef("shares");
-    let branch_shard = pqueue_engine::QueueKey::new(
-        branch_def.tenant_id.clone(),
-        branch_def.queue_id.clone(),
-    );
+    let branch_shard =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
     let branch_epoch = parent
         .branch(&parent_shard, &branch_def, &cut, 60_000, 20)
         .unwrap();
@@ -466,9 +464,7 @@ fn branch_shares_segments_and_diverges() {
         "branch creation does not duplicate parent segment objects"
     );
 
-    parent
-        .enqueue(&parent_shard, &pushes(1), 0, 30)
-        .unwrap();
+    parent.enqueue(&parent_shard, &pushes(1), 0, 30).unwrap();
     parent.seal(&parent_shard, 0, 31).unwrap();
     parent
         .enqueue(&branch_shard, &pushes(1), branch_epoch, 32)
@@ -505,10 +501,8 @@ fn branch_gets_own_lease_no_parent_fence_change() {
 
     let parent_epoch = log.current_epoch(&parent_shard).unwrap();
     let branch_def = branch_qdef("lease");
-    let branch_shard = pqueue_engine::QueueKey::new(
-        branch_def.tenant_id.clone(),
-        branch_def.queue_id.clone(),
-    );
+    let branch_shard =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
     let branch_epoch = log
         .branch(
             &parent_shard,
@@ -547,12 +541,11 @@ fn branch_suppresses_emission_by_default() {
         .unwrap();
     assert_eq!(branch_epoch, 1);
     assert!(
-        !log
-            .branch_emits_change_records(&pqueue_engine::QueueKey::new(
-                branch_def.tenant_id.clone(),
-                branch_def.queue_id.clone(),
-            ))
-            .unwrap(),
+        !log.branch_emits_change_records(&pqueue_engine::QueueKey::new(
+            branch_def.tenant_id.clone(),
+            branch_def.queue_id.clone(),
+        ))
+        .unwrap(),
         "branch activity is emission-suppressed unless explicitly enabled"
     );
 }
@@ -569,10 +562,8 @@ fn branch_pins_parent_segments_against_expiry() {
     log.seal(&parent_shard, 0, 11).unwrap();
 
     let branch_def = branch_qdef("pins");
-    let branch_shard = pqueue_engine::QueueKey::new(
-        branch_def.tenant_id.clone(),
-        branch_def.queue_id.clone(),
-    );
+    let branch_shard =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
     log.branch(
         &parent_shard,
         &branch_def,
@@ -583,7 +574,10 @@ fn branch_pins_parent_segments_against_expiry() {
     .unwrap();
 
     let deleted = log.expire_segments_through(&parent_shard, 3, 21).unwrap();
-    assert_eq!(deleted, 0, "live branch pins parent segments against expiry");
+    assert_eq!(
+        deleted, 0,
+        "live branch pins parent segments against expiry"
+    );
 
     let parent_seg_key = format!(
         "t/{}/q/{}/seg/00000000000000000000.seg",

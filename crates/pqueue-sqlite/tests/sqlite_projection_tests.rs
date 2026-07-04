@@ -8,8 +8,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
-    CommandPosition, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome, PauseQueueCommand,
-    ProjectionRead, PushCommand, PushItem, QueueCommand, SideRecord, WriteSideRecordsCommand,
+    CommandPosition, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    PauseQueueCommand, ProjectionRead, PushCommand, PushItem, QueueCommand, SideRecord,
+    WriteSideRecordsCommand,
 };
 use pqueue_projection::InMemoryProjection;
 use pqueue_sqlite::{HybridProjectionStore, SqliteProjectionStore};

@@ -17,13 +17,13 @@ use pqueue_core::{
     TenantId, UtcTimestamp, WorkerId,
 };
 
+use crate::ProjectionStore;
 use crate::claim_validation::ClaimCompatibility;
 use crate::command::{
     ChangeRecord, CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand,
     SideRecord,
 };
 use crate::error::{EngineError, EngineResult};
-use crate::ProjectionStore;
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
 // ---------------------------------------------------------------------------

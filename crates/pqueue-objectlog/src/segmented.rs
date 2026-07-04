@@ -1303,7 +1303,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             expires_at_ms: now_ms.saturating_add(ttl_ms as i64),
             emit_change_records,
         };
-        self.store_put(&format!("{branch_prefix}branch.json"), &to_json(&metadata)?, true)?;
+        self.store_put(
+            &format!("{branch_prefix}branch.json"),
+            &to_json(&metadata)?,
+            true,
+        )?;
         self.store_put(
             &branch_registry_key(source, &branch),
             &to_json(&metadata)?,

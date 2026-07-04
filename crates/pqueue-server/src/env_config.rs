@@ -20,8 +20,8 @@ use pqueue_core::{
 use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 
 use crate::{
-    BackendSpec, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL, LogSpec, ProjectionSpec,
-    SegmentConfig, resolve_node_id,
+    BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
+    LogSpec, ProjectionSpec, SegmentConfig, resolve_node_id,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -116,6 +116,72 @@ fn hybrid_async_thresholds(
         ),
     )
     .map_err(|e| ConfigError::new(format!("invalid hybrid-async threshold configuration: {e}")))
+}
+
+fn parse_bool(env: &BTreeMap<String, String>, key: &str, default: bool) -> bool {
+    env.get(key)
+        .and_then(|v| match v.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+fn change_record_sink_config(
+    env: &BTreeMap<String, String>,
+) -> Result<ChangeRecordSinkConfig, ConfigError> {
+    let mut config = ChangeRecordSinkConfig::default();
+    config.endpoint = env
+        .get("PQUEUE_CHANGE_RECORD_SINK_ENDPOINT")
+        .cloned()
+        .filter(|v| !v.trim().is_empty());
+    config.enabled = parse_bool(
+        env,
+        "PQUEUE_CHANGE_RECORD_SINK_ENABLED",
+        config.endpoint.is_some(),
+    );
+    config.tick_interval = parse_duration_ms(
+        env,
+        "PQUEUE_CHANGE_RECORD_SINK_TICK_INTERVAL_MS",
+        config.tick_interval.as_millis() as u64,
+    );
+    config.batch_size = parse_usize(
+        env,
+        "PQUEUE_CHANGE_RECORD_SINK_BATCH_SIZE",
+        config.batch_size,
+    );
+    if let Some(value) = env
+        .get("PQUEUE_CHANGE_RECORD_SINK_AUTHORIZATION")
+        .cloned()
+        .filter(|v| !v.trim().is_empty())
+    {
+        config.headers.insert("authorization".to_string(), value);
+    }
+    for (key, value) in env {
+        if let Some(name) = key.strip_prefix("PQUEUE_CHANGE_RECORD_SINK_HEADER_") {
+            if !value.trim().is_empty() {
+                let header = name.replace('_', "-").to_ascii_lowercase();
+                config.headers.insert(header, value.clone());
+            }
+        }
+    }
+    if config.enabled && config.endpoint.is_none() {
+        return Err(ConfigError::new(
+            "PQUEUE_CHANGE_RECORD_SINK_ENABLED=true requires PQUEUE_CHANGE_RECORD_SINK_ENDPOINT",
+        ));
+    }
+    if config.enabled && config.batch_size == 0 {
+        return Err(ConfigError::new(
+            "PQUEUE_CHANGE_RECORD_SINK_BATCH_SIZE must be greater than 0",
+        ));
+    }
+    if config.enabled && config.tick_interval.is_zero() {
+        return Err(ConfigError::new(
+            "PQUEUE_CHANGE_RECORD_SINK_TICK_INTERVAL_MS must be greater than 0",
+        ));
+    }
+    Ok(config)
 }
 
 fn unsupported_storage(log: &str, projection: &str, reason: &str) -> ConfigError {
@@ -272,6 +338,7 @@ fn queue_definition(tenant: &str, queue: &str) -> Result<QueueDefinition, Config
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
+        emit_change_records: true,
     })
 }
 
@@ -326,6 +393,7 @@ impl Config {
                 "PQUEUE_HYBRID_DEFERRED_FLUSH_CHUNK",
                 DEFAULT_DEFERRED_FLUSH_CHUNK,
             ),
+            change_record_sink: change_record_sink_config(env)?,
         })
     }
 }

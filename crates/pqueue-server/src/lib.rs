@@ -35,7 +35,12 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+mod change_record_sink;
 mod object_log_sqlite;
+pub use change_record_sink::{
+    ChangeRecordSinkConfig, NiflheimChangeRecordSink, emit_change_record_tick,
+    spawn_change_record_emitter,
+};
 pub use object_log_sqlite::{
     DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend,
     SegmentedObjectLogSqliteBackend,
@@ -254,6 +259,9 @@ pub struct Config {
     /// `PQUEUE_HYBRID_DEFERRED_FLUSH_CHUNK`, defaulting to
     /// [`pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK`]; applied to the hybrid projection store on open.
     pub deferred_flush_chunk: usize,
+    // Background change-record emission settings (TD-008). Disabled by default; enabled deployments
+    // can point at a niflheim durable-ingest endpoint and configure tick/batch cadence.
+    pub change_record_sink: ChangeRecordSinkConfig,
 }
 
 impl Config {
@@ -279,6 +287,7 @@ impl Config {
             worker_threads: None,
             hybrid_async: HybridAsyncThresholds::default(),
             deferred_flush_chunk: pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
+            change_record_sink: ChangeRecordSinkConfig::default(),
         }
     }
 }
@@ -868,6 +877,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let debug_segments = config.debug_segments;
     let hybrid_async = config.hybrid_async;
     let deferred_flush_chunk = config.deferred_flush_chunk;
+    let change_record_sink = config.change_record_sink.clone();
     let BackendSpec {
         log,
         projection,
@@ -931,6 +941,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
+            let _change_record_emitter = spawn_change_record_emitter_if_enabled(
+                backend.clone(),
+                &queues,
+                &change_record_sink,
+            )?;
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         (LogSpec::ObjectLog { root }, ProjectionSpec::HybridAsync { path }) => {
@@ -957,6 +972,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
+            let _change_record_emitter = spawn_change_record_emitter_if_enabled(
+                backend.clone(),
+                &queues,
+                &change_record_sink,
+            )?;
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         #[cfg(feature = "postgres")]
@@ -981,7 +1001,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(BlockingBackend::new(backend));
+            let backend = Arc::new(BlockingBackend::from_arc(backend));
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         (log, projection) => Err(EngineError::Storage(format!(
@@ -1060,6 +1080,26 @@ fn spawn_hybrid_flusher(
             }
         }
     })
+}
+
+fn spawn_change_record_emitter_if_enabled<B>(
+    backend: Arc<B>,
+    queues: &[QueueDefinition],
+    config: &ChangeRecordSinkConfig,
+) -> EngineResult<Option<JoinHandle<()>>>
+where
+    B: change_record_sink::ChangeRecordEmissionBackend + Send + Sync + 'static,
+{
+    if !config.enabled {
+        return Ok(None);
+    }
+    let sink = Arc::new(NiflheimChangeRecordSink::new(config)?);
+    Ok(Some(spawn_change_record_emitter(
+        backend,
+        sink,
+        queues.to_vec(),
+        config.clone(),
+    )))
 }
 
 /// Wrap an already-`Arc`-shared backend in the single-node ownership runtime and run it: a per-node

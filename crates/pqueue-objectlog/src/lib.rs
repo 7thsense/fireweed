@@ -45,16 +45,15 @@ use pqueue_engine::{
     Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, CompiledSchema,
     ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
-    FinalizeCommand, FinalizeOutcome, FinalizePort, IdempotencyDecision, IndexHit, IndexQueryPort,
-    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, LogWriter, PayloadUpdate,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgeItemsCommand, PurgePort,
-    PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, RequestOutcome, SnapshotRef, SnapshotStore, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
-    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
-    validate_purge_force, HistoricalProjectionRead,
-    ProjectionStore,
+    FinalizeCommand, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision,
+    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
+    LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionStore,
+    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
+    RequestOutcome, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
+    validate_gate_command, validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 
@@ -1736,8 +1735,9 @@ impl HistoricalProjectionRead for ObjectLogBackend {
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
-        let result = (|| futures::executor::block_on(self.high_water(shard))?
-            .ok_or(EngineError::NotFound))();
+        let result =
+            (|| futures::executor::block_on(self.high_water(shard))?.ok_or(EngineError::NotFound))(
+            );
         std::future::ready(result)
     }
 
@@ -1759,9 +1759,9 @@ impl HistoricalProjectionRead for ObjectLogBackend {
             let snapshot_ref =
                 futures::executor::block_on(self.snapshot_at_or_before(shard, &position))?;
             let snapshot = match snapshot_ref.as_ref() {
-                Some(snapshot_ref) => {
-                    Some(futures::executor::block_on(self.read_snapshot(snapshot_ref))?)
-                }
+                Some(snapshot_ref) => Some(futures::executor::block_on(
+                    self.read_snapshot(snapshot_ref),
+                )?),
                 None => None,
             };
             let mut as_of = InMemoryProjection::new();

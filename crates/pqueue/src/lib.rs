@@ -20,8 +20,8 @@ use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
 use pqueue_core::{IndexDeclaration, QueueIndex, WorkerId};
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, CommandPosition, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
+    Backend, ClaimPort, ClaimRequest, CommandPosition, CommitEntryOutcome, CommitTransition,
+    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
     FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort, IndexQueryPort, LeaseState,
     OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
     QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,

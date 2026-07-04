@@ -11,7 +11,8 @@ use pqueue_core::{
     RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, Clock, ComposedBackend, ControlPlaneStore, EngineError,
+    ChangeRecord, ChangeRecordKind, ClaimPort, ClaimRequest, Clock, ComposedBackend,
+    ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
     InMemoryControlPlane, InProcessControlPlane, ProjectionRead, PushPort, PushSpec,
     QueueControlPlane, QueueKey,
 };
@@ -19,7 +20,8 @@ use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_objectlog::ObjectLog;
 use pqueue_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
 use pqueue_server::{
-    BackendSpec, Config, ControlPlaneSpec, LogSpec, OwnershipRuntime, ProjectionSpec, start,
+    BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, LogSpec,
+    NiflheimChangeRecordSink, OwnershipRuntime, ProjectionSpec, emit_change_record_tick, start,
     start_with,
 };
 use pqueue_sqlite::HybridProjectionStore;
@@ -96,6 +98,7 @@ fn qdef() -> QueueDefinition {
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
+        emit_change_records: true,
     }
 }
 
@@ -1537,4 +1540,188 @@ fn resolve_node_id_uses_small_ints_verbatim_and_hashes_the_rest() {
     let c = resolve_node_id("pqueue-statefulset-1");
     assert_ne!(b, c, "distinct pod identities map to distinct node ids");
     let _ = a; // just must not panic / must be in range (u8 by construction)
+}
+
+async fn accept_change_record_requests(
+    listener: TcpListener,
+    statuses: Vec<u16>,
+    captured: Arc<std::sync::Mutex<Vec<Vec<ChangeRecord>>>>,
+) {
+    for status in statuses {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        socket.read_to_end(&mut request).await.unwrap();
+        let request = String::from_utf8(request).unwrap();
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+        let records: Vec<ChangeRecord> = serde_json::from_str(body).unwrap();
+        captured.lock().unwrap().push(records);
+        let reason = if (200..300).contains(&status) {
+            "OK"
+        } else {
+            "ERROR"
+        };
+        let response =
+            format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+}
+
+fn sink_config(addr: std::net::SocketAddr) -> ChangeRecordSinkConfig {
+    let mut headers = std::collections::BTreeMap::new();
+    headers.insert("authorization".to_string(), "Bearer test".to_string());
+    ChangeRecordSinkConfig {
+        enabled: true,
+        endpoint: Some(format!("http://127.0.0.1:{}/ingest", addr.port())),
+        headers,
+        tick_interval: Duration::from_millis(1),
+        batch_size: 16,
+    }
+}
+
+#[tokio::test]
+async fn change_record_sink_delivers() {
+    let backend = Arc::new(composed_memory_backend());
+    let shard = qkey();
+    backend.create_queue(qdef()).await.unwrap();
+    let pushed = backend
+        .push(&shard, vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    let claim = backend
+        .claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("worker-1").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: Default::default(),
+            expected_epoch: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(pushed[0], claim.items[0].item_id);
+    backend
+        .finalize(
+            &shard,
+            vec![FinalizeOutcome::new(
+                claim.items[0].item_id,
+                FinalizeKind::Complete,
+            )],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let receiver = tokio::spawn(accept_change_record_requests(
+        listener,
+        vec![200],
+        captured.clone(),
+    ));
+    let config = sink_config(addr);
+    let sink = NiflheimChangeRecordSink::new(&config).unwrap();
+
+    emit_change_record_tick(backend.as_ref(), &sink, &[qdef()], config.batch_size).unwrap();
+    receiver.await.unwrap();
+
+    let received = captured.lock().unwrap().clone();
+    assert_eq!(received.len(), 1);
+    let records = &received[0];
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records.iter().map(|r| r.command_kind).collect::<Vec<_>>(),
+        vec![
+            ChangeRecordKind::Push,
+            ChangeRecordKind::Claim,
+            ChangeRecordKind::Finalize,
+        ]
+    );
+    assert!(records[0].position.sequence < records[1].position.sequence);
+    assert!(records[1].position.sequence < records[2].position.sequence);
+    let keys: Vec<_> = records
+        .iter()
+        .map(|record| record.idempotency_key(&shard))
+        .collect();
+    assert_eq!(keys[0].2, records[0].item_id);
+    assert_eq!(keys[1].2, records[1].item_id);
+    assert_eq!(keys[2].2, records[2].item_id);
+    assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2]);
+}
+
+#[tokio::test]
+async fn change_record_sink_failure_isolation() {
+    let backend = Arc::new(composed_memory_backend());
+    let shard = qkey();
+    backend.create_queue(qdef()).await.unwrap();
+    let pushed = backend
+        .push(&shard, vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    let claim = backend
+        .claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("worker-1").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: Default::default(),
+            expected_epoch: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(pushed[0], claim.items[0].item_id);
+    backend
+        .finalize(
+            &shard,
+            vec![FinalizeOutcome::new(
+                claim.items[0].item_id,
+                FinalizeKind::Complete,
+            )],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let receiver = tokio::spawn(accept_change_record_requests(
+        listener,
+        vec![500, 200],
+        captured.clone(),
+    ));
+    let config = sink_config(addr);
+    let sink = NiflheimChangeRecordSink::new(&config).unwrap();
+
+    emit_change_record_tick(backend.as_ref(), &sink, &[qdef()], config.batch_size).unwrap();
+    emit_change_record_tick(backend.as_ref(), &sink, &[qdef()], config.batch_size).unwrap();
+    receiver.await.unwrap();
+
+    let received = captured.lock().unwrap().clone();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].len(), 3);
+    assert_eq!(received[1].len(), 3);
+    let stable = |records: &Vec<ChangeRecord>| {
+        records
+            .iter()
+            .map(|record| {
+                (
+                    record.item_id,
+                    record.position.clone(),
+                    record.command_kind,
+                    record.new_state,
+                    record.terminal_at,
+                    record.source_owner_id.clone(),
+                    record.source_epoch,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(stable(&received[0]), stable(&received[1]));
 }

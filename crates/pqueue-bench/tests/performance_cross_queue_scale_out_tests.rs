@@ -77,6 +77,7 @@ fn qdef(tenant: &str, queue: &str) -> QueueDefinition {
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
+    emit_change_records: true,
     }
 }
 

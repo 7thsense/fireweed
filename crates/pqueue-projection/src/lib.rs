@@ -3818,7 +3818,7 @@ mod tests {
             &[env(QueueCommand::PauseQueue(PauseQueueCommand::default()))],
             0,
         )
-            .unwrap();
+        .unwrap();
         log.append(&shard(), &[env(QueueCommand::ResumeQueue)], 0)
             .unwrap();
         // Acquire E+1 (durable fence), then one append at epoch 1.

@@ -678,6 +678,7 @@ async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
             unique: false,
         }],
         typed_indexes: vec![],
+        emit_change_records: true,
         ..queue_definition()
     };
     pq.create_queue(def).await.unwrap();

@@ -23,7 +23,7 @@ use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand,
     CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, ControlPlaneStore,
     DiscoveryGranularity, DiscoveryPort, FenceLeaseCommand, FinalizeKind, FinalizeOutcome,
-    FinalizePort, GroupBatching, PayloadUpdate, PauseQueueCommand, ProjectionRead, PurgePort,
+    FinalizePort, GroupBatching, PauseQueueCommand, PayloadUpdate, ProjectionRead, PurgePort,
     PushCommand, PushItem, PushPort, PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver,
     RenewLeasePort, SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsPort, UpsertOutcome,
     UpsertPort,
@@ -955,7 +955,10 @@ async fn group_claim_yields_nothing_while_paused() {
     .unwrap();
     commit(
         &b,
-        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+        envelope(
+            QueueCommand::PauseQueue(PauseQueueCommand::default()),
+            vec![],
+        ),
     )
     .await;
 
@@ -1668,7 +1671,10 @@ async fn discover_reports_scopes_on_a_paused_queue() {
         .unwrap();
     commit(
         &b,
-        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+        envelope(
+            QueueCommand::PauseQueue(PauseQueueCommand::default()),
+            vec![],
+        ),
     )
     .await;
 

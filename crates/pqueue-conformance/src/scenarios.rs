@@ -13,7 +13,7 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRef, ClaimRequest, CommandPosition, EngineError,
     EngineResult, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
-    InstanceFence, PayloadUpdate, PauseQueueCommand, ProjectionSnapshot, PushCommand, PushSpec,
+    InstanceFence, PauseQueueCommand, PayloadUpdate, ProjectionSnapshot, PushCommand, PushSpec,
     QueueCommand, ReplacePendingCommand, SideRecord, UnfenceLeaseCommand, UpsertOutcome,
 };
 
@@ -2296,7 +2296,10 @@ pub async fn paused_queue_yields_no_claims<B: ConformanceCore>(make: impl Fn() -
     // Pause: nothing eligible/claimable.
     commit(
         &b,
-        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+        envelope(
+            QueueCommand::PauseQueue(PauseQueueCommand::default()),
+            vec![],
+        ),
     )
     .await;
     assert!(
@@ -2885,7 +2888,10 @@ pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: i
     .await;
     commit(
         &a,
-        envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()), vec![]),
+        envelope(
+            QueueCommand::PauseQueue(PauseQueueCommand::default()),
+            vec![],
+        ),
     )
     .await;
 
@@ -3682,8 +3688,8 @@ pub async fn stale_epoch_append_is_fenced<B: ConformanceCore>(make: impl Fn() ->
         e0,
         QueueCommand::PauseQueue(PauseQueueCommand::default()),
     )
-        .await
-        .expect("append at the current epoch is admitted");
+    .await
+    .expect("append at the current epoch is admitted");
 
     // Acquire allocates a strictly-greater, durably-recorded epoch (TD-003 monotonicity).
     let e1 = b.acquire_epoch(&shard()).await.unwrap();
@@ -3728,8 +3734,8 @@ pub async fn epoch_fence_closes_pre_segment_window<B: ConformanceCore>(make: imp
         e0,
         QueueCommand::PauseQueue(PauseQueueCommand::default()),
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // The new owner acquires E+1 — durably fenced — but has NOT written any E+1 segment yet.
     let e1 = b.acquire_epoch(&shard()).await.unwrap();

@@ -31,6 +31,7 @@ fn valid_create_queue() -> CreateQueue {
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
+        emit_change_records: true,
     }
 }
 

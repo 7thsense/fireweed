@@ -1,0 +1,188 @@
+{
+  "attempt_id": "20260704T002845-97e1e8be",
+  "bead_id": "pqueue-6f8d85db",
+  "base_rev": "23eafe775d61d4537486064478820e1c5839cc7a",
+  "created_at": "2026-07-04T00:28:46.260179749Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-6f8d85db",
+    "title": "Implement the niflheim durable-ingest HTTP ChangeRecordSink and server emission task",
+    "description": "PROBLEM\nThe engine-side emission foundation (ChangeRecordSink port, cursor) needs a real sink: niflheim's durable-ingest HTTP endpoint (the same path cayce uses for SES exhaust per its CONTRACT-013), plus the server task that drives the tail consumer.\n\nCURRENT STATE\n- pqueue deliberately carries no outbound HTTP client: crates/pqueue-objectlog/Cargo.toml:29 documents the no-reqwest/hyper policy (the S3 client is hand-rolled SigV4).\n- pqueue-server owns tokio (crates/pqueue-server/Cargo.toml:33) and has the interval-task pattern to mirror: flush_tick/try_flush_deferred_projection (crates/pqueue-engine/src/compose.rs:1061,1099).\n\nPROPOSED FIX\nPer TD-008: implement ChangeRecordSink as a lean hand-rolled HTTP POST (no heavy SDK, matching the objectlog client ethos) to a configurable niflheim durable-ingest endpoint with auth headers from config; drive an interval emission task in pqueue-server that reads the log tail per queue, emits, and advances the durable cursor. Failure isolation per TD-008: sink errors advance nothing, retry next tick with backoff; commits are never blocked or failed by the sink. Config keys: endpoint URL, auth, enable/disable, tick interval, batch size.\n\nNON-SCOPE\n- niflheim-side schema/projection (niflheim repo work).\n- Reap coupling and lag metrics (sibling bead).",
+    "acceptance": "1. change_record_sink_delivers: against a mock HTTP receiver, a push -\u003e claim -\u003e finalize sequence arrives as records in per-queue sequence order with correct idempotency keys. cargo test -p pqueue-server change_record_sink_delivers\n2. change_record_sink_failure_isolation: mock receiver returns 5xx/timeouts; commits still succeed, the cursor does not advance, and the next tick re-delivers. cargo test -p pqueue-server change_record_sink_failure_isolation\n3. cargo test -p pqueue-server passes.",
+    "labels": [
+      "activity:build",
+      "kind:build",
+      "area:pqueue-server",
+      "suite:server",
+      "ac-quality:needs-refinement"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"change_record_sink_delivers: against a mock HTTP receiver, a push -\\u003e claim -\\u003e finalize sequence arrives as records in per-queue sequence order with correct idempotency keys. cargo test -p pqueue-server change_record_sink_delivers\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"change_record_sink_failure_isolation: mock receiver returns 5xx/timeouts; commits still succeed, the cursor does not advance, and the next tick re-delivers. cargo test -p pqueue-server change_record_sink_failure_isolation\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":3,\"text\":\"cargo test -p pqueue-server passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T21:00:07.559275642Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.33 threshold=0.50 verifiable=1/3"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude\",\"resolved_model\":\"sonnet\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-03T21:21:17.253518543Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude model=sonnet reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260703T210204-cc9d05a3\",\"harness\":\"claude\",\"model\":\"sonnet\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":21608,\"output_tokens\":79402,\"total_tokens\":101010,\"cost_usd\":8.919789000000003,\"duration_ms\":1152240,\"exit_code\":0}",
+          "created_at": "2026-07-03T21:21:17.2927311Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=101010 cost_usd=8.9198 model=sonnet"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude\",\"actual_model\":\"sonnet\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260703T210204-cc9d05a3\",\"bead_id\":\"pqueue-6f8d85db\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-03T21:21:47.453405379Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=sonnet harness=claude"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"9d4988da89ac9389e9bf5a19ae0787e119f70474\",\"classification\":\"recoverable\",\"detail\":\"DDx validation: the implementation commit was rewritten after the first commit (2 commit events; first 96b71ec5076a, final implementation_rev c5647b6b0e14). The execute-bead contract requires exactly one commit with no post-commit amend/rebase. Detected by DDx, not an implementation failure; rerun the bead in a fresh attempt.\",\"rationale\":\"DDx rejected the attempt for execution-audit integrity because the implementation commit was rewritten after the first commit; the report explicitly says this was detected by DDx, not an implementation failure, and recommends rerunning the bead in a fresh attempt.\",\"recommended_action\":\"release_claim_retry\",\"result_rev\":\"c3cf7880c54757319a90b45f4c2eb0edc5c92411\",\"session_id\":\"eb-2eb303a0\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-03T21:22:06.944876649Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "recoverable: release_claim_retry"
+        },
+        {
+          "actor": "erik",
+          "body": "DDx validation: the implementation commit was rewritten after the first commit (2 commit events; first 96b71ec5076a, final implementation_rev c5647b6b0e14). The execute-bead contract requires exactly one commit with no post-commit amend/rebase. Detected by DDx, not an implementation failure; rerun the bead in a fresh attempt.\ndecision_audit={\"failure_class\":\"recoverable\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude\",\"model\":\"sonnet\",\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"claude\",\"model\":\"sonnet\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=c3cf7880c54757319a90b45f4c2eb0edc5c92411\nbase_rev=9d4988da89ac9389e9bf5a19ae0787e119f70474\noutcome_reason=recoverable",
+          "created_at": "2026-07-03T21:22:06.969005461Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"change_record_sink_delivers: against a mock HTTP receiver, a push -\\u003e claim -\\u003e finalize sequence arrives as records in per-queue sequence order with correct idempotency keys. cargo test -p pqueue-server change_record_sink_delivers\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"change_record_sink_failure_isolation: mock receiver returns 5xx/timeouts; commits still succeed, the cursor does not advance, and the next tick re-delivers. cargo test -p pqueue-server change_record_sink_failure_isolation\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":3,\"text\":\"cargo test -p pqueue-server passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-03T23:00:13.625379676Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.33 threshold=0.50 verifiable=1/3"
+        },
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"change_record_sink_delivers: against a mock HTTP receiver, a push -\\u003e claim -\\u003e finalize sequence arrives as records in per-queue sequence order with correct idempotency keys. cargo test -p pqueue-server change_record_sink_delivers\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"change_record_sink_failure_isolation: mock receiver returns 5xx/timeouts; commits still succeed, the cursor does not advance, and the next tick re-delivers. cargo test -p pqueue-server change_record_sink_failure_isolation\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":3,\"text\":\"cargo test -p pqueue-server passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-04T00:03:34.140571313Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.33 threshold=0.50 verifiable=1/3"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-04T00:05:21.194717504Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"change_record_sink_delivers: against a mock HTTP receiver, a push -\\u003e claim -\\u003e finalize sequence arrives as records in per-queue sequence order with correct idempotency keys. cargo test -p pqueue-server change_record_sink_delivers\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"change_record_sink_failure_isolation: mock receiver returns 5xx/timeouts; commits still succeed, the cursor does not advance, and the next tick re-delivers. cargo test -p pqueue-server change_record_sink_failure_isolation\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":3,\"text\":\"cargo test -p pqueue-server passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-04T00:12:59.516254808Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.33 threshold=0.50 verifiable=1/3"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: signal: terminated\",\"fingerprint\":\"74debd57843837e5df55f8ccd3aaf718a2b0e7750c7a48fd40c5bed2e0d57b0a\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"74debd57843837e5df55f8ccd3aaf718a2b0e7750c7a48fd40c5bed2e0d57b0a\"}",
+          "created_at": "2026-07-04T00:13:11.765892239Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"change_record_sink_delivers: against a mock HTTP receiver, a push -\\u003e claim -\\u003e finalize sequence arrives as records in per-queue sequence order with correct idempotency keys. cargo test -p pqueue-server change_record_sink_delivers\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"change_record_sink_failure_isolation: mock receiver returns 5xx/timeouts; commits still succeed, the cursor does not advance, and the next tick re-delivers. cargo test -p pqueue-server change_record_sink_failure_isolation\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":3,\"text\":\"cargo test -p pqueue-server passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-04T00:22:40.888493022Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.33 threshold=0.50 verifiable=1/3"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-04T00:25:30.460943309Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260704T000527-140d4353\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":16892814,\"output_tokens\":66069,\"total_tokens\":16958883,\"cost_usd\":0,\"duration_ms\":1202505,\"exit_code\":0}",
+          "created_at": "2026-07-04T00:25:30.487969068Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=16958883 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260704T000527-140d4353\",\"bead_id\":\"pqueue-6f8d85db\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-04T00:25:31.420516728Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "",
+          "body": "[{\"ac\":1,\"text\":\"change_record_sink_delivers: against a mock HTTP receiver, a push -\\u003e claim -\\u003e finalize sequence arrives as records in per-queue sequence order with correct idempotency keys. cargo test -p pqueue-server change_record_sink_delivers\",\"kind\":\"prose\",\"verifiable\":false},{\"ac\":2,\"text\":\"change_record_sink_failure_isolation: mock receiver returns 5xx/timeouts; commits still succeed, the cursor does not advance, and the next tick re-delivers. cargo test -p pqueue-server change_record_sink_failure_isolation\",\"kind\":\"negative\",\"verifiable\":true},{\"ac\":3,\"text\":\"cargo test -p pqueue-server passes.\",\"kind\":\"prose\",\"verifiable\":false}]",
+          "created_at": "2026-07-04T00:25:32.606008132Z",
+          "kind": "ac-quality-low",
+          "source": "preclaim-ac-quality",
+          "summary": "score=0.33 threshold=0.50 verifiable=1/3"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"ccce9b98f36030046f7bbc09cd7f9fc5c577389d\",\"classification\":\"recoverable\",\"detail\":\"DDx validation: tracked files remained uncommitted after the implementation commit (crates/pqueue-conformance/src/scenarios.rs, crates/pqueue-engine/src/command.rs, crates/pqueue-engine/src/compose.rs, crates/pqueue-engine/src/lib.rs, crates/pqueue-engine/src/port.rs, crates/pqueue-memory/tests/ownership.rs, crates/pqueue-objectlog/src/lib.rs, crates/pqueue-objectlog/src/segmented.rs, crates/pqueue-objectlog/tests/segmented_s3_substrate_tests.rs, crates/pqueue-postgres/src/lib.rs, crates/pqueue-postgres/src/relational.rs, crates/pqueue-projection/src/compose_impls.rs, crates/pqueue-projection/src/lib.rs, crates/pqueue-sqlite/tests/relational_conformance.rs, crates/pqueue-sqlite/tests/sqlite_projection_tests.rs, crates/pqueue/src/lib.rs); the contract requires a clean worktree. Detected by DDx, not an implementation failure.\",\"rationale\":\"DDx attempt failed on execution integrity because tracked files remained uncommitted after the implementation commit; report states this was detected by DDx and not an implementation or verification failure.\",\"recommended_action\":\"release_claim_retry\",\"result_rev\":\"fd14b1ec86484c697e370232e1ba8dce519cfda6\",\"session_id\":\"eb-06c654b1\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-04T00:25:57.207137017Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "recoverable: release_claim_retry"
+        },
+        {
+          "actor": "erik",
+          "body": "DDx validation: tracked files remained uncommitted after the implementation commit (crates/pqueue-conformance/src/scenarios.rs, crates/pqueue-engine/src/command.rs, crates/pqueue-engine/src/compose.rs, crates/pqueue-engine/src/lib.rs, crates/pqueue-engine/src/port.rs, crates/pqueue-memory/tests/ownership.rs, crates/pqueue-objectlog/src/lib.rs, crates/pqueue-objectlog/src/segmented.rs, crates/pqueue-objectlog/tests/segmented_s3_substrate_tests.rs, crates/pqueue-postgres/src/lib.rs, crates/pqueue-postgres/src/relational.rs, crates/pqueue-projection/src/compose_impls.rs, crates/pqueue-projection/src/lib.rs, crates/pqueue-sqlite/tests/relational_conformance.rs, crates/pqueue-sqlite/tests/sqlite_projection_tests.rs, crates/pqueue/src/lib.rs); the contract requires a clean worktree. Detected by DDx, not an implementation failure.\ndecision_audit={\"failure_class\":\"recoverable\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=fd14b1ec86484c697e370232e1ba8dce519cfda6\nbase_rev=ccce9b98f36030046f7bbc09cd7f9fc5c577389d\noutcome_reason=recoverable",
+          "created_at": "2026-07-04T00:25:57.241456601Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-04T00:27:50.620138315Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260704T002845-97e1e8be",
+    "prompt": ".ddx/executions/20260704T002845-97e1e8be/prompt.md",
+    "manifest": ".ddx/executions/20260704T002845-97e1e8be/manifest.json",
+    "result": ".ddx/executions/20260704T002845-97e1e8be/result.json",
+    "checks": ".ddx/executions/20260704T002845-97e1e8be/checks.json",
+    "usage": ".ddx/executions/20260704T002845-97e1e8be/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-6f8d85db-20260704T002845-97e1e8be"
+  },
+  "prompt_sha": "7c1bd130c6a9eba6248824df7adbc4eab39a40bbc786f75696925b6aa1e12ead"
+}

@@ -647,10 +647,18 @@ pub struct QueueDefinition {
     /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
     #[serde(default)]
     pub typed_indexes: Vec<QueueIndex>,
+    // Whether this queue emits change records to the niflheim history sink. Default-on so operators
+    // get history unless they explicitly opt out per queue.
+    #[serde(default = "default_emit_change_records")]
+    pub emit_change_records: bool,
 }
 
 fn default_terminal_retention_ms() -> u64 {
     3_600_000
+}
+
+fn default_emit_change_records() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -949,6 +957,7 @@ impl CreateQueue {
             secondary_indexes: self.secondary_indexes,
             entity_schema: self.entity_schema,
             typed_indexes: self.typed_indexes,
+            emit_change_records: true,
         })
     }
 }
@@ -1405,6 +1414,7 @@ mod coverage_tests {
             secondary_indexes: vec![],
             entity_schema: None,
             typed_indexes: vec![],
+            emit_change_records: true,
         }
     }
 

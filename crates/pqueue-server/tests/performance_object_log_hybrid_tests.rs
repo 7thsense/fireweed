@@ -78,6 +78,7 @@ fn qdef(queue: &str, max_batch: u64) -> QueueDefinition {
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
+        emit_change_records: true,
     }
 }
 

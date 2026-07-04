@@ -76,6 +76,11 @@ impl<B: RespBackend> BlockingBackend<B> {
         }
     }
 
+    /// Wrap an existing `Arc` so the caller can keep another handle to the same backend instance.
+    pub fn from_arc(inner: Arc<B>) -> Self {
+        Self { inner: Some(inner) }
+    }
+
     /// A fresh `Arc` handle to move into a `spawn_blocking` closure.
     fn arc(&self) -> Arc<B> {
         self.inner

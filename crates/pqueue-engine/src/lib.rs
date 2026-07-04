@@ -51,7 +51,7 @@ pub use command::{
     ChangeRecordState, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
     CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PayloadUpdate, PauseQueueCommand, PurgeItemsCommand, PushCommand,
+    LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, PurgeItemsCommand, PushCommand,
     PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
     ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand, SideRecord,
     UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items,
@@ -64,16 +64,16 @@ pub use finalize_validation::{
     validate_rearm,
 };
 pub use port::{
-    Backend, ChangeRecordSink, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, Clock,
-    CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitCapabilities,
-    CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery,
-    FinalizePort, HotProjectionQueryPort, IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView,
-    LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, ReschedulePort, SetGatesPort,
-    SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    AsOfProjectionStore, HistoricalProjectionRead, validate_instance_fence,
+    AsOfProjectionStore, Backend, ChangeRecordSink, ClaimPort, ClaimRef, ClaimRequest, Claimed,
+    ClaimedItem, Clock, CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, CommandPage,
+    CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition,
+    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome,
+    DiscoveryPort, EntryRecovery, FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort,
+    IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView, LeaseView, LiveItemView, LogRead,
+    LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec,
+    QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
@@ -164,10 +164,7 @@ mod tests {
     #[test]
     fn pause_error_is_structured() {
         assert_eq!(
-            EngineError::Paused {
-                drain_intake: true
-            }
-            .resp_token(),
+            EngineError::Paused { drain_intake: true }.resp_token(),
             Some("-ERR pqueue paused")
         );
     }

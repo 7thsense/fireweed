@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OwnerId,
     PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::QueueKey;
 use crate::error::{EngineError, EngineResult};

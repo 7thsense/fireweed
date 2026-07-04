@@ -50,14 +50,14 @@ use crate::error::{EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
 use crate::idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 use crate::port::{
-    Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, CommandPage,
-    CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition,
-    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery, FinalizePort,
-    IndexHit, IndexQueryPort, ItemView, LeaseView, LiveItemView, LogRead, LogWriter,
-    ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec,
-    QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, AsOfProjectionStore, HistoricalProjectionRead, validate_instance_fence,
+    AsOfProjectionStore, Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem,
+    CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery,
+    CommitTransition, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery,
+    FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView, LeaseView,
+    LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
+    PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -818,6 +818,10 @@ struct Inner<L, P> {
     /// path; populated only when the composition runs the ack-after-seal write path against a group-commit
     /// log. Protected by the SAME `Mutex<Inner>` as `log`/`projection` — no async lock.
     coords: HashMap<QueueKey, ShardCoord>,
+    /// Per-queue change-record emission cursor (tail consumer checkpoint). In-memory for the composed
+    /// backend seam; durable backends can later mirror it into their own substrate, but the emission path
+    /// already needs a stable advance point inside the current process.
+    emission_cursors: HashMap<QueueKey, CommandPosition>,
 }
 
 /// Default recovery-window budget: the max durable-log tail (commands) a normal reopen replays beyond the
@@ -861,6 +865,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 commit_idempotency: HashMap::new(),
                 cmd_seq: 0,
                 coords: HashMap::new(),
+                emission_cursors: HashMap::new(),
             }),
             control,
             node_id: 0,
@@ -926,7 +931,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     ) -> EngineResult<usize> {
         let (page, _cursor) = {
             let g = self.inner.lock().expect("composed backend poisoned");
-            let cursor = g.log.emission_cursor(shard)?;
+            let cursor = g.emission_cursors.get(shard).cloned();
             let page = g.log.read_from(shard, cursor.clone(), limit)?;
             (page, cursor)
         };
@@ -946,7 +951,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         sink.emit(shard, &records)?;
         if let Some((position, _)) = page.entries.last() {
             let mut g = self.inner.lock().expect("composed backend poisoned");
-            g.log.set_emission_cursor(shard, position.clone())?;
+            g.emission_cursors.insert(shard.clone(), position.clone());
         }
         Ok(records.len())
     }
@@ -1757,9 +1762,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let mut g = self.inner.lock().expect("poisoned");
             g.projection.index_validate_push(shard, &push_items)?;
             if g.projection.pause_blocks_intake(shard)? {
-                return Err(EngineError::Paused {
-                    drain_intake: true,
-                });
+                return Err(EngineError::Paused { drain_intake: true });
             }
             let env = Self::make_envelope(
                 &mut g,
@@ -1835,9 +1838,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             g.projection.index_validate_push(shard, &push_items)?;
             if g.projection.pause_blocks_intake(shard)? {
-                return Err(EngineError::Paused {
-                    drain_intake: true,
-                });
+                return Err(EngineError::Paused { drain_intake: true });
             }
             let command_id = Self::next_command_id(&mut g, self.node_id);
             let env = CommandEnvelope {
@@ -2589,7 +2590,9 @@ where
             let mut as_of = g.projection.reconstruct_as_of(&definition, snapshot)?;
             let mut from = snapshot_ref.map(|s| s.position);
             loop {
-                let page = g.log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
+                let page = g
+                    .log
+                    .read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
                 if page.entries.is_empty() {
                     break;
                 }
@@ -3539,7 +3542,8 @@ mod ordered_tests {
             Ok(ids
                 .iter()
                 .filter_map(|id| {
-                    let lease_expires_at = state.lease_expires_at.get(id).copied().unwrap_or(ts(60));
+                    let lease_expires_at =
+                        state.lease_expires_at.get(id).copied().unwrap_or(ts(60));
                     state.leased.get(id).map(|token| ClaimedItem {
                         item_id: *id,
                         client_item_key: ClientItemKey::new(id.to_string()).unwrap(),
@@ -3765,6 +3769,7 @@ mod ordered_tests {
             secondary_indexes: vec![],
             entity_schema: None,
             typed_indexes: vec![],
+            emit_change_records: true,
         }
     }
 
@@ -3772,7 +3777,12 @@ mod ordered_tests {
         UtcTimestamp::new(seconds, 0).unwrap()
     }
 
-    fn pause_envelope(drain_intake: bool, seq: &str, item_id: ItemId, now: UtcTimestamp) -> CommandEnvelope {
+    fn pause_envelope(
+        drain_intake: bool,
+        seq: &str,
+        item_id: ItemId,
+        now: UtcTimestamp,
+    ) -> CommandEnvelope {
         CommandEnvelope {
             command_id: CommandId::new(seq),
             request_id: None,
@@ -3942,7 +3952,10 @@ mod ordered_tests {
 
         let mut blocked_push = backend.push(&shard, vec![PushSpec::default()], ts(2), None);
         assert!(
-            matches!(poll_once(&mut blocked_push), Poll::Ready(Err(EngineError::Paused { drain_intake: true }))),
+            matches!(
+                poll_once(&mut blocked_push),
+                Poll::Ready(Err(EngineError::Paused { drain_intake: true }))
+            ),
             "intake-blocking pause rejects pushes"
         );
 
@@ -3974,7 +3987,9 @@ mod ordered_tests {
             compatibility: ClaimCompatibility::default(),
             expected_epoch: None,
         });
-        assert!(matches!(poll_once(&mut resumed_claim), Poll::Ready(Ok(claimed)) if claimed.items.len() == 1));
+        assert!(
+            matches!(poll_once(&mut resumed_claim), Poll::Ready(Ok(claimed)) if claimed.items.len() == 1)
+        );
 
         let plain_backend = ComposedBackend::new(
             FakeGroupCommitLog::default(),
@@ -3995,7 +4010,8 @@ mod ordered_tests {
         });
         assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
 
-        let mut landed_push = plain_backend.push(&plain_shard, vec![PushSpec::default()], ts(1), None);
+        let mut landed_push =
+            plain_backend.push(&plain_shard, vec![PushSpec::default()], ts(1), None);
         assert!(matches!(poll_once(&mut landed_push), Poll::Ready(Ok(ids)) if ids.len() == 1));
         drop(landed_push);
 
@@ -4042,7 +4058,9 @@ mod ordered_tests {
             compatibility: ClaimCompatibility::default(),
             expected_epoch: None,
         });
-        assert!(matches!(poll_once(&mut resumed_plain_claim), Poll::Ready(Ok(claimed)) if claimed.items.len() == 1));
+        assert!(
+            matches!(poll_once(&mut resumed_plain_claim), Poll::Ready(Ok(claimed)) if claimed.items.len() == 1)
+        );
     }
 
     #[test]
@@ -4075,7 +4093,9 @@ mod ordered_tests {
             compatibility: ClaimCompatibility::default(),
             expected_epoch: None,
         });
-        assert!(matches!(poll_once(&mut initial_claim), Poll::Ready(Ok(claimed)) if claimed.items[0].item_id == first_id));
+        assert!(
+            matches!(poll_once(&mut initial_claim), Poll::Ready(Ok(claimed)) if claimed.items[0].item_id == first_id)
+        );
 
         let pause_env = pause_envelope(true, "pause-lease", ItemId::from_u64(1), ts(1));
         let lease_pause_shard = shard.clone();
@@ -4133,7 +4153,9 @@ mod ordered_tests {
             compatibility: ClaimCompatibility::default(),
             expected_epoch: None,
         });
-        assert!(matches!(poll_once(&mut resumed_claim), Poll::Ready(Ok(claimed)) if claimed.items[0].item_id == first_id));
+        assert!(
+            matches!(poll_once(&mut resumed_claim), Poll::Ready(Ok(claimed)) if claimed.items[0].item_id == first_id)
+        );
     }
 
     type SeenKey = (TenantId, pqueue_core::QueueId, Option<ItemId>, u64, u64);
