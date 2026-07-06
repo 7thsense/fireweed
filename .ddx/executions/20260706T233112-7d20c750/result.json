@@ -1,0 +1,60 @@
+{
+  "bead_id": "pqueue-e0dc69d2",
+  "attempt_id": "20260706T233112-7d20c750",
+  "base_rev": "8553946d6e8681cba6d3e45fa655f6e62281be56",
+  "result_rev": "ccb41b0bae877b40323fc5218d6c081346c0feee",
+  "implementation_rev": "ccb41b0bae877b40323fc5218d6c081346c0feee",
+  "outcome": "error",
+  "status": "execution_failed",
+  "detail": "land coordination failed: land advancer: checkpoint add: The following paths are ignored by one of your .gitignore files:\n.ddx/metrics\nhint: Use -f if you really want to add them.\nhint: Disable this message with \"git config set advice.addIgnoredFile false\": exit status 1: land advancer: checkpoint add: The following paths are ignored by one of your .gitignore files:\n.ddx/metrics\nhint: Use -f if you really want to add them.\nhint: Disable this message with \"git config set advice.addIgnoredFile false\": exit status 1",
+  "orchestrator_status": "execution_failed",
+  "reason": "land coordination failed: land advancer: checkpoint add: The following paths are ignored by one of your .gitignore files:\n.ddx/metrics\nhint: Use -f if you really want to add them.\nhint: Disable this message with \"git config set advice.addIgnoredFile false\": exit status 1",
+  "preserve_ref": "refs/ddx/iterations/pqueue-e0dc69d2/20260706T233112-7d20c750-8553946d6e86",
+  "candidate_ref": "refs/ddx/iterations/20260706T233112-7d20c750/0",
+  "required_exec_summary": "skipped",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260706T233112-7d20c750",
+      "result_rev": "ccb41b0bae877b40323fc5218d6c081346c0feee",
+      "implementer_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "requested_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "actual_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "codex",
+  "model": "gpt-5.4-mini",
+  "session_id": "eb-68727aaa",
+  "duration_ms": 562753,
+  "tokens": 4059030,
+  "exit_code": 0,
+  "error": "land advancer: checkpoint add: The following paths are ignored by one of your .gitignore files:\n.ddx/metrics\nhint: Use -f if you really want to add them.\nhint: Disable this message with \"git config set advice.addIgnoredFile false\": exit status 1",
+  "project_root": "/Users/erik/Projects/pqueue",
+  "failure_mode": "unknown",
+  "execution_dir": ".ddx/executions/20260706T233112-7d20c750",
+  "prompt_file": ".ddx/executions/20260706T233112-7d20c750/prompt.md",
+  "manifest_file": ".ddx/executions/20260706T233112-7d20c750/manifest.json",
+  "result_file": ".ddx/executions/20260706T233112-7d20c750/result.json",
+  "usage_file": ".ddx/executions/20260706T233112-7d20c750/usage.json",
+  "started_at": "2026-07-06T23:31:13.282425162Z",
+  "finished_at": "2026-07-06T23:40:36.036024995Z"
+}
