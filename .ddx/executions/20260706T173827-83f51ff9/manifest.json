@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260706T173827-83f51ff9",
+  "bead_id": "pqueue-7263fe62",
+  "base_rev": "eb508f083248ebc387cb7b11bf02e142ff88b5d2",
+  "created_at": "2026-07-06T17:38:28.282175494Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-7263fe62",
+    "title": "Wire the fjord Kafka change-log semantics",
+    "description": "PROBLEM: The change-log path still only POSTs records to Niflheim, so there is no embedded Kafka surface that can serve stock consumers with ordered fetch and durable offsets.\nROOT CAUSE: `crates/pqueue-server/src/change_record_sink.rs:34` through `crates/pqueue-server/src/change_record_sink.rs:266` defines only the HTTP `NiflheimChangeRecordSink`, and `crates/pqueue-server/src/lib.rs:944` through `crates/pqueue-server/src/lib.rs:979` starts only that emitter when change-record delivery is enabled.\nPROPOSED FIX: implement the fjord-backed change-topic writer, single-partition per `(tenant_id, queue_id)`, with broker-assigned monotonic offsets, durable source-cursor persistence in fjord's own namespace, and the record-key / header / payload contract from ADR-014.\nNON-SCOPE: tenant ACL policy, cross-tenant denial paths, and repo-wide release or packaging changes.",
+    "acceptance": "1. `TestKafkaChangeLogConsumesInCommandPositionOrder` proves a stock Kafka client can read one queue's change records in order.\n2. `TestKafkaOffsetNeverRegressesAcrossFailover` proves failover can re-emit the same logical record without regressing the broker offset stream.\n3. `go test ./... -run 'TestKafkaChangeLogConsumesInCommandPositionOrder|TestKafkaOffsetNeverRegressesAcrossFailover'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-a391c196",
+    "labels": [
+      "kind:build",
+      "area:fjord",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-06T17:29:13.202096366Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T173827-83f51ff9",
+    "prompt": ".ddx/executions/20260706T173827-83f51ff9/prompt.md",
+    "manifest": ".ddx/executions/20260706T173827-83f51ff9/manifest.json",
+    "result": ".ddx/executions/20260706T173827-83f51ff9/result.json",
+    "checks": ".ddx/executions/20260706T173827-83f51ff9/checks.json",
+    "usage": ".ddx/executions/20260706T173827-83f51ff9/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-7263fe62-20260706T173827-83f51ff9"
+  },
+  "prompt_sha": "92f90a884ba9ee25b1bf090497556f28f33e6213f48283b9512ec886a9f56be6"
+}
