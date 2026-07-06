@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T154907-9b4e8284",
+  "bead_id": "pqueue-d28950d6",
+  "base_rev": "1319c92f88286eee09c046bce9a87edaf2c913a7",
+  "created_at": "2026-07-06T15:49:08.516323199Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-d28950d6",
+    "title": "Preserve stable change-record idempotency across re-emission",
+    "description": "PROBLEM: TD-008 CL-3 says crash/failover re-emission must dedupe by stable record identity instead of broker offset. Verify the fjord-bound path (ADR-014 embedded shape) preserves the per-record identity across re-emission: record key {item_id}:{backend_epoch}:{sequence} stable for the same logical record, re-emitted records appear at later offsets, and a stock consumer deduping on the key over the documented window observes each logical record's effect exactly once.",
+    "acceptance": "1. `TestKafkaIdempotencyKeyIsStableAcrossReemit` proves the emitted identity stays `(tenant_id, queue_id, item_id, backend_epoch, sequence)`.\n2. `TestKafkaOffsetAdvanceDoesNotChangeDedupKey` proves a later broker offset does not alter the logical dedupe key.\n3. `go test ./... -run 'TestKafkaIdempotencyKeyIsStableAcrossReemit|TestKafkaOffsetAdvanceDoesNotChangeDedupKey'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-0b38f31f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-engine",
+      "area:change-log",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T154907-9b4e8284",
+    "prompt": ".ddx/executions/20260706T154907-9b4e8284/prompt.md",
+    "manifest": ".ddx/executions/20260706T154907-9b4e8284/manifest.json",
+    "result": ".ddx/executions/20260706T154907-9b4e8284/result.json",
+    "checks": ".ddx/executions/20260706T154907-9b4e8284/checks.json",
+    "usage": ".ddx/executions/20260706T154907-9b4e8284/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-d28950d6-20260706T154907-9b4e8284"
+  },
+  "prompt_sha": "c3dd1fc12580fd870491a5cf68cb73898173e9ae06a02b3edc1fabf02c2c9d66"
+}
