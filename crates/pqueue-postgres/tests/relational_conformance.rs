@@ -66,6 +66,7 @@ pg_relational!(
     claim_returns_priority_ordered_rich_items,
     claim_empty_when_nothing_eligible,
     claimed_item_shape_includes_payload_fields_and_gate_keys,
+    claimed_item_shape_reflects_update_fields_after_reclaim,
     claimed_item_shape_omits_empty_conditionals,
     structured_live_items_are_ordered_and_only_live,
     tick_reclaims_expired_lease_with_no_client_traffic,

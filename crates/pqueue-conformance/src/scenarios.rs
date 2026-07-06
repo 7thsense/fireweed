@@ -1866,6 +1866,157 @@ pub async fn claimed_item_shape_includes_payload_fields_and_gate_keys<B: Conform
     );
 }
 
+pub async fn claimed_item_shape_reflects_update_fields_after_reclaim<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    let mut def = qdef();
+    def.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    def.eligibility_policy.max_gate_keys_per_item = Some(8);
+    b.create_queue(def).await.unwrap();
+
+    let mut item = item("1", "ka", 5);
+    item.not_before = Some(ts(50));
+    item.group_key = Some(GroupKey::new("group-a").unwrap());
+    item.payload = Some(Bytes::from_static(b"opaque-payload"));
+    item.fields = BTreeMap::from([
+        ("field-a".to_string(), Bytes::from_static(b"value-a")),
+        ("field-b".to_string(), Bytes::from_static(b"value-b")),
+    ]);
+    item.metadata
+        .insert("tenant_segment", MetadataValue::String("vip".to_string()));
+    item.gate_keys = vec!["gate-a".to_string()];
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand { items: vec![item] }),
+            vec![],
+        ),
+    )
+    .await;
+
+    let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    let first = &claimed.items[0];
+    let item_id = first.item_id;
+    let client_item_key = first.client_item_key.clone();
+    let claim_version = first.item_version;
+    assert_eq!(first.lease_token, Some(LeaseToken::new("lease-1").unwrap()));
+    assert_eq!(first.payload.as_deref(), Some(&b"opaque-payload"[..]));
+    assert_eq!(first.not_before, Some(ts(50)));
+    assert_eq!(first.group_key, Some(GroupKey::new("group-a").unwrap()));
+    assert_eq!(
+        first.metadata.get("tenant_segment"),
+        Some(&MetadataValue::String("vip".to_string()))
+    );
+    assert_eq!(first.gate_keys, vec!["gate-a"]);
+    assert_eq!(
+        first.fields.get("field-a").map(|bytes| bytes.as_ref()),
+        Some(&b"value-a"[..])
+    );
+    assert_eq!(
+        first.fields.get("field-b").map(|bytes| bytes.as_ref()),
+        Some(&b"value-b"[..])
+    );
+
+    let updated_version = b
+        .update_fields(
+            &shard(),
+            item_id,
+            BTreeMap::from([
+                (
+                    "field-a".to_string(),
+                    Some(Bytes::from_static(b"value-a-2")),
+                ),
+                ("field-b".to_string(), None),
+                ("field-c".to_string(), Some(Bytes::from_static(b"value-c"))),
+            ]),
+            PayloadUpdate::Set(Some(Bytes::from_static(b"opaque-payload-v2"))),
+            None,
+            Some(claim_version),
+            ts(120),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(updated_version > claim_version);
+
+    let live_claim = b.claimed_view(&shard(), &[item_id]).await.unwrap();
+    assert_eq!(live_claim.len(), 1);
+    let live_claim = &live_claim[0];
+    assert_eq!(live_claim.item_id, item_id);
+    assert_eq!(live_claim.client_item_key, client_item_key);
+    assert_eq!(live_claim.item_version, updated_version);
+    assert_eq!(
+        live_claim.lease_token,
+        Some(LeaseToken::new("lease-1").unwrap())
+    );
+    assert_eq!(
+        live_claim.payload.as_deref(),
+        Some(&b"opaque-payload-v2"[..])
+    );
+    assert_eq!(live_claim.not_before, Some(ts(50)));
+    assert_eq!(
+        live_claim.group_key,
+        Some(GroupKey::new("group-a").unwrap())
+    );
+    assert_eq!(
+        live_claim.metadata.get("tenant_segment"),
+        Some(&MetadataValue::String("vip".to_string()))
+    );
+    assert_eq!(live_claim.gate_keys, vec!["gate-a"]);
+    assert_eq!(
+        live_claim.fields.get("field-a").map(|bytes| bytes.as_ref()),
+        Some(&b"value-a-2"[..])
+    );
+    assert_eq!(
+        live_claim.fields.get("field-c").map(|bytes| bytes.as_ref()),
+        Some(&b"value-c"[..])
+    );
+    assert!(
+        !live_claim.fields.contains_key("field-b"),
+        "removed field must stay absent from the claimed shape"
+    );
+
+    assert_eq!(
+        b.reclaim_expired(&shard(), None, ts(600), None)
+            .await
+            .unwrap(),
+        vec![item_id]
+    );
+
+    let mut reclaim_req = claim_req(1, 1100, 700);
+    reclaim_req.lease_token = LeaseToken::new("lease-2").unwrap();
+    let reclaimed = b.claim(reclaim_req).await.unwrap();
+    assert_eq!(reclaimed.items.len(), 1);
+    let got = &reclaimed.items[0];
+    assert_eq!(got.item_id, item_id);
+    assert_eq!(got.client_item_key, client_item_key);
+    assert!(got.item_version > updated_version);
+    assert_eq!(got.lease_token, Some(LeaseToken::new("lease-2").unwrap()));
+    assert_eq!(got.attempt_count, 2);
+    assert_eq!(got.payload.as_deref(), Some(&b"opaque-payload-v2"[..]));
+    assert_eq!(got.not_before, Some(ts(50)));
+    assert_eq!(got.group_key, Some(GroupKey::new("group-a").unwrap()));
+    assert_eq!(
+        got.metadata.get("tenant_segment"),
+        Some(&MetadataValue::String("vip".to_string()))
+    );
+    assert_eq!(got.gate_keys, vec!["gate-a"]);
+    assert_eq!(
+        got.fields.get("field-a").map(|bytes| bytes.as_ref()),
+        Some(&b"value-a-2"[..])
+    );
+    assert_eq!(
+        got.fields.get("field-c").map(|bytes| bytes.as_ref()),
+        Some(&b"value-c"[..])
+    );
+    assert!(
+        !got.fields.contains_key("field-b"),
+        "re-claimed shape must keep the current field map"
+    );
+}
+
 pub async fn claimed_item_shape_omits_empty_conditionals<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();
     b.create_queue(qdef()).await.unwrap();

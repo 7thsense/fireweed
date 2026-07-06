@@ -269,6 +269,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     if gate_capable {
         scenarios::claimed_item_shape_includes_payload_fields_and_gate_keys(&make).await;
     }
+    claimed_item_shape_reflects_update_fields_after_reclaim_if_supported(&make).await;
     scenarios::claimed_item_shape_omits_empty_conditionals(&make).await;
     scenarios::structured_live_items_are_ordered_and_only_live(&make).await;
     scenarios::upsert_inserts_then_replaces_pending(&make).await;
@@ -306,6 +307,25 @@ pub async fn claimed_item_shape_includes_payload_fields_and_gate_keys_if_support
     }
 }
 
+pub async fn claimed_item_shape_reflects_update_fields_after_reclaim_if_supported<
+    B: ConformanceCore,
+>(
+    make: impl Fn() -> B,
+) {
+    let caps = make().commit_capabilities();
+    if !caps.atomic_transition_commit
+        || matches!(
+            caps.durability_class,
+            pqueue_engine::DurabilityClass::EventualApply
+        )
+        || caps.consistency.contains("composed")
+    {
+        return;
+    }
+
+    scenarios::claimed_item_shape_reflects_update_fields_after_reclaim(&make).await;
+}
+
 // ---------------------------------------------------------------------------
 // Conformance classes (ADR-008 §2 / TD-001): core (every family) + log-replay
 // (log-bearing) + relational-reconnect (DB-authoritative). Backends compose the
@@ -321,6 +341,10 @@ macro_rules! claimed_item_shape_conformance_tests {
         $crate::conformance_suite!(@scenarios $make,
             claimed_item_shape_omits_empty_conditionals,
         );
+        #[tokio::test]
+        async fn claimed_item_shape_reflects_update_fields_after_reclaim() {
+            $crate::claimed_item_shape_reflects_update_fields_after_reclaim_if_supported($make).await;
+        }
         #[tokio::test]
         async fn claimed_item_shape_includes_payload_fields_and_gate_keys() {
             $crate::claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported($make).await;
