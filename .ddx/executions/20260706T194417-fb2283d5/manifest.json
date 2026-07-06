@@ -1,0 +1,48 @@
+{
+  "attempt_id": "20260706T194417-fb2283d5",
+  "bead_id": "pqueue-10ec7789",
+  "base_rev": "86ef37becea0435ce93aef53358f95f78dbcd045",
+  "created_at": "2026-07-06T19:44:18.493508154Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-10ec7789",
+    "title": "Enforce embedded Kafka tenant ACLs",
+    "description": "PROBLEM: The embedded Kafka surface does not yet reject reads outside a queue's exact tenant/queue namespace. ROOT CAUSE: `crates/pqueue-server/src/lib.rs:239-257` defines `authorize_fjord_topic_read`, but `crates/pqueue-server/src/lib.rs:277-332` and `crates/pqueue-server/src/lib.rs:1110-1203` construct and start the broker without wiring that authorization into any live read path. PROPOSED FIX: thread the deny-by-default ACL bridge into the broker's metadata/fetch handling so cross-tenant and cross-queue reads are rejected before any record is served. NON-SCOPE: implementing a second Kafka broker, reopening ADR-005 queue-data-plane consumer semantics, or restoring the superseded heimq target.",
+    "acceptance": "1. `TestKafkaTenantAclRejectsCrossTenantRead` proves a caller outside `(tenant_id, queue_id)` is denied access.\n2. `TestKafkaTenantAclRejectsCrossQueueRead` proves a caller in the same tenant but different queue is denied access.\n3. `go test ./... -run 'TestKafkaTenantAclRejectsCrossTenantRead|TestKafkaTenantAclRejectsCrossQueueRead'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-0b450534",
+    "labels": [
+      "kind:build",
+      "area:security",
+      "area:tenant",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014",
+      "adr-002"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field preClaimIntakePromptRewrite.rewrite.acceptance of type string\",\"fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\"}",
+          "created_at": "2026-07-06T19:44:16.550967414Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T194417-fb2283d5",
+    "prompt": ".ddx/executions/20260706T194417-fb2283d5/prompt.md",
+    "manifest": ".ddx/executions/20260706T194417-fb2283d5/manifest.json",
+    "result": ".ddx/executions/20260706T194417-fb2283d5/result.json",
+    "checks": ".ddx/executions/20260706T194417-fb2283d5/checks.json",
+    "usage": ".ddx/executions/20260706T194417-fb2283d5/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-10ec7789-20260706T194417-fb2283d5"
+  },
+  "prompt_sha": "a1111535b49004c43706696de1942393c7a5a21090660929e72c558dd617baf9"
+}
