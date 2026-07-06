@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T190528-ccf00015",
+  "bead_id": "pqueue-5f65e5bb",
+  "base_rev": "fb79dd3dca194c849faf6ced5756f348dd93fc6a",
+  "created_at": "2026-07-06T19:05:29.001928856Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-5f65e5bb",
+    "title": "Clean server-test and projection-helper regressions",
+    "description": "PROBLEM: The release matrix still exposes server-test and projection-helper regressions that basic CI misses.\nROOT CAUSE: `crates/pqueue-server/tests/server.rs:1645-1652` still sits on the old `idempotency_key` callsite shape, and `crates/pqueue-projection/src/lib.rs:3043-3070` is the helper seam that required the missing `emit_change_records` initializer; the same release-gate surface also picks up the six-crate fmt/clippy noise.\nPROPOSED FIX: update the server test callsites, keep `emit_change_records` explicit in helper constructors, and clear the release-gate formatting/clippy warnings in the touched crates.\nNON-SCOPE: PR gate wiring, release notification plumbing, postgres wrapper ownership, and sqlite historical-read plumbing.",
+    "acceptance": "1. TestChangeRecordIdempotencyKeyCallsitesCompile: the server tests compile against the current `idempotency_key` shape and the affected assertions still pass.\n2. TestProjectionHelperCarriesEmitChangeRecords: helper constructors set `emit_change_records` explicitly and the projection helper remains green under the release matrix.\n3. TestReleaseMatrixStyleClean: `cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.\n4. TestGoTestGate: `go test ./...` passes.\n5. TestLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-a5316d70",
+    "labels": [
+      "kind:build",
+      "area:ci",
+      "area:release",
+      "review-rework"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T190528-ccf00015",
+    "prompt": ".ddx/executions/20260706T190528-ccf00015/prompt.md",
+    "manifest": ".ddx/executions/20260706T190528-ccf00015/manifest.json",
+    "result": ".ddx/executions/20260706T190528-ccf00015/result.json",
+    "checks": ".ddx/executions/20260706T190528-ccf00015/checks.json",
+    "usage": ".ddx/executions/20260706T190528-ccf00015/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-5f65e5bb-20260706T190528-ccf00015"
+  },
+  "prompt_sha": "6dd48b6de92286c15dd5d78bbab632d4d297600a90b5d97ebb078564ea7ddf9d"
+}
