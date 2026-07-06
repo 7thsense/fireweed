@@ -13,7 +13,7 @@ ddx:
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T14:59:32Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # Contract

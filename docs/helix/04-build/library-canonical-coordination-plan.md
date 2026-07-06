@@ -14,7 +14,7 @@ ddx:
       adr-engine-enforced-coordination-and-encapsulated-library-surface: 36c73add90f1c464172040dd7c926608f49c5a263b2bf03d9dd03103d8a5b6c2
       adr-hexagonal-architecture-and-two-interfaces: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # Library Canonical Coordination — Implementation Plan

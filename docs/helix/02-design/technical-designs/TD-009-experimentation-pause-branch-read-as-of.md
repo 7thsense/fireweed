@@ -15,7 +15,7 @@ ddx:
       td-queue-history-change-records: 02808f93dee17f6f31facc9719b7c3b534ba871d430255eceafa37b0aea67ddf
       td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-06T14:38:23Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # TD-009: Experimentation surface — pause, branch-at-position, read-as-of-position

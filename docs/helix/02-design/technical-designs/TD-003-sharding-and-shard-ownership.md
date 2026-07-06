@@ -15,7 +15,7 @@ ddx:
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # Technical Design: TD-003 Queue Ownership and Fencing

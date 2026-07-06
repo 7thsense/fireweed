@@ -11,7 +11,7 @@ ddx:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-kafka-producer-wire-adapter: b49b122239af43127faabd91747efc79cc3853555ffa9bfe4febb9d04f8bde32
       adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
-    reviewed_at: "2026-07-06T14:38:23Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # Architecture Decision Record

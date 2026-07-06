@@ -15,7 +15,7 @@ ddx:
       adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
       td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T14:38:23Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention

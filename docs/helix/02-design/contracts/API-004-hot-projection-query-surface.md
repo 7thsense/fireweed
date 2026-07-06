@@ -11,9 +11,9 @@ ddx:
     deps:
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       adr-typed-payload-schemas-and-indexes-via-axon-esf: bc29e64f6e6f89932496a4803282d3e388bea665db6c526a92ba17fe49422347
-      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
+      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # Contract

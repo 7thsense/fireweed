@@ -23,7 +23,7 @@ ddx:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
-      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
+      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -33,7 +33,7 @@ ddx:
       tp-governing-test-traceability: b485d8c2cb0e34424404c839913f764dffe86be59112c3d135d731aaf40378a3
       tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
       tp-verification-acceptance-criteria: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
-    reviewed_at: "2026-07-06T04:10:30Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence

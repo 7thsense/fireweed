@@ -11,7 +11,7 @@ ddx:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T14:59:49Z"
 ---
 
 # Architecture Decision Record
