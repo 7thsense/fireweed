@@ -1,0 +1,8 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/helix/02-design/adr/ADR-014-heimq-external-broker-change-log-consumer-surface.md",
+    "docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md",
+    "docs/helix/02-design/technical-designs/TD-009-experimentation-pause-branch-read-as-of.md"
+  ]
+}
