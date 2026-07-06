@@ -22,11 +22,11 @@ use pqueue_core::{
 use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand,
     CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, ControlPlaneStore,
-    DiscoveryGranularity, DiscoveryPort, FenceLeaseCommand, FinalizeKind, FinalizeOutcome,
-    FinalizePort, GroupBatching, PauseQueueCommand, PayloadUpdate, ProjectionRead, PurgePort,
-    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, ReassignLeasePort, ReclaimDriver,
-    RenewLeasePort, SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort,
+    DiscoveryGranularity, DiscoveryPort, EngineError, FenceLeaseCommand, FinalizeKind,
+    FinalizeOutcome, FinalizePort, GroupBatching, HistoricalProjectionRead, PauseQueueCommand,
+    PayloadUpdate, ProjectionRead, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
+    QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SetGatesCommand,
+    UnfenceLeaseCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -379,6 +379,28 @@ async fn tick_reclaims_expired_lease() {
         b.pending(&shard()).await.unwrap().is_empty(),
         "no longer leased"
     );
+}
+
+/// The sqlite relational backend is fail-closed for historical reads until the rebuild-from-log path
+/// lands; the trait seam is explicit and returns `Unavailable`.
+#[tokio::test]
+async fn sqlite_relational_conformance_historical_projection_read_is_explicit() {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+
+    let shard = shard();
+    let position = pqueue_engine::CommandPosition::new(shard.clone(), 0, 0);
+    let err = b
+        .read_as_of(
+            &shard,
+            position,
+            |_projection| -> pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>> {
+                unreachable!("sqlite relational historical reads should decline before querying")
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, EngineError::Unavailable);
 }
 
 /// FenceLease blocks finalize (StaleLease); UnfenceLease restores it.
@@ -1790,7 +1812,7 @@ async fn discover_empty_queue_is_empty() {
 // ---------------------------------------------------------------------------
 
 use pqueue_core::{IndexDeclaration, IndexType, QueueIndex};
-use pqueue_engine::{EngineError, IndexQueryPort};
+use pqueue_engine::IndexQueryPort;
 
 fn qdef_unique_str_index(index_name: &str, field: &str) -> QueueDefinition {
     use axon_esf::IndexDef;
