@@ -1,0 +1,33 @@
+{
+  "attempt_id": "20260706T040604-88ea2121",
+  "bead_id": "pqueue-045f516f",
+  "base_rev": "1dddd223545bfd4095648461cec8b804d613f7b9",
+  "created_at": "2026-07-06T04:06:05.102975253Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-045f516f",
+    "title": "Re-evaluate log-then-apply upsert/update_fields/reschedule ban under universal commit ordering",
+    "description": "ADR-013 (amended 2026-07-05) makes commit ordering universal: log durable -\u003e serving projection applied -\u003e ack. On objectlog/hybrid the serving (memory) projection applies synchronously before ack, so the projection a claim or upsert validates against is current — the upsert-vs-lagging-projection race that motivated TD-007 §2.2's blanket '-ERR pqueue unavailable' for upsert/update_fields/reschedule on the log-then-apply class may now be closable on hybrid profiles. This matters for 7thsense: mutable schedules (FR-46, ingest-then-reschedule) are core to scheduled delivery, and today they are unavailable on the flagship S3-durable profile, forcing atomic-class backends. Decide per profile: which log-then-apply compositions can validate pre-commit against a synchronously-applied serving projection and safely lift the ban; update TD-007 §2.2, TD-006 flavor-difference 5, TD-004, and API-003's scheduled-delivery profile accordingly. If the ban stays for any profile, record the 7thsense topology consequence (mutable-schedule queues must run atomic-class) explicitly in API-003.",
+    "acceptance": "TD-007/TD-006/TD-004 state per-profile upsert/update_fields/reschedule availability with rationale; the upsert-claim race argument is re-derived under the universal ordering; either the hybrid ban is lifted with conformance scenarios covering upsert-during-claim under group commit, or API-003 records the atomic-class requirement for mutable-schedule queues; cascade re-stamped, ddx doc stale clean.",
+    "labels": [
+      "kind:design",
+      "area:docs",
+      "td-007",
+      "td-004",
+      "adr-013",
+      "7thsense"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T040604-88ea2121",
+    "prompt": ".ddx/executions/20260706T040604-88ea2121/prompt.md",
+    "manifest": ".ddx/executions/20260706T040604-88ea2121/manifest.json",
+    "result": ".ddx/executions/20260706T040604-88ea2121/result.json",
+    "checks": ".ddx/executions/20260706T040604-88ea2121/checks.json",
+    "usage": ".ddx/executions/20260706T040604-88ea2121/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-045f516f-20260706T040604-88ea2121"
+  },
+  "prompt_sha": "94274a7d71e36374c596a328b55aa0e63fe37eec2b6d2769974d1d6e147662f6"
+}
