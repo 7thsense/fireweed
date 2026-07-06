@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260706T192852-15394787",
+  "bead_id": "pqueue-34df874c",
+  "base_rev": "2fb3c6ab3ee81a60b5fc364ed870d0918fabb63f",
+  "created_at": "2026-07-06T19:28:53.040540791Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-34df874c",
+    "title": "Serve one queue as one fjord topic",
+    "description": "PROBLEM: Stock Kafka clients need an ordered read path for one queue's change log through embedded fjord.\nROOT CAUSE: `docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:138` through `docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:154` require a Kafka-protocol consumer surface with one single-partition topic per queue, but `crates/pqueue-server/src/lib.rs:156` through `crates/pqueue-server/src/lib.rs:205` only materialize the fjord primitives and `crates/pqueue-engine/src/compose.rs:918` through `crates/pqueue-engine/src/compose.rs:951` still emit a generic tail without any Kafka topic/partition routing seam.\nPROPOSED FIX: Add tenant-prefixed topic naming and one-partition routing for each `(tenant_id, queue_id)` stream, then expose the ordered fetch path so a stock Kafka client sees `CommandPosition` order.\nNON-SCOPE: Dependency pinning, ACL scoping, and consumer-group ownership are handled by sibling beads.",
+    "acceptance": "1. `TestKafkaChangeLogConsumesInCommandPositionOrder` proves a stock Kafka client reads one queue's change records in order.\n2. `TestKafkaTopicMapsOneQueueToOnePartition` proves each `(tenant_id, queue_id)` stream lands on exactly one partition.\n3. `go test ./... -run 'TestKafkaChangeLogConsumesInCommandPositionOrder|TestKafkaTopicMapsOneQueueToOnePartition'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-37a8fd9d",
+    "labels": [
+      "kind:build",
+      "area:fjord",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T192852-15394787",
+    "prompt": ".ddx/executions/20260706T192852-15394787/prompt.md",
+    "manifest": ".ddx/executions/20260706T192852-15394787/manifest.json",
+    "result": ".ddx/executions/20260706T192852-15394787/result.json",
+    "checks": ".ddx/executions/20260706T192852-15394787/checks.json",
+    "usage": ".ddx/executions/20260706T192852-15394787/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-34df874c-20260706T192852-15394787"
+  },
+  "prompt_sha": "c468aa928f879c2b7a329b19567a134f92125a82b8358f42327a3c508aa32db7"
+}
