@@ -455,7 +455,7 @@ fn hybrid_projection_poisoned_after_sqlite_commit_memory_apply_failure() {
     );
     assert_eq!(
         store.sqlite().recovery_high_water(&shard()).unwrap(),
-        Some(1)
+        Some(pos(0))
     );
 
     let read_err = pqueue_engine::ProjectionStore::metrics(&store, &shard()).unwrap_err();
@@ -492,7 +492,7 @@ fn hybrid_chaos_sqlite_commit_before_memory_failure_poisons_and_recovers() {
     );
     assert_eq!(
         store.sqlite().recovery_high_water(&shard()).unwrap(),
-        Some(1),
+        Some(pos(0)),
         "SQLite committed the batch before memory failed"
     );
     assert!(pqueue_engine::ProjectionStore::metrics(&store, &shard()).is_err());
