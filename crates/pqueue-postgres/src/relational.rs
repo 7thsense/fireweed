@@ -4701,11 +4701,35 @@ impl LogStore for PostgresRelational {
         }))
     }
 
-    fn set_high_water(
-        &mut self,
-        _shard: &QueueKey,
-        _position: CommandPosition,
-    ) -> EngineResult<()> {
+    fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()> {
+        let mut g = self.lock();
+        let (t, q) = parts(shard);
+        let next = position
+            .sequence
+            .checked_add(1)
+            .ok_or(EngineError::Invalid("high-water overflow"))?;
+        let row: Option<postgres::Row> = st(g.client.query_opt(
+            "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?;
+        let Some(row) = row else {
+            return Err(EngineError::NotFound);
+        };
+        let next_seq: i64 = row.get(0);
+        let epoch: i64 = row.get(1);
+        if epoch as u64 != position.backend_epoch {
+            return Err(EngineError::EpochFenced);
+        }
+        let next = next as i64;
+        if next_seq > next {
+            return Err(EngineError::Invalid("high-water regression"));
+        }
+        if next_seq < next {
+            st(g.client.execute(
+                "UPDATE relational_cursor SET next_seq=$3 WHERE tenant=$1 AND queue=$2 AND next_seq<$3",
+                &[&t, &q, &next],
+            ))?;
+        }
         Ok(())
     }
 

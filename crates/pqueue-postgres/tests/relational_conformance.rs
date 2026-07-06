@@ -21,8 +21,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{EntitySchemaDocument, RequestId};
-use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, RecoveryReadPort};
-use pqueue_postgres::PostgresRelationalBackend;
+use pqueue_engine::{
+    ClaimPort, CommandPosition, ControlPlaneStore, EngineError, ProjectionRead, ProjectionStore,
+    PushPort, RecoveryReadPort,
+};
+use pqueue_postgres::{PostgresRelationalBackend, composed_postgres_relational_in_schema};
 use serde_json::json;
 
 fn fresh_schema() -> String {
@@ -270,6 +273,192 @@ fn commit_transition_explain_commit_shared_scenario_runs_against_postgres_relati
         Err(_) => {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (commit_transition_explain_commit_shared_scenario_runs_against_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+            );
+        }
+    }
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestPostgresRelationalRecoveryHighWater() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            futures::executor::block_on(async {
+                let backend = composed_postgres_relational_in_schema(&url, &schema)
+                    .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                backend
+                    .create_queue(pqueue_conformance::qdef())
+                    .await
+                    .unwrap();
+                backend
+                    .push_with_request_id(
+                        &pqueue_conformance::shard(),
+                        RequestId::new("relational-high-water").unwrap(),
+                        vec![
+                            pqueue_engine::PushSpec::default(),
+                            pqueue_engine::PushSpec::default(),
+                        ],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                backend
+                    .claim(pqueue_conformance::claim_req(1, 500, 10))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    backend.with_projection(|projection| {
+                        projection
+                            .recovery_high_water(&pqueue_conformance::shard())
+                            .unwrap()
+                    }),
+                    Some(CommandPosition::new(pqueue_conformance::shard(), 0, 2))
+                );
+            });
+
+            let reopened = composed_postgres_relational_in_schema(&url, &schema)
+                .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+            assert_eq!(
+                reopened.with_projection(|projection| {
+                    projection
+                        .recovery_high_water(&pqueue_conformance::shard())
+                        .unwrap()
+                }),
+                Some(CommandPosition::new(pqueue_conformance::shard(), 0, 2)),
+                "the relational projection must reopen at the last applied position"
+            );
+        }
+        Err(_) => {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalRecoveryHighWater) — set PQUEUE_PG_TEST_URL to a live DB"
+            );
+        }
+    }
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestPostgresRelationalTruncateThenRecoverExactState() {
+    match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) => {
+            let schema = fresh_schema();
+            let request_id = RequestId::new("replay-1").unwrap();
+            let body = vec![
+                pqueue_engine::PushSpec {
+                    priority: Some(pqueue_core::PriorityValue::Int64(10)),
+                    ..Default::default()
+                },
+                pqueue_engine::PushSpec {
+                    priority: Some(pqueue_core::PriorityValue::Int64(20)),
+                    ..Default::default()
+                },
+            ];
+            let (original_ids, fence_epoch) = futures::executor::block_on(async {
+                let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
+                    .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                backend
+                    .create_queue(pqueue_conformance::qdef())
+                    .await
+                    .unwrap();
+                let original_ids = backend
+                    .push_with_request_id(
+                        &pqueue_conformance::shard(),
+                        request_id.clone(),
+                        body.clone(),
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+
+                let claimed = backend
+                    .claim(pqueue_conformance::claim_req(1, 500, 10))
+                    .await
+                    .unwrap();
+                assert_eq!(claimed.items.len(), 1, "one leased item before reopen");
+                let fence_epoch = backend
+                    .acquire_epoch(&pqueue_conformance::shard())
+                    .await
+                    .unwrap();
+
+                let metrics = backend.metrics(&pqueue_conformance::shard()).await.unwrap();
+                assert_eq!((metrics.pending, metrics.leased), (1, 1));
+                assert_eq!(
+                    backend
+                        .current_epoch(&pqueue_conformance::shard())
+                        .await
+                        .unwrap(),
+                    fence_epoch
+                );
+                (original_ids, fence_epoch)
+            });
+
+            let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
+                .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+            futures::executor::block_on(async {
+                assert_eq!(
+                    backend
+                        .current_epoch(&pqueue_conformance::shard())
+                        .await
+                        .unwrap(),
+                    fence_epoch,
+                    "the durable fence epoch survives reopen"
+                );
+                assert_eq!(
+                    backend.metrics(&pqueue_conformance::shard()).await.unwrap(),
+                    pqueue_engine::QueueMetrics {
+                        pending: 1,
+                        leased: 1,
+                        complete: 0,
+                        failed: 0,
+                    },
+                    "the item lifecycle counts survive reopen"
+                );
+                assert!(
+                    backend
+                        .pending(&pqueue_conformance::shard())
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "the leased item's live token is dropped on reopen"
+                );
+
+                let replayed = backend
+                    .push_with_request_id(
+                        &pqueue_conformance::shard(),
+                        request_id,
+                        body,
+                        pqueue_conformance::ts(1),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    replayed, original_ids,
+                    "request-id replay returns the original item ids"
+                );
+
+                let fresh = backend
+                    .push(
+                        &pqueue_conformance::shard(),
+                        vec![pqueue_engine::PushSpec::default()],
+                        pqueue_conformance::ts(2),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(fresh.len(), 1);
+                assert!(
+                    !original_ids.contains(&fresh[0]),
+                    "counter recovery must mint a fresh item id after reopen"
+                );
+            });
+        }
+        Err(_) => {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalTruncateThenRecoverExactState) — set PQUEUE_PG_TEST_URL to a live DB"
             );
         }
     }
