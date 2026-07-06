@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T043710-ff946509",
+  "bead_id": "pqueue-68aa6cfd",
+  "base_rev": "6ee722c5cefc4496530a4e6e2b0ec46df76f61a4",
+  "created_at": "2026-07-06T04:37:11.247333867Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-68aa6cfd",
+    "title": "Model and emit committed change records",
+    "description": "PROBLEM: TD-008 CL-1, CL-3, and CL-4 require every committed mutating command on an opted-in queue to materialize as ordered change records with a stable idempotency key, but the record model and mapping logic are split across engine types without a dedicated, verified change-log contract.\nROOT CAUSE: docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:43-56 and crates/pqueue-engine/src/command.rs:531-695 define the required record semantics, while crates/pqueue-engine/src/port.rs:115-118 only exposes a generic sink port; there is no child-owned test seam proving the command-to-record mapping across all mutating commands.\nPROPOSED FIX: Harden the engine-side record synthesis path so every mutating command path maps through a single, test-covered change-record builder, and add explicit checks for per-queue ordering and the stable idempotency key shape `(tenant_id, queue_id, item_id, backend_epoch, sequence)`.\nNON-SCOPE: No Kafka/heimq broker work, no HTTP sink plumbing, no terminal-retention policy change, and no Parquet/Delta export inside pqueue; history remains an external consumer concern.",
+    "acceptance": "1. `TestChangeRecordSynthesisCoversAllMutatingCommands` proves every committed mutating command path emits the expected record(s) from the engine-side mapping.\n2. `TestChangeRecordIdempotencyKeyIncludesTenantQueueItemBackendEpochSequence` proves the stable dedupe key matches TD-008 CL-3 and stays tenant-scoped.\n3. `TestChangeRecordBatchPreservesCommandPositionOrder` proves one queue's emitted batch stays in `CommandPosition` order and does not imply cross-queue ordering.\n4. `go test ./... -run 'TestChangeRecordSynthesisCoversAllMutatingCommands|TestChangeRecordIdempotencyKeyIncludesTenantQueueItemBackendEpochSequence|TestChangeRecordBatchPreservesCommandPositionOrder'`\n5. `lefthook run pre-commit`\n6. `lefthook run pre-push`",
+    "parent": "pqueue-a8a9e7e7",
+    "labels": [
+      "kind:build",
+      "area:pqueue-engine",
+      "area:change-log",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T043710-ff946509",
+    "prompt": ".ddx/executions/20260706T043710-ff946509/prompt.md",
+    "manifest": ".ddx/executions/20260706T043710-ff946509/manifest.json",
+    "result": ".ddx/executions/20260706T043710-ff946509/result.json",
+    "checks": ".ddx/executions/20260706T043710-ff946509/checks.json",
+    "usage": ".ddx/executions/20260706T043710-ff946509/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-68aa6cfd-20260706T043710-ff946509"
+  },
+  "prompt_sha": "baa84722cf25e9aec3af2f89dd88ce49ad15b3445b1a6f8a930b44b20f3c55dc"
+}
