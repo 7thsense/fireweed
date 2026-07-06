@@ -11,9 +11,9 @@ use pqueue_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::QueueKey;
 use crate::error::{EngineError, EngineResult};
 use crate::types::CommandPosition;
+use crate::QueueKey;
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -581,13 +581,10 @@ pub struct ChangeRecord {
 }
 
 impl ChangeRecord {
-    pub fn idempotency_key(
-        &self,
-        shard: &QueueKey,
-    ) -> (TenantId, QueueId, Option<ItemId>, u64, u64) {
+    pub fn idempotency_key(&self) -> (TenantId, QueueId, Option<ItemId>, u64, u64) {
         (
-            shard.tenant_id.clone(),
-            shard.queue_id.clone(),
+            self.tenant_id.clone(),
+            self.queue_id.clone(),
             self.item_id,
             self.position.backend_epoch,
             self.position.sequence,
@@ -1197,7 +1194,453 @@ mod serde_tests {
     }
 
     #[test]
-    fn change_record_mapping() {
+    fn test_change_record_synthesis_covers_all_mutating_commands() {
+        #[derive(Debug)]
+        struct ExpectedRecord {
+            item_id: Option<ItemId>,
+            kind: ChangeRecordKind,
+            new_state: Option<ChangeRecordState>,
+            item_version: Option<u64>,
+            terminal_at: Option<UtcTimestamp>,
+        }
+
+        fn expect_records(
+            records: &[ChangeRecord],
+            expected: &[ExpectedRecord],
+            emitted_at: UtcTimestamp,
+        ) {
+            assert_eq!(records.len(), expected.len());
+            for (record, expected) in records.iter().zip(expected.iter()) {
+                assert_eq!(record.item_id, expected.item_id);
+                assert_eq!(record.command_kind, expected.kind);
+                assert_eq!(record.new_state, expected.new_state);
+                assert_eq!(record.item_version, expected.item_version);
+                assert_eq!(record.terminal_at, expected.terminal_at);
+                assert_eq!(record.emitted_at, Some(emitted_at));
+            }
+        }
+
+        let shard = shard();
+        let position = CommandPosition::new(shard.clone(), 7, 11);
+        let emitted_at = ts(99);
+        let cases: Vec<(&str, QueueCommand, Vec<ExpectedRecord>)> = vec![
+            (
+                "push",
+                QueueCommand::Push(PushCommand {
+                    items: vec![
+                        item(),
+                        PushItem {
+                            item_id: iid("b"),
+                            ..item()
+                        },
+                    ],
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::Push,
+                        new_state: Some(ChangeRecordState::Pending),
+                        item_version: Some(1),
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::Push,
+                        new_state: Some(ChangeRecordState::Pending),
+                        item_version: Some(1),
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "claim",
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: vec![iid("a"), iid("b")],
+                    lease_token: LeaseToken::new("lease").unwrap(),
+                    lease_expires_at: ts(100),
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::Claim,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::Claim,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "cohort-claim",
+                QueueCommand::CohortClaim(CohortClaimCommand {
+                    cohort_id: CohortId::new("cohort").unwrap(),
+                    item_ids: vec![iid("a"), iid("b")],
+                    lease_token: LeaseToken::new("lease").unwrap(),
+                    lease_expires_at: ts(100),
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::CohortClaim,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::CohortClaim,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "renew-lease",
+                QueueCommand::RenewLease(RenewLeaseCommand {
+                    item_ids: vec![iid("a"), iid("b")],
+                    lease_expires_at: ts(200),
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::RenewLease,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::RenewLease,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "cohort-renew-lease",
+                QueueCommand::CohortRenewLease(CohortRenewLeaseCommand {
+                    cohort_id: CohortId::new("cohort").unwrap(),
+                    lease_expires_at: ts(200),
+                }),
+                vec![ExpectedRecord {
+                    item_id: None,
+                    kind: ChangeRecordKind::CohortRenewLease,
+                    new_state: None,
+                    item_version: None,
+                    terminal_at: None,
+                }],
+            ),
+            (
+                "reassign-lease",
+                QueueCommand::ReassignLease(ReassignLeaseCommand {
+                    item_ids: vec![iid("a"), iid("b")],
+                    lease_token: LeaseToken::new("lease").unwrap(),
+                    lease_expires_at: ts(200),
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::ReassignLease,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::ReassignLease,
+                        new_state: Some(ChangeRecordState::Leased),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "finalize",
+                QueueCommand::Finalize(FinalizeCommand {
+                    outcomes: vec![
+                        FinalizeOutcome::new(iid("a"), FinalizeKind::Complete),
+                        FinalizeOutcome {
+                            item_id: iid("b"),
+                            kind: FinalizeKind::Retry,
+                            not_before: Some(ts(500)),
+                        },
+                    ],
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::Finalize,
+                        new_state: Some(ChangeRecordState::Complete),
+                        item_version: None,
+                        terminal_at: Some(ts(1)),
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::Finalize,
+                        new_state: Some(ChangeRecordState::Pending),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "cohort-finalize",
+                QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                    cohort_id: CohortId::new("cohort").unwrap(),
+                    kind: FinalizeKind::Fail,
+                    not_before: Some(ts(500)),
+                }),
+                vec![ExpectedRecord {
+                    item_id: None,
+                    kind: ChangeRecordKind::CohortFinalize,
+                    new_state: None,
+                    item_version: None,
+                    terminal_at: None,
+                }],
+            ),
+            (
+                "replace-pending",
+                QueueCommand::ReplacePending(ReplacePendingCommand {
+                    client_item_key: ClientItemKey::new("k").unwrap(),
+                    superseded_item_id: iid("old"),
+                    replacement: PushItem {
+                        item_id: iid("new"),
+                        ..item()
+                    },
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("old")),
+                        kind: ChangeRecordKind::ReplacePending,
+                        new_state: Some(ChangeRecordState::Pending),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("new")),
+                        kind: ChangeRecordKind::ReplacePending,
+                        new_state: Some(ChangeRecordState::Pending),
+                        item_version: Some(1),
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "update-fields",
+                QueueCommand::UpdateFields(UpdateFieldsCommand {
+                    item_id: iid("a"),
+                    field_ops: BTreeMap::from([
+                        ("state".to_string(), Some(Bytes::from_static(b"leased"))),
+                        ("stale".to_string(), None),
+                    ]),
+                    payload: PayloadUpdate::Set(Some(Bytes::from_static(b"body"))),
+                    set_priority: ScheduleUpdate::Keep,
+                    set_not_before: ScheduleUpdate::Keep,
+                    set_entity_document: None,
+                }),
+                vec![ExpectedRecord {
+                    item_id: Some(iid("a")),
+                    kind: ChangeRecordKind::UpdateFields,
+                    new_state: None,
+                    item_version: None,
+                    terminal_at: None,
+                }],
+            ),
+            (
+                "lease-expired",
+                QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                    item_ids: vec![iid("a"), iid("b")],
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::LeaseExpired,
+                        new_state: Some(ChangeRecordState::Pending),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::LeaseExpired,
+                        new_state: Some(ChangeRecordState::Pending),
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "cohort-expired",
+                QueueCommand::CohortExpired(CohortExpiredCommand {
+                    group_key: GroupKey::new("g").unwrap(),
+                }),
+                vec![ExpectedRecord {
+                    item_id: None,
+                    kind: ChangeRecordKind::CohortExpired,
+                    new_state: None,
+                    item_version: None,
+                    terminal_at: None,
+                }],
+            ),
+            (
+                "fence-lease",
+                QueueCommand::FenceLease(FenceLeaseCommand {
+                    item_ids: vec![iid("a"), iid("b")],
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::FenceLease,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::FenceLease,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "unfence-lease",
+                QueueCommand::UnfenceLease(UnfenceLeaseCommand {
+                    item_ids: vec![iid("a"), iid("b")],
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::UnfenceLease,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::UnfenceLease,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
+            ),
+            (
+                "pause-queue",
+                QueueCommand::PauseQueue(PauseQueueCommand::default()),
+                vec![ExpectedRecord {
+                    item_id: None,
+                    kind: ChangeRecordKind::PauseQueue,
+                    new_state: None,
+                    item_version: None,
+                    terminal_at: None,
+                }],
+            ),
+            (
+                "resume-queue",
+                QueueCommand::ResumeQueue,
+                vec![ExpectedRecord {
+                    item_id: None,
+                    kind: ChangeRecordKind::ResumeQueue,
+                    new_state: None,
+                    item_version: None,
+                    terminal_at: None,
+                }],
+            ),
+            (
+                "purge-items",
+                QueueCommand::PurgeItems(PurgeItemsCommand {
+                    item_ids: vec![iid("a"), iid("b")],
+                    force: true,
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::PurgeItems,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: Some(ts(1)),
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::PurgeItems,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: Some(ts(1)),
+                    },
+                ],
+            ),
+            (
+                "set-gates",
+                QueueCommand::SetGates(SetGatesCommand {
+                    gate_keys: vec!["hold".to_string()],
+                    blocked: true,
+                }),
+                vec![ExpectedRecord {
+                    item_id: None,
+                    kind: ChangeRecordKind::SetGates,
+                    new_state: None,
+                    item_version: None,
+                    terminal_at: None,
+                }],
+            ),
+            (
+                "write-side-records",
+                QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                    records: vec![SideRecord {
+                        key: b"state/run-1".to_vec(),
+                        payload: Bytes::from_static(b"opaque-state"),
+                    }],
+                }),
+                vec![],
+            ),
+            (
+                "advance-instance-fence",
+                QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                    instance_key: b"instance/run-1".to_vec(),
+                    expected: 7,
+                    next: 8,
+                }),
+                vec![],
+            ),
+        ];
+
+        for (label, command, expected) in cases {
+            let records = command_envelope_change_records(
+                &shard,
+                &position,
+                &envelope(command),
+                emitted_at,
+                None,
+            );
+            expect_records(&records, &expected, emitted_at);
+            assert!(
+                records
+                    .iter()
+                    .all(|record| record.position.backend_epoch == 7
+                        && record.position.sequence == 11),
+                "unexpected position in {label}"
+            );
+            assert!(
+                records
+                    .iter()
+                    .all(|record| record.tenant_id == shard.tenant_id
+                        && record.queue_id == shard.queue_id),
+                "unexpected shard identity in {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_change_record_idempotency_key_includes_tenant_queue_item_backend_epoch_sequence() {
         let shard = shard();
         let position = CommandPosition::new(shard.clone(), 7, 11);
         let emitted_at = ts(99);
@@ -1205,20 +1648,14 @@ mod serde_tests {
             &shard,
             &position,
             &envelope(QueueCommand::Push(PushCommand {
-                items: vec![
-                    item(),
-                    PushItem {
-                        item_id: iid("b"),
-                        ..item()
-                    },
-                ],
+                items: vec![item()],
             })),
             emitted_at,
             None,
         );
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 1);
         assert_eq!(
-            records[0].idempotency_key(&shard),
+            records[0].idempotency_key(),
             (
                 shard.tenant_id.clone(),
                 shard.queue_id.clone(),
@@ -1227,23 +1664,66 @@ mod serde_tests {
                 11
             )
         );
-        assert_eq!(records[0].item_id, Some(iid("a")));
-        assert_eq!(records[0].new_state, Some(ChangeRecordState::Pending));
-        assert_eq!(records[0].command_kind, ChangeRecordKind::Push);
-        assert_eq!(records[0].emitted_at, Some(emitted_at));
+        assert_eq!(records[0].tenant_id, shard.tenant_id);
+        assert_eq!(records[0].queue_id, shard.queue_id);
+    }
 
-        let gates = command_envelope_change_records(
-            &shard,
-            &position,
-            &envelope(QueueCommand::SetGates(SetGatesCommand {
-                gate_keys: vec!["hold".to_string()],
-                blocked: true,
+    #[test]
+    fn test_change_record_batch_preserves_command_position_order() {
+        let shard = shard();
+        let other_shard = QueueKey::new(
+            TenantId::new("tenant-2").unwrap(),
+            QueueId::new("queue-2").unwrap(),
+        );
+        let emitted_at = ts(99);
+        let batch = vec![
+            (
+                CommandPosition::new(shard.clone(), 7, 1),
+                envelope(QueueCommand::Push(PushCommand {
+                    items: vec![item()],
+                })),
+            ),
+            (
+                CommandPosition::new(shard.clone(), 7, 2),
+                envelope(QueueCommand::Finalize(FinalizeCommand {
+                    outcomes: vec![FinalizeOutcome::new(iid("a"), FinalizeKind::Complete)],
+                })),
+            ),
+        ];
+        let records = batch
+            .iter()
+            .flat_map(|(position, env)| {
+                command_envelope_change_records(&shard, position, env, emitted_at, None)
+            })
+            .collect::<Vec<_>>();
+        let positions = records
+            .iter()
+            .map(|record| (record.position.backend_epoch, record.position.sequence))
+            .collect::<Vec<_>>();
+        assert_eq!(positions, vec![(7, 1), (7, 2)]);
+
+        let other_records = command_envelope_change_records(
+            &other_shard,
+            &CommandPosition::new(other_shard.clone(), 7, 1),
+            &envelope(QueueCommand::Push(PushCommand {
+                items: vec![item()],
             })),
             emitted_at,
             None,
         );
-        assert_eq!(gates.len(), 1);
-        assert_eq!(gates[0].item_id, None);
-        assert_eq!(gates[0].command_kind, ChangeRecordKind::SetGates);
+        assert_eq!(
+            other_records[0].idempotency_key(),
+            (
+                other_shard.tenant_id.clone(),
+                other_shard.queue_id.clone(),
+                Some(iid("a")),
+                7,
+                1,
+            )
+        );
+        assert_ne!(
+            records[0].idempotency_key(),
+            other_records[0].idempotency_key()
+        );
     }
 }

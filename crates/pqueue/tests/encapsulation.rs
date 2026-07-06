@@ -83,6 +83,7 @@ fn facade_exports_queue_definition_construction_surface() {
         secondary_indexes: vec![],
         entity_schema: None,
         typed_indexes: vec![],
+        emit_change_records: true,
     };
 
     let validated = create.validate(&QueueCreationPolicy::default()).unwrap();

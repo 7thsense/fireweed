@@ -609,6 +609,9 @@ pub struct CreateQueue {
     /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a pqueue name.
     /// Empty = no typed indexes. Must not overlap `secondary_indexes` by name.
     pub typed_indexes: Vec<QueueIndex>,
+    // Whether this queue emits change records to the history sink. Default-on so operators get
+    // history unless they explicitly opt out per queue.
+    pub emit_change_records: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -957,7 +960,7 @@ impl CreateQueue {
             secondary_indexes: self.secondary_indexes,
             entity_schema: self.entity_schema,
             typed_indexes: self.typed_indexes,
-            emit_change_records: true,
+            emit_change_records: self.emit_change_records,
         })
     }
 }
@@ -1743,19 +1746,17 @@ mod coverage_tests {
             until: None,
         };
         let err = request.validate(&policy()).unwrap_err();
-        assert!(
-            err.message
-                .contains("required when recurrence.mode=recurring")
-        );
+        assert!(err
+            .message
+            .contains("required when recurrence.mode=recurring"));
 
         // max_eligible_group_size == 0
         let mut request = valid_create_queue();
         request.max_eligible_group_size = Some(0);
         let err = request.validate(&policy()).unwrap_err();
-        assert!(
-            err.message
-                .contains("max_eligible_group_size must be greater")
-        );
+        assert!(err
+            .message
+            .contains("max_eligible_group_size must be greater"));
 
         // None branch of the max_eligible_group_size guard validates.
         let mut request = valid_create_queue();
