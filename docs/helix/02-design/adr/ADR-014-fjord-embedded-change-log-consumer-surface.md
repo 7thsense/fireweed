@@ -6,12 +6,12 @@ ddx:
     - adr-auth-tenancy-and-storage-isolation
     - adr-log-single-source-of-truth
   review:
-    self_hash: c1e5ff620517f039f2138f76841bf6d51a5d52d86ad05d75c5885c80c1cb96e0
+    self_hash: 1f3190f62b6dbccebd33dfd0f141e411e437bf041551f58e5ca61c0409a10e67
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-kafka-producer-wire-adapter: b49b122239af43127faabd91747efc79cc3853555ffa9bfe4febb9d04f8bde32
       adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
-    reviewed_at: "2026-07-06T17:29:43Z"
+    reviewed_at: "2026-07-06T17:31:18Z"
 ---
 
 # Architecture Decision Record
@@ -50,10 +50,19 @@ deployment is required for another system to consume the change log.
 ### Provider + shape
 
 - **Provider**: fjord, embedded as a component of `pqueue-server` behind an explicit seam.
-- **Shape**: pqueue-owned broker surface. The TD-008 emission task feeds committed change records
-  into fjord's change topics; fjord serves stock Kafka clients (metadata, fetch, consumer groups,
-  committed offsets, fan-out) from those topics. pqueue does not implement any Kafka consumer-group
-  machinery itself — that is exactly what embedding fjord buys.
+- **Shape**: **pqueue produces to fjord; fjord does Kafka things.** Canonically (product owner,
+  2026-07-06): *if* fjord change logs are active, there is one topic per pqueue queue; as changes
+  are persisted to the projection (i.e., as commands commit under ADR-013's log-durable →
+  projection-applied ordering), they are captured as change events on that topic; fjord allows
+  consumer groups to consume those topics. The relationship is producer-only — the TD-008 emission
+  task feeds committed change records through the delivery seam, and pqueue's responsibility ends
+  there. Everything Kafka — metadata, fetch, consumer groups, committed offsets, topic state,
+  fan-out — is fjord's concern, implemented and owned entirely inside the fjord component. No Kafka
+  concept appears in pqueue's engine, projections, contracts, or vocabulary; pqueue owns the
+  surface only in the deployment sense (it ships in-process, so it exists wherever pqueue runs and
+  is activated by configuration). Disambiguation: "consumer group" on the RESP data plane is
+  unrelated stock Redis-Streams wire vocabulary that pqueue accepts for client compatibility and
+  never persists (TD-006); it has nothing to do with Kafka consumer groups.
 
 ### Boundary invariants (what "well-maintained boundaries" means)
 

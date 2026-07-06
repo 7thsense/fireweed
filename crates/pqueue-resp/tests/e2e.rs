@@ -443,9 +443,13 @@ fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &Claim
     );
 }
 
+// TD-006: "consumer group" on this surface is stock Redis Streams wire vocabulary only.
+// pqueue accepts XGROUP/XREADGROUP group names for stock-client compatibility but never persists
+// them — delivery is priority-ordered per-item tracking under one implicit group. This has nothing
+// to do with Kafka consumer groups, which are entirely fjord's concern on the change-log surface
+// (ADR-014): pqueue produces to fjord; fjord does Kafka things.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(non_snake_case)]
-async fn TestKafkaConsumerGroupsStayBrokerOwnedByHeimq() {
+async fn resp_named_consumer_groups_are_wire_fiction_not_persisted() {
     let (mut con, _backend) = setup().await;
 
     let _: String = redis::cmd("XADD")
@@ -460,7 +464,7 @@ async fn TestKafkaConsumerGroupsStayBrokerOwnedByHeimq() {
     let _: String = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg("t1:q1")
-        .arg("heimq-group")
+        .arg("worker-group")
         .arg("0")
         .query_async(&mut con)
         .await
@@ -468,8 +472,8 @@ async fn TestKafkaConsumerGroupsStayBrokerOwnedByHeimq() {
 
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
         .arg("GROUP")
-        .arg("heimq-group")
-        .arg("heimq-consumer")
+        .arg("worker-group")
+        .arg("worker-1")
         .arg("COUNT")
         .arg(1)
         .arg("STREAMS")
@@ -483,7 +487,7 @@ async fn TestKafkaConsumerGroupsStayBrokerOwnedByHeimq() {
 
     let _: i64 = redis::cmd("XACK")
         .arg("t1:q1")
-        .arg("heimq-group")
+        .arg("worker-group")
         .arg(&claimed_id)
         .query_async(&mut con)
         .await
