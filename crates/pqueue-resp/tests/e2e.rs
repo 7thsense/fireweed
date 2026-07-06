@@ -3,8 +3,10 @@
 //! produced item is delivered exactly once, in priority order, with ties broken by insertion order
 //! (plan section 3 drain-and-reconcile, validating Invariant 1 through the stock command surface).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use pqueue_core::{
     EligibilityPolicy, ItemId, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
@@ -12,8 +14,9 @@ use pqueue_core::{
 };
 use pqueue_engine::Clock;
 use pqueue_engine::{
-    Backend, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore, FenceLeaseCommand,
-    LogWriter, ProjectionWriter, QueueCommand, QueueKey,
+    Backend, ClaimedItem, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore,
+    FenceLeaseCommand, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter, QueueCommand,
+    QueueKey, UpdateFieldsPort,
 };
 use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 use pqueue_resp::{RespBackend, SystemClock, serve};
@@ -250,7 +253,7 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
 async fn xreadgroup_returns_api001_claimed_item_shape() {
     let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
-    let (mut con, _) = serve_backend(backend, Arc::new(ManualClock::at(1_000))).await;
+    let (mut con, _) = serve_backend(backend.clone(), Arc::new(ManualClock::at(1_000))).await;
     let id: String = redis::cmd("XADD")
         .arg("t1:q1")
         .arg("*")
@@ -268,9 +271,33 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
         .arg(r#"{"tenant_segment":{"String":"vip"}}"#)
         .arg("recipient_ref")
         .arg("r-1")
+        .arg("field-a")
+        .arg("value-a")
+        .arg("field-b")
+        .arg("value-b")
         .query_async(&mut con)
         .await
         .unwrap();
+
+    let item_id = ItemId::new(&id).unwrap();
+    let updated_version = backend
+        .update_fields(
+            &shard(),
+            item_id,
+            BTreeMap::from([
+                ("field-a".to_string(), Some(Bytes::from_static(b"value-a-2"))),
+                ("field-b".to_string(), None),
+                ("field-c".to_string(), Some(Bytes::from_static(b"value-c"))),
+            ]),
+            PayloadUpdate::Keep,
+            None,
+            Some(1),
+            UtcTimestamp::new(1_000, 0).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated_version, 2, "update_fields bumps item_version");
 
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
         .arg("GROUP")
@@ -286,40 +313,17 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
         .unwrap();
     let claimed = &reply.keys[0].ids[0];
     assert_eq!(claimed.id, id);
+
+    let claimed_view: Vec<ClaimedItem> = backend
+        .claimed_view(&shard(), &[item_id])
+        .await
+        .unwrap();
+    assert_eq!(claimed_view.len(), 1);
     assert_eq!(
-        claimed.get::<String>("item_id").as_deref(),
-        Some(id.as_str())
+        claimed.get::<u64>("item_version"),
+        Some(claimed_view[0].item_version)
     );
-    assert_eq!(
-        claimed.get::<String>("client_item_key").as_deref(),
-        Some("shape-key")
-    );
-    assert_eq!(claimed.get::<u64>("item_version"), Some(2));
-    assert_eq!(claimed.get::<i64>("priority"), Some(7));
-    assert_eq!(
-        claimed.get::<String>("group_key").as_deref(),
-        Some("group-a")
-    );
-    assert_eq!(claimed.get::<i64>("not_before"), Some(1_000_000));
-    assert_eq!(claimed.get::<String>("lease_token").as_deref(), Some("L1"));
-    assert_eq!(claimed.get::<i64>("lease_expires_at"), Some(1_060_000));
-    assert_eq!(claimed.get::<u32>("attempt_count"), Some(1));
-    assert_eq!(
-        claimed.get::<Vec<u8>>("payload").as_deref(),
-        Some(&b"opaque"[..])
-    );
-    assert_eq!(
-        claimed.get::<Vec<u8>>("recipient_ref").as_deref(),
-        Some(&b"r-1"[..])
-    );
-    assert_eq!(
-        claimed.get::<String>("metadata").as_deref(),
-        Some(r#"{"tenant_segment":{"String":"vip"}}"#)
-    );
-    assert!(
-        claimed.get::<String>("gate_keys").is_none(),
-        "gate_keys are omitted for gate_keys=none queues"
-    );
+    assert_claimed_entry_parity(claimed, &claimed_view[0]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -363,6 +367,73 @@ fn field_value(fields: &[Value], name: &str) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+fn ts_millis(ts: UtcTimestamp) -> i64 {
+    ts.seconds * 1_000 + i64::from(ts.nanoseconds / 1_000_000)
+}
+
+fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &ClaimedItem) {
+    let item_id = claimed.item_id.to_string();
+    assert_eq!(
+        entry.get::<String>("item_id").as_deref(),
+        Some(item_id.as_str())
+    );
+    assert_eq!(entry.id, item_id);
+    assert_eq!(
+        entry.get::<String>("client_item_key").as_deref(),
+        Some(claimed.client_item_key.as_str())
+    );
+    assert_eq!(entry.get::<u64>("item_version"), Some(claimed.item_version));
+    assert_eq!(
+        entry.get::<i64>("priority"),
+        match claimed.priority.as_ref() {
+            Some(pqueue_core::PriorityValue::Int64(n)) => Some(*n),
+            _ => None,
+        }
+    );
+    assert_eq!(
+        entry.get::<String>("lease_token").as_deref(),
+        claimed.lease_token.as_ref().map(|token| token.as_str())
+    );
+    assert_eq!(
+        entry.get::<i64>("lease_expires_at"),
+        Some(ts_millis(claimed.lease_expires_at))
+    );
+    assert_eq!(entry.get::<u32>("attempt_count"), Some(claimed.attempt_count));
+    assert_eq!(
+        entry.get::<Vec<u8>>("payload").as_deref(),
+        claimed.payload.as_deref()
+    );
+    assert_eq!(
+        entry.get::<String>("group_key").as_deref(),
+        claimed.group_key.as_ref().map(|group| group.as_str())
+    );
+    assert_eq!(
+        entry.get::<i64>("not_before"),
+        claimed.not_before.map(ts_millis)
+    );
+    assert_eq!(
+        entry.get::<String>("metadata").as_deref(),
+        Some(r#"{"tenant_segment":{"String":"vip"}}"#)
+    );
+    assert!(
+        entry.get::<String>("gate_keys").is_none(),
+        "gate_keys are omitted for gate_keys=none queues"
+    );
+
+    for (name, value) in &claimed.fields {
+        assert_eq!(
+            entry.get::<Vec<u8>>(name.as_str()).as_deref(),
+            Some(value.as_ref()),
+            "RESP entry must carry the current structured field map"
+        );
+    }
+    assert_eq!(
+        entry.get::<Vec<u8>>("field-b").as_deref(),
+        None,
+        "removed fields stay absent from the claimed shape"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
