@@ -115,24 +115,34 @@ impl NiflheimChangeRecordSink {
     }
 }
 
+fn build_delivery_request(
+    endpoint: &ParsedEndpoint,
+    shard: &QueueKey,
+    headers: &BTreeMap<String, String>,
+    records: &[pqueue_engine::ChangeRecord],
+) -> EngineResult<Vec<u8>> {
+    let body = serde_json::to_vec(records)
+        .map_err(|e| EngineError::Storage(format!("serialize change records: {e}")))?;
+    let mut request = Vec::new();
+    write_request_line(&mut request, endpoint, body.len())?;
+    write_header(&mut request, "Content-Type", "application/json")?;
+    write_header(&mut request, "Connection", "close")?;
+    write_header(&mut request, "X-Pqueue-Tenant", shard.tenant_id.as_str())?;
+    write_header(&mut request, "X-Pqueue-Queue", shard.queue_id.as_str())?;
+    for (name, value) in headers {
+        write_header(&mut request, name, value)?;
+    }
+    request.extend_from_slice(b"\r\n");
+    request.extend_from_slice(&body);
+    Ok(request)
+}
+
 impl ChangeRecordSink for NiflheimChangeRecordSink {
     fn emit(&self, shard: &QueueKey, records: &[pqueue_engine::ChangeRecord]) -> EngineResult<()> {
         if records.is_empty() {
             return Ok(());
         }
-        let body = serde_json::to_vec(records)
-            .map_err(|e| EngineError::Storage(format!("serialize change records: {e}")))?;
-        let mut request = Vec::new();
-        write_request_line(&mut request, &self.endpoint, body.len())?;
-        write_header(&mut request, "Content-Type", "application/json")?;
-        write_header(&mut request, "Connection", "close")?;
-        write_header(&mut request, "X-Pqueue-Tenant", shard.tenant_id.as_str())?;
-        write_header(&mut request, "X-Pqueue-Queue", shard.queue_id.as_str())?;
-        for (name, value) in &self.headers {
-            write_header(&mut request, name, value)?;
-        }
-        request.extend_from_slice(b"\r\n");
-        request.extend_from_slice(&body);
+        let request = build_delivery_request(&self.endpoint, shard, &self.headers, records)?;
 
         let addr = format!("{}:{}", self.endpoint.host, self.endpoint.port);
         let mut stream = TcpStream::connect(addr)
@@ -293,7 +303,9 @@ mod tests {
         let config = ChangeRecordSinkConfig::default();
         assert!(!config.enabled);
         assert!(config.endpoint.is_none());
-        config.validate().expect("disabled sink config remains valid");
+        config
+            .validate()
+            .expect("disabled sink config remains valid");
     }
 
     #[test]
@@ -305,10 +317,94 @@ mod tests {
         assert!(!config.enabled);
         let err = config.validate().expect_err("malformed endpoint must fail");
         assert!(
-            err.to_string().contains("durable-ingest endpoint must use http://"),
+            err.to_string()
+                .contains("durable-ingest endpoint must use http://"),
             "{}",
             err
         );
         assert!(!config.enabled);
+    }
+
+    #[test]
+    fn TestChangeRecordSinkWritesTenantQueueAndCustomHeaders() {
+        let endpoint = ParsedEndpoint {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            path: "/ingest".to_string(),
+        };
+        let shard = QueueKey::new(
+            pqueue_core::TenantId::new("tenant-a").unwrap(),
+            pqueue_core::QueueId::new("queue-a").unwrap(),
+        );
+        let mut headers = BTreeMap::new();
+        headers.insert("authorization".to_string(), "Bearer test".to_string());
+        headers.insert("x-custom-header".to_string(), "custom-value".to_string());
+        let records = vec![pqueue_engine::ChangeRecord {
+            tenant_id: shard.tenant_id.clone(),
+            queue_id: shard.queue_id.clone(),
+            item_id: None,
+            position: pqueue_engine::ChangeRecordPosition {
+                backend_epoch: 7,
+                sequence: 42,
+            },
+            command_kind: pqueue_engine::ChangeRecordKind::PauseQueue,
+            new_state: None,
+            item_version: None,
+            terminal_at: None,
+            emitted_at: Some(UtcTimestamp::new(1, 0).unwrap()),
+            source_owner_id: None,
+            source_epoch: 7,
+        }];
+
+        let request = build_delivery_request(&endpoint, &shard, &headers, &records)
+            .expect("request should build");
+        let request = String::from_utf8(request).expect("request should be utf8");
+        assert!(request.contains("POST /ingest HTTP/1.1"));
+        assert!(request.contains("X-Pqueue-Tenant: tenant-a"));
+        assert!(request.contains("X-Pqueue-Queue: queue-a"));
+        assert!(request.contains("authorization: Bearer test"));
+        assert!(request.contains("x-custom-header: custom-value"));
+    }
+
+    #[test]
+    fn TestChangeRecordSinkBuildsDeliveryRequestWithTenantAndQueueMetadata() {
+        let endpoint = ParsedEndpoint {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            path: "/ingest".to_string(),
+        };
+        let shard = QueueKey::new(
+            pqueue_core::TenantId::new("tenant-a").unwrap(),
+            pqueue_core::QueueId::new("queue-a").unwrap(),
+        );
+        let headers = BTreeMap::new();
+        let records = vec![pqueue_engine::ChangeRecord {
+            tenant_id: shard.tenant_id.clone(),
+            queue_id: shard.queue_id.clone(),
+            item_id: Some(pqueue_core::ItemId::from_u64(17)),
+            position: pqueue_engine::ChangeRecordPosition {
+                backend_epoch: 9,
+                sequence: 3,
+            },
+            command_kind: pqueue_engine::ChangeRecordKind::Finalize,
+            new_state: Some(pqueue_engine::ChangeRecordState::Complete),
+            item_version: Some(2),
+            terminal_at: Some(UtcTimestamp::new(2, 0).unwrap()),
+            emitted_at: Some(UtcTimestamp::new(3, 0).unwrap()),
+            source_owner_id: Some(pqueue_core::OwnerId::new("node-a").unwrap()),
+            source_epoch: 9,
+        }];
+
+        let request = build_delivery_request(&endpoint, &shard, &headers, &records)
+            .expect("request should build");
+        let request = String::from_utf8(request).expect("request should be utf8");
+        let (head, body) = request
+            .split_once("\r\n\r\n")
+            .expect("request should include headers and body");
+        assert!(head.contains("X-Pqueue-Tenant: tenant-a"));
+        assert!(head.contains("X-Pqueue-Queue: queue-a"));
+        let parsed: Vec<pqueue_engine::ChangeRecord> =
+            serde_json::from_str(body).expect("request body should be valid json");
+        assert_eq!(parsed, records);
     }
 }
