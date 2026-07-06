@@ -1,4 +1,4 @@
-//! Conformance for the sqlite **relational** projection family (`pqueue_items` DB-authoritative).
+//! Conformance for the sqlite **relational** projection family (`pqueue_items` as a rebuildable cache).
 //!
 //! Three layers of evidence:
 //!
@@ -10,6 +10,9 @@
 //!    ports, proving the apply-UoW round-trips item state through `pqueue_items` (incl. CohortExpired,
 //!    which is not in the core class).
 //! 3. **Regression guards** — id-counter restore on reopen + stable-FIFO from the BQ-11a fresh-eyes review.
+//!
+//! The TOCTOU prerequisite bead `pqueue-b59f4897` remains explicit in the migration notes for the
+//! multi-node follow-on.
 
 use std::collections::BTreeMap;
 
@@ -748,8 +751,8 @@ async fn purged_terminal_key_is_retained_against_repush() {
 // ---------------------------------------------------------------------------
 
 /// F1: the server id counter is restored on reopen, so a push after reconnect does not re-mint an item
-/// id that already exists in the durable projection (PushPort restart-safety). DB-authoritative: the
-/// committed items are present after reopen with no log replay.
+/// id that already exists in the durable projection cache (PushPort restart-safety). The committed items
+/// are present after reopen with no log replay, and the multi-node prerequisite stays `pqueue-b59f4897`.
 #[tokio::test]
 async fn reopen_restores_id_counter_and_state() {
     let path = std::env::temp_dir()

@@ -132,4 +132,4 @@ Making the append-then-apply seam (`compose.rs:1346-1366`) the sole serializatio
 relational family's "concurrency-correct by construction" story (`relational.rs:11-19`). The Postgres
 high-water guard and `MAX(seq)+1` append allocation carry a documented TOCTOU under connection pooling
 (`crates/pqueue-postgres/src/lib.rs:16-46`). **The TOCTOU fix is a hard prerequisite for this ADR to be
-safe multi-node**; it is tracked as the blocking bead of this ADR's implementation chain.
+safe multi-node**; it is tracked as the blocking bead `pqueue-b59f4897` in this ADR's implementation chain.

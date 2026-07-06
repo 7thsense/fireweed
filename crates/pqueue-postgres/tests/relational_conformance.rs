@@ -1,9 +1,11 @@
 //! BQ-12 — the CORE conformance class + the relational-reconnect class run against the postgres
-//! **relational** backend (`PostgresRelationalBackend`: DB-authoritative `pqueue_items`, real
+//! **relational** backend (`PostgresRelationalBackend`: rebuildable `pqueue_items` cache, real
 //! `FOR UPDATE SKIP LOCKED` claim), **env-gated** on a live database via `PQUEUE_PG_TEST_URL`.
 //!
 //! Each scenario gets a process-unique schema (`connect_in_schema`); a scenario's repeated `make()` calls
-//! reopen the SAME schema, so the relational-reconnect scenarios exercise real DB-authoritative recovery.
+//! reopen the SAME schema, so the relational-reconnect scenarios exercise rebuildable-cache recovery.
+//! The TOCTOU prerequisite bead `pqueue-b59f4897` stays explicit in the migration path for the later
+//! multi-node rollout.
 //!
 //! If `PQUEUE_PG_TEST_URL` is ABSENT, every scenario prints a LOUD skip — a green run is then VISIBLY
 //! partial (postgres unverified against a live DB), never a hidden pass. Compiling this file already proves
@@ -13,7 +15,8 @@
 //!
 //! NOTE: only `ConformanceCore`-bounded scenarios appear here — the relational backend is log-optional
 //! (no `LogRead`/`SnapshotStore`), so the log-class scenarios (high_water/snapshots/log-replay) do not
-//! apply. The `FOR UPDATE SKIP LOCKED` contended-writer evidence is likewise live-DB-gated and pending.
+//! apply. The `FOR UPDATE SKIP LOCKED` contended-writer evidence is likewise live-DB-gated and pending,
+//! and the multi-node prerequisite remains `pqueue-b59f4897`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
