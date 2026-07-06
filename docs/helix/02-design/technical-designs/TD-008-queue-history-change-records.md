@@ -4,16 +4,18 @@ ddx:
   depends_on:
     - adr-log-single-source-of-truth
     - adr-cqrs-log-projection-storage-model
+    - adr-heimq-external-broker-change-log-consumer-surface
     - td-storage-architecture-backend-contracts
     - td-s3-object-log-sqlite-projection-mode
   review:
-    self_hash: 961aff3b869972154406b6737ffac1d890d19b35002db866788a7607703481dc
+    self_hash: fa1c3abd066ece0cc44c905939bbfe25f399e763d59acfa1c34d36657cd72b02
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-heimq-external-broker-change-log-consumer-surface: 68dd5e8df6d5187c7abb5a1fac0add02ee49fab38badd9d37dc02bc7af6b805f
       adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
       td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T01:51:45Z"
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention
@@ -21,8 +23,8 @@ ddx:
 **Status**: Draft
 **Decision authority**: ADR-013 (log as single source of truth)
 **Cross-repo**: niflheim durable-ingest HTTP endpoint (consumer); cayce CONTRACT-013 uses the same
-ingest path for SES exhaust, so delivery history lands beside delivery exhaust; heimq / fjord as the
-candidate providers of the Kafka-protocol change-log interface (see "Delivery interfaces").
+ingest path for SES exhaust, so delivery history lands beside delivery exhaust; heimq as the
+Kafka-protocol change-log interface provider (see "Delivery interfaces" and ADR-014).
 
 ## Scope
 
@@ -133,24 +135,22 @@ bindings. Two are in contract:
 1. **niflheim durable-ingest (HTTP push)** — the current binding, specified throughout this TD: a
    lean hand-rolled POST driven by the `pqueue-server` interval task.
 2. **Kafka-protocol consumer interface (required)** — product requirement (2026-07-05): downstream
-   consumers must be able to subscribe to the change log with stock Kafka clients. The interface is
-   provided by **heimq** (Kafka wire protocol served over `heimq-wire`, which pqueue already
-   git-pins) or possibly **fjord**; the provider choice is an **open ADR-level decision** with two
-   admissible shapes:
-   - *pqueue-as-broker*: `pqueue-server` embeds a Kafka-protocol read surface (Metadata/Fetch/
-     consumer-group APIs over `heimq-wire`) serving change topics directly from the committed log
-     tail. Topic ↦ `(tenant_id, queue_id)` change stream; single partition per topic (preserves CL-4);
-     offsets are a monotonic mapping of `CommandPosition` (epoch-aware — offsets never regress across
-     failover). Retention follows the log/snapshot retention frontier.
-   - *external broker*: the emission task produces change records into a heimq or fjord deployment
-     (a producer sink beside the HTTP sink); the broker owns consumer groups, offsets, and fan-out;
-     pqueue's obligation ends at CL-3/CL-4/CL-5 on the produced stream.
+   consumers must be able to subscribe to the change log with stock Kafka clients. ADR-014 settles
+   the provider/shape choice: **heimq** provides the surface as an **external broker**. pqueue emits
+   change records into heimq; heimq owns consumer groups, committed offsets, and fan-out. Each
+   `(tenant_id, queue_id)` change stream is a single-partition topic so per-queue order is preserved
+   (CL-4), and the emitted record carries its originating `CommandPosition` in headers or payload so
+   the Kafka offset can be mapped back to the source log position. On failover, re-emission may assign
+   a later Kafka offset to the same logical record, but the offset stream never regresses and the
+   stable `CommandPosition` remains the dedupe key. Retention stays aligned to the source log/snapshot
+   frontier: source segments may expire only after snapshot coverage and the durable emission cursor
+   has passed the segment's terminal `CommandPosition`. Tenant authz on the Kafka surface is enforced
+   by tenant-prefixed topic ACLs that only expose the caller's `(tenant_id, queue_id)` namespace.
 
-   Either shape must satisfy CL-1..CL-8. Scope boundary with ADR-005: ADR-005's "consumer-side Kafka
-   APIs are permanently out of scope" applies to the **queue data plane** (committed offsets conflict
-   with mutable priority and progress bounds). The change log is a different surface — an append-only,
-   per-queue-ordered stream where Kafka consumer semantics fit naturally — so a Kafka interface here
-   does not reopen ADR-005.
+   Scope boundary with ADR-005: ADR-005's "consumer-side Kafka APIs are permanently out of scope"
+   applies to the **queue data plane** (committed offsets conflict with mutable priority and progress
+   bounds). The change log is a different surface — an append-only, per-queue-ordered stream where
+   Kafka consumer semantics fit naturally — so this Kafka interface does not reopen ADR-005.
 
 ## Delivery semantics and failure isolation
 
@@ -191,9 +191,10 @@ from history. On an opted-out queue only the retention condition applies.
    exceed the worst-case emission outage + failover window; document the requirement on the niflheim
    side.
 
-## Open decisions
+## Kafka interface decision
 
-- **Kafka interface provider and shape** (heimq pqueue-as-broker vs heimq/fjord external broker) —
-  requires its own ADR before the Kafka binding is built: offset↦`CommandPosition` mapping, consumer
-  group/offset ownership, retention alignment with the log frontier, and CL-8 authz on the Kafka
-  surface are the load-bearing sections that ADR must settle.
+The change-log Kafka surface is provided by heimq as an external broker. The
+load-bearing rules are the offset-to-`CommandPosition` mapping, broker-owned
+consumer groups and offsets, source-log retention alignment with the snapshot
+frontier, and CL-8 tenant authz via topic ACLs. See ADR-014 for the normative
+decision.
