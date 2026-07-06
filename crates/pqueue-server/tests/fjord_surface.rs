@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use heimq_broker::consumer_group::{GroupCoordinatorBackend as _, JoinRequest};
+use heimq_broker::storage::OffsetStore as _;
 use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
@@ -15,7 +17,7 @@ use pqueue_server::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, EmbeddedFjordConfig,
     FjordChangeRecordSink, LogSpec, ProjectionSpec, authorize_fjord_topic_read,
     build_embedded_fjord_surface, fjord_topic_name, register_embedded_fjord_topics,
-    spawn_embedded_fjord_broker, start,
+    spawn_embedded_fjord_broker,
 };
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -209,11 +211,18 @@ fn TestFjordDependencyIsGitPinnedNoPathDeps() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestFjordBootstrapConfigWiresEmbeddedSurface() {
+async fn TestEmbeddedFjordSurfaceUsesDedicatedNamespaceRoot() {
+    let base = std::env::temp_dir().join(format!("pqueue-fjord-namespace-{}", std::process::id()));
+    let queue_storage_root = base.join("queue-storage");
+    let projection_path = base.join("queue-projection.db");
     let mut config = Config::new(
         BackendSpec {
-            log: LogSpec::Memory,
-            projection: ProjectionSpec::InMemory,
+            log: LogSpec::ObjectLog {
+                root: queue_storage_root.clone(),
+            },
+            projection: ProjectionSpec::Hybrid {
+                path: projection_path.clone(),
+            },
             control_plane: ControlPlaneSpec::InProcess,
         },
         7,
@@ -222,32 +231,22 @@ async fn TestFjordBootstrapConfigWiresEmbeddedSurface() {
         vec![queue_definition("t1", "q1")],
     );
     config.embedded_fjord = EmbeddedFjordConfig {
-        namespace_root: PathBuf::from("/var/lib/pqueue/fjord-test"),
+        namespace_root: base.join("fjord-state"),
         cluster_id: "fjord-test-cluster".to_string(),
     };
 
     let surface = build_embedded_fjord_surface(config.node_id as i32, &config.embedded_fjord);
+    let expected_root = config.embedded_fjord.namespace_root.join("node-7");
 
-    assert_eq!(
-        surface.namespace_root(),
-        &PathBuf::from("/var/lib/pqueue/fjord-test/node-7")
-    );
-    assert_eq!(surface.cluster_id(), "fjord-test-cluster");
-
-    let server = start(config)
-        .await
-        .expect("start pqueue-server with embedded fjord");
+    assert_eq!(surface.namespace_root(), &expected_root);
     assert!(
-        server.is_running(),
-        "server must boot with embedded fjord config"
+        surface
+            .namespace_root()
+            .starts_with(&config.embedded_fjord.namespace_root)
     );
-    server.shutdown();
-
-    surface.topic_registry.register_topic("t1.q1", 1);
-    assert_eq!(
-        surface.topic_registry.topic_list(),
-        vec![("t1.q1".to_string(), 1)]
-    );
+    assert!(!surface.namespace_root().starts_with(&queue_storage_root));
+    assert_ne!(surface.namespace_root(), &queue_storage_root.join("node-7"));
+    assert_eq!(surface.cluster_id(), "fjord-test-cluster");
 }
 
 #[test]
@@ -311,6 +310,129 @@ fn TestKafkaTenantAclRejectsCrossQueueRead() {
         Err(EngineError::Forbidden(
             "principal is not authorized for the requested queue namespace"
         ))
+    );
+}
+
+#[test]
+fn TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped() {
+    let surface = build_embedded_fjord_surface(
+        7,
+        &EmbeddedFjordConfig {
+            namespace_root: std::env::temp_dir()
+                .join(format!("pqueue-fjord-test-{}", std::process::id())),
+            cluster_id: "fjord-test-cluster".to_string(),
+        },
+    );
+    let tenant_a = queue_definition("tenant-a", "queue-a");
+    let tenant_b = queue_definition("tenant-b", "queue-b");
+
+    register_embedded_fjord_topics(
+        &surface.topic_registry,
+        &[tenant_a.clone(), tenant_b.clone()],
+    );
+
+    let mut topics = surface.topic_registry.topic_list();
+    topics.sort();
+    assert_eq!(
+        topics,
+        vec![
+            ("tenant-a.queue-a".to_string(), 1),
+            ("tenant-b.queue-b".to_string(), 1),
+        ]
+    );
+
+    let topic_a = fjord_topic_name(&queue_key("tenant-a", "queue-a"));
+    let topic_b = fjord_topic_name(&queue_key("tenant-b", "queue-b"));
+
+    surface
+        .offset_store
+        .commit("tenant-a.reader", &topic_a, 0, 11, 0, None)
+        .expect("commit tenant-a offset");
+    surface
+        .offset_store
+        .commit("tenant-b.reader", &topic_b, 0, 22, 0, None)
+        .expect("commit tenant-b offset");
+
+    assert_eq!(
+        surface
+            .offset_store
+            .fetch("tenant-a.reader", &topic_a, 0)
+            .map(|offset| offset.offset),
+        Some(11)
+    );
+    assert_eq!(
+        surface
+            .offset_store
+            .fetch("tenant-a.reader", &topic_b, 0)
+            .map(|offset| offset.offset),
+        None
+    );
+    assert_eq!(
+        surface
+            .offset_store
+            .fetch_all_for_group("tenant-a.reader")
+            .get(&(topic_a.clone(), 0))
+            .map(|offset| offset.offset),
+        Some(11)
+    );
+    assert_eq!(
+        surface
+            .offset_store
+            .fetch_all_for_group("tenant-b.reader")
+            .get(&(topic_b.clone(), 0))
+            .map(|offset| offset.offset),
+        Some(22)
+    );
+
+    let join_a = surface.group_coordinator.join_group(JoinRequest {
+        group_id: "tenant-a.reader".to_string(),
+        member_id: "tenant-a-member".to_string(),
+        client_id: "client-a".to_string(),
+        client_host: "127.0.0.1".to_string(),
+        session_timeout_ms: 30_000,
+        rebalance_timeout_ms: 30_000,
+        protocol_type: "consumer".to_string(),
+        protocols: vec![("range".to_string(), vec![])],
+    });
+    let join_b = surface.group_coordinator.join_group(JoinRequest {
+        group_id: "tenant-b.reader".to_string(),
+        member_id: "tenant-b-member".to_string(),
+        client_id: "client-b".to_string(),
+        client_host: "127.0.0.1".to_string(),
+        session_timeout_ms: 30_000,
+        rebalance_timeout_ms: 30_000,
+        protocol_type: "consumer".to_string(),
+        protocols: vec![("range".to_string(), vec![])],
+    });
+
+    assert_eq!(join_a.error_code, 0);
+    assert_eq!(join_b.error_code, 0);
+
+    let desc_a = surface
+        .group_coordinator
+        .describe_group("tenant-a.reader")
+        .expect("tenant-a group exists");
+    let desc_b = surface
+        .group_coordinator
+        .describe_group("tenant-b.reader")
+        .expect("tenant-b group exists");
+
+    assert_eq!(desc_a.group_id, "tenant-a.reader");
+    assert_eq!(desc_a.group_state, "Stable");
+    assert_eq!(desc_a.members.len(), 1);
+    assert_eq!(desc_a.members[0].member_id, "tenant-a-member");
+    assert_eq!(desc_a.members[0].member_assignment, Vec::<u8>::new());
+    assert_eq!(desc_b.group_id, "tenant-b.reader");
+    assert_eq!(desc_b.group_state, "Stable");
+    assert_eq!(desc_b.members.len(), 1);
+    assert_eq!(desc_b.members[0].member_id, "tenant-b-member");
+    assert_eq!(desc_b.members[0].member_assignment, Vec::<u8>::new());
+
+    let mut groups = surface.group_coordinator.list_groups();
+    groups.sort();
+    assert_eq!(
+        groups,
+        vec!["tenant-a.reader".to_string(), "tenant-b.reader".to_string()]
     );
 }
 

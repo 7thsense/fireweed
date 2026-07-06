@@ -180,11 +180,15 @@ impl EmbeddedFjordSurface {
 /// Construct the embedded fjord surface from typed config. This stays separate from the queue commit path:
 /// the returned surface owns its own namespace root and state objects, and the queue backend never shares
 /// those directories or handles.
+fn embedded_fjord_namespace_root(node_id: i32, config: &EmbeddedFjordConfig) -> PathBuf {
+    config.namespace_root.join(format!("node-{node_id}"))
+}
+
 pub fn build_embedded_fjord_surface(
     node_id: i32,
     config: &EmbeddedFjordConfig,
 ) -> EmbeddedFjordSurface {
-    let namespace_root = config.namespace_root.join(format!("node-{node_id}"));
+    let namespace_root = embedded_fjord_namespace_root(node_id, config);
     let topic_registry = FjordTopicRegistry::new(node_id);
     let log = Arc::new(FjordLog::new_with_registry(Arc::clone(&topic_registry)));
     let offset_store = FjordOffsetStore::new();
@@ -283,11 +287,12 @@ pub async fn spawn_embedded_fjord_broker(
     let (host, port) = parse_kafka_bootstrap(endpoint)?;
     let surface = build_embedded_fjord_surface(node_id, config);
     register_embedded_fjord_topics(&surface.topic_registry, queues);
+    let namespace_root = surface.namespace_root().clone();
 
     let broker_config = HeimqConfig {
         host: host.clone(),
         port,
-        data_dir: config.namespace_root.join(format!("node-{node_id}")),
+        data_dir: namespace_root,
         memory_only: true,
         segment_size: 1024 * 1024 * 1024,
         retention_ms: 7 * 24 * 60 * 60 * 1000,
