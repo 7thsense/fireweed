@@ -1,0 +1,33 @@
+{
+  "attempt_id": "20260706T234117-35f43838",
+  "bead_id": "pqueue-64a22c85",
+  "base_rev": "e188a2beb9489d10f68b64fde307028ba2373017",
+  "created_at": "2026-07-06T23:41:17.65191019Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-64a22c85",
+    "title": "Postgres relational recover-from-log: part 2",
+    "description": "PROBLEM\nParent bead pqueue-b0b1fc83 is too broad for one execution pass. This child owns part 2 of 2 of that parent scope.\n\nROOT CAUSE\nPROBLEM\n`PostgresRelationalBackend` still treats `pqueue_items` as durable truth and does not expose a replayable recovery seam for the relational family.\nROOT CAUSE\n`crates/pqueue-postgres/src/relational.rs:988-990, 4682-4708, 4840-4842, 2772-2779` still says the item projection is already durable, returns an empty `CommandPage`, leaves `set_high_water` as a no-op, and labels the backend DB-authoritative.\nPROPOSED FIX\nPersist the applied high-water for the relational projection, make `recovery_high_water` return the last applied `CommandPosition`, and let `ComposedBackend::recover` replay the durable log tail from that point so truncation plus recovery reproduces the acknowledged state.\nNON-SCOPE\nsqlite family changes, conformance-suite expansion, docs wording cleanup, and the `pqueue-b59f4897` TOCTOU prerequisite fix.\n\nPROPOSED FIX\nImplement only this child acceptance slice:\n- `cargo test -p pqueue-postgres --test relational_conformance` and `cargo test -p pqueue-postgres --test composed_relational_reconnect` pass for the postgres relational path.\n- `lefthook run pre-commit` passes.\n\nNON-SCOPE\nDo not implement parent acceptance criteria assigned to sibling child beads. Preserve every parent non-scope constraint unless this child explicitly narrows it.",
+    "acceptance": "1. `cargo test -p pqueue-postgres --test relational_conformance` and `cargo test -p pqueue-postgres --test composed_relational_reconnect` pass for the postgres relational path.\n2. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-b0b1fc83",
+    "labels": [
+      "kind:build",
+      "area:pqueue-postgres",
+      "area:pqueue-relational",
+      "adr-013",
+      "decomposed"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T234117-35f43838",
+    "prompt": ".ddx/executions/20260706T234117-35f43838/prompt.md",
+    "manifest": ".ddx/executions/20260706T234117-35f43838/manifest.json",
+    "result": ".ddx/executions/20260706T234117-35f43838/result.json",
+    "checks": ".ddx/executions/20260706T234117-35f43838/checks.json",
+    "usage": ".ddx/executions/20260706T234117-35f43838/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-64a22c85-20260706T234117-35f43838"
+  },
+  "prompt_sha": "51bfea653ecf4342bc09528ff89dc540bc65ef86890bcacfa7286126904df09d"
+}
