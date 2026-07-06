@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260706T171043-3a83970b",
+  "bead_id": "pqueue-1aa0e850",
+  "base_rev": "d935cceb1cffaac4d31717d252733f50c0af0e55",
+  "created_at": "2026-07-06T17:10:44.444247564Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-1aa0e850",
+    "title": "Define consumer-group ownership boundary",
+    "description": "PROBLEM: The consumer-group and committed-offset ownership model must be explicit before the Kafka surface can be considered complete.\nROOT CAUSE: The current bead mixes surface implementation with broker ownership semantics, and the repo does not yet expose a tested consumer-group boundary.\nPROPOSED FIX: Lock down where consumer-group state and committed offsets live, and make the ownership boundary observable in tests before the surface is declared done.\nNON-SCOPE: Dependency pinning, ordered emission, and ACL scoping are handled by sibling beads.",
+    "acceptance": "1. `TestKafkaConsumerGroupsStayBrokerOwnedByHeimq` proves committed offsets and consumer-group state live in heimq, not pqueue.\n2. `go test ./... -run 'TestKafkaConsumerGroupsStayBrokerOwnedByHeimq'`\\n3. `lefthook run pre-commit`\\n4. `lefthook run pre-push`",
+    "parent": "pqueue-a391c196",
+    "labels": [
+      "kind:build",
+      "area:fjord",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T171043-3a83970b",
+    "prompt": ".ddx/executions/20260706T171043-3a83970b/prompt.md",
+    "manifest": ".ddx/executions/20260706T171043-3a83970b/manifest.json",
+    "result": ".ddx/executions/20260706T171043-3a83970b/result.json",
+    "checks": ".ddx/executions/20260706T171043-3a83970b/checks.json",
+    "usage": ".ddx/executions/20260706T171043-3a83970b/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-1aa0e850-20260706T171043-3a83970b"
+  },
+  "prompt_sha": "a7692e3eaf89a332d1f8259be387969b3f8c75ddc71cf95ac36c1ac5b1183457"
+}
