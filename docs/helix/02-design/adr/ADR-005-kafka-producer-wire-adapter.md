@@ -4,10 +4,10 @@ ddx:
   depends_on:
     - prd
   review:
-    self_hash: 43a41c225d87f7bd4ecad12b49012fad53dc10ecc8d44595e569aaaeae3cdd3a
+    self_hash: b49b122239af43127faabd91747efc79cc3853555ffa9bfe4febb9d04f8bde32
     deps:
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T14:38:23Z"
 ---
 
 # ADR-005: Kafka Producer Wire Adapter as P2 Compatibility Layer
@@ -25,8 +25,9 @@ retained for historical context only; its decision is no longer in effect. See
 **Scope note (2026-07-05)**: this ADR's "consumer-side Kafka APIs are permanently out of scope" verdict
 applies to the **queue data plane** (Kafka committed-offset semantics do not compose with mutable
 priority and progress bounds). It does not cover the **change log**: TD-008 requires a Kafka-protocol
-consumer interface for the append-only, per-queue-ordered change-record stream (provider heimq or
-fjord, own ADR pending). That surface has none of the data-plane conflicts this ADR rejected.
+consumer interface for the append-only, per-queue-ordered change-record stream, provided by fjord
+embedded in pqueue-server (ADR-014, decided 2026-07-06). That surface has none of the data-plane
+conflicts this ADR rejected.
 
 _(Historical — as originally accepted 2026-06-16:)_ Accepted
 

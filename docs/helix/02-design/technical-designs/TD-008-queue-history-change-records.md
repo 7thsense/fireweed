@@ -4,18 +4,18 @@ ddx:
   depends_on:
     - adr-log-single-source-of-truth
     - adr-cqrs-log-projection-storage-model
-    - adr-heimq-external-broker-change-log-consumer-surface
+    - adr-fjord-embedded-change-log-consumer-surface
     - td-storage-architecture-backend-contracts
     - td-s3-object-log-sqlite-projection-mode
   review:
-    self_hash: fa1c3abd066ece0cc44c905939bbfe25f399e763d59acfa1c34d36657cd72b02
+    self_hash: 02808f93dee17f6f31facc9719b7c3b534ba871d430255eceafa37b0aea67ddf
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-heimq-external-broker-change-log-consumer-surface: 68dd5e8df6d5187c7abb5a1fac0add02ee49fab38badd9d37dc02bc7af6b805f
+      adr-fjord-embedded-change-log-consumer-surface: c1e5ff620517f039f2138f76841bf6d51a5d52d86ad05d75c5885c80c1cb96e0
       adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
       td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T04:10:30Z"
+    reviewed_at: "2026-07-06T14:38:23Z"
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention
@@ -23,8 +23,9 @@ ddx:
 **Status**: Draft
 **Decision authority**: ADR-013 (log as single source of truth)
 **Cross-repo**: niflheim durable-ingest HTTP endpoint (consumer); cayce CONTRACT-013 uses the same
-ingest path for SES exhaust, so delivery history lands beside delivery exhaust; heimq as the
-Kafka-protocol change-log interface provider (see "Delivery interfaces" and ADR-014).
+ingest path for SES exhaust, so delivery history lands beside delivery exhaust; fjord, embedded in
+pqueue-server, as the Kafka-protocol change-log interface provider (see "Delivery interfaces" and
+ADR-014).
 
 ## Scope
 
@@ -134,18 +135,23 @@ bindings. Two are in contract:
 
 1. **niflheim durable-ingest (HTTP push)** — the current binding, specified throughout this TD: a
    lean hand-rolled POST driven by the `pqueue-server` interval task.
-2. **Kafka-protocol consumer interface (required)** — product requirement (2026-07-05): downstream
-   consumers must be able to subscribe to the change log with stock Kafka clients. ADR-014 settles
-   the provider/shape choice: **heimq** provides the surface as an **external broker**. pqueue emits
-   change records into heimq; heimq owns consumer groups, committed offsets, and fan-out. Each
-   `(tenant_id, queue_id)` change stream is a single-partition topic so per-queue order is preserved
-   (CL-4), and the emitted record carries its originating `CommandPosition` in headers or payload so
-   the Kafka offset can be mapped back to the source log position. On failover, re-emission may assign
-   a later Kafka offset to the same logical record, but the offset stream never regresses and the
-   stable `CommandPosition` remains the dedupe key. Retention stays aligned to the source log/snapshot
-   frontier: source segments may expire only after snapshot coverage and the durable emission cursor
-   has passed the segment's terminal `CommandPosition`. Tenant authz on the Kafka surface is enforced
-   by tenant-prefixed topic ACLs that only expose the caller's `(tenant_id, queue_id)` namespace.
+2. **Kafka-protocol consumer interface (required)** — product requirement (2026-07-05, provider
+   decided 2026-07-06): downstream consumers must be able to subscribe to the change log with stock
+   Kafka clients, and **pqueue must own the surface**. ADR-014 settles the provider/shape choice:
+   **fjord, embedded** in `pqueue-server` behind the delivery seam, serves the change topics
+   (metadata, fetch, consumer groups, committed offsets, fan-out) so the surface exists in every
+   deployment without operating a second system. Each `(tenant_id, queue_id)` change stream is a
+   single-partition topic so per-queue order is preserved (CL-4). The normative record contract
+   (record key = `"{item_id}:{backend_epoch}:{sequence}"` — unique across fan-out; `pq-*` headers;
+   `ChangeRecord` payload; consumer dedupe-window and offset-commit obligations) is pinned in
+   ADR-014. On failover, re-emission may assign a later Kafka offset to the same logical record; the
+   offset stream never regresses and the record key is the dedupe identity. Retention: on
+   `emit_change_records = true` queues, source segments expire only after snapshot coverage AND the
+   durable emission cursor has passed the segment's terminal `CommandPosition`; on opted-out queues
+   (including TD-009 branches) only snapshot coverage applies — expiry never waits on a cursor that
+   does not exist. Tenant authz (CL-8) is enforced by tenant-prefixed topics and ACLs scoped to the
+   caller's `(tenant_id, queue_id)` namespace. A deployment that must publish to an external Kafka
+   attaches a producer sink at the same seam; the embedded fjord then sits idle.
 
    Scope boundary with ADR-005: ADR-005's "consumer-side Kafka APIs are permanently out of scope"
    applies to the **queue data plane** (committed offsets conflict with mutable priority and progress
@@ -193,8 +199,11 @@ from history. On an opted-out queue only the retention condition applies.
 
 ## Kafka interface decision
 
-The change-log Kafka surface is provided by heimq as an external broker. The
-load-bearing rules are the offset-to-`CommandPosition` mapping, broker-owned
-consumer groups and offsets, source-log retention alignment with the snapshot
-frontier, and CL-8 tenant authz via topic ACLs. See ADR-014 for the normative
-decision.
+The change-log Kafka surface is provided by **fjord, embedded in pqueue-server**
+(product-owner decision 2026-07-06): pqueue owns the interface, so the surface
+exists in every deployment. The load-bearing rules are the boundary invariants
+(feed-forward only, never on the commit path, separate storage namespace,
+swappable at the seam with fjord idling when an external Kafka is used), the
+offset-to-`CommandPosition` mapping, the pinned per-record consumer contract,
+retention scoped to `emit_change_records = true` queues, and CL-8 tenant authz
+via tenant-prefixed topics/ACLs. See ADR-014 for the normative decision.
