@@ -1,0 +1,33 @@
+{
+  "attempt_id": "20260706T031836-12d0e024",
+  "bead_id": "pqueue-46ea00f4",
+  "base_rev": "4bb2f5951152f526d1856e7460764d96bf946391",
+  "created_at": "2026-07-06T03:18:37.641528285Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-46ea00f4",
+    "title": "Prove relational claim paths return current fields after update_fields",
+    "description": "PROBLEM: The relational claim-path coverage does not independently prove that the current structured `fields` map survives an `update_fields` mutation and then reappears on claim/claimed_view for both committed projection families. ROOT CAUSE: `crates/pqueue-sqlite/tests/relational_conformance.rs:119` and `crates/pqueue-postgres/tests/relational_conformance.rs:68` wire the existing claim-shape suite, but neither backend has a focused regression that mutates fields and then re-claims to verify the current map through the relational claim surfaces. PROPOSED FIX: add backend regressions that push an item, claim it, mutate `fields`, and re-claim/read `claimed_view` on `object_log_sqlite_projection` and `postgres_native`, asserting the returned `fields` map matches the post-update state and that whole-cohort shape still omits per-item `lease_token` while retaining fields. This extends the closed claimed-shape work (`pqueue-9c77d5e7` / `pqueue-922eaf00`). NON-SCOPE: RESP reply formatting, shared conformance docs, and API-003 e2e workflows.",
+    "acceptance": "1. TestRelationalClaimShapeAfterUpdateFields: `cargo test -p pqueue-sqlite relational_conformance update_fields -- --nocapture` and `PQUEUE_PG_TEST_URL=... cargo test -p pqueue-postgres relational_conformance update_fields -- --nocapture` pass with claim/claimed_view asserting the updated `fields` map.\n2. TestRelationalWholeCohortFieldsParity: `cargo test -p pqueue-sqlite relational_conformance claimed_item_shape_whole_cohort -- --nocapture` and the postgres equivalent remain green with per-item `lease_token` omitted and `fields` retained.\n3. TestGoTestGate: `go test ./...` passes.\n4. TestLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-7bed1610",
+    "labels": [
+      "kind:test",
+      "area:pqueue-sqlite",
+      "area:pqueue-postgres",
+      "area:claim-path",
+      "api-001"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T031836-12d0e024",
+    "prompt": ".ddx/executions/20260706T031836-12d0e024/prompt.md",
+    "manifest": ".ddx/executions/20260706T031836-12d0e024/manifest.json",
+    "result": ".ddx/executions/20260706T031836-12d0e024/result.json",
+    "checks": ".ddx/executions/20260706T031836-12d0e024/checks.json",
+    "usage": ".ddx/executions/20260706T031836-12d0e024/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-46ea00f4-20260706T031836-12d0e024"
+  },
+  "prompt_sha": "418d77c2a2e67abe5c74d940ba226d01cf059999515e1bb3aa3ea6f111cd664e"
+}
