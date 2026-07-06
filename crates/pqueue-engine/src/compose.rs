@@ -3261,7 +3261,7 @@ mod ordered_tests {
             state.epoch = epoch;
             state.next_sequence = 0;
             state.entries.clear();
-            let positions = entries
+            entries
                 .into_iter()
                 .map(|env| {
                     let position =
@@ -3270,8 +3270,7 @@ mod ordered_tests {
                     state.entries.push((position.clone(), env));
                     position
                 })
-                .collect::<Vec<_>>();
-            positions
+                .collect::<Vec<_>>()
         }
 
         fn fail_next_cursor_write(&self) {

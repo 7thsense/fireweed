@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(emitted, 1);
         assert_eq!(
             backend.emitted_shards.lock().expect("poisoned").as_slice(),
-            &[enabled_shard.clone()]
+            std::slice::from_ref(&enabled_shard)
         );
         assert_eq!(
             sink.emitted_shards.lock().expect("poisoned").as_slice(),

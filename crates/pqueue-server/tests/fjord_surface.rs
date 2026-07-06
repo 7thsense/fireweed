@@ -113,9 +113,8 @@ async fn start_embedded_broker(queue: &QueueDefinition) -> EmbeddedBroker {
     let handle = spawn_embedded_fjord_broker(
         7,
         &EmbeddedFjordConfig {
-            namespace_root: PathBuf::from(
-                std::env::temp_dir().join(format!("pqueue-fjord-test-{}", std::process::id())),
-            ),
+            namespace_root: std::env::temp_dir()
+                .join(format!("pqueue-fjord-test-{}", std::process::id())),
             cluster_id: "fjord-test-cluster".to_string(),
         },
         &format!("kafka://{bootstrap}"),
@@ -154,9 +153,11 @@ async fn start_embedded_broker(queue: &QueueDefinition) -> EmbeddedBroker {
 }
 
 fn make_sink(bootstrap: &str) -> FjordChangeRecordSink {
-    let mut config = ChangeRecordSinkConfig::default();
-    config.enabled = true;
-    config.endpoint = Some(format!("kafka://{bootstrap}"));
+    let config = ChangeRecordSinkConfig {
+        enabled: true,
+        endpoint: Some(format!("kafka://{bootstrap}")),
+        ..Default::default()
+    };
     FjordChangeRecordSink::new(&config).expect("fjord sink")
 }
 
@@ -170,7 +171,7 @@ fn consume_records(
     tokio::task::block_in_place(move || {
         let consumer: BaseConsumer = ClientConfig::new()
             .set("bootstrap.servers", &bootstrap)
-            .set("group.id", &format!("fjord-test-{}", std::process::id()))
+            .set("group.id", format!("fjord-test-{}", std::process::id()))
             .set("auto.offset.reset", "earliest")
             .set("enable.auto.commit", "false")
             .create()
