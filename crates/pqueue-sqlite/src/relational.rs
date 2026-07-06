@@ -4036,8 +4036,8 @@ fn validate_cohort_lease(
 // SqliteRelationalBackend
 // ---------------------------------------------------------------------------
 
-/// Sqlite-backed **relational** projection family: `pqueue_items` is the DB-authoritative projection
-/// (ADR-008 / TD-001 relational class). Atomic durability class.
+/// Sqlite-backed **relational** projection family: `pqueue_items` holds the durable item projection and
+/// `relational_cursor` persists the applied high-water for reopen / recovery. Atomic durability class.
 pub struct SqliteRelationalBackend {
     inner: Mutex<Inner>,
     /// This instance's node id, packed into every minted [`ItemId`] (ADR-009). `0` single-instance.
@@ -4212,8 +4212,6 @@ impl HybridProjectionStore {
             )));
         }
         let sqlite_high_water = self.sqlite.recovery_high_water(&shard)?;
-        let sqlite_high_water = sqlite_high_water
-            .and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1)));
         let high_water_matches = match (&sqlite_high_water, &expected_high_water) {
             (Some(cursor), Some(image)) => {
                 cursor.queue == image.queue && cursor.sequence == image.sequence
@@ -4284,8 +4282,8 @@ impl HybridProjectionStore {
 }
 
 impl SqliteRelationalBackend {
-    /// Open (or create) the relational store at `path` and load the queue-definition cache. The item
-    /// projection is already durable in `pqueue_items`; there is no log to replay.
+    /// Open (or create) the relational store at `path` and load the queue-definition cache. The durable
+    /// cursor and item projection are both recovered from the sqlite file.
     pub fn open(path: &str) -> EngineResult<Self> {
         Self::from_conn(st(Connection::open(path))?)
     }
@@ -4300,6 +4298,26 @@ impl SqliteRelationalBackend {
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
         self
+    }
+
+    /// Snapshot recovery seam (bead pqueue-8a76daad): the last command position already absorbed by the
+    /// durable relational cursor. This mirrors the projection-store high-water so callers can recover the
+    /// applied position from the monolithic backend after a reopen.
+    pub fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let g = self.inner.lock().expect("projection store poisoned");
+        let (t, q) = parts(shard);
+        let row: Option<(i64, i64)> = st(g
+            .conn
+            .query_row(
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional())?;
+        Ok(row.and_then(|(next_seq, epoch)| {
+            (next_seq > 0)
+                .then(|| CommandPosition::new(shard.clone(), epoch as u64, next_seq as u64 - 1))
+        }))
     }
 
     fn from_conn(conn: Connection) -> EngineResult<Self> {
@@ -4409,28 +4427,29 @@ impl SqliteProjectionStore {
         Ok(leased_id_count_sql(&g.conn, shard, ids)? == ids.len())
     }
 
-    /// Snapshot recovery seam (bead pqueue-8a76daad): the per-queue **high-water** durably recorded by the
-    /// materialized projection — the next command sequence the projection expects (`relational_cursor.
-    /// next_seq`). The last sequence already absorbed is therefore `high_water - 1`, so a reopen need only
-    /// replay the object-log tail at `>= high_water` rather than from genesis. `None` if the queue has no
-    /// projection row yet (a never-created queue → caller falls back to a full replay).
+    /// Snapshot recovery seam (bead pqueue-8a76daad): the per-queue **applied high-water** durably recorded
+    /// by the relational cursor. The returned position is the last command already absorbed
+    /// (`relational_cursor.next_seq - 1`), so a reopen can resume replay from the durable tail after that
+    /// point. `None` if the queue has no projection row yet (a never-created queue → caller falls back to a
+    /// full replay).
     ///
     /// Because every committed batch advances this cursor INSIDE the same SQLite transaction that applies
-    /// the batch, the persisted high-water can never be ahead of what is durably materialized: a crash
-    /// between the object-log commit and the projection apply leaves the cursor behind the log head, so the
-    /// uncommitted tail is replayed (never skipped) on recovery.
-    pub fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+    /// the batch, the persisted high-water can never be ahead of what is durably materialized.
+    pub fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         let g = self.inner.lock().expect("projection store poisoned");
         let (t, q) = parts(shard);
-        let next_seq: Option<i64> = st(g
+        let row: Option<(i64, i64)> = st(g
             .conn
             .query_row(
-                "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
                 params![t, q],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional())?;
-        Ok(next_seq.map(|n| n as u64))
+        Ok(row.and_then(|(next_seq, epoch)| {
+            (next_seq > 0)
+                .then(|| CommandPosition::new(shard.clone(), epoch as u64, next_seq as u64 - 1))
+        }))
     }
 
     /// Export the durable SQLite projection rows for `shard` as a typed in-memory projection image.
@@ -8422,13 +8441,18 @@ impl ProjectionStore for SqliteRelational {
         apply_committed_batch_sql(&mut g, positions, commands)
     }
 
-    // -- recovery-on-open (ADR-012 P2): the DB-authoritative store already holds the full projection +
-    //    definitions, so there is nothing to replay (the default `recovery_high_water` → `None` makes the
-    //    composition's `read_from` return an empty page). Recovery only repopulates the in-process control
-    //    plane (via `recover_definitions`) and re-seeds the id-mint counters from `pqueue_items`.
+    // -- recovery-on-open (ADR-012 P2): the durable cursor records the last absorbed position, so a reopen
+    //    can resume replay from the persisted tail while still repopulating the in-process control plane and
+    //    id-mint counters from the durable sqlite rows.
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         Ok(self.lock().queues.values().cloned().collect())
+    }
+
+    fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        // `SqliteRelational` is the unified log+projection store, so the durable replay cursor is the
+        // relational high-water already tracked by the shared sqlite cursor.
+        LogStore::high_water(self, shard)
     }
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
@@ -8776,8 +8800,7 @@ impl ProjectionStore for HybridProjectionStore {
 
     fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         self.require_hydrated(shard)?;
-        let next = self.sqlite.recovery_high_water(shard)?;
-        Ok(next.and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1))))
+        self.sqlite.recovery_high_water(shard)
     }
 
     /// Fail closed unless the durable SQLite image provably descends from the object log it is about to be
@@ -8800,7 +8823,10 @@ impl ProjectionStore for HybridProjectionStore {
         self.check_healthy()?;
         let shard = &identity.shard;
         let recorded = self.sqlite.checkpoint_lineage(shard)?;
-        let sqlite_next_seq = self.sqlite.recovery_high_water(shard)?.unwrap_or(0);
+        let sqlite_high_water = self.sqlite.recovery_high_water(shard)?;
+        let sqlite_next_seq = sqlite_high_water
+            .as_ref()
+            .map_or(0, |pos| pos.sequence.saturating_add(1));
         // The exclusive upper bound on any applied prefix: the next sequence the log will assign.
         let log_next_seq = identity
             .high_water
@@ -8824,9 +8850,9 @@ impl ProjectionStore for HybridProjectionStore {
 
         if sqlite_next_seq > log_next_seq {
             return self.poison(format!(
-                "hybrid recovery SQLite high-water {} for {}/{} is ahead of the object-log head {}; the \
+                "hybrid recovery SQLite high-water {:?} for {}/{} is ahead of the object-log head {}; the \
                  projection absorbed commands the durable log does not contain",
-                sqlite_next_seq, shard.tenant_id, shard.queue_id, log_next_seq,
+                sqlite_high_water, shard.tenant_id, shard.queue_id, log_next_seq,
             ));
         }
         Ok(())
@@ -9094,10 +9120,7 @@ impl ProjectionStore for SqliteProjectionStore {
     //    so a reopened composition replays only the object-/sqlite-log tail beyond the snapshot.
 
     fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
-        // The inherent method returns `next_seq`; the last position already absorbed is `next_seq - 1`
-        // (the log's `read_from` resumes at `sequence + 1`, so the first replayed command is `next_seq`).
-        let next = SqliteProjectionStore::recovery_high_water(self, shard)?;
-        Ok(next.and_then(|n| (n > 0).then(|| CommandPosition::new(shard.clone(), 0, n - 1))))
+        SqliteProjectionStore::recovery_high_water(self, shard)
     }
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
@@ -9328,7 +9351,7 @@ pub fn composed_sqlite_relational_in_memory() -> EngineResult<ComposedSqliteRela
 }
 
 /// Assemble a unified sqlite-relational composition over a DURABLE store at `path`. Runs recovery-on-open
-/// (ADR-012 P2): the DB-authoritative projection needs no log replay, so recovery only repopulates the
+/// (ADR-012 P2): the durable relational cursor provides the replay start, while recovery repopulates the
 /// in-process control plane from the durable `queues` catalog and re-seeds the id-mint counters.
 pub fn composed_sqlite_relational(path: &str) -> EngineResult<ComposedSqliteRelationalBackend> {
     let store = SqliteRelational::open(path)?;

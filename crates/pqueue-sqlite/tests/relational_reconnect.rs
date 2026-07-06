@@ -14,11 +14,11 @@
 use std::collections::BTreeMap;
 
 use pqueue_conformance::{qdef, shard};
-use pqueue_core::{ClientItemKey, LeaseToken, PriorityValue, UtcTimestamp, WorkerId};
+use pqueue_core::{ClientItemKey, LeaseToken, PriorityValue, RequestId, UtcTimestamp, WorkerId};
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
-    FinalizePort, ProjectionRead, PurgePort, PushPort, PushSpec, ReclaimDriver, UpsertOutcome,
-    UpsertPort,
+    ClaimPort, ClaimRequest, CommandPosition, ControlPlaneStore, EngineError, FinalizeKind,
+    FinalizeOutcome, FinalizePort, ProjectionRead, PurgePort, PushPort, PushSpec, ReclaimDriver,
+    UpsertOutcome, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 use rusqlite::Connection;
@@ -137,6 +137,37 @@ fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
         compatibility: pqueue_engine::ClaimCompatibility::default(),
         expected_epoch: None,
     }
+}
+
+/// The relational cursor reopens at the last applied position, not at genesis.
+#[tokio::test]
+async fn recovery_high_water_tracks_applied_position_after_reopen() {
+    let path = unique_path("high-water");
+    let _ = std::fs::remove_file(&path);
+    let rid = RequestId::new("high-water-push").unwrap();
+
+    {
+        let a = SqliteRelationalBackend::open(&path).unwrap();
+        a.create_queue(qdef()).await.unwrap();
+        a.push_with_request_id(
+            &shard(),
+            rid,
+            vec![PushSpec::default(), PushSpec::default()],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+        a.claim(claim_req(1, 500, 10)).await.unwrap();
+    } // crash
+
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    assert_eq!(
+        b.recovery_high_water(&shard()).unwrap(),
+        Some(CommandPosition::new(shard(), 0, 1)),
+        "reopen must resume from the last applied command position"
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 /// The `pqueue_item_key_retention` tombstone is durable: a terminal item purged before a reopen still
@@ -293,6 +324,85 @@ async fn leased_item_survives_reopen_but_loses_its_live_token() {
         (m.leased, m.pending),
         (0, 1),
         "reclaim tick recovers the tokenless lease after reopen"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Truncating the process and reopening the sqlite relational family preserves the durable work state:
+/// items, leases, counters, request-id replay, fences, and metrics all come back from sqlite.
+#[tokio::test]
+async fn truncate_then_recover_exact_state() {
+    let path = unique_path("exact-state");
+    let _ = std::fs::remove_file(&path);
+    let request_id = RequestId::new("replay-1").unwrap();
+    let body = vec![
+        PushSpec {
+            priority: Some(PriorityValue::Int64(10)),
+            ..Default::default()
+        },
+        PushSpec {
+            priority: Some(PriorityValue::Int64(20)),
+            ..Default::default()
+        },
+    ];
+    let original_ids;
+    let fence_epoch;
+
+    {
+        let a = SqliteRelationalBackend::open(&path).unwrap();
+        a.create_queue(qdef()).await.unwrap();
+        original_ids = a
+            .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
+            .await
+            .unwrap();
+
+        let claimed = a.claim(claim_req(1, 500, 10)).await.unwrap();
+        assert_eq!(claimed.items.len(), 1, "one leased item before reopen");
+        fence_epoch = a.acquire_epoch(&shard()).await.unwrap();
+
+        let metrics = a.metrics(&shard()).await.unwrap();
+        assert_eq!((metrics.pending, metrics.leased), (1, 1));
+        assert_eq!(a.current_epoch(&shard()).await.unwrap(), fence_epoch);
+    } // crash
+
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    assert_eq!(
+        b.current_epoch(&shard()).await.unwrap(),
+        fence_epoch,
+        "the durable fence epoch survives reopen"
+    );
+    assert_eq!(
+        b.metrics(&shard()).await.unwrap(),
+        pqueue_engine::QueueMetrics {
+            pending: 1,
+            leased: 1,
+            complete: 0,
+            failed: 0,
+        },
+        "the item lifecycle counts survive reopen"
+    );
+    assert!(
+        b.pending(&shard()).await.unwrap().is_empty(),
+        "the leased item's live token is dropped on reopen"
+    );
+
+    let replayed = b
+        .push_with_request_id(&shard(), request_id, body, ts(1), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        replayed, original_ids,
+        "request-id replay returns the original item ids"
+    );
+
+    let fresh = b
+        .push(&shard(), vec![PushSpec::default()], ts(2), None)
+        .await
+        .unwrap();
+    assert_eq!(fresh.len(), 1);
+    assert!(
+        !original_ids.contains(&fresh[0]),
+        "counter recovery must mint a fresh item id after reopen"
     );
     let _ = std::fs::remove_file(&path);
 }
