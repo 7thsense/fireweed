@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T232615-872415d8",
+  "bead_id": "pqueue-ea8aed4f",
+  "base_rev": "993423908dc31260b9972264fbc786428e1daf41",
+  "created_at": "2026-07-06T23:26:16.048694348Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-ea8aed4f",
+    "title": "Docs cleanup and TOCTOU prerequisite",
+    "description": "PROBLEM\nThe relational module docs still describe the projection family as DB-authoritative, and the ADR migration still needs to keep the `pqueue-b59f4897` multi-node TOCTOU prerequisite explicit instead of burying it.\nROOT CAUSE\n`crates/pqueue-postgres/src/relational.rs:3-9, 2772-2779` and `crates/pqueue-sqlite/src/relational.rs:3-9, 4039-4040, 8425-8428` still use authoritative wording, while `docs/helix/02-design/adr/ADR-013-log-single-source-of-truth.md:126-135` names `pqueue-b59f4897` as a hard prerequisite.\nPROPOSED FIX\nRemove \"authoritative\" wording from the relational module docs, replace it with rebuildable-cache language consistent with ADR-013/TD-001, and keep the `pqueue-b59f4897` prerequisite explicit in the migration notes and test references.\nNON-SCOPE\nruntime behavior changes, replay plumbing, and conformance coverage beyond the prerequisite reference.",
+    "acceptance": "1. `TestRelationalDocsDropDBAuthoritativeLanguage` removes the DB-authoritative/authoritative wording from the postgres and sqlite relational module docs.\n2. `TestRelationalPrereqReferencesTOCTOUBead` keeps `pqueue-b59f4897` explicitly referenced in the migration notes and test comments.\n3. `cargo test -p pqueue-postgres --test relational_conformance -- --list` and `cargo test -p pqueue-sqlite --test relational_conformance -- --list` still pass after the doc cleanup.\n4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-3c5aa2e0",
+    "labels": [
+      "kind:docs",
+      "area:pqueue-postgres",
+      "area:pqueue-sqlite",
+      "adr-013"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T232615-872415d8",
+    "prompt": ".ddx/executions/20260706T232615-872415d8/prompt.md",
+    "manifest": ".ddx/executions/20260706T232615-872415d8/manifest.json",
+    "result": ".ddx/executions/20260706T232615-872415d8/result.json",
+    "checks": ".ddx/executions/20260706T232615-872415d8/checks.json",
+    "usage": ".ddx/executions/20260706T232615-872415d8/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-ea8aed4f-20260706T232615-872415d8"
+  },
+  "prompt_sha": "be5121d050f3021b3ab3d100e0263e87ede87acdfb91d57168dbfcedfba5d035"
+}
