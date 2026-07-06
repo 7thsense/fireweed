@@ -1,0 +1,35 @@
+{
+  "attempt_id": "20260706T042555-d0f9ba07",
+  "bead_id": "pqueue-ac9695d7",
+  "base_rev": "65e985017c0103d3cbf0466a0ed14b2ede42f421",
+  "created_at": "2026-07-06T04:25:55.926837744Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-ac9695d7",
+    "title": "Couple terminal reap to the emission frontier",
+    "description": "Implement TD-008 CL-6 for terminal retention: terminal records must not be reaped until both the retention window has elapsed and the durable emission cursor has advanced past the record's CommandPosition. Keep the off-commit-path emission model intact and add the frontier regression coverage needed to prove the terminal record survives until it is emitted.",
+    "acceptance": "Terminal record never lost to reap; frontier test proves reap_frontier = min(terminal_at + retention, emission_cursor_position); conformance stays green.",
+    "parent": "pqueue-a8a9e7e7",
+    "labels": [
+      "kind:build",
+      "area:pqueue-projection",
+      "area:change-log",
+      "td-008"
+    ],
+    "metadata": {
+      "spec-id": "td-008"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T042555-d0f9ba07",
+    "prompt": ".ddx/executions/20260706T042555-d0f9ba07/prompt.md",
+    "manifest": ".ddx/executions/20260706T042555-d0f9ba07/manifest.json",
+    "result": ".ddx/executions/20260706T042555-d0f9ba07/result.json",
+    "checks": ".ddx/executions/20260706T042555-d0f9ba07/checks.json",
+    "usage": ".ddx/executions/20260706T042555-d0f9ba07/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-ac9695d7-20260706T042555-d0f9ba07"
+  },
+  "prompt_sha": "73e7d56bba797d003f0dfee924ed4f927ca3cb17f6183aab1c2875da18d83bb2"
+}
