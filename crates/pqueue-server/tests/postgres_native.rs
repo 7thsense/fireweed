@@ -11,6 +11,7 @@
 #![cfg(feature = "postgres")]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use pqueue_core::{
@@ -153,6 +154,16 @@ fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
         resolve_postgres_log(&fallback).expect("PQUEUE_PG_URL fallback resolves"),
         LogSpec::Postgres { .. }
     ));
+}
+
+/// Compile-time regression for the constructor seam that previously tripped `E0308` in the release
+/// matrix: the wrapper must accept the composed postgres backend through `from_arc`.
+#[test]
+fn blocking_backend_from_arc_compiles_for_composed_postgres_backend() {
+    let _ctor: fn(
+        Arc<pqueue_postgres::ComposedPostgresBackend>,
+    ) -> pqueue_server::BlockingBackend<pqueue_postgres::ComposedPostgresBackend> =
+        pqueue_server::BlockingBackend::from_arc;
 }
 
 /// No plaintext fallback: on a build WITHOUT the `tls` feature, an `sslmode=require` DSN must fail at config
