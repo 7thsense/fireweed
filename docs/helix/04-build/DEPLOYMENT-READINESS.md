@@ -13,11 +13,11 @@ ddx:
     deps:
       build-implementation-plan: 05039d8518c9782554cf610ada22dc0eddec379c426e33f1389f9bc076683e16
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
-      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
       tp-verification-acceptance-criteria: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T04:10:30Z"
 ---
 
 # Production Deployment Readiness Contract

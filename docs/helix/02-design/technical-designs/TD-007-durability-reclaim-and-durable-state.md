@@ -10,7 +10,7 @@ ddx:
     - api-operator-repair-contract
   status: draft
   review:
-    self_hash: b624637398b8426e66607ef0168b97491ba5ae8e9074c8d306f8ff3467aa4f9d
+    self_hash: df3c854e643ae08a14a5793a019768912ca867ee1384b81e6dfcaca44f26fb39
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-hexagonal-architecture-and-two-interfaces: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
@@ -18,7 +18,7 @@ ddx:
       api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T04:10:14Z"
 ---
 
 # Technical Design
@@ -84,10 +84,15 @@ unit of work** as candidate selection — no item is selected-but-not-leased.
 - If the colliding item is **claimed (leased, non-terminal)**: reject with `-ERR pqueue invalid`
   (lifecycle transition not allowed on in-flight work). If the colliding item is **terminal**: reject
   with `-ERR pqueue terminal`. Never desync a PEL entry. (Mirrored verbatim in TD-006 §3 `XADD`.)
-- On **log-then-apply** backends: colliding-key replacement is selectable only if the backend closes
-  the upsert/claim race under the same external transaction contract. Until then, the engine returns
-  `-ERR pqueue unavailable` for a colliding-key `XADD`. (Absent `client_item_key` ⇒ plain append on
-  all backends.)
+- On **log-then-apply** backends whose serving projection may lag the validation projection:
+  colliding-key replacement is unavailable and the engine returns `-ERR pqueue unavailable` for a
+  colliding-key `XADD`.
+- On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the command's own success barrier
+  applies the serving projection before ack, so pre-commit validation runs against the current hot
+  projection and closes the upsert/claim race. Those profiles MAY therefore allow colliding-key
+  `XADD`, `update_fields`, and `reschedule` once the queue implementation proves the race-closure
+  conformance cases in TD-004.
+- (Absent `client_item_key` ⇒ plain append on all backends.)
 - A later `XACK`/`XCLAIM` of a **superseded** old id returns `-ERR pqueue superseded` — never a silent
   `nil` (preserves at-least-once "no silent drop"; TD-006 §3).
 
@@ -145,8 +150,14 @@ key→shard routing to keep it local, and no multi-shard uniqueness concern.
   succeed; superseded-id `XACK` returns `-ERR pqueue superseded`.
 - **Class guarantees:** atomic and log-then-apply backends both satisfy API-001's external transaction
   contract. Log-then-apply additionally proves its response barrier, crash-point matrix, and
-  `request_id` replay behavior; colliding-key `XADD` returns `-ERR pqueue unavailable` until the
-  backend can close the replacement/claim race.
+  `request_id` replay behavior; pure lagging-projection log-then-apply profiles keep colliding-key
+  `XADD` at `-ERR pqueue unavailable`, while `objectlog/hybrid-strict` and `objectlog/hybrid-async`
+  must prove the replacement/update/reschedule race-closure scenarios in TD-004 before they lift the
+  ban.
+- **Mutable-write race closure:** `objectlog/hybrid-strict` and `objectlog/hybrid-async` MUST prove
+  that `replace_if_pending`, `update_fields`, and `reschedule` against a pending item in the same
+  queue can race a concurrent claim under group commit without both succeeding; the winner's effect
+  must be visible on the response path and the loser must fail closed.
 - **Durable-state replay:** each §4 row reconstructs identically after projection drop + log replay.
 - **No-stub behavioral:** every port method (`ClaimPort`, `UpsertPort`, `Backend::write`,
   `ReclaimDriver`/`tick`) has a test that fails if the impl returns a default/no-op.

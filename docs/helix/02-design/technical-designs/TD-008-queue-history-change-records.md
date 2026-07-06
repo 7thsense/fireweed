@@ -13,9 +13,9 @@ ddx:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-heimq-external-broker-change-log-consumer-surface: 68dd5e8df6d5187c7abb5a1fac0add02ee49fab38badd9d37dc02bc7af6b805f
       adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
-      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T01:51:45Z"
+    reviewed_at: "2026-07-06T04:10:30Z"
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention

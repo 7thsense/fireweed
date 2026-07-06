@@ -10,7 +10,7 @@ ddx:
     - td-sharding-and-shard-ownership
   status: draft
   review:
-    self_hash: c47a696e43bfb633fac95d9d96b9c75b12c5ac9d5cc8e70ea4531510608139f3
+    self_hash: ffcb25e0d28775a431c980cb8ec4753e54e4f6c796ebd2d328072a7b4b6e7023
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
@@ -18,7 +18,7 @@ ddx:
       api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T04:10:14Z"
 ---
 
 # Technical Design
@@ -93,7 +93,7 @@ begins redirecting. Within that window:
 | Command class | On a deposed/stale owner, within the renew window |
 |---|---|
 | **Durable writes** (`XADD`; the `append_batch` of any mutating command) | **Cannot corrupt state.** The TD-003 Single Authoritative Fencing Rule rejects an append whose `expected_epoch` is not the current control-plane epoch, the instant the epoch advances — so a misrouted write is rejected and the client retries against the current owner. `client_item_key` makes the `XADD` retry converge. |
-| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver before commit, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On a log-then-apply backend (`objectlog`) any tentative delivery before the claim command commits is non-authoritative: if the `BatchClaim` append is fenced, **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced -> `-ERR pqueue stale_lease` (§3). A successful claim response is still subject to API-001's durable+visible response barrier. Stock `XREADGROUP` carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection; library/native paths use `request_id` replay (§4). |
+| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver before commit, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On a log-then-apply backend (`objectlog`) any tentative delivery before the claim command commits is non-authoritative: if the `BatchClaim` append is fenced, **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced -> `-ERR pqueue stale_lease` (§3). In `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the hot projection is current on the success path, so the claim/upsert race can be closed by the backend's own response barrier; stock `XREADGROUP` still carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection, while library/native paths use `request_id` replay (§4). |
 | **Pure reads** (`XLEN`, `XINFO`, `XPENDING`, `XRANGE`) | **Bounded-stale, never authoritative.** A read has no `append_batch` and is not epoch-fenced; a deposed owner that has not yet failed a renew MAY serve a read from its frozen local projection. Such reads are best-effort and bounded-stale by the lease/renew interval and any documented unrelated-operation apply budget. A client needing an authoritative read MUST reach the current owner (follow the redirect). The read guarantee is "bounded staleness," not "fresh-or-fenced"; a node MUST still redirect once it has learned it is not the owner. |
 
 ### Reassignment (drain) on the wire
@@ -266,7 +266,7 @@ interface. The RESP launch contract is the stock worker hot path.
 | Operation | RESP stock | Rust library |
 |---|---:|---:|
 | Push append | pass (`XADD`) | pass |
-| Pending-item replacement | pass on atomic backends (`XADD` with `client_item_key`) | pass |
+| Pending-item replacement | pass on atomic backends (`XADD` with `client_item_key`); pass on `objectlog/hybrid-strict` and `objectlog/hybrid-async` once TD-004's race-closure conformance is met | pass |
 | Claim item, unfiltered | pass (`XREADGROUP >`) | pass |
 | Claim filtered by group or metadata | library-only-intentional | pass |
 | Claim whole group or whole cohort | library-only-intentional | pass |
@@ -298,8 +298,9 @@ Launch custom RESP commands are read-only and scoped to live item access.
 5. **Superseded ids are explicit failures.** `XACK`/`XCLAIM` of a superseded id returns
    `-ERR pqueue superseded`.
 6. **Log-then-apply backends preserve the same durable queue contract through a response barrier.**
-   Pending-item replacement may return `-ERR pqueue unavailable` until that backend can close the
-   replacement/claim race without weakening transaction integrity.
+   Pure lagging-projection profiles still return `-ERR pqueue unavailable` for pending-item
+   replacement; `objectlog/hybrid-strict` and `objectlog/hybrid-async` lift that ban only after they
+   prove the race-closure conformance cases in TD-004.
 7. **`PQ.H*` commands are pqueue live-item reads, not Redis hashes.** They emulate Redis hash read
    response shapes over pqueue's structured item fields. They do not create independent hash keys, and
    data disappears from the live view when the queue item completes, fails, is purged, or is superseded.

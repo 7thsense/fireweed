@@ -6,12 +6,12 @@ ddx:
     - api-native-client-interface
     - api-operator-repair-contract
   review:
-    self_hash: 86978e327346b713a813368d430ae5e5d583dfef967378e30ecffef7c205d484
+    self_hash: 3206a0ad7896fa01deb790f1dca95bddab1cbe9d8f69a761cfb041a34498450e
     deps:
       api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T04:10:14Z"
 ---
 
 # Contract
@@ -126,6 +126,13 @@ The adapter SHOULD create one queue per logical delivery stream with:
   otherwise.
 - `retry_policy`: a `max_attempts` consistent with the application's
   redelivery policy.
+
+Mutable schedules are a backend-choice constraint, not a new queue feature.
+The adapter MAY use `BatchUpdate` / `update_fields` / `reschedule` to move still-
+pending work only on a backend profile that proves the mutable-write race
+closure called out in TD-004. If the deployment does not run on a profile that
+documents that guarantee, Seventh Sense-style ingest-then-reschedule queues
+MUST stay on an atomic-class backend so the mutable schedule path remains safe.
 
 The example nouns above (*sender*, *provider*, *domain*) are illustrative
 caller-owned keys, not pqueue concepts.

@@ -10,10 +10,10 @@ ddx:
     self_hash: 5695ee9c00997c12cf2df378af020ae38c2b1e095b2d7e9bc1b3083fc6fb6b65
     deps:
       adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
-      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-verification-acceptance-criteria: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T04:10:30Z"
 ---
 
 # Hybrid SQLite + In-Memory Projection Implementation Plan

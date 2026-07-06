@@ -13,9 +13,9 @@ ddx:
       adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
       adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
       td-queue-history-change-records: fa1c3abd066ece0cc44c905939bbfe25f399e763d59acfa1c34d36657cd72b02
-      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-06T01:52:06Z"
+    reviewed_at: "2026-07-06T04:10:30Z"
 ---
 
 # TD-009: Experimentation surface — pause, branch-at-position, read-as-of-position

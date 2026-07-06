@@ -14,7 +14,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+    self_hash: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -27,7 +27,7 @@ ddx:
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T04:10:14Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -279,12 +279,19 @@ telemetry, verification ledgers, and release notes.
 
 | Mode | Success barrier | SQLite projection role | Failure semantics |
 |------|-----------------|------------------------|-------------------|
-| `objectlog/hybrid-strict` | Manifest commit + durable SQLite apply + synchronous memory apply/render for the operation's own result | SQLite is on the response path and is the owner-local restart accelerator/high-water source | SQLite apply failure returns no success; SQLite commit followed by memory apply failure poisons the store |
-| `objectlog/hybrid-async` | Manifest commit + synchronous memory apply/render for the operation's own result | SQLite is an asynchronous projection fed from the committed object log and MAY lag behind memory | SQLite lag/failure after success is retried from the object log; memory apply/render failure before success produces an unknown-outcome retry path |
+| `objectlog/hybrid-strict` | Manifest commit + durable SQLite apply + synchronous memory apply/render for the operation's own result | SQLite is on the response path and is the owner-local restart accelerator/high-water source; the hot memory image is current before success returns | SQLite apply failure returns no success; SQLite commit followed by memory apply failure poisons the store; upsert/update/reschedule race closure is conformance-gated |
+| `objectlog/hybrid-async` | Manifest commit + synchronous memory apply/render for the operation's own result | SQLite is an asynchronous projection fed from the committed object log and MAY lag behind memory; the hot memory image is current before success returns | SQLite lag/failure after success is retried from the object log; memory apply/render failure before success produces an unknown-outcome retry path; upsert/update/reschedule race closure is conformance-gated |
 
 Both modes use the same manifest ack boundary and group-commit pipeline as the
 other object-log profiles. The difference is which projection applies are inside
 the success barrier.
+
+For mutable item changes, the ban is profile-specific rather than universal:
+`objectlog/hybrid-strict` and `objectlog/hybrid-async` MAY admit
+`replace_if_pending`, `update_fields`, and `reschedule` because the hot
+projection is applied before success returns and the request validates against
+current state. Pure lagging-projection log-then-apply profiles remain unable to
+close the same race and must keep the `-ERR pqueue unavailable` behavior.
 
 ### `objectlog/hybrid-strict` apply path
 
@@ -293,7 +300,7 @@ the success barrier.
 | Element | Rule |
 |---------|------|
 | SQLite-first apply | `HybridProjectionStore::apply` MUST durably apply the complete sealed batch to `SqliteProjectionStore::apply_committed_batch` before touching memory. Memory is never ahead of SQLite for an acknowledged command. |
-| Memory apply | The same positions and command envelopes MUST then be applied to `InMemoryProjection` before the operation returns success. Reads, claim selection, metrics, secondary-index lookup, live-item lookup, and pre-commit validation MUST use the in-memory projection. |
+| Memory apply | The same positions and command envelopes MUST then be applied to `InMemoryProjection` before the operation returns success. Reads, claim selection, metrics, secondary-index lookup, live-item lookup, and pre-commit validation MUST use the in-memory projection. Because the in-memory projection is current on the response path, mutable item changes (`replace_if_pending`, `update_fields`, and `reschedule`) MAY be admitted when the backend also proves the claim-race conformance cases below. |
 | SQLite failure | If SQLite apply fails, no success response is returned. Recovery replays the object-log tail beyond the prior SQLite high-water. |
 | Poisoned gap | If SQLite commits and the memory apply fails, the store MUST mark itself poisoned. The current operation returns `EngineError::Storage`; subsequent reads, validation, and writes fail closed with storage error; and the process must restart to hydrate memory from SQLite before serving. |
 | No lazy divergence | A poisoned hybrid store MUST NOT continue serving with memory behind SQLite, even for read-only methods. |
@@ -749,6 +756,11 @@ The following cases define the required evidence surface:
   barrier for push, claim, renew, finalize, retry/release, update, purge, and
   operator-style mutations; same-body retry returns the original result without
   append, different-body retry returns `request-id-conflict`.
+- Mutable-write race closure: on `objectlog/hybrid-strict` and
+  `objectlog/hybrid-async`, race `replace_if_pending`/`update_fields`/`reschedule`
+  against a concurrent claim for the same pending item under group commit;
+  exactly one path succeeds, the winner is visible on the response path, and
+  the loser fails closed.
 - Hybrid segment retention: prove local SQLite high-water alone never authorizes
   object-log segment expiry; compute the retention frontier as the minimum of
   committed snapshot coverage, active manifest tail, request-id retention,

@@ -18,7 +18,7 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
   review:
-    self_hash: a67d0a5d06ac057dfbed30309348c2e0a719cb89453120c2ab8d35dc3bd0eb6f
+    self_hash: b485d8c2cb0e34424404c839913f764dffe86be59112c3d135d731aaf40378a3
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -27,15 +27,15 @@ ddx:
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
       api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
-      api-workload-integration-profiles: 86978e327346b713a813368d430ae5e5d583dfef967378e30ecffef7c205d484
+      api-workload-integration-profiles: 3206a0ad7896fa01deb790f1dca95bddab1cbe9d8f69a761cfb041a34498450e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
-      td-resp-wire-adapter: c47a696e43bfb633fac95d9d96b9c75b12c5ac9d5cc8e70ea4531510608139f3
-      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-resp-wire-adapter: ffcb25e0d28775a431c980cb8ec4753e54e4f6c796ebd2d328072a7b4b6e7023
+      td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T04:10:30Z"
 ---
 
 # Test Plan: TP-001 Governing Test Traceability
