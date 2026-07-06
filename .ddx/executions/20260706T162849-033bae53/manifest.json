@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T162849-033bae53",
+  "bead_id": "pqueue-b8b1e8b7",
+  "base_rev": "af96ed6346e4e8049f8883bd717083b745b51c64",
+  "created_at": "2026-07-06T16:28:50.299028814Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b8b1e8b7",
+    "title": "Skip opted-out queues during emitter startup and ticks",
+    "description": "PROBLEM: TD-008 CL-2 and CL-7 require per-queue opt-out to suppress delivery cleanly, but emitter startup and tick handling still need a single place to skip disabled queues and preserve cursor behavior.\nROOT CAUSE: docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:64-65 defines opt-out semantics, while crates/pqueue-server/src/change_record_sink.rs:221-260 and crates/pqueue-server/src/lib.rs:1085-1102 contain the emitter startup and tick loop that must enforce it.\nPROPOSED FIX: Update emitter startup and tick processing so opted-out queues are filtered before emission, skipped queues do not advance the emission cursor, and the default-on delivery path remains intact for enabled queues.\nNON-SCOPE: No Kafka consumer surface, no engine record-mapping changes, no retention-frontier changes, and no claim-path coupling; this remains a background delivery feature only.",
+    "acceptance": "1. `TestEmitChangeRecordTickSkipsOptedOutQueues` proves opted-out queues are never emitted.\n2. `TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut` proves skipping a queue does not advance the emission cursor.\n3. `go test ./... -run 'TestEmitChangeRecordTickSkipsOptedOutQueues|TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-842ac11f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:change-log",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T162849-033bae53",
+    "prompt": ".ddx/executions/20260706T162849-033bae53/prompt.md",
+    "manifest": ".ddx/executions/20260706T162849-033bae53/manifest.json",
+    "result": ".ddx/executions/20260706T162849-033bae53/result.json",
+    "checks": ".ddx/executions/20260706T162849-033bae53/checks.json",
+    "usage": ".ddx/executions/20260706T162849-033bae53/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b8b1e8b7-20260706T162849-033bae53"
+  },
+  "prompt_sha": "4d60179d38ae5667f959b24964940ffd17e53fdd32ec9193fc1955a4e159ba4a"
+}
