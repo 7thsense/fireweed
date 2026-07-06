@@ -293,7 +293,6 @@ pub async fn spawn_embedded_fjord_broker(
         retention_ms: 7 * 24 * 60 * 60 * 1000,
         max_memory_bytes: 0,
         default_partitions: 1,
-        auto_create_topics: true,
         broker_id: node_id,
         cluster_id: config.cluster_id.clone(),
         metrics: false,
@@ -310,6 +309,10 @@ pub async fn spawn_embedded_fjord_broker(
                 )
             })
             .collect(),
+        // The embedded change-log surface only serves the exact queue topics we pre-register.
+        // Unknown topics must not be auto-created, otherwise Metadata can leak or mint
+        // namespaces outside the configured tenant/queue set.
+        auto_create_topics: false,
         storage_log: "memory://".to_string(),
         storage_offsets: "memory://".to_string(),
         storage_groups: "memory://".to_string(),

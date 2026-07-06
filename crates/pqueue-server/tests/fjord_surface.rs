@@ -295,6 +295,25 @@ fn TestKafkaTenantAclRejectsCrossTenantRead() {
     );
 }
 
+#[test]
+fn TestKafkaTenantAclRejectsCrossQueueRead() {
+    let allowed = queue_key("tenant-a", "queue-a");
+    let denied = queue_key("tenant-a", "queue-b");
+    let auth = AuthContext::new("fjord-reader", [allowed.tenant_id.as_str()]);
+    let denied_topic = fjord_topic_name(&denied);
+
+    assert_eq!(
+        authorize_fjord_topic_read(&auth, &allowed, "tenant-a.queue-a"),
+        Ok(())
+    );
+    assert_eq!(
+        authorize_fjord_topic_read(&auth, &allowed, &denied_topic),
+        Err(EngineError::Forbidden(
+            "principal is not authorized for the requested queue namespace"
+        ))
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn TestKafkaChangeLogConsumesInCommandPositionOrder() {
     let queue = queue_definition("tenant-a", "queue-a");
