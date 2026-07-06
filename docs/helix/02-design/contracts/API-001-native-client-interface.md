@@ -7,13 +7,13 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - adr-queue-as-shard-unit-and-projection-families
   review:
-    self_hash: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+    self_hash: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
     deps:
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Contract
@@ -44,12 +44,18 @@ The contract is transport-neutral. A Rust client, TypeScript client, HTTP API,
 or embedded library binding may expose idiomatic names, but MUST preserve these
 operations, fields, lifecycle semantics, per-item outcomes, and error rules.
 
-The same native command model is exposed through three first-class surfaces:
+The same native command model is exposed through exactly **two committed
+first-class surfaces** (ADR-007; see the "Realized surfaces" note above):
 
-- A Rust crate for embedded or same-process use.
-- A stateless Rust service exposing an HTTP/JSON API for remote clients.
-- Generated or hand-written SDKs that wrap the HTTP API and preserve batch-first
-  semantics.
+- The **Rust library** (`pqueue` crate) for embedded or same-process use — the
+  full surface.
+- The **RESP wire front** (`pqueue-resp`, TD-006) — the stock-worker hot path.
+
+Other transports (a stateless HTTP/JSON service, SDKs wrapping it) are
+**possible bindings** of this transport-neutral contract, not committed
+surfaces: any future binding MUST preserve these operations, fields, lifecycle
+semantics, per-item outcomes, and error rules, but none is currently built or
+planned.
 
 Compatibility adapters, such as an SQS-shaped API, are separate secondary
 surfaces. They MUST NOT replace the native API because they cannot represent
@@ -133,8 +139,8 @@ per-item result semantics as a one-item batch.
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
-| HTTP principal | authenticated identity | yes for service mode | MUST be resolved before authorizing any route. The provider is intentionally outside this contract. | Examples: machine token, service account, user session. |
-| Tenant binding | authorization rule | yes for service mode | `tenant_id` from the route MUST be authorized for the HTTP principal. Servers MAY infer a default tenant only when that inference is unambiguous and authorized. | Prevents route-level tenant spoofing. |
+| Wire principal | authenticated identity | yes for service mode | MUST be resolved before authorizing any wire command or route (RESP per TD-006 today; HTTP if ever built). The provider is intentionally outside this contract. | Examples: machine token, service account, user session. |
+| Tenant binding | authorization rule | yes for service mode | The request's `tenant_id` MUST be authorized for the wire principal. Servers MAY infer a default tenant only when that inference is unambiguous and authorized. | Prevents tenant spoofing at the wire boundary. |
 | Embedded tenant | configuration | yes for embedded mode | Embedded or local deployments MAY bind all operations to a configured default `tenant_id`. | Keeps local/library mode simple. |
 | `worker_id` | observability identity | yes for claim | MUST NOT be treated as the authenticated principal. | Worker names are caller-supplied labels. |
 | `DiscoverActiveScopes` permission | authorization rule | yes for service mode | The principal MUST hold `queue:read` for each queue a descriptor would expose. With no `queue_id` in the request, discovery MUST authorize per candidate queue and MUST include only queues for which authorization succeeds (mixed-authorization enumeration). Enumeration and per-queue auth fanout MUST be bounded by pagination or a documented per-tenant queue ceiling (see Active-Scope Discovery). | Tenant-wide route still authorizes per queue. |
@@ -144,15 +150,22 @@ per-item result semantics as a one-item batch.
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
-| Rust embedded surface | crate API | yes | MUST expose the native operations as typed async Rust functions or traits. MUST NOT require the HTTP service for same-process deployments. | First local implementation surface. |
-| HTTP service surface | HTTP/JSON API | yes | MUST expose the native operations over versioned `/v1` routes. MUST support stateless service containers behind a load balancer. | First remote implementation surface. |
-| SDK surface | client library | should | SHOULD wrap the HTTP service without changing operation semantics, result ordering, or error codes. | Initial SDK targets are Rust and TypeScript unless later design changes this. |
+| Rust library surface | crate API (`pqueue`) | yes | MUST expose the native operations as typed async Rust functions or traits. MUST NOT require any wire service for same-process deployments. | Committed full-power surface (ADR-007/ADR-009). |
+| RESP wire surface | RESP protocol (`pqueue-resp`) | yes | MUST expose the stock-worker subset per TD-006 with the richer operations marked library-only in the TD-006 §3 capability matrix. | Committed remote surface (ADR-007). |
+| HTTP service surface | HTTP/JSON API | no (possible binding, not built) | IF ever built, MUST expose the native operations over versioned `/v1` routes and support stateless service containers behind a load balancer. | Not committed; the legacy `pqueue-service` crate was deleted (ADR-007). The route shape below is illustrative. |
+| SDK surface | client library | no (possible binding, not built) | IF ever built, SHOULD wrap a wire surface without changing operation semantics, result ordering, or error codes. | Not committed. |
 | Compatibility adapter surface | adapter API | may | MAY expose SQS-shaped or other compatibility APIs. MUST document unsupported native semantics. | P1, not the native contract. |
 
 ### HTTP Route Shape
 
-The HTTP binding MUST use JSON request and response bodies unless a later
-transport contract explicitly defines another encoding.
+**This entire section is conditional and illustrative** (see Exposure Surfaces
+above): no HTTP binding is built or committed — the legacy `pqueue-service`
+crate was deleted (ADR-007). Every requirement below applies **only IF** an
+HTTP binding is ever built; it then defines that binding's shape so the
+transport-neutral contract is preserved.
+
+The HTTP binding, if built, MUST use JSON request and response bodies unless a
+later transport contract explicitly defines another encoding.
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
@@ -166,7 +179,7 @@ transport contract explicitly defines another encoding.
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/leases:renew` | HTTP operation | yes | MUST bind to `BatchRenewLeases`. | Data-plane route. |
 | `POST /v1/tenants/{tenant_id}/queues/{queue_id}/items:finalize` | HTTP operation | yes | MUST bind to `BatchFinalize`. | Data-plane route. |
 | `GET /v1/tenants/{tenant_id}/queues/{queue_id}/metrics` | HTTP operation | yes | MUST bind to `GetQueueMetrics`. | Observability route. |
-| `POST /v1/tenants/{tenant_id}/scopes:discover` | HTTP operation | should | MUST bind to `DiscoverActiveScopes`. MUST be implemented (P0/MUST) in native service mode and MAY be omitted by compatibility adapters. Tenant-scoped; MAY accept an optional `queue_id` in the body to drill into one queue's groups. Read-only; no side effects; results read from the queue's owner. MUST support pagination (`page_token`) or enforce a documented per-tenant queue ceiling. | First tenant-scoped (multi-queue) data-plane route. |
+| `POST /v1/tenants/{tenant_id}/scopes:discover` | HTTP operation | should | MUST bind to `DiscoverActiveScopes`. `DiscoverActiveScopes` itself is P0 on the committed surfaces (library; TD-006 capability matrix for RESP); an HTTP binding, if built, MUST expose it and compatibility adapters MAY omit it. Tenant-scoped; MAY accept an optional `queue_id` in the body to drill into one queue's groups. Read-only; no side effects; results read from the queue's owner. MUST support pagination (`page_token`) or enforce a documented per-tenant queue ceiling. | First tenant-scoped (multi-queue) data-plane route. |
 
 The HTTP binding MAY add transport headers for authentication, trace context,
 content encoding, and idempotent retry metadata. Those headers MUST NOT change
@@ -408,6 +421,7 @@ returns.
 | `not_before` | conditional | Present when the item carries a `not_before`; absent otherwise. |
 | `group_key` | conditional | Present when the queue requires `group_key` on every item (`cohort_policy.enabled` or group batching enabled) or when the item was pushed with a `group_key`; absent otherwise. |
 | `payload` | conditional | Present when the item was pushed with a payload; returned verbatim and uninterpreted. |
+| `fields` | conditional | Present when the item carries structured `fields` (from push or subsequent field updates); MUST equal the item's current structured field map as of this claim. Items are extensible through `fields`: a consumer MUST be able to execute its unit of work from the claimed item alone, without consulting a secondary storage system for its queue data. |
 | `metadata` | conditional | Present when the item carries caller metadata; returned verbatim. |
 | `gate_keys` | conditional | Present **only** on queues created with `eligibility_policy.gate_keys = dynamic` and only when the item declared one or more gate keys; **absent** on `gate_keys = none` queues. |
 

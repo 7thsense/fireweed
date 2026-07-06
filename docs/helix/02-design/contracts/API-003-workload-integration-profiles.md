@@ -6,12 +6,12 @@ ddx:
     - api-native-client-interface
     - api-operator-repair-contract
   review:
-    self_hash: 3f166d11c53bb55286a458b8c48cba7252deb79c39788d06186e8123e54797e0
+    self_hash: 86978e327346b713a813368d430ae5e5d583dfef967378e30ecffef7c205d484
     deps:
-      api-native-client-interface: 948b2d97220a65b5b985d83dd73b511c25fa3c793fec1903344cc88487af076c
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-    reviewed_at: "2026-06-28T16:41:59Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Contract
@@ -155,8 +155,10 @@ The claiming side (the delivery workers) MUST:
 1. Claim due work with `BatchClaim`, choosing `max_items` and claim cadence to
    pace downstream calls (this is the workload's rate control, not pqueue's).
 2. Treat the claimed item using the **Claimed Item Response Shape** (API-001):
-   correlate via `client_item_key`, read the `payload`, apply caller `metadata`,
-   and use `lease_token` + `lease_expires_at` to bound processing time.
+   correlate via `client_item_key`, read the `payload` and structured `fields`,
+   apply caller `metadata`, and use `lease_token` + `lease_expires_at` to bound
+   processing time. The claimed item is self-sufficient: the worker MUST NOT
+   need a secondary storage system to obtain its queue data.
 3. Renew with `BatchRenewLeases` before `lease_expires_at` for long downstream
    calls; never exceed the lease without renewing.
 4. For whole-batch workloads, claim with `compatibility.group_batching` (whole

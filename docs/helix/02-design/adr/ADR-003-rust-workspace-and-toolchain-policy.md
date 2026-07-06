@@ -7,13 +7,13 @@ ddx:
     - api-native-client-interface
     - td-storage-architecture-backend-contracts
   review:
-    self_hash: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
+    self_hash: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
     deps:
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # ADR-003: Rust Workspace and Toolchain Policy
@@ -40,23 +40,31 @@ unsafe usage, and verification gates.
 pqueue will be implemented as a Rust Cargo workspace using the latest stable
 Rust toolchain at project creation time, pinned in `rust-toolchain.toml`.
 
-The initial workspace crates are:
+The workspace crates (as amended by ADR-007's hexagonal cutover, ADR-009's
+encapsulated surface, and ADR-012's composition; the original table named
+`pqueue-storage`/`pqueue-service`/`pqueue-client`, all since dissolved or
+deleted) are:
 
 | Crate | Purpose |
 |-------|---------|
 | `pqueue-core` | API-001 domain types, validation, priority encoding, lifecycle state transitions, idempotency semantics, and errors. |
-| `pqueue-storage` | TD-001 storage traits, command envelopes, command positions, durability profiles, and backend conformance harness. |
-| `pqueue-postgres` | Postgres `ControlPlaneStore`, `LogStore`, and `ProjectionStore` implementations for `postgres_native`. |
-| `pqueue-service` | HTTP/JSON service binding, auth context, route handlers, telemetry, and backend wiring. |
-| `pqueue-client` | Rust client facade over embedded core or HTTP transport. |
+| `pqueue-engine` | Ports, command envelopes/positions, ownership + fencing, and the generic `ComposedBackend` orchestration (ADR-012). |
+| `pqueue-projection` | Shared in-memory projection state machine (`ProjectionData`). |
+| `pqueue-conformance` | Backend-parameterized conformance harness (the behavioral contract). |
+| `pqueue-memory` / `pqueue-sqlite` / `pqueue-postgres` / `pqueue-objectlog` | Driven adapters per backend substrate. |
+| `pqueue-resp` | RESP wire driving adapter (TD-006). |
+| `pqueue` | The library facade — the only published crate (ADR-009). |
+| `pqueue-server` | Composition root binary (DI, ReclaimDriver ticker, ownership renewal, health probe). |
 
-The crate graph must flow inward:
+The crate graph must flow inward (adapters → projection → engine → core;
+enforced by a dependency-direction test):
 
 ```text
-pqueue-service  -> pqueue-client, pqueue-core, pqueue-storage, pqueue-postgres
-pqueue-client   -> pqueue-core
-pqueue-postgres -> pqueue-core, pqueue-storage
-pqueue-storage  -> pqueue-core
+pqueue-server  -> all adapters, pqueue, pqueue-engine, pqueue-core
+pqueue / pqueue-resp -> pqueue-engine, pqueue-core (+ feature-gated adapters for pqueue)
+adapters (memory/sqlite/postgres/objectlog) -> pqueue-projection, pqueue-engine, pqueue-core
+pqueue-projection -> pqueue-engine, pqueue-core
+pqueue-engine   -> pqueue-core
 pqueue-core     -> no pqueue crate dependencies
 ```
 
@@ -115,7 +123,7 @@ The first implementation must include:
 
 - Unit tests for `pqueue-core` validation, priority encoding, lifecycle
   transitions, idempotency, and retry rules.
-- Shared conformance tests in `pqueue-storage`.
+- Shared conformance tests in `pqueue-conformance`.
 - Postgres integration tests for TD-002 scenarios.
 - Concurrency stress tests for duplicate claim prevention and stale lease
   handling.
@@ -144,4 +152,5 @@ Negative:
 
 ## Status
 
-Accepted for initial implementation planning.
+Accepted for initial implementation planning; crate layout amended 2026-07-05 to
+record the realized post-ADR-007/ADR-012 workspace.

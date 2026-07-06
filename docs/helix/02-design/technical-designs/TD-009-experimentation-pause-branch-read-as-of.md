@@ -7,6 +7,15 @@ ddx:
     - td-sharding-and-shard-ownership
     - td-s3-object-log-sqlite-projection-mode
     - td-queue-history-change-records
+  review:
+    self_hash: 64af1d72d4246cb1cbe23c851fcf7f7ffbc7ccbc210ea6b5ab494cc46d5ea61a
+    deps:
+      adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
+      adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
+      td-queue-history-change-records: 961aff3b869972154406b6737ffac1d890d19b35002db866788a7607703481dc
+      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # TD-009: Experimentation surface — pause, branch-at-position, read-as-of-position
@@ -36,7 +45,8 @@ currently unspecified:
 ## 2. Read-as-of-position
 
 Primitives exist: `LogStore::high_water` (`crates/pqueue-engine/src/compose.rs:113`) and
-snapshot-at-position storage (`compose.rs:116-123`). New read path:
+snapshot-at-position storage (`compose.rs:116-123`). (`shard` below is a `QueueKey` — the whole queue,
+per ADR-008; the name survives from the engine's internal vocabulary.) New read path:
 
 - `current_position(shard) -> CommandPosition` — thin wrapper over `high_water`; the cheap "grab the
   LSN" call.

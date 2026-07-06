@@ -9,10 +9,11 @@ ddx:
   review:
     self_hash: 07b216b2b09d6828109027ea44f891f59224cb8ff844155f8b60242c96fe2f39
     deps:
-      adr-queue-as-shard-unit-and-projection-families: 82aa83ecb8e50e10302e0fa0e5f20561b0ce0a644ee4fc9f801ba26460e5ccef
-      api-native-client-interface: 075b6705974ea7ddbda46cc3b0b2ae1e84d3a963de1e27aa47582fb23b215cf8
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-typed-payload-schemas-and-indexes-via-axon-esf: bc29e64f6e6f89932496a4803282d3e388bea665db6c526a92ba17fe49422347
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-02T14:34:38Z"
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Contract

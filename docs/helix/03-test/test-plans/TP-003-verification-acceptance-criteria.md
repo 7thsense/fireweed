@@ -18,24 +18,24 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: cda220585cc9e5cf4b660a323298baa0550451a1ee9482ecb9de93c02b8e723e
+    self_hash: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-granularity-mapping-and-claim-domain: f84d9bd6d3a8ab886c14f84afa45d189923e0cb7db32f57b700a9a0d8b1655b4
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
-      adr-rust-workspace-and-toolchain-policy: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      td-postgres-native-reference-mode: ea91286ed9f810497a7da0dd05f962e0bfe2cb001acb682f3d7b10e1e69cdc64
-      td-resp-wire-adapter: 3a5f7264fdbbce7420618ea780e64009416cba5650d82c1333df376fc9602118
-      td-s3-object-log-sqlite-projection-mode: fde8c520a39579fd2c2e771a3f251d09714bb370db6e2eaf040c2d84e9e7dc0d
-      td-sharding-and-shard-ownership: 6bf3dcc75c94fefa35af4ed9f1859e76b76df3f171a89622fcb24888d92c93e4
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-      tp-governing-test-traceability: 07ab40e9e68c15d39d73de4b373c0a75d6b5b4a2ae0db1fd19009dc00cb32d9e
-      tp-scale-substantiation: ed173bd7adce26c78059c7d347ecb31bfbea8a7e8f679b11f3d9761ddb4fb3d3
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
+      td-resp-wire-adapter: c47a696e43bfb633fac95d9d96b9c75b12c5ac9d5cc8e70ea4531510608139f3
+      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+      tp-governing-test-traceability: a67d0a5d06ac057dfbed30309348c2e0a719cb89453120c2ab8d35dc3bd0eb6f
+      tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria

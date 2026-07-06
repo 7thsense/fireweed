@@ -10,15 +10,15 @@ ddx:
     - api-operator-repair-contract
   status: draft
   review:
-    self_hash: a6efd5228446a3a5223809f16ef0041f4afce9277c338b95c26c5b70ccc9b6d3
+    self_hash: b624637398b8426e66607ef0168b97491ba5ae8e9074c8d306f8ff3467aa4f9d
     deps:
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-hexagonal-architecture-and-two-interfaces: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-hexagonal-architecture-and-two-interfaces: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-25T04:21:18Z"
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Technical Design

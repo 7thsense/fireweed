@@ -1,3 +1,15 @@
+---
+ddx:
+  id: adr-typed-payload-schemas-and-indexes-via-axon-esf
+  depends_on:
+    - adr-per-queue-secondary-indexes
+  review:
+    self_hash: bc29e64f6e6f89932496a4803282d3e388bea665db6c526a92ba17fe49422347
+    deps:
+      adr-per-queue-secondary-indexes: cd412536c22371beb00f53e7d439cbabed2de5f357c1cf2b8659b9ab38f4c055
+    reviewed_at: "2026-07-06T00:56:00Z"
+---
+
 # ADR-011: Typed Payload Schemas and Secondary Indexes via the Shared `axon-esf` ESF Vocabulary
 
 - Status: Accepted / Implemented

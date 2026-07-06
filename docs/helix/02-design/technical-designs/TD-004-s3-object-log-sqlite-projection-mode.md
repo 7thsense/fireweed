@@ -14,20 +14,20 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: fde8c520a39579fd2c2e771a3f251d09714bb370db6e2eaf040c2d84e9e7dc0d
+    self_hash: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-granularity-mapping-and-claim-domain: f84d9bd6d3a8ab886c14f84afa45d189923e0cb7db32f57b700a9a0d8b1655b4
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
-      adr-rust-workspace-and-toolchain-policy: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      td-postgres-native-reference-mode: ea91286ed9f810497a7da0dd05f962e0bfe2cb001acb682f3d7b10e1e69cdc64
-      td-sharding-and-shard-ownership: 6bf3dcc75c94fefa35af4ed9f1859e76b76df3f171a89622fcb24888d92c93e4
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
+      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -130,8 +130,10 @@ It follows TD-001's capability boundaries unchanged:
 
 - `ControlPlaneStore`: Postgres (queue defs, queue-owner assignment + `assignment_epoch`, backend
   profile). Identical to TD-002's control plane; not re-specified here. The control-plane seam is
-  pluggable (ADR-008); the object-store control plane is a deferred, spike-gated capability, so in v1
-  this backend still uses the Postgres control plane. TD-004 *reads* the current `assignment_epoch`
+  pluggable (ADR-008); the object-store control plane — the object log providing per-queue multi-node
+  fencing and coordination via its manifest-CAS series — is committed direction (ADR-008 §4) whose
+  acquire→fence atomicity proof has not yet landed, so in v1 this backend still uses the Postgres
+  control plane. TD-004 *reads* the current `assignment_epoch`
   from it on the manifest-commit path (see Epoch Fencing).
 - `LogStore`: S3-compatible object log with group-commit sealed segments and a per-queue manifest.
 - `ProjectionStore`: local in-memory or SQLite, rebuildable, applied only from
@@ -678,8 +680,10 @@ eligibility, FR-10).
 > and cross-shard command convergence). The durable object-log substrate it validated — group-commit
 > segments, manifest CAS, current-epoch fencing, in-flight claim reservation, snapshot + log-tail
 > recovery, cohort/recurring replay — **carries forward unchanged** under the per-queue model; only the
-> intra-queue-shard partitioning and the cross-shard command binding are retired as targets. Re-scoping
-> the built code to the per-queue manifest/key layout is a later build phase (it is doc-only here). This
+> intra-queue-shard partitioning and the cross-shard command binding are retired as targets.
+> **Update (2026-07-05): the re-scoping has since landed** — the codebase (workspace v0.8.0) is on the
+> per-queue ownership model throughout (`QueueKey { tenant_id, queue_id }`, no `shard_count`, per-queue
+> manifests in `pqueue-objectlog/src/segmented.rs`), so "later build phase" above is historical. This
 > record is preserved as the historical PHASE-7 build attestation, not as the current per-queue target.
 
 As of 2026-06-16, the v1 `object_log_sqlite_projection` implementation is

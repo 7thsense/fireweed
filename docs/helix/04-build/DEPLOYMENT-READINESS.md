@@ -9,15 +9,15 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: f6f9e85aec0b5a2b9db0fbc511fc22189acf93e13b13fbf8969d348838f2bd76
+    self_hash: 008984c0248225f54c3469dce1200aba49acc47d8408f68ee27a1ca82eabd1b1
     deps:
-      build-implementation-plan: 3234935e1274435e86b9396e2b107230e0142fc12c46c0603b01f0a9965a9fc8
-      td-postgres-native-reference-mode: ea91286ed9f810497a7da0dd05f962e0bfe2cb001acb682f3d7b10e1e69cdc64
-      td-s3-object-log-sqlite-projection-mode: fde8c520a39579fd2c2e771a3f251d09714bb370db6e2eaf040c2d84e9e7dc0d
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-      tp-scale-substantiation: ed173bd7adce26c78059c7d347ecb31bfbea8a7e8f679b11f3d9761ddb4fb3d3
-      tp-verification-acceptance-criteria: cda220585cc9e5cf4b660a323298baa0550451a1ee9482ecb9de93c02b8e723e
-    reviewed_at: "2026-06-25T04:21:18Z"
+      build-implementation-plan: 05039d8518c9782554cf610ada22dc0eddec379c426e33f1389f9bc076683e16
+      td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
+      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+      tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
+      tp-verification-acceptance-criteria: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -184,7 +184,9 @@ commit boundary (`CommitTransitionPort`, epic pqueue-2201fd37, C9) on the postgr
 storage axis. Both `pqueue-postgres` backend flavors currently no-op the port
 (inherit the `Unavailable` default): `PostgresBackend` (log-replay,
 `crates/pqueue-postgres/src/lib.rs`) and `PostgresRelationalBackend`
-(DB-authoritative relational family, `crates/pqueue-postgres/src/relational.rs`).
+(relational family, `crates/pqueue-postgres/src/relational.rs` — the code still
+carries its pre-ADR-013 "DB-authoritative" posture; the rebuildable-from-log
+migration is tracked as bead pqueue-3c5aa2e0).
 
 **(a) Backend flavor in scope: `PostgresRelationalBackend` only.**
 

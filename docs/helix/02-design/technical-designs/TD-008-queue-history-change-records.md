@@ -6,22 +6,63 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - td-storage-architecture-backend-contracts
     - td-s3-object-log-sqlite-projection-mode
+  review:
+    self_hash: 961aff3b869972154406b6737ffac1d890d19b35002db866788a7607703481dc
+    deps:
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
+      td-s3-object-log-sqlite-projection-mode: cee88af68edc66819a627c1bb14e24b5816551d775f208b5e6787c85dddbae44
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
-# TD-008: Queue history via change-record emission to niflheim, plus longer terminal retention
+# TD-008: Queue history via change-record emission, plus longer terminal retention
 
 **Status**: Draft
 **Decision authority**: ADR-013 (log as single source of truth)
 **Cross-repo**: niflheim durable-ingest HTTP endpoint (consumer); cayce CONTRACT-013 uses the same
-ingest path for SES exhaust, so delivery history lands beside delivery exhaust.
+ingest path for SES exhaust, so delivery history lands beside delivery exhaust; heimq / fjord as the
+candidate providers of the Kafka-protocol change-log interface (see "Delivery interfaces").
 
 ## Scope
 
-pqueue emits **item-lifecycle change records** derived from the committed log, delivered at-least-once
-to niflheim's durable-ingest endpoint, default-on with per-queue opt-out. niflheim owns history and
-Delta projection. pqueue does **not** write Parquet/Delta. The terminal retention default rises so
-items linger long enough to (a) satisfy idempotency windows and (b) guarantee a terminal item is never
-reaped before its terminal change record is durably emitted.
+pqueue emits **item-lifecycle change records** derived from the committed log — the change log. The
+first consumer binding is at-least-once delivery to niflheim's durable-ingest endpoint, default-on
+with per-queue opt-out; a Kafka-protocol consumer interface is a required second binding (see
+"Delivery interfaces"). niflheim owns history and Delta projection. pqueue does **not** write
+Parquet/Delta. The terminal retention default rises so items linger long enough to (a) satisfy
+idempotency windows and (b) guarantee a terminal item is never reaped before its terminal change
+record is durably emitted.
+
+## Change-log requirements (normative)
+
+These hold for **every** delivery binding, current and future:
+
+- **CL-1 Completeness**: on every queue with `emit_change_records = true` (CL-7), every committed
+  mutating command produces its change records ("Which transitions emit"); no acknowledged transition
+  on such a queue may be absent from the change log. Opting out (CL-7) disables **delivery** for that
+  queue entirely — no records are produced and no emission cursor advances for it; the committed
+  command log itself (ADR-013, mandatory) remains complete, so opting back in guarantees records only
+  from the opt-in position forward, not retroactively. CL-1 is only possible because the durable
+  command log is mandatory — the change log is a pure derivation of the committed log tail.
+- **CL-2 Off-commit-path**: emission never blocks, observes, or fails the commit path. Bounded,
+  telemetry-surfaced lag is the accepted cost (`emission_lag_commands`,
+  `emission_oldest_unemitted_age_ms`).
+- **CL-3 At-least-once with a stable idempotency key**: `(tenant_id, queue_id, item_id,
+  backend_epoch, sequence)`; consumers dedupe. Exactly-once is never claimed.
+- **CL-4 Per-queue order**: records for one queue are delivered in `CommandPosition` order; no
+  cross-queue ordering exists or is implied.
+- **CL-5 Durable resumability**: the emission cursor is durable per queue; crash/failover re-emits
+  from the last durable cursor (never skips), and post-failover re-emission under a new epoch still
+  dedupes via CL-3.
+- **CL-6 Reap/emission frontier coupling**: on a queue with `emit_change_records = true`, a terminal
+  item may be reaped only when **both** hold: (a) its retention time has elapsed
+  (`now >= terminal_at + terminal_retention_ms`), and (b) the durable `emission_cursor` is at or past
+  the item's terminal record `CommandPosition`. On an opted-out queue only (a) applies.
+- **CL-7 Per-queue opt-out**: `emit_change_records` (default `true`; branches default `false`,
+  TD-009).
+- **CL-8 Tenant isolation**: a consumer binding must be scopeable to `(tenant_id, queue_id)` and
+  must not leak other tenants' records (ADR-002 deny-by-default applies to the change log too).
 
 ## Emission seam
 
@@ -36,6 +77,8 @@ New engine port, minimal and runtime-free like the group-commit facet:
 ```rust
 trait ChangeRecordSink: Send + Sync {
     /// At-least-once delivery of an ordered batch for one shard. Idempotent on the receiver.
+    // `shard` is the whole queue: under ADR-008 the queue is the unit of sharding, and the
+    // parameter name survives from the engine's internal vocabulary (`QueueKey{tenant_id, queue_id}`).
     fn emit(&self, shard: &QueueKey, records: &[ChangeRecord]) -> EngineResult<()>;
 }
 ```
@@ -82,6 +125,33 @@ idempotency_key = (tenant_id, queue_id, item_id, position.backend_epoch, positio
 only by queue identity. Including `backend_epoch` means post-failover re-emission under a new epoch
 that references the same logical work still dedupes correctly.
 
+## Delivery interfaces
+
+The change log has one seam (`ChangeRecordSink` over the committed-log tail) and multiple consumer
+bindings. Two are in contract:
+
+1. **niflheim durable-ingest (HTTP push)** — the current binding, specified throughout this TD: a
+   lean hand-rolled POST driven by the `pqueue-server` interval task.
+2. **Kafka-protocol consumer interface (required)** — product requirement (2026-07-05): downstream
+   consumers must be able to subscribe to the change log with stock Kafka clients. The interface is
+   provided by **heimq** (Kafka wire protocol served over `heimq-wire`, which pqueue already
+   git-pins) or possibly **fjord**; the provider choice is an **open ADR-level decision** with two
+   admissible shapes:
+   - *pqueue-as-broker*: `pqueue-server` embeds a Kafka-protocol read surface (Metadata/Fetch/
+     consumer-group APIs over `heimq-wire`) serving change topics directly from the committed log
+     tail. Topic ↦ `(tenant_id, queue_id)` change stream; single partition per topic (preserves CL-4);
+     offsets are a monotonic mapping of `CommandPosition` (epoch-aware — offsets never regress across
+     failover). Retention follows the log/snapshot retention frontier.
+   - *external broker*: the emission task produces change records into a heimq or fjord deployment
+     (a producer sink beside the HTTP sink); the broker owns consumer groups, offsets, and fan-out;
+     pqueue's obligation ends at CL-3/CL-4/CL-5 on the produced stream.
+
+   Either shape must satisfy CL-1..CL-8. Scope boundary with ADR-005: ADR-005's "consumer-side Kafka
+   APIs are permanently out of scope" applies to the **queue data plane** (committed offsets conflict
+   with mutable priority and progress bounds). The change log is a different surface — an append-only,
+   per-queue-ordered stream where Kafka consumer semantics fit naturally — so a Kafka interface here
+   does not reopen ADR-005.
+
 ## Delivery semantics and failure isolation
 
 - **At-least-once + idempotent ingest** (niflheim dedupes on `idempotency_key`). Never exactly-once,
@@ -103,18 +173,27 @@ linearly (in-RAM `ProjectionData` for the log-replay family; table+index rows fo
 niflheim owning long-term history, pqueue needs only a short operational tail. Per-queue override
 remains.
 
-**Reap/emission frontier coupling (the subtlest rule in this TD)**: a terminal item MUST NOT be reaped
-until the emission cursor has durably passed its terminal record's position. Reap frontier =
-`min(terminal_at + retention, emission_cursor_position)`. Otherwise a crash between reap and emit
-silently drops the terminal transition from history.
+**Reap/emission frontier coupling (the subtlest rule in this TD)**: on a queue with
+`emit_change_records = true`, a terminal item MUST NOT be reaped until **both** conditions hold —
+retention elapsed (`now >= terminal_at + terminal_retention_ms`) **and** the durable `emission_cursor`
+at or past the item's terminal record `CommandPosition` (CL-6). Retention elapsing never overrides the
+emission condition. Otherwise a crash between reap and emit silently drops the terminal transition
+from history. On an opted-out queue only the retention condition applies.
 
 ## Risks
 
 1. **Retention vs hot-projection memory** — capped at 1h default, per-queue tunable; add a
    resident-terminal-count metric so operators see the cost.
 2. **Ordering** — records are **per-queue ordered, globally unordered** (`CommandPosition.sequence` is
-   per-shard). niflheim/cayce consumers MUST NOT assume cross-queue order. Contract-level statement.
+   per-queue). niflheim/cayce consumers MUST NOT assume cross-queue order. Contract-level statement.
 3. **Re-emission after failover** — a new owner replaying the tail re-emits positions the old owner
    may have delivered; correctness rests on receiver idempotency. niflheim's dedupe retention must
    exceed the worst-case emission outage + failover window; document the requirement on the niflheim
    side.
+
+## Open decisions
+
+- **Kafka interface provider and shape** (heimq pqueue-as-broker vs heimq/fjord external broker) —
+  requires its own ADR before the Kafka binding is built: offset↦`CommandPosition` mapping, consumer
+  group/offset ownership, retention alignment with the log frontier, and CL-8 authz on the Kafka
+  surface are the load-bearing sections that ADR must settle.

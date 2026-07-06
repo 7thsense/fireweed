@@ -6,12 +6,12 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
+    self_hash: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
     deps:
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      product-vision: d5543b685e3f48406e03429eda380418943be1c1b152483fe349ef466d5dfaa1
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      product-vision: 0e59c80e42299b3426b95bc91d71ad509059dcadf3a47aa74b688acb6c626e5e
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # ADR-001: CQRS Log Projection Storage Model
@@ -295,7 +295,7 @@ Source URLs:
 
 - AWS S3 pricing: https://aws.amazon.com/s3/pricing/
 - AWS MSK pricing: https://aws.amazon.com/msk/pricing/
-- AWS DynamoDB pricing: https://aws.eu/dynamodb/pricing/on-demand/
+- AWS DynamoDB pricing: https://aws.amazon.com/dynamodb/pricing/on-demand/
 - AWS Aurora pricing: https://aws.amazon.com/rds/aurora/pricing/
 - AWS public offer files:
   https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/

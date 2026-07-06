@@ -7,20 +7,25 @@ ddx:
     - adr-rust-workspace-and-toolchain-policy
     - td-storage-architecture-backend-contracts
   review:
-    self_hash: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
+    self_hash: e18689f92ad1070a9d3e96253f41b6d0a3fe67eb9b6eb80f5df07ac24e56c7cc
     deps:
-      adr-rust-workspace-and-toolchain-policy: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-25T04:21:18Z"
+      adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # ADR-006: Embedded Engine Integration and Public Crate Surface
 
 ## Status
 
-Accepted
+Accepted, with two later amendments: the **client mode** half (API-001 over HTTP or the
+`pqueue-client` SDK) was superseded by ADR-007's clean cutover — those crates are deleted; the client
+faces are now RESP (TD-006) and the `pqueue` library. The **embedded mode** half stands, refined by
+ADR-009: the embedding surface is the published `pqueue` facade crate (structurally enforced), not
+direct `pqueue-core`/`pqueue-storage` trait access; ports are `#[doc(hidden)]` behind a documented
+`internal` escape hatch.
 
 ## Context
 

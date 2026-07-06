@@ -2,9 +2,9 @@
 ddx:
   id: product-vision
   review:
-    self_hash: d5543b685e3f48406e03429eda380418943be1c1b152483fe349ef466d5dfaa1
+    self_hash: 0e59c80e42299b3426b95bc91d71ad509059dcadf3a47aa74b688acb6c626e5e
     deps: {}
-    reviewed_at: "2026-06-25T04:21:18Z"
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Product Vision

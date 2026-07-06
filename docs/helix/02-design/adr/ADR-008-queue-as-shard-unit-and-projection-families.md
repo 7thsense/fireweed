@@ -5,10 +5,10 @@ ddx:
     - prd
   status: accepted
   review:
-    self_hash: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+    self_hash: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
     deps:
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Architecture Decision Record
@@ -85,12 +85,16 @@ sharding, create more queues."**
    cohort-split. The progress bound — both `oldest_eligible_age_ms` and `progress_bound_risk_count` — is a
    **local per-queue property**, not a cross-shard aggregate or sum.
 
-4. **The control plane is pluggable.** `ControlPlaneStore` (membership + leases + epoch) is a capability with
-   a Postgres implementation (default). A no-Postgres / object-store implementation (S3 conditional-PUT lease
-   + heartbeat membership + epoch CAS), enabling a pure object-log + local-projection deployment, is recorded
-   as a **deferred capability** that must clear an S3-CAS multi-object-acquire→fence-atomicity spike before it
-   is specified as settled (it has a real correctness cost the transactional Postgres path gets for free).
-   This loop specs only the pluggable **seam**.
+4. **The control plane is pluggable, and the object log is the committed no-Postgres implementation.**
+   `ControlPlaneStore` (membership + leases + epoch) is a capability with a Postgres implementation
+   (default). The no-Postgres / object-store implementation (S3 conditional-PUT lease + heartbeat
+   membership + epoch CAS), enabling a pure object-log + local-projection deployment, is **committed
+   direction** (product-owner decision, 2026-07-05): the object log is intended to provide **multi-node
+   fencing and coordination at the per-queue level**, building on the manifest conditional-PUT series
+   that already serves as both CAS and epoch fence for appends (TD-004). The S3-CAS
+   multi-object-acquire→fence-atomicity design must still be proven before the implementation ships (it
+   has a real correctness cost the transactional Postgres path gets for free), but it is sequenced build
+   work, not an open question. This loop specs the pluggable **seam**.
 
 ## Consequences
 
@@ -127,7 +131,9 @@ sharding, create more queues."**
 - **Async-behind projection (log leads, projection trails).** Deferred and benchmark-gated; it only pays off
   when the log substrate is far cheaper than the projection AND any lag is hidden behind API-001's success
   barrier. Exposing read-after-success lag, delayed claim visibility, or backend-specific caller repair is not
-  acceptable; it would break transaction integrity. v1 modes are log-less (default) and log + sync-projection.
+  acceptable; it would break transaction integrity. (This bullet originally allowed a log-less relational
+  default; ADR-013 retired that — the durable log is mandatory in every production deployment, so the v1
+  relational mode is log + sync-projection.)
 - **Routing via a separately-distributed owner map.** Unnecessary: owner placement is deterministic (HRW over
   the live owner set), so the map is *computable*, and a stale route is safe (the fenced append rejects a
   deposed owner) — so a lazy `MOVED`-style redirect-on-miss suffices.

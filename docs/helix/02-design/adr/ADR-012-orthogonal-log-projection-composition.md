@@ -1,8 +1,26 @@
+---
+ddx:
+  id: adr-orthogonal-log-projection-composition
+  depends_on:
+    - adr-cqrs-log-projection-storage-model
+    - adr-queue-as-shard-unit-and-projection-families
+    - td-storage-architecture-backend-contracts
+  review:
+    self_hash: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
+    deps:
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
+---
+
 # Architecture Decision Record
 
 **ADR ID**: ADR-012
 **Title**: The backend is the orthogonal product `LogStore × ProjectionStore × ControlPlane`, assembled by one generic `ComposedBackend`
-**Status**: Proposed
+**Status**: Accepted (status updated 2026-07-05 — the generic `ComposedBackend<L, P, C>` is
+implemented in `crates/pqueue-engine/src/compose.rs` and the `objectlog/hybrid` composition shipped;
+remaining phased work tracks as beads)
 **Related**: ADR-001 (CQRS log/projection), ADR-007 (hexagonal & two interfaces), ADR-008 (queue as
 shard unit & two projection families — **superseded in part**, see below), ADR-009 (engine-enforced
 coordination), TD-001 (backend contracts / conformance capability classes), TD-003 (ownership & epoch
@@ -23,7 +41,8 @@ That duplication is the root cost ADR-007 set out to remove ("one shared in-memo
 log stores") but never finished: the projection state machine *was* extracted into `pqueue-projection`
 (`ProjectionData`, `LogData`, `commit`), yet the **assembly** of log + projection into a backend was left
 per-crate. ADR-008 then framed storage as **two projection families** (in-memory log-replay vs
-DB-authoritative relational) — a useful behavioral axis, but it described the families as distinct backend
+DB-authoritative relational — a label ADR-013 has since retired; the relational projection is a
+rebuildable cache) — a useful behavioral axis, but it described the families as distinct backend
 *kinds* rather than as points in a composition.
 
 ## Decision
@@ -198,8 +217,11 @@ realizations, and the composition must serve both **without forcing a phantom se
    this ADR's Phase 1.**
 
 2. **Unified-transactional path** (sqlite-relational, postgres-relational / `postgres_native`). Here
-   append+apply are **one DB transaction** and there is no separate command-log write at all (the relational
-   projection is log-optional and DB-authoritative). The two-face closure must *not* be coerced into a
+   append+apply are **one DB transaction**: the command-log row and the projection mutation commit
+   together. (As originally written this bullet called the relational projection "log-optional and
+   DB-authoritative"; ADR-013 retired both properties — the log is mandatory and the projection is a
+   rebuildable cache. What survives is the *mechanism*: one transaction, no separate two-phase log
+   write.) The two-face closure must *not* be coerced into a
    split log write. The composition handles this by routing the UoW through a **single choke point**,
    `ComposedBackend::commit_locked(inner, shard, env, expected_epoch)`, which is the only place that
    sequences `epoch-resolve → fence → log.append → projection.apply`. For a unified store this choke point
@@ -214,8 +236,12 @@ realizations, and the composition must serve both **without forcing a phantom se
    store as a **disjoint logical facet of the same transaction** — a position counter / staged-command
    buffer that lives beside the projection rows in the one DB transaction. The two `&mut dyn` faces then
    borrow disjoint *parts* of the transaction wrapper, identically to how the separate path borrows disjoint
-   *fields* of `Inner`. **No phantom log row is written**: for a DB-authoritative relational store the
-   `append` facet only mints the position; the durable effect is the `apply`.
+   *fields* of `Inner`. **No two-phase log write is introduced** — append and apply remain one
+   transaction. (As originally written this said "no phantom log row is written: the `append` facet only
+   mints the position"; ADR-013 supersedes that half — the log is mandatory and the relational family
+   must be rebuildable from it, so the `append` facet MUST durably persist the command envelope as a real
+   log row *inside the same transaction* as the projection mutation. What stands is that no separate,
+   second-phase log write exists.)
 
    Proposed trait support (Phase 3, specified now so the shape is fixed): `LogStore` and `ProjectionStore`
    each expose the substrate behind `&mut self` write methods and `&self` reads, so a *single* type may

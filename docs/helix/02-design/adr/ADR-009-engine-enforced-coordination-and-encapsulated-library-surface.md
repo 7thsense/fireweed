@@ -7,23 +7,27 @@ ddx:
     - adr-queue-as-shard-unit-and-projection-families
     - adr-auth-tenancy-and-storage-isolation
     - td-sharding-and-shard-ownership
-  status: draft
+  status: accepted
   review:
-    self_hash: f5795719c029efc047debaac97e0bfc86274b6f0c70b0b23c3df8c86bf519b68
+    self_hash: 36c73add90f1c464172040dd7c926608f49c5a263b2bf03d9dd03103d8a5b6c2
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
-      adr-hexagonal-architecture-and-two-interfaces: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
-      td-sharding-and-shard-ownership: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
-    reviewed_at: "2026-06-27T19:08:47Z"
+      adr-embedded-engine-integration-and-public-surface: e18689f92ad1070a9d3e96253f41b6d0a3fe67eb9b6eb80f5df07ac24e56c7cc
+      adr-hexagonal-architecture-and-two-interfaces: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Architecture Decision Record
 
 **ADR ID**: ADR-009
 **Title**: The engine enforces coordination below the ports; the library is the only encapsulated external surface
-**Status**: draft
+**Status**: accepted (status updated 2026-07-05 — this ADR is cited as committed by the accepted
+ADR-011 and is **partially realized**: the library facade, backend constructors, and ownership/session
+code exist, but the Decision 2 publish topology is not yet enforced — no crate manifest sets
+`publish = false` and no guard test asserts it — and the Decision 4/5 epoch-collapse and
+fence-threading items remain sequenced build work. All are tracked as beads, not open design)
 **Related**: ADR-002 (auth & deny-by-default), ADR-006 (embedded surface), ADR-007 (hexagonal & two
 interfaces — this ADR *refines*, does not supersede), ADR-008 (queue as shard unit & pluggable control
 plane), TD-003 (sharding & ownership), TD-006 (RESP `route`), TD-007 (durability & durable state),
@@ -108,12 +112,17 @@ it locates its enforcement and seals the surface.
    value advanced atomically at acquire**; collapsing today's two counters is a prerequisite. This
    **reverses** the `port.rs:33-34` "in-process owners pass current epoch, never self-fence" contract.
 
-5. **Multi-instance shared-store competition is a Postgres-only, conditional capability.** It is correct
-   only on a backend that presents a single atomic acquire→fence epoch. **No backend provides this today.**
-   memory (per-process control plane) and sqlite (no shared control plane) are single-process; object-log
-   is `EventualApply` with a non-recoverable per-entry epoch and a non-atomic epoch object — **excluded**
-   (single-owner only). Postgres becomes safe **once** the single durable epoch (Decision 4 prerequisite)
-   and the data-plane fence threading land. The library **runtime-refuses** multi-owner construction on any
+5. **Multi-instance shared-store competition requires a single atomic acquire→fence epoch — and the
+   object log is the committed way to provide it per queue.** It is correct only on a backend that
+   presents a single atomic acquire→fence epoch. **No backend provides this today.** memory (per-process
+   control plane) and sqlite (no shared control plane) are single-process. Postgres becomes safe **once**
+   the single durable epoch (Decision 4 prerequisite) and the data-plane fence threading land. For the
+   object log, the design intent (product-owner decision, 2026-07-05) is that **the object log itself
+   provides multi-node fencing and coordination at the per-queue level**: the manifest conditional-PUT
+   series is already both the CAS and the epoch fence for appends (TD-004), and extending it to an atomic
+   per-queue acquire→fence (epoch-fence manifest entry published before any data segment, per TD-003's
+   Single Authoritative Fencing Rule) is sequenced build work, not an open question. Until that lands the
+   object log remains single-owner, and the library **runtime-refuses** multi-owner construction on any
    backend that does not present the atomic acquire→fence capability.
 
 6. **Authorization stays out of the library, bounded by ADR-002.** The library performs **no authn** and
@@ -122,6 +131,15 @@ it locates its enforcement and seals the surface.
    relaxes nor substitutes for that. Trusted single-tenant embedders may pass a fixed principal (ADR-002
    embedded mode). RESP adds network authentication (`HELLO`/ACL) and the wire codec — and **only** those —
    on top of the same engine coordination.
+
+7. **Structured `ItemId`, minted locally by the owning node** (recorded here for traceability — this
+   decision previously lived only in the library-canonical-coordination design and the code). An
+   `ItemId` packs `[epoch:24][node:8][counter:32]`: the owner-tenure epoch, a **configured** `node_id`
+   (sourced by the deployment, e.g. Helm), and a per-tenure monotonic counter
+   (`crates/pqueue-core/src/domain.rs` ItemId packing; counters in `QueueCounters`). Ids are minted
+   locally by the queue's single owner with no coordination on the mint path — uniqueness follows from
+   per-queue single-writer ownership (ADR-008) plus the epoch component across tenures. Ids are stable,
+   orderable within a tenure, and never reused across epochs.
 
 ## Consequences
 
@@ -141,9 +159,10 @@ it locates its enforcement and seals the surface.
   TD-003** (re-scoped per-queue ownership is reused as-is). **Bounded by ADR-002** (authz delegation is
   valid only in embedded/trusted mode; multi-tenant hosts still authorize). **Amends ADR-006** by making
   the embedded public surface *enforced* (publish topology + private constructor) rather than conventional.
-- **Honest scope:** multi-instance shared-store competition does not work today and is not claimed to; it
-  is Postgres-only and gated on the single-durable-epoch + fence-threading work. Object-log multi-owner is
-  out until a manifest-CAS epoch fence exists.
+- **Honest scope:** multi-instance shared-store competition does not work today and is not claimed to;
+  Postgres is gated on the single-durable-epoch + fence-threading work, and object-log multi-owner is out
+  until the manifest-CAS acquire→fence lands — but the latter is committed direction (the object log is
+  the intended per-queue multi-node fencing/coordination substrate), not a deferred maybe.
 - **Trade-offs accepted:** `pqueue` becomes a thin composition root that fans into feature-gated adapter
   crates (an explicit dependency inversion, kept minimal by `optional` deps); the encapsulation wall is
   strong-by-default but a determined embedder can still path-depend on an internal crate (acceptable — the

@@ -6,12 +6,12 @@ ddx:
     - concerns
     - api-native-client-interface
   review:
-    self_hash: f84d9bd6d3a8ab886c14f84afa45d189923e0cb7db32f57b700a9a0d8b1655b4
+    self_hash: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
     deps:
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # ADR-004: Granularity Mapping and Claim Domain
@@ -255,4 +255,5 @@ it is NOT silently resolved by moving one axis to metadata.
 
 ## Status
 
-Proposed.
+Accepted (status updated 2026-07-05; this ADR is load-bearing for the accepted ADR-008 cascade and is
+implemented in code — treating it as still "proposed" was stale metadata).

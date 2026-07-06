@@ -8,14 +8,14 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
+    self_hash: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
     deps:
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-27T19:08:46Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Technical Design: TD-003 Queue Ownership and Fencing
@@ -72,9 +72,10 @@ Out of scope:
 - Operator APIs to trigger reassign/drain (P1 operator contract).
 - Cross-tenant or cross-queue placement policy and capacity-based bin-packing
   (P1).
-- The no-Postgres / object-store `ControlPlaneStore` implementation — recorded
-  as a deferred, spike-gated capability (ADR-008; this design specs only the
-  pluggable seam, see "Control-Plane Pluggability").
+- The no-Postgres / object-store `ControlPlaneStore` implementation — committed
+  direction per ADR-008 §4 (the object log provides per-queue multi-node fencing
+  and coordination), but designed and reviewed separately; this design specs only
+  the pluggable seam, see "Control-Plane Pluggability".
 
 ## Technical Approach
 
@@ -289,9 +290,10 @@ realization of this design. It is correct **only** on a backend that presents th
 single atomic acquire->fence epoch above — `postgres_native` once that binding
 holds. The reference in-memory control plane (per-process, resets on restart) and a
 backend with no shared durable control plane (sqlite-local) are **single-process
-only**. `object_log_sqlite_projection` is **single-owner only** until the deferred
-manifest-CAS epoch fence (Control-Plane Pluggability) lands and per-entry epochs
-are recorded. A `Pqueue` constructed for multi-owner operation MUST runtime-refuse
+only**. `object_log_sqlite_projection` is **single-owner only** until the
+manifest-CAS acquire→fence (Control-Plane Pluggability) lands and per-entry epochs
+are recorded — committed build direction per ADR-008 §4: the object log is the
+intended per-queue multi-node fencing/coordination substrate. A `Pqueue` constructed for multi-owner operation MUST runtime-refuse
 a backend that does not present the atomic acquire->fence capability.
 
 ## Graceful Drain
@@ -348,7 +350,7 @@ contract (ADR-001):
 | Step | Normative text |
 |------|----------------|
 | 1. Resolve + fence epoch | Acquire the queue lease, read the current `assignment_epoch`, and durably fence it into the log (see Single Authoritative Fencing Rule) before any data append. |
-| 2. Load snapshot | Read the latest `SnapshotStore` snapshot for the queue (TD-001 `latest_snapshot`); it carries a committed `CommandPosition`. For `postgres_native`, the projection is authoritative in-place and snapshot load is a no-op (TD-002 / see Backend Profile Bindings). |
+| 2. Load snapshot | Read the latest `SnapshotStore` snapshot for the queue (TD-001 `latest_snapshot`); it carries a committed `CommandPosition`. For `postgres_native`, the DB-resident projection already holds acknowledged state at its persisted applied-high-water, so the snapshot-load step starts from that position (per ADR-013 the projection is a rebuildable cache, not authoritative; see Backend Profile Bindings). |
 | 3. Replay tail | Read `LogStore` commands from the snapshot position forward (TD-001 `read_from`) and apply them to the projection (`apply_committed`), bounded by the retention/snapshot window (ADR-001 bounded replay). |
 | 4. Materialize leases | Reconstruct active leases and lease-expiry state; expired leases become eligible again (FR-26) and MUST preserve progress-bound age (FR-11). |
 | 5. Resume | Begin serving claims under the current epoch. All appends carry `expected_epoch`. |
@@ -393,18 +395,21 @@ owner's summary rows; there is no cross-owner merge. Results expose the summary
 capability** (ADR-008). The default and only v1-settled implementation is
 Postgres (transactional acquire/renew/epoch allocation); ADR-001's bar — "Postgres
 is preferred; a backend-specific control plane may be supported later but must
-justify" — holds. A no-Postgres / object-store implementation (S3 conditional-PUT
-lease + heartbeat membership + epoch CAS), enabling a pure object-log +
-local-projection deployment, is the deferred candidate that must clear that bar:
-it is gated on an S3-CAS multi-object acquire→fence-atomicity spike before it is
-specified as settled (ADR-008 §4). This design specs only the pluggable **seam**;
-the object-store implementation gets its own fresh-eyes review when it lands.
+justify" — holds and is met. The no-Postgres / object-store implementation (S3
+conditional-PUT lease + heartbeat membership + epoch CAS), enabling a pure
+object-log + local-projection deployment, is **committed direction** (ADR-008 §4,
+product-owner decision 2026-07-05: the object log provides multi-node fencing and
+coordination at the per-queue level). The S3-CAS multi-object acquire→fence
+atomicity design must still be proven before it is specified as settled — that
+proof is sequenced build work, not an open question. This design specs only the
+pluggable **seam**; the object-store implementation gets its own fresh-eyes
+review when it lands.
 
 **Seam contract (what any `ControlPlaneStore` implementation MUST provide).** The
 seam is substrate-neutral; an implementation is admissible only if it upholds these
 invariants — which the Postgres implementation obtains for free from a single
-serializable transaction, and which the deferred object-store implementation MUST
-prove out in the spike before it is specified:
+serializable transaction, and which the committed object-store implementation MUST
+prove out before it is specified:
 
 | Invariant | Requirement |
 |-----------|-------------|
@@ -415,7 +420,7 @@ prove out in the spike before it is specified:
 | Fail-closed unavailability | When the control plane is unreachable, existing owners keep serving under live leases and new acquisitions/renewals fail with a retryable error (TD-001 control-plane fallback); no append proceeds on an unconfirmed epoch. |
 
 The trait below is the seam; backend DDL/CAS mechanics live in TD-002 (Postgres)
-and the deferred object-store design (TD-004 territory).
+and the object-store control-plane design (TD-004 territory).
 
 ## API / Interface Design
 
@@ -606,8 +611,8 @@ ownership/background resource and still meets its progress bound. Validated by
 
 | Profile | Queue lease store | Append fence | Recovery |
 |---------|-------------------|--------------|----------|
-| `postgres_native` (TD-002) | Postgres queue-owner row, transactional acquire/renew | `assignment_epoch` updated on the queue-owner row in the acquire transaction; the data-plane append transaction validates `expected_epoch == current assignment_epoch` (TD-002 stale-epoch reject). The acquire transaction IS the durable fence. | Projection is in-place authoritative; recovery = read current epoch (no replay needed beyond crash recovery of the DB). |
-| `object_log_sqlite_projection` (TD-004, D4b) | Postgres `ControlPlaneStore` (ADR-001 keeps control plane in Postgres in v1; object-store control plane deferred, ADR-008) | On acquire, the new owner MUST commit an epoch-fence manifest entry advancing the manifest's recorded current epoch to `E+1` via CAS BEFORE any data segment; thereafter manifest commit MUST reject any `expected_epoch` not equal to the manifest's recorded current epoch. | Recovery = latest SQLite snapshot from object storage + replay sealed segments after the snapshot position (ADR-001 S3/Object-Log section). |
+| `postgres_native` (TD-002) | Postgres queue-owner row, transactional acquire/renew | `assignment_epoch` updated on the queue-owner row in the acquire transaction; the data-plane append transaction validates `expected_epoch == current assignment_epoch` (TD-002 stale-epoch reject). The acquire transaction IS the durable fence. | Normal reconnect: the DB-resident projection already holds acknowledged state at its persisted applied-high-water; recovery reads the current epoch and resumes. Per ADR-013 the projection is a rebuildable cache, not authoritative: it MUST also be reconstructable by replaying the persisted command log from genesis or a snapshot (migration tracked). |
+| `object_log_sqlite_projection` (TD-004, D4b) | Postgres `ControlPlaneStore` in v1 (the object-store control plane — the object log providing per-queue fencing/coordination via manifest CAS — is committed direction, ADR-008 §4, acquire→fence proof pending) | On acquire, the new owner MUST commit an epoch-fence manifest entry advancing the manifest's recorded current epoch to `E+1` via CAS BEFORE any data segment; thereafter manifest commit MUST reject any `expected_epoch` not equal to the manifest's recorded current epoch. | Recovery = latest SQLite snapshot from object storage + replay sealed segments after the snapshot position (ADR-001 S3/Object-Log section). |
 
 Both committed v1 profiles MUST pass the TD-003 conformance scenarios (see
 Testing).

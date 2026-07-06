@@ -6,22 +6,26 @@ ddx:
     - adr-embedded-engine-integration-and-public-surface
     - api-native-client-interface
     - api-operator-repair-contract
-  status: draft
+  status: accepted
   review:
-    self_hash: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
+    self_hash: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
     deps:
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-embedded-engine-integration-and-public-surface: e18689f92ad1070a9d3e96253f41b6d0a3fe67eb9b6eb80f5df07ac24e56c7cc
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
-    reviewed_at: "2026-06-25T04:21:18Z"
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Architecture Decision Record
 
 **ADR ID**: ADR-007
 **Title**: Hexagonal architecture and two interfaces (RESP + Rust library)
-**Status**: draft (the "one shared projection" consequence superseded by ADR-008)
+**Status**: accepted (status updated 2026-07-05 — the migration this ADR specifies is built:
+service/client/kafka deleted; `pqueue-resp`, the `pqueue` facade, and `pqueue-server` shipped).
+Partial supersessions: the "one shared projection" consequence was retracted by ADR-008 and the
+projection framing further refined by ADR-012 (composition axes) and ADR-013 (log single source of
+truth).
 **Related**: ADR-001 (CQRS log/projection), ADR-006 (embedded surface), ADR-008 (queue-as-shard-unit &
 two projection families — supersedes the one-shared-projection consequence below), API-001, API-002,
 TD-006 (RESP surface), TD-007 (durability), `docs/helix/04-build/hexagonal-migration-plan.md`

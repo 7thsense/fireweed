@@ -10,16 +10,16 @@ ddx:
     - concerns
     - prd
   review:
-    self_hash: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
+    self_hash: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-granularity-mapping-and-claim-domain: f84d9bd6d3a8ab886c14f84afa45d189923e0cb7db32f57b700a9a0d8b1655b4
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Technical Design: TD-001 Storage Architecture and Backend Contracts
@@ -58,8 +58,10 @@ Out of scope:
 - Queue-to-owner assignment, leases, epoch allocation, drain, reassignment, and
   recovery *mechanism*. TD-003 owns ownership and fencing; TD-001 defines only
   the fencing token (`expected_epoch` on `append_batch`).
-- The deferred no-Postgres / object-store `ControlPlaneStore` implementation
-  (ADR-008; spike-gated).
+- The no-Postgres / object-store `ControlPlaneStore` implementation — committed
+  direction (ADR-008 §4: the object log provides per-queue multi-node fencing
+  and coordination via manifest CAS), designed and proven separately (TD-003
+  seam invariants; acquire→fence atomicity proof pending).
 - Broad operator repair, purge, redrive, and backend migration APIs. Targeted
   in-band recurring teardown (`PurgeItems`, per-key/`item_id`) is in native scope
   (P0); broad operator purge/redrive/retention remains a separate P1 operator
@@ -88,9 +90,12 @@ and projection in one transactional backend.
   must preserve API-001 success, structured rejection, unknown-outcome
   `request_id` replay, read-after-success visibility, and single-active-lease
   guarantees.
-- **Projection is rebuildable unless the backend is transactional-authoritative**:
-  SQLite or local projection state may accelerate claims, but the command log
-  plus snapshots must recover acknowledged state after node loss.
+- **Every projection is rebuildable; the durable log is mandatory (ADR-013)**:
+  SQLite, local, or relational projection state may accelerate claims, but every
+  backend — including the relational family — persists the durable command log,
+  and the log plus snapshots must recover acknowledged state after node loss.
+  There is no production log-less posture; a no-op log exists for tests only and
+  is rejected by production configuration surfaces.
 - **The projection is a family, held by conformance (ADR-008)**: pqueue supports
   two projection families — an **in-memory log-replay** projection
   (embedded/object-log) and a **relational/DB-resident** projection (`pqueue_items`
@@ -106,9 +111,11 @@ and projection in one transactional backend.
 - **Control plane is pluggable; Postgres is the default**: queue definitions,
   queue-to-owner assignment, backend profile, and epochs live in the
   `ControlPlaneStore`. Postgres is the preferred and only v1-settled
-  implementation; a backend-specific control plane (e.g. an object-store
-  implementation) may be supported later but MUST justify against ADR-001's bar
-  (ADR-008; the object-store impl is deferred behind an S3-CAS spike).
+  implementation. The object-store control plane — the object log providing
+  per-queue multi-node fencing and coordination via its manifest-CAS series —
+  is **committed direction** (ADR-008 §4, product-owner decision 2026-07-05),
+  not v1-settled: its S3-CAS acquire→fence atomicity proof is sequenced build
+  work and it ships only after passing the TD-003 seam invariants.
 - **Queue epochs fence execution**: pqueue does not run node discovery or
   cluster consensus. A control-plane assignment gives a worker authority for a
   `(tenant_id, queue_id)` epoch; stale workers must be fenced before they can
@@ -149,13 +156,19 @@ and projection in one transactional backend.
   projection mutations, per-item results, and metrics snapshots.
 - **Files**: `crates/pqueue-core/src/**`
 
-### New: `pqueue-storage`
+### `pqueue-engine`, `pqueue-projection`, `pqueue-conformance` (realized layout)
 
-- **Purpose**: backend capability traits, command envelopes, command positions,
-  snapshot contracts, and conformance test harness.
-- **Interfaces**: `LogStore`, `ProjectionStore`, `SnapshotStore`,
-  `ControlPlaneStore`.
-- **Files**: `crates/pqueue-storage/src/**`
+Per ADR-007 (hexagonal) and ADR-012 (orthogonal composition), the capability
+layer originally sketched as a `pqueue-storage` crate is realized as:
+
+- **`pqueue-engine`**: the ports and orchestration — command envelopes, command
+  positions, the `LogStore` / `ProjectionStore` / `ControlPlane` axis traits, and
+  the generic `ComposedBackend` write/recovery choke point
+  (`crates/pqueue-engine/src/compose.rs`).
+- **`pqueue-projection`**: the shared in-memory projection state machine
+  (`ProjectionData`) that all log-replay members apply commands through.
+- **`pqueue-conformance`**: the backend-parameterized conformance harness — the
+  contract that holds backends behaviorally identical.
 
 ### New: `pqueue-postgres`
 
@@ -164,12 +177,18 @@ and projection in one transactional backend.
 - **Interfaces**: Postgres connection pool in; trait implementations out.
 - **Files**: `crates/pqueue-postgres/src/**`
 
-### New: `pqueue-service`
+### Driving adapters and composition root (supersedes the `pqueue-service` HTTP binding)
 
-- **Purpose**: stateless HTTP service binding API-001 to core commands and
-  configured backend profiles.
-- **Interfaces**: HTTP/JSON in; `pqueue-core` operation results out.
-- **Files**: `crates/pqueue-service/src/**`
+The HTTP service crate originally planned here was deleted in the ADR-007 clean
+cutover. API-001 is realized through exactly two driving faces plus one
+composition root:
+
+- **`pqueue-resp`**: the RESP wire adapter (TD-006) — the stock-Redis-client hot
+  path, with `-MOVED` owner routing.
+- **`pqueue`**: the Rust library facade (ADR-009) — the full-power interface and
+  the only published crate.
+- **`pqueue-server`**: the composition root binary — dependency injection,
+  ReclaimDriver ticker, ownership renewal loop, health probe.
 
 ### New: Backend Profiles
 
@@ -179,8 +198,8 @@ and projection in one transactional backend.
 | `object_log_inmemory_projection` | S3-compatible object log | In-memory local/rebuildable (log-replay family) | S3-compatible object storage | Postgres |
 | `object_log_sqlite_projection` | S3-compatible object log | SQLite local/rebuildable (relational family) | S3-compatible object storage | Postgres |
 | `object_log_hybrid_projection` | S3-compatible object log | Hybrid: hot in-memory + durable local SQLite projection image | S3-compatible object storage | Postgres |
-| `kafka_log_sqlite_projection` | Kafka/Redpanda partition log | SQLite local/rebuildable | Object storage or Postgres checkpoint | Postgres |
-| `dynamodb_authority` | DynamoDB transaction/log table | DynamoDB query tables or local projection | DynamoDB/object storage | Postgres |
+| `kafka_log_sqlite_projection` (retired) | Kafka/Redpanda partition log | SQLite local/rebuildable | Object storage or Postgres checkpoint | Postgres |
+| `dynamodb_authority` (retired) | DynamoDB transaction/log table | DynamoDB query tables or local projection | DynamoDB/object storage | Postgres |
 
 `postgres_native` (TD-002) is the reference correctness backend and is
 implemented first; it delivers the single-deployment envelope.
@@ -192,8 +211,11 @@ properties: SQLite is applied first as the local durable projection image, then
 the same committed batch is applied to the in-memory hot model used for reads and
 pre-commit validation. TD-004 owns their shared object-log semantics and
 projection-specific recovery requirements. The remaining profiles
-(`kafka_log_sqlite_projection`, `dynamodb_authority`) define design targets and
-conformance expectations only. Every profile, including committed ones, becomes
+(`kafka_log_sqlite_projection`, `dynamodb_authority`) are **retired**: they were
+design targets only, and the ADR-007 cutover (which deleted the Kafka adapter,
+superseding ADR-005) plus ADR-012's composition model removed any commitment to
+them. They remain in the table as capability-mapping illustrations; nothing may
+cite them as supported. Every profile, including committed ones, becomes
 usable for a queue only after it passes the shared backend conformance suite
 defined in this document.
 
@@ -205,9 +227,11 @@ behaviorally identical:
 
 - **In-memory log-replay** projection: the projection is rebuilt by replaying the
   durable log (embedded and `object_log_sqlite_projection` use this for recovery).
-- **Relational / DB-resident** projection: `pqueue_items` is authoritative
-  in-place and claim is an SQL `FOR UPDATE SKIP LOCKED` statement
-  (`postgres_native`, and the SQLite local projection).
+- **Relational / DB-resident** projection: `pqueue_items` is a **materialized
+  cache with a persisted applied-high-water** (ADR-013 retired the
+  "authoritative in-place" framing) and claim is an SQL `FOR UPDATE SKIP LOCKED`
+  statement (`postgres_native`, and the SQLite local projection). The relational
+  family persists the same durable command log and MUST be rebuildable from it.
 
 The conformance suite partitions into capability classes:
 
@@ -215,8 +239,8 @@ The conformance suite partitions into capability classes:
 |-------|-----------------|-------------|
 | **core** | Observable queue behavior independent of durability substrate: ordering, eligibility (API-001 Eligibility Precedence), claim atomicity, single-active-lease, idempotency (`request_id` + `client_item_key`), lease renewal/expiry/reclaim, epoch fencing, and the per-queue progress bound. | **Every** projection family / backend. |
 | **transaction contract** | Success is durable and visible; structured envelope rejection has no committed effect; per-item rejection has no effect for that item; unknown outcomes resolve exactly once by `request_id`; crashes at every append/apply/response boundary preserve the same visible history. | **Every** supported implementation combination. |
-| **log** | Replay-from-log, snapshot + log-tail recovery, segment/manifest group-commit fencing, orphan-segment handling, and commit-latency-bound behavior. | Log-bearing backends only (`object_log_inmemory_projection`, `object_log_sqlite_projection`, kafka). |
-| **relational durability** | Reconnect-after-crash durability — the relational substitute for replay-from-log: after process loss the DB-resident projection still holds acknowledged state. | Relational-family backends that are transactional-authoritative (`postgres_native`). |
+| **log** | Replay-from-log, snapshot + log-tail recovery, segment/manifest group-commit fencing, orphan-segment handling, and commit-latency-bound behavior. | Log-bearing backends (`object_log_inmemory_projection`, `object_log_sqlite_projection`, `object_log_hybrid_projection`; the relational family joins once its ADR-013 rebuildability migration lands). |
+| **relational durability** | Reconnect-after-crash durability: after process loss the DB-resident projection still holds acknowledged state. Per ADR-013 this is a **supplement to, not a substitute for**, replay-from-log — once the relational family's rebuildability migration lands it also runs the **log** class (replay tail from its persisted command log). | Relational-family backends (`postgres_native`). |
 
 A backend is admissible for a queue only after it passes **core**,
 **transaction contract**, and whichever of **log** / **relational durability**
@@ -224,9 +248,9 @@ matches its durability class. Durability class follows the durability
 **substrate, not the projection family**: a
 relational-family projection that is rebuilt from a log (the SQLite local
 projection under `object_log_sqlite_projection`) discharges its durability
-obligation via **log** (replay/snapshot+tail), not **relational durability**;
-only a transactional-authoritative relational projection (`postgres_native`) runs
-the reconnect-after-crash class. The fencing and ownership scenarios (stale-epoch
+obligation via **log** (replay/snapshot+tail); the transactional relational
+projection (`postgres_native`) runs the reconnect-after-crash class in addition
+to — never instead of — the ADR-013 rebuild-from-log obligation. The fencing and ownership scenarios (stale-epoch
 reject, reassignment recovery) are part of **core** and bind every backend; their
 *mechanism* is TD-003.
 
@@ -655,11 +679,11 @@ duplicated here; they come from the single `pqueue_group_summary`.
 
 | From | To | Method | Data |
 |------|----|--------|------|
-| `pqueue-service` | `pqueue-core` | Direct Rust call | API-001 operation structs |
-| `pqueue-core` | `ControlPlaneStore` | Trait | queue definitions, queue assignment, backend profile |
-| `pqueue-core` | `LogStore` | Trait | durable command envelopes |
-| `pqueue-core` | `ProjectionStore` | Trait | committed commands, claim plans, metrics reads |
-| `pqueue-core` | `SnapshotStore` | Trait | projection snapshots and recovery checkpoints |
+| `pqueue-resp` / `pqueue` (library) | `pqueue-engine` | Direct Rust call | API-001 operation structs |
+| `pqueue-engine` | `ControlPlaneStore` | Trait | queue definitions, queue assignment, backend profile |
+| `pqueue-engine` | `LogStore` | Trait | durable command envelopes |
+| `pqueue-engine` | `ProjectionStore` | Trait | committed commands, claim plans, metrics reads |
+| `pqueue-engine` | `SnapshotStore` | Trait | projection snapshots and recovery checkpoints |
 | Backend conformance tests | Backend crates | Trait test harness | deterministic scenarios and crash/replay fixtures |
 
 ### External Dependencies
@@ -674,7 +698,8 @@ duplicated here; they come from the single `pqueue_group_summary`.
 
 ## Security
 
-- **Authentication**: service mode resolves a principal before any HTTP route.
+- **Authentication**: server mode resolves a principal before dispatching any
+  wire command (RESP per TD-006); embedded mode delegates to the host (ADR-002).
   Provider choice remains outside TD-001.
 - **Authorization**: every operation authorizes the principal against
   `tenant_id` and `queue_id` before reading or mutating control-plane,
@@ -774,7 +799,7 @@ duplicated here; they come from the single `pqueue_group_summary`.
 | Stale lease finalization | Old token fails after renew/expiry/reclaim. |
 | Claim replay | Same claim `request_id` returns same active lease set. |
 | Snapshot recovery | Restore snapshot plus log tail reproduces projection state. |
-| Relational reconnect durability | After process loss, a transactional-authoritative relational projection still returns acknowledged state on reconnect (the relational substitute for replay-from-log). |
+| Relational reconnect durability | After process loss, the DB-resident relational projection still returns acknowledged state on reconnect. Per ADR-013 this is a supplement to — never a substitute for — rebuild-from-log: the same state MUST also be reconstructable by replaying the persisted command log. |
 | Progress-bound risk | Eligible age metrics identify near-violation items. |
 | Tenant isolation | Tenant A cannot read or mutate tenant B state. |
 | Stale-epoch reject | Append under a superseded epoch fails without mutating state (TD-003). |
@@ -837,8 +862,10 @@ duplicated here; they come from the single `pqueue_group_summary`.
    Files: `crates/pqueue-objectlog/src/**`, `crates/pqueue-sqlite/src/**`.
    Tests: shared conformance suite (including the object-log rows) plus the
    TD-004 scale/cost evidence record (TP-002 E3 vs E0).
-7. Implement `pqueue-service` HTTP binding after core structs and first backend
-   compile.
+7. Implement the driving faces after core structs and first backend compile:
+   the RESP wire adapter (`pqueue-resp`, TD-006), the library facade (`pqueue`,
+   ADR-009), and the `pqueue-server` composition root. (The originally planned
+   `pqueue-service` HTTP binding was superseded by the ADR-007 clean cutover.)
 
 **Prerequisites**: API-001 complete; ADR-001, ADR-002, ADR-003, ADR-004, and
 ADR-008 accepted; TD-002, TD-003, and TD-004 accepted; TP-002 available for test

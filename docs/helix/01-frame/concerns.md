@@ -7,9 +7,9 @@ ddx:
   review:
     self_hash: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
     deps:
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      product-vision: d5543b685e3f48406e03429eda380418943be1c1b152483fe349ef466d5dfaa1
-    reviewed_at: "2026-06-25T04:21:18Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      product-vision: 0e59c80e42299b3426b95bc91d71ad509059dcadf3a47aa74b688acb6c626e5e
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Project Concerns

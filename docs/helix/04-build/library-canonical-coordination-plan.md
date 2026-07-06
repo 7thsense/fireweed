@@ -10,11 +10,11 @@ ddx:
   review:
     self_hash: aba8b07892cbfc73213491ef0285e2b6851da283824a3987c090d52b956e287b
     deps:
-      adr-embedded-engine-integration-and-public-surface: 6266b5ddd069b0a421dfba44333be9102c0fed225b8cd4e845637eb1d8f6309b
-      adr-engine-enforced-coordination-and-encapsulated-library-surface: f5795719c029efc047debaac97e0bfc86274b6f0c70b0b23c3df8c86bf519b68
-      adr-hexagonal-architecture-and-two-interfaces: 03851e92193304e7fddd7fe73abad5ef0ef20bb87b4316e1dcbfa42e5495cdc9
-      td-sharding-and-shard-ownership: 1a4006e7a828bc8e52913c317f40d42ee61e71a2d98ac4727145727843558c0c
-    reviewed_at: "2026-06-27T23:47:34Z"
+      adr-embedded-engine-integration-and-public-surface: e18689f92ad1070a9d3e96253f41b6d0a3fe67eb9b6eb80f5df07ac24e56c7cc
+      adr-engine-enforced-coordination-and-encapsulated-library-surface: 36c73add90f1c464172040dd7c926608f49c5a263b2bf03d9dd03103d8a5b6c2
+      adr-hexagonal-architecture-and-two-interfaces: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
+      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Library Canonical Coordination — Implementation Plan

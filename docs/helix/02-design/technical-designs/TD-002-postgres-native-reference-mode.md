@@ -12,18 +12,18 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 69eab6b9a93ad895edbddee1b950ce3c38275dc51b972e6ef4e62cae7389d769
+    self_hash: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: 9a9570ebe2718bf637c73564018e3702bc4473bcbf5a6499b52b7e1937bd0b83
-      adr-granularity-mapping-and-claim-domain: f84d9bd6d3a8ab886c14f84afa45d189923e0cb7db32f57b700a9a0d8b1655b4
-      adr-queue-as-shard-unit-and-projection-families: 77d1e2feb6a27e0a093564e3f07247cd8cc2c6fba6c3d20b5eeade568ba25964
-      adr-rust-workspace-and-toolchain-policy: ab726c0cca517786afa9301ab8e15e525c664dfbcd011a2cf736e22993e2ef27
-      api-native-client-interface: a97e014a176aa9e37a93fbab151c31ffb47aa8428c62e802c98fa3be0413426b
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
+      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
+      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
-      prd: a910dd5fb95102767b4ddf81115569d39d85c7e082a40c62ce424dea73ca8533
-      td-storage-architecture-backend-contracts: a0053226d680acddfc3b606ec106c47ffb09167374940dc8282607e46b8df96e
-    reviewed_at: "2026-06-25T22:49:59Z"
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    reviewed_at: "2026-07-06T00:56:00Z"
 ---
 
 # Technical Design: TD-002 Postgres-Native Reference Mode
@@ -81,15 +81,20 @@ Out of scope:
 ## Technical Approach
 
 `postgres_native` is the reference correctness backend and the reference member
-of the **relational projection family** (ADR-008): `pqueue_items` is authoritative
-in-place and claim is an SQL `FOR UPDATE SKIP LOCKED` statement. It uses ordinary
+of the **relational projection family** (ADR-008, as amended by ADR-013):
+`pqueue_items` is a materialized cache with a persisted applied-high-water and
+claim is an SQL `FOR UPDATE SKIP LOCKED` statement. It uses ordinary
 Postgres transactions to commit the durable command record and the operational
-projection together. This keeps the first implementation simple, gives
+projection together — the command log row is fully durable in the same
+transaction that mutates the projection, and success is returned only after
+both commit (ADR-013's universal ordering: log durable → projection applied →
+client acknowledged). This keeps the first implementation simple, gives
 low-latency small-batch commits, and creates executable semantics for later
-backends to match through conformance tests. Because the projection is DB-resident
-and transactional-authoritative, it satisfies its durability obligation via the
-**relational reconnect-after-crash** conformance class (TD-001) rather than
-replay-from-log.
+backends to match through conformance tests. The DB-resident projection runs
+the **relational reconnect-after-crash** conformance class (TD-001) in addition
+to the ADR-013 rebuild-from-log obligation: `pqueue_items` and its peers MUST be
+reconstructable by replaying `pqueue_commands` from genesis or from a snapshot,
+and the log is never optional.
 
 The backend still follows TD-001's capability boundaries:
 
