@@ -5,15 +5,15 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::fjord_topic_name;
 use pqueue_core::{QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
     ChangeRecordSink, ComposedBackend, ControlPlane, EngineError, EngineResult, LogStore,
     ProjectionStore, QueueKey,
 };
+use rdkafka::ClientConfig;
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::ClientConfig;
-use crate::fjord_topic_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRecordSinkConfig {
@@ -230,7 +230,7 @@ fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> OwnedHeaders {
         .insert(Header {
             key: "pq-command-kind",
             value: Some(command_kind.as_str()),
-    });
+        });
     if let Some(item_id) = item_id.as_deref() {
         headers = headers.insert(Header {
             key: "pq-item-id",
@@ -266,9 +266,8 @@ impl ChangeRecordSink for FjordChangeRecordSink {
         block_on_sync(async {
             for record in records {
                 let key = change_record_key(record);
-                let payload = serde_json::to_vec(record).map_err(|e| {
-                    EngineError::Storage(format!("serialize change record: {e}"))
-                })?;
+                let payload = serde_json::to_vec(record)
+                    .map_err(|e| EngineError::Storage(format!("serialize change record: {e}")))?;
                 let headers = change_record_headers(record);
                 self.producer
                     .send(
@@ -343,7 +342,9 @@ fn parse_delivery_endpoint(input: &str) -> EngineResult<ParsedDeliveryEndpoint> 
             "change record sink endpoint must use http:// or kafka://",
         ));
     }
-    Ok(ParsedDeliveryEndpoint::Kafka(parse_kafka_endpoint(trimmed)?))
+    Ok(ParsedDeliveryEndpoint::Kafka(parse_kafka_endpoint(
+        trimmed,
+    )?))
 }
 
 pub(crate) fn change_record_sink_is_fjord(endpoint: Option<&str>) -> EngineResult<bool> {
@@ -387,9 +388,7 @@ fn parse_kafka_endpoint(input: &str) -> EngineResult<ParsedKafkaEndpoint> {
         .parse::<u16>()
         .map_err(|_| EngineError::Invalid("change record sink port must be a u16"))?;
     if host.is_empty() {
-        return Err(EngineError::Invalid(
-            "change record sink host is required",
-        ));
+        return Err(EngineError::Invalid("change record sink host is required"));
     }
     Ok(ParsedKafkaEndpoint {
         bootstrap_servers: format!("{host}:{port}"),
@@ -590,7 +589,7 @@ mod tests {
     }
 
     impl ChangeRecordEmissionBackend for RecordingEmissionBackend {
-        fn emit_change_record_tail<S: ChangeRecordSink>(
+        fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
             &self,
             shard: &QueueKey,
             sink: &S,

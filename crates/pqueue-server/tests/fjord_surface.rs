@@ -3,13 +3,13 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pqueue_engine::{
-    AuthContext, ChangeRecord, ChangeRecordKind, ChangeRecordPosition, ChangeRecordSink as _,
-    ChangeRecordState, EngineError, QueueKey,
-};
 use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
+};
+use pqueue_engine::{
+    AuthContext, ChangeRecord, ChangeRecordKind, ChangeRecordPosition, ChangeRecordSink as _,
+    ChangeRecordState, EngineError, QueueKey,
 };
 use pqueue_server::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, EmbeddedFjordConfig,
@@ -17,9 +17,9 @@ use pqueue_server::{
     build_embedded_fjord_surface, fjord_topic_name, register_embedded_fjord_topics,
     spawn_embedded_fjord_broker, start,
 };
+use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message as _};
-use rdkafka::ClientConfig;
 
 fn queue_definition(tenant: &str, queue: &str) -> QueueDefinition {
     QueueDefinition {
@@ -113,10 +113,9 @@ async fn start_embedded_broker(queue: &QueueDefinition) -> EmbeddedBroker {
     let handle = spawn_embedded_fjord_broker(
         7,
         &EmbeddedFjordConfig {
-            namespace_root: PathBuf::from(std::env::temp_dir().join(format!(
-                "pqueue-fjord-test-{}",
-                std::process::id()
-            ))),
+            namespace_root: PathBuf::from(
+                std::env::temp_dir().join(format!("pqueue-fjord-test-{}", std::process::id())),
+            ),
             cluster_id: "fjord-test-cluster".to_string(),
         },
         &format!("kafka://{bootstrap}"),
@@ -135,10 +134,9 @@ async fn start_embedded_broker(queue: &QueueDefinition) -> EmbeddedBroker {
             consumer
                 .fetch_metadata(Some(&topic), Duration::from_millis(500))
                 .map(|metadata| {
-                    metadata
-                        .topics()
-                        .iter()
-                        .any(|topic_meta| topic_meta.name() == topic && topic_meta.partitions().len() == 1)
+                    metadata.topics().iter().any(|topic_meta| {
+                        topic_meta.name() == topic && topic_meta.partitions().len() == 1
+                    })
                 })
                 .unwrap_or(false)
         });
@@ -162,7 +160,11 @@ fn make_sink(bootstrap: &str) -> FjordChangeRecordSink {
     FjordChangeRecordSink::new(&config).expect("fjord sink")
 }
 
-fn consume_records(bootstrap: &str, topic: &str, expected: usize) -> Vec<rdkafka::message::OwnedMessage> {
+fn consume_records(
+    bootstrap: &str,
+    topic: &str,
+    expected: usize,
+) -> Vec<rdkafka::message::OwnedMessage> {
     let bootstrap = bootstrap.to_string();
     let topic = topic.to_string();
     tokio::task::block_in_place(move || {
@@ -299,14 +301,7 @@ async fn TestKafkaChangeLogConsumesInCommandPositionOrder() {
     let sink = make_sink(&broker.bootstrap);
     let shard = queue_key("tenant-a", "queue-a");
     let records = vec![
-        change_record(
-            "tenant-a",
-            "queue-a",
-            Some(1),
-            7,
-            1,
-            ChangeRecordKind::Push,
-        ),
+        change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push),
         change_record(
             "tenant-a",
             "queue-a",
@@ -349,14 +344,8 @@ async fn TestKafkaOffsetNeverRegressesAcrossFailover() {
     let queue = queue_definition("tenant-a", "queue-a");
     let broker = start_embedded_broker(&queue).await;
     let shard = queue_key("tenant-a", "queue-a");
-    let logical_record = change_record(
-        "tenant-a",
-        "queue-a",
-        Some(1),
-        7,
-        1,
-        ChangeRecordKind::Push,
-    );
+    let logical_record =
+        change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push);
 
     let sink = make_sink(&broker.bootstrap);
     sink.emit(&shard, std::slice::from_ref(&logical_record))

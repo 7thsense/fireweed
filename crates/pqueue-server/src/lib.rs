@@ -1202,13 +1202,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &change_record_sink,
             )?;
             run_owned_with_fjord_task(
-                backend,
-                node_id,
-                clock,
-                &listen,
-                interval,
-                &queues,
-                fjord_task,
+                backend, node_id, clock, &listen, interval, &queues, fjord_task,
             )
             .await
         }
@@ -1257,13 +1251,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &change_record_sink,
             )?;
             run_owned_with_fjord_task(
-                backend,
-                node_id,
-                clock,
-                &listen,
-                interval,
-                &queues,
-                fjord_task,
+                backend, node_id, clock, &listen, interval, &queues, fjord_task,
             )
             .await
         }
