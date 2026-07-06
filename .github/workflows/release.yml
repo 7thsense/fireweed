@@ -187,3 +187,7 @@ jobs:
               --title "$tag" \
               --notes "pqueue $tag binary release. Storage is configured with separate log and projection backends."
           fi
+
+      - name: Surface release workflow failure
+        if: failure()
+        run: bash scripts/ci/release-failure-notification.sh
