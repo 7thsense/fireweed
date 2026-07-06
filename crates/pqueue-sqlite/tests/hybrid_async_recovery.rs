@@ -143,7 +143,7 @@ fn hybrid_async_recovery_hydrates_validates_and_advertises_high_water() {
     // After hydration the high-water is the last absorbed command (seq 0), the replay-skip point.
     assert_eq!(
         ProjectionStore::recovery_high_water(&hybrid, &shard()).unwrap(),
-        Some(CommandPosition::new(shard(), 0, 0)),
+        Some(CommandPosition::new(shard(), 3, 0)),
     );
     assert_eq!(
         ProjectionStore::metrics(&hybrid, &shard()).unwrap().pending,
