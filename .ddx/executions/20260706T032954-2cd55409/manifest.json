@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T032954-2cd55409",
+  "bead_id": "pqueue-5c70706b",
+  "base_rev": "bdec11fad0015602aa6e224a27ceee6c7ebb4b3f",
+  "created_at": "2026-07-06T03:29:55.416466247Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-5c70706b",
+    "title": "Verify RESP XREADGROUP claimed-item field parity",
+    "description": "PROBLEM: The RESP surface still only has a static claimed-item shape check, so it does not independently prove parity with the library claim result after `update_fields`. ROOT CAUSE: `crates/pqueue-resp/tests/e2e.rs:250` asserts the XREADGROUP reply shape once, but it does not drive a post-`update_fields` claim nor compare the RESP entry to the library-facing claimed-item shape. PROPOSED FIX: extend the RESP e2e to push an item, mutate `fields`, issue `XREADGROUP`, and assert the reply carries the current structured fields and reserved-field behavior exactly as the claim contract requires; compare the RESP entry to the library claim result where available. This extends the closed claimed-shape work (`pqueue-9c77d5e7` / `pqueue-922eaf00`). NON-SCOPE: backend storage internals, conformance-traceability docs, and API-003 workflow logic.",
+    "acceptance": "1. TestRespXreadgroupClaimShapeParity: `cargo test -p pqueue-resp --test e2e xreadgroup_returns_api001_claimed_item_shape -- --nocapture` passes after the RESP reply is checked against the updated claim-field contract.\n2. TestRespReservedFieldAndFieldMapRegression: the RESP test also asserts reserved-field handling and claim-field parity after `update_fields` on the same queue.\n3. TestGoTestGate: `go test ./...` passes.\n4. TestLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-7bed1610",
+    "labels": [
+      "kind:test",
+      "area:pqueue-resp",
+      "area:contracts",
+      "api-001"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T032954-2cd55409",
+    "prompt": ".ddx/executions/20260706T032954-2cd55409/prompt.md",
+    "manifest": ".ddx/executions/20260706T032954-2cd55409/manifest.json",
+    "result": ".ddx/executions/20260706T032954-2cd55409/result.json",
+    "checks": ".ddx/executions/20260706T032954-2cd55409/checks.json",
+    "usage": ".ddx/executions/20260706T032954-2cd55409/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-5c70706b-20260706T032954-2cd55409"
+  },
+  "prompt_sha": "bc90c111246140b5f5c21cd5d8057fa2cf07ce153002d5829f45ed5157dec5c7"
+}
