@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260706T170029-485ce814",
+  "bead_id": "pqueue-73a40e30",
+  "base_rev": "0f4f21734e1c69fa043a448ff09655c089f64d2b",
+  "created_at": "2026-07-06T17:00:30.568642731Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-73a40e30",
+    "title": "Enforce tenant-scoped Kafka ACLs",
+    "description": "PROBLEM: The Kafka surface must deny reads outside the caller's tenant and queue namespace.\nROOT CAUSE: The repo has tenant-aware queue identity in the core, but no Kafka ACL test or authorization bridge for the embedded surface.\nPROPOSED FIX: Enforce tenant-prefixed topic access and deny-by-default ACL scoping so a caller can only read its own `(tenant_id, queue_id)` change stream.\nNON-SCOPE: Dependency pinning, ordered emission, and consumer-group ownership are handled by sibling beads.",
+    "acceptance": "1. `TestKafkaTenantAclRejectsCrossTenantRead` proves the Kafka surface is tenant-scoped and denies a caller outside its `(tenant_id, queue_id)` namespace.\n2. `go test ./... -run 'TestKafkaTenantAclRejectsCrossTenantRead'`\\n3. `lefthook run pre-commit`\\n4. `lefthook run pre-push`",
+    "parent": "pqueue-a391c196",
+    "labels": [
+      "kind:build",
+      "area:fjord",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T170029-485ce814",
+    "prompt": ".ddx/executions/20260706T170029-485ce814/prompt.md",
+    "manifest": ".ddx/executions/20260706T170029-485ce814/manifest.json",
+    "result": ".ddx/executions/20260706T170029-485ce814/result.json",
+    "checks": ".ddx/executions/20260706T170029-485ce814/checks.json",
+    "usage": ".ddx/executions/20260706T170029-485ce814/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-73a40e30-20260706T170029-485ce814"
+  },
+  "prompt_sha": "519dd1794be1b4e87a334f12c29563376074bb85b1a474fc6d9de5975f99fe25"
+}
