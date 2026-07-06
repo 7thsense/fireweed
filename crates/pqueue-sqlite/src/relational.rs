@@ -151,6 +151,11 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     assignment_epoch INTEGER NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
+CREATE TABLE IF NOT EXISTS relational_emission_cursor (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL,
+    epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
 -- BQ-11c: the single per-group summary projection (TD-002 §Per-Group Summary Projection), maintained
 -- in the SAME transaction as every grouped-item mutation (recompute-from-items; exact at mutation time,
 -- lagged across a time-only not_before crossing — see refresh_group_summary). Consumer: BQ-14 g1
@@ -8396,6 +8401,54 @@ impl LogStore for SqliteRelational {
             (next > 0)
                 .then(|| CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1)),
         )
+    }
+
+    fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let g = self.lock();
+        let (t, q) = parts(shard);
+        let row: Option<(i64, i64)> = st(g
+            .conn
+            .query_row(
+                "SELECT epoch, seq FROM relational_emission_cursor WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional())?;
+        Ok(row.map(|(epoch, seq)| CommandPosition::new(shard.clone(), epoch as u64, seq as u64)))
+    }
+
+    fn set_emission_cursor(
+        &mut self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        let g = self.lock();
+        let (t, q) = parts(shard);
+        let current: Option<(i64, i64)> = st(g
+            .conn
+            .query_row(
+                "SELECT epoch, seq FROM relational_emission_cursor WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional())?;
+        if let Some((epoch, seq)) = current {
+            let cur = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
+            if !cur.precedes(&position) && cur != position {
+                return Err(EngineError::Invalid("emission cursor regression"));
+            }
+        }
+        st(g.conn.execute(
+            "INSERT INTO relational_emission_cursor(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
+            params![
+                t,
+                q,
+                position.backend_epoch as i64,
+                position.sequence as i64
+            ],
+        ))?;
+        Ok(())
     }
 
     fn set_high_water(
