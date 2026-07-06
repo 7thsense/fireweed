@@ -1,11 +1,11 @@
 //! # Relational projection family (postgres) — BQ-12
 //!
-//! The postgres sibling of [`pqueue_sqlite::SqliteRelationalBackend`]: a **DB-authoritative** projection
-//! family (ADR-008 / TD-001 relational class) where the `pqueue_items` SQL table **is** the projection.
-//! Every lifecycle command is applied as SQL against `pqueue_items`; reads are SQL; a reconnect recovers
-//! committed state from the table itself (no command log to replay). The schema + the 14-arm apply mirror
-//! the sqlite relational reference arm-for-arm, so the two relational backends — and the in-memory
-//! reference — stay behaviorally identical on the conformance CORE class.
+//! The postgres sibling of [`pqueue_sqlite::SqliteRelationalBackend`]: a rebuildable relational
+//! projection family (ADR-008 / TD-001 relational class) where the `pqueue_items` SQL table holds the
+//! durable projection cache. Every lifecycle command is applied as SQL against `pqueue_items`; reads are
+//! SQL; a reconnect recovers committed state from the table itself (no command log to replay). The
+//! schema + the 14-arm apply mirror the sqlite relational reference arm-for-arm, so the two relational
+//! backends - and the in-memory reference - stay behaviorally identical on the conformance CORE class.
 //!
 //! ## What postgres gives that sqlite cannot: pool-ready row-level concurrency
 //! The sqlite relational backend serializes its in-one-transaction claim with a process-wide `Mutex` (a
@@ -986,7 +986,7 @@ struct Inner {
 
 impl Inner {
     /// Reload the queue-def cache from the durable `queues` table. The item projection itself is already
-    /// durable in `pqueue_items` (DB-authoritative) — nothing to replay.
+    /// durable in `pqueue_items` as a rebuildable cache - nothing to replay.
     ///
     /// NOTE: item-id restart-safety is handled by `restore_counters` (it seeds `QueueCounters` past the
     /// highest durable id, decoding `(epoch, counter)` straight from the packed id — ADR-009).
@@ -2769,7 +2769,8 @@ fn validate_cohort_lease(
 // PostgresRelationalBackend
 // ---------------------------------------------------------------------------
 
-/// Postgres-backed **relational** projection family (`pqueue_items` is DB-authoritative). Atomic class.
+/// Postgres-backed **relational** projection family (`pqueue_items` is a rebuildable projection cache).
+/// Atomic class.
 pub struct PostgresRelationalBackend {
     inner: Mutex<Inner>,
     /// This instance's node id, packed into every minted [`ItemId`] (ADR-009). `0` single-instance.
@@ -2785,9 +2786,9 @@ impl PostgresRelationalBackend {
         Self::from_client(client)
     }
 
-    /// Connect isolated in a dedicated `schema` (the postgres analogue of a fresh sqlite file). Reconnecting
-    /// with the SAME `schema` reopens the same DB-authoritative projection — used by the conformance +
-    /// relational-reconnect suites.
+    /// Connect isolated in a dedicated `schema` (the postgres analogue of a fresh sqlite file).
+    /// Reconnecting with the SAME `schema` reopens the same rebuildable projection cache — used by the
+    /// conformance + relational-reconnect suites.
     pub fn connect_in_schema(url: &str, schema: &str) -> EngineResult<Self> {
         if !schema
             .chars()
@@ -4567,7 +4568,7 @@ impl PostgresRelational {
     }
 
     /// Connect isolated in a dedicated `schema` (the postgres analogue of a fresh sqlite file). Reconnecting
-    /// with the SAME `schema` reopens the same DB-authoritative projection.
+    /// with the SAME `schema` reopens the same rebuildable projection cache.
     pub fn connect_in_schema(url: &str, schema: &str) -> EngineResult<Self> {
         if !schema
             .chars()

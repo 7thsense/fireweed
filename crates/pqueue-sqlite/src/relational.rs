@@ -1,12 +1,12 @@
 //! # Relational projection family (sqlite) — BQ-11a
 //!
-//! A SECOND, **DB-authoritative** projection family for sqlite (ADR-008 / TD-001 relational class),
-//! distinct from the log-replay [`crate::ComposedSqliteBackend`]. Here the `pqueue_items` SQL table **is** the
-//! projection (TD-002 columns): every lifecycle command is applied as SQL INSERT/UPDATE/DELETE against
-//! `pqueue_items` inside the unit of work, and reads (eligibility, peek, pending, metrics) are SQL
-//! queries over it. There is **no** shared in-memory [`pqueue_projection::ProjectionData`] and **no**
-//! command log — a reopen recovers committed state from the table itself (the relational-reconnect class,
-//! proven in BQ-11d), not by replaying a log.
+//! A second rebuildable projection family for sqlite (ADR-008 / TD-001 relational class), distinct from
+//! the log-replay [`crate::ComposedSqliteBackend`]. Here the `pqueue_items` SQL table holds the durable
+//! projection cache (TD-002 columns): every lifecycle command is applied as SQL INSERT/UPDATE/DELETE
+//! against `pqueue_items` inside the unit of work, and reads (eligibility, peek, pending, metrics) are
+//! SQL queries over it. There is **no** shared in-memory [`pqueue_projection::ProjectionData`] and **no**
+//! command log - a reopen recovers committed state from the table itself (the relational-reconnect
+//! class, proven in BQ-11d), not by replaying a log.
 //!
 //! Scope (plan §2): BQ-11a = the schema + the 14-arm apply-UoW. BQ-11b = the serialized claim CTE
 //! (candidate-select + lease in one transaction) + Eligibility Precedence in SQL, wiring the full
@@ -1690,7 +1690,7 @@ struct Inner {
 
 impl Inner {
     /// Rebuild the in-RAM definition cache from the durable `queues` table. The item projection itself is
-    /// already durable in `pqueue_items` (DB-authoritative) — nothing to replay.
+    /// already durable in `pqueue_items` as a rebuildable cache - nothing to replay.
     fn reload(&mut self) -> EngineResult<()> {
         let rows: Vec<String> = {
             let mut stmt = st(self.conn.prepare("SELECT definition FROM queues"))?;
@@ -5018,7 +5018,7 @@ impl HybridAsyncMonitor {
 
     /// The recovery/high-water backpressure rule (TD-004 "Recovery/high-water backpressure"): while the
     /// queue is poisoned OR in `Hard` backpressure, its lagging `sqlite_high_water` MUST NOT be advertised
-    /// as a safe replay-skip point, so this returns `None` (forcing replay from an earlier authoritative
+    /// as a safe replay-skip point, so this returns `None` (forcing replay from an earlier durable
     /// source). Otherwise the supplied high-water is trusted.
     pub fn recovery_high_water_safe(
         &self,
@@ -5749,12 +5749,13 @@ impl Backend for SqliteRelationalBackend {
         true
     }
 
-    /// Authoritative-commit capabilities (epic pqueue-2201fd37). The DB-authoritative relational backend
-    /// implements the full vectorized claimed-work commit boundary in one sqlite transaction: atomic per-entry
-    /// transition, vectorized commit, lease-token (hash) + version + lease-expiry validation, retained
-    /// whole-body request-id idempotency (`pqueue_request_idempotency`), opaque non-work side records
-    /// (`pqueue_side_records`), and authoritative recovery/explain reads. Delayed/timer lifecycle work is
-    /// supported (`not_before`). The boundary is `Atomic` (single-transaction durability).
+    /// Rebuildable-commit capabilities (epic pqueue-2201fd37). The relational backend implements the full
+    /// vectorized claimed-work commit boundary in one sqlite transaction: atomic per-entry transition,
+    /// vectorized commit, lease-token (hash) + version + lease-expiry validation, retained whole-body
+    /// request-id idempotency (`pqueue_request_idempotency`), opaque non-work side records
+    /// (`pqueue_side_records`), and recovery/explain reads against the durable projection cache.
+    /// Delayed/timer lifecycle work is supported (`not_before`). The boundary is `Atomic`
+    /// (single-transaction durability).
     fn commit_capabilities(&self) -> CommitCapabilities {
         CommitCapabilities {
             atomic_transition_commit: true,
@@ -6634,10 +6635,10 @@ impl UpsertPort for SqliteRelationalBackend {
     }
 }
 
-/// Snorri authoritative vectorized claimed-work commit on the DB-authoritative relational family (C9, epic
-/// pqueue-2201fd37) — "at least one durable backend" parity for the commit boundary. The WHOLE request body
-/// runs in ONE sqlite transaction so request-id check + per-entry validate + side-record/lifecycle/finalize
-/// writes + outcome record commit atomically (or roll back together on a storage fault).
+/// Snorri vectorized claimed-work commit on the rebuildable relational family (C9, epic pqueue-2201fd37)
+/// - "at least one durable backend" parity for the commit boundary. The WHOLE request body runs in ONE
+/// sqlite transaction so request-id check + per-entry validate + side-record/lifecycle/finalize writes +
+/// outcome record commit atomically (or roll back together on a storage fault).
 impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
     fn commit_transition(
         &self,
@@ -8365,8 +8366,9 @@ impl LogStore for SqliteRelational {
         _from: Option<CommandPosition>,
         _limit: usize,
     ) -> EngineResult<CommandPage> {
-        // The relational family is DB-authoritative: there is no replayable command log (the projection is
-        // the source of truth). The conformance CORE class never reads the log; surface an empty page.
+        // The relational family is rebuildable-cache backed: there is no replayable command log (the
+        // projection cache is the source of truth). The conformance CORE class never reads the log; surface
+        // an empty page.
         Ok(CommandPage {
             entries: Vec::new(),
             next: None,
@@ -8402,7 +8404,7 @@ impl LogStore for SqliteRelational {
         _position: CommandPosition,
     ) -> EngineResult<()> {
         // The cursor advances transactionally inside `apply`; an external high-water set is a no-op for the
-        // DB-authoritative family (there is no detached log tail to acknowledge).
+        // rebuildable-cache family (there is no detached log tail to acknowledge).
         Ok(())
     }
 
