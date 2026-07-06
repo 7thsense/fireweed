@@ -7,13 +7,13 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - adr-queue-as-shard-unit-and-projection-families
   review:
-    self_hash: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
+    self_hash: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T00:56:00Z"
+    reviewed_at: "2026-07-06T14:59:32Z"
 ---
 
 # Contract
@@ -124,6 +124,7 @@ message, endpoint, or payload element named here is part of the contract.
 | `gate_keys` | array of strings | no | MAY declare zero or more opaque gate keys for the item. An item MUST be ineligible for claim while any of its gate keys is `blocked` in the queue's gate state (see Eligibility Precedence). pqueue MUST NOT interpret gate-key meaning. An item with no gate keys is never gate-blocked. Each key MUST match `^[A-Za-z0-9._:-]{1,256}$`; duplicates within one item MUST be collapsed to a set; the set size MUST NOT exceed the queue's `eligibility_policy.max_gate_keys_per_item`. Valid only when the queue's `eligibility_policy.gate_keys = dynamic`; otherwise the item fails per-item `invalid`. | Distinct from `group_key` (claim compatibility/ordering, not eligibility) and from downstream rate pacing (not modeled by pqueue). Gate keys are opaque and independent of whichever `group_key` topology a queue uses (ADR-004). |
 | `cohort_size` | integer | conditional | Required on every item of a queue with `cohort_policy.enabled=true`; MUST NOT be present otherwise (else per-item `invalid`). MUST be greater than 0. MUST be identical for every item sharing one `group_key`; a conflicting value on a later member MUST be rejected per item with `conflict`. Fixed at the first accepted member of the `group_key` and immutable thereafter. | Expected complete-cohort member count (analogue of `batch_checksum`). The cohort key is `group_key`; cohort identity = all items sharing a `group_key` on a cohort-enabled queue. |
 | `lifecycle_state` | enum | response | MUST be one of `pending`, `leased`, `complete`, `failed`. Retry is represented as pending with retry metadata and `not_before`. A **recurring** item (see Queue Definition `recurrence`) cycles between `pending` and `leased` indefinitely and reaches `complete`/`failed` only on an explicit terminal finalize. After `recurrence.until` the item stops being re-armed but does **not** change lifecycle state until a terminal finalize occurs or the item is removed by `PurgeItems`. | Recurring items never auto-terminate. |
+| `attempt_count` | integer | response | MUST count the deliveries charged to the item in its current cycle. Charging rules: a successful claim charges exactly one delivery; a timed reclaim (an expired lease returned to pending) charges nothing — the subsequent re-delivery charges the one attempt, so a reclaim-plus-redeliver cycle charges exactly one; a lease renewal by the same consumer never charges; a reclaim by a different consumer charges one (the re-lease is the delivery). This is the queue's per-cycle transient-retry counter — the same counter `retry_policy.max_attempts` bounds (a `retry` finalize once `attempt_count` has reached `max_attempts` MUST make the item terminal `failed`, see Queue Definition) and that a successful `rearm` MUST reset to 0 (see Batch Finalize). pqueue defines exactly one attempt counter; there is no separate `retry_count`. | RESP wire mapping (reserved reply field; `XCLAIM`/`XAUTOCLAIM` charging) is pinned in TD-006 §2–§3. |
 | `item_result.status` | enum | response | MUST be one of `accepted`, `updated`, `duplicate`, `claimed`, `renewed`, `completed`, `failed`, `retried`, `released`, `rearmed`, `purged`, `not_found`, `invalid`, `conflict`, `stale_lease`, `terminal`, `rate_limited`, `unavailable`. | Per-item outcome. `rearmed` is the per-item success status of a `rearm` finalize; `purged` is the per-item success status of a `PurgeItems` removal. `rate_limited` denotes a pqueue deployment/tenant capacity limit only (P1) — specifically the partial-batch case where pqueue accepts some items and declines others of one request under a capacity control; whole-request capacity rejection uses the envelope rate-limit error instead. `rate_limited` is never a downstream-API rate signal. |
 
 ### Batch-Centric Operation Shape
@@ -209,7 +210,7 @@ the native operation semantics defined by this contract.
 | `request_id_retention_ms` | integer | yes | MUST be greater than 0. | Bounds mutating request replay/deduplication. |
 | `client_item_key_retention_ms` | integer | yes | MUST be greater than 0. | Bounds duplicate push convergence after terminal retention rules no longer keep the item addressable. |
 | `max_lease_duration_ms` | integer | yes | MUST be greater than 0. | Caps claim and renew lease durations. |
-| `retry_policy.max_attempts` | integer | yes | MUST be greater than 0. A `retry` finalize beyond this count MUST make the item terminal `failed`. The `retry` budget is **per recurring cycle**: a successful `rearm` MUST reset the item's transient-retry counter to 0. The `rearm` outcome (see Batch Finalize) MUST NOT count against `max_attempts` and MUST NOT cause terminal `failed`. `max_attempts` bounds only the transient-failure `retry` path within a single cycle. | Defines terminal retry exhaustion. |
+| `retry_policy.max_attempts` | integer | yes | MUST be greater than 0. A `retry` finalize beyond this count MUST make the item terminal `failed`. The `retry` budget is **per recurring cycle**: a successful `rearm` MUST reset the item's transient-retry counter (`attempt_count`, see Common Types) to 0. The `rearm` outcome (see Batch Finalize) MUST NOT count against `max_attempts` and MUST NOT cause terminal `failed`. `max_attempts` bounds only the transient-failure `retry` path within a single cycle. | Defines terminal retry exhaustion. |
 | `max_push_batch_size` | integer | yes | MUST be greater than 0. | Server may enforce a lower deployment cap. |
 | `max_claim_batch_size` | integer | yes | MUST be greater than 0. | Server may enforce a lower deployment cap. |
 | `max_eligible_group_size` | integer | required when group batching is enabled | MUST be greater than 0 and MUST be `<= max_claim_batch_size`, so any single whole eligible group fits one claim. Bounds a group's non-terminal member count: `BatchPush` MUST fail per-item with `group-too-large` when accepting an item would push its `group_key`'s non-terminal member count over this value. | Required precondition for `compatibility.group_batching`. |
@@ -417,6 +418,7 @@ returns.
 | `item_version` | yes | Monotonic version as of this claim (the claim bumps it). |
 | `lease_token` | conditional | Present on item-level and `whole_group` results; **absent** on `whole_cohort` results, where the shared top-level `cohort_lease_token` replaces it. |
 | `lease_expires_at` | yes | When the lease expires if not renewed or finalized (server time). |
+| `attempt_count` | yes | The number of deliveries charged to the item in its current cycle, **including this claim** (the delivering claim has already charged its one attempt, so a first delivery returns `1`). Charging rules are defined once in **Common Types** `attempt_count` (claim charges one; timed reclaim does not charge — the re-delivery after it charges the one; same-consumer renew never charges); it is the counter `retry_policy.max_attempts` bounds and a successful `rearm` resets. Workers derive poison-item and backoff decisions from it without a secondary read. |
 | `priority` | yes when the queue is orderable | The item's priority in the queue's declared priority model. |
 | `not_before` | conditional | Present when the item carries a `not_before`; absent otherwise. |
 | `group_key` | conditional | Present when the queue requires `group_key` on every item (`cohort_policy.enabled` or group batching enabled) or when the item was pushed with a `group_key`; absent otherwise. |
@@ -1020,6 +1022,7 @@ HTTP. Library bindings SHOULD map the same `code` values to typed errors.
       "item_id": "itm_01JX2A7Y6VMT5DRF7YZ1DN7G6W",
       "client_item_key": "action:123",
       "item_version": 3,
+      "attempt_count": 1,
       "priority": { "timestamp": "2026-06-06T14:45:00Z" },
       "payload": { "action_id": 123 },
       "metadata": {

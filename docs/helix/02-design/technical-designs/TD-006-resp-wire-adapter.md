@@ -10,15 +10,15 @@ ddx:
     - td-sharding-and-shard-ownership
   status: draft
   review:
-    self_hash: ffcb25e0d28775a431c980cb8ec4753e54e4f6c796ebd2d328072a7b4b6e7023
+    self_hash: 0414829c85906588637eba5fdf9bc25a05e4e3ba86cac15edec9e73557e7e807
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-      api-native-client-interface: c70eba23875d1b9592ea70e5a28b472f936fc0238dba17a0c5cb7773a94c297f
+      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-06T04:10:14Z"
+    reviewed_at: "2026-07-06T14:59:32Z"
 ---
 
 # Technical Design
@@ -138,7 +138,7 @@ the item's structured field map.
 | `item_version` | reply | Server-assigned monotonic item version. |
 | `lifecycle_state` | reply/read | `Pending` or `Leased` for live reads. |
 | `lease_expires_at` | reply | Server-computed lease expiry timestamp. |
-| `attempt_count` | reply | Delivery count (claims handed to a worker); a timed reclaim does not charge. |
+| `attempt_count` | reply/read | Delivery count (claims handed to a worker); a timed reclaim does not charge. |
 
 The RESP entry id is the wire `item_id`. `client_item_key` is not the entry id; it is the caller's
 logical replacement/idempotency key.
@@ -203,7 +203,9 @@ Rules:
 - `attempt_count` = the number of times the item was **delivered** (handed to a worker via a claim). A
   timed reclaim (`ReclaimDriver`/`XAUTOCLAIM` returning an expired lease to pending) is NOT a delivery and
   does **not** charge; the subsequent re-delivery charges the one attempt. So a reclaim+redeliver cycle
-  bumps `attempt_count` by exactly one.
+  bumps `attempt_count` by exactly one. This is the same single counter the API-001 claimed-item shape
+  returns as `attempt_count`: `retry_policy.max_attempts` bounds it, and a (library-only) `rearm` resets
+  it to 0 for the next cycle.
 - Same-consumer `XCLAIM` is treated as a lease renew and does not charge an attempt.
 - Cross-consumer `XCLAIM` reclaims ownership to the new consumer and charges one attempt (the re-lease is
   the delivery).
