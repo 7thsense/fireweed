@@ -18,6 +18,9 @@ use std::time::Duration;
 use fjord::{
     FjordClusterView, FjordGroupCoordinator, FjordLog, FjordOffsetStore, FjordTopicRegistry,
 };
+use heimq::config::Config as HeimqConfig;
+use heimq::server::Server as HeimqServer;
+use heimq_broker::storage::{ClusterView, LogBackend, OffsetStore};
 use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
     AcquireOutcome, AuthContext, Clock, ComposedBackend, EngineError, EngineResult,
@@ -41,8 +44,8 @@ use tokio_util::sync::CancellationToken;
 mod change_record_sink;
 mod object_log_sqlite;
 pub use change_record_sink::{
-    ChangeRecordSinkConfig, NiflheimChangeRecordSink, emit_change_record_tick,
-    spawn_change_record_emitter,
+    ChangeRecordSinkConfig, FjordChangeRecordSink, NiflheimChangeRecordSink,
+    emit_change_record_tick, spawn_change_record_emitter,
 };
 pub use object_log_sqlite::{
     DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend,
@@ -158,10 +161,10 @@ pub struct EmbeddedFjordSurface {
     namespace_root: PathBuf,
     cluster_id: String,
     pub topic_registry: Arc<FjordTopicRegistry>,
-    pub log: FjordLog,
+    pub log: Arc<FjordLog>,
     pub offset_store: Arc<FjordOffsetStore>,
-    pub cluster_view: FjordClusterView,
-    pub group_coordinator: FjordGroupCoordinator,
+    pub cluster_view: Arc<FjordClusterView>,
+    pub group_coordinator: Arc<FjordGroupCoordinator>,
 }
 
 impl EmbeddedFjordSurface {
@@ -183,15 +186,15 @@ pub fn build_embedded_fjord_surface(
 ) -> EmbeddedFjordSurface {
     let namespace_root = config.namespace_root.join(format!("node-{node_id}"));
     let topic_registry = FjordTopicRegistry::new(node_id);
-    let log = FjordLog::new_with_registry(Arc::clone(&topic_registry));
+    let log = Arc::new(FjordLog::new_with_registry(Arc::clone(&topic_registry)));
     let offset_store = FjordOffsetStore::new();
-    let cluster_view = FjordClusterView::new_with_registry(
+    let cluster_view = Arc::new(FjordClusterView::new_with_registry(
         node_id,
         "127.0.0.1",
         0,
         config.cluster_id.clone(),
         Arc::clone(&topic_registry),
-    );
+    ));
 
     EmbeddedFjordSurface {
         namespace_root,
@@ -200,7 +203,7 @@ pub fn build_embedded_fjord_surface(
         log,
         offset_store,
         cluster_view,
-        group_coordinator: FjordGroupCoordinator::new(),
+        group_coordinator: Arc::new(FjordGroupCoordinator::new()),
     }
 }
 
@@ -209,7 +212,7 @@ pub fn build_embedded_fjord_surface(
 /// ADR-014 scopes each change stream to a tenant-prefixed topic so the embedded surface can
 /// authorize reads by exact `(tenant_id, queue_id)` identity instead of broad tenant-only access.
 pub fn fjord_topic_name(queue: &QueueKey) -> String {
-    format!("{}:{}", queue.tenant_id.as_str(), queue.queue_id.as_str())
+    format!("{}.{}", queue.tenant_id.as_str(), queue.queue_id.as_str())
 }
 
 /// Register the tenant-prefixed change-log topics owned by the configured queues.
@@ -225,7 +228,7 @@ pub fn register_embedded_fjord_topics(
 
 fn parse_fjord_topic_name(topic: &str) -> EngineResult<QueueKey> {
     let (tenant, queue) = topic
-        .split_once(':')
+        .split_once('.')
         .ok_or(EngineError::Invalid("fjord topic must be tenant-prefixed"))?;
     Ok(QueueKey::new(
         TenantId::new(tenant).map_err(|_| EngineError::Invalid("bad tenant"))?,
@@ -251,6 +254,109 @@ pub fn authorize_fjord_topic_read(
             "principal is not authorized for the requested queue namespace",
         ))
     }
+}
+
+fn parse_kafka_bootstrap(input: &str) -> EngineResult<(String, u16)> {
+    let trimmed = input.trim();
+    let without_scheme = trimmed
+        .strip_prefix("kafka://")
+        .or_else(|| trimmed.strip_prefix("tcp://"))
+        .unwrap_or(trimmed);
+    let (host, port) = without_scheme.rsplit_once(':').ok_or(EngineError::Invalid(
+        "kafka endpoint must include host:port",
+    ))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| EngineError::Invalid("kafka endpoint port must be a u16"))?;
+    if host.is_empty() {
+        return Err(EngineError::Invalid("kafka endpoint host is required"));
+    }
+    Ok((host.to_string(), port))
+}
+
+pub async fn spawn_embedded_fjord_broker(
+    node_id: i32,
+    config: &EmbeddedFjordConfig,
+    endpoint: &str,
+    queues: &[QueueDefinition],
+) -> EngineResult<JoinHandle<()>> {
+    let (host, port) = parse_kafka_bootstrap(endpoint)?;
+    let surface = build_embedded_fjord_surface(node_id, config);
+    register_embedded_fjord_topics(&surface.topic_registry, queues);
+
+    let broker_config = HeimqConfig {
+        host: host.clone(),
+        port,
+        data_dir: config.namespace_root.join(format!("node-{node_id}")),
+        memory_only: true,
+        segment_size: 1024 * 1024 * 1024,
+        retention_ms: 7 * 24 * 60 * 60 * 1000,
+        max_memory_bytes: 0,
+        default_partitions: 1,
+        auto_create_topics: true,
+        broker_id: node_id,
+        cluster_id: config.cluster_id.clone(),
+        metrics: false,
+        metrics_port: 9093,
+        create_topics: queues
+            .iter()
+            .map(|queue| {
+                format!(
+                    "{}:1",
+                    fjord_topic_name(&QueueKey::new(
+                        queue.tenant_id.clone(),
+                        queue.queue_id.clone(),
+                    ))
+                )
+            })
+            .collect(),
+        storage_log: "memory://".to_string(),
+        storage_offsets: "memory://".to_string(),
+        storage_groups: "memory://".to_string(),
+        advertised_host: Some(host.clone()),
+    };
+
+    let cluster_view = Arc::new(FjordClusterView::new_with_registry(
+        node_id,
+        host.clone(),
+        port,
+        config.cluster_id.clone(),
+        Arc::clone(&surface.topic_registry),
+    ));
+    let server = HeimqServer::with_backends_and_cluster_view(
+        broker_config,
+        Arc::clone(&surface.log) as Arc<dyn LogBackend>,
+        Arc::clone(&surface.offset_store) as Arc<dyn OffsetStore>,
+        cluster_view as Arc<dyn ClusterView>,
+    )
+    .map_err(|e| EngineError::Storage(format!("build embedded fjord server: {e}")))?;
+
+    let bootstrap = format!("{host}:{port}");
+    let handle = tokio::spawn(async move {
+        if let Err(e) = server.run().await {
+            eprintln!("[fjord] embedded broker terminated: {e}");
+        }
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match tokio::net::TcpStream::connect(&bootstrap).await {
+            Ok(_) => break,
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                handle.abort();
+                return Err(EngineError::Storage(format!(
+                    "embedded fjord broker did not bind at {bootstrap}: {e}"
+                )));
+            }
+        }
+    }
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    Ok(handle)
 }
 
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
@@ -880,6 +986,7 @@ pub struct Server {
     serve_task: Option<JoinHandle<()>>,
     reclaim_task: Option<JoinHandle<()>>,
     ownership_task: Option<JoinHandle<()>>,
+    fjord_task: Option<JoinHandle<()>>,
     /// Signals the RESP serve loop to stop accepting and drain in-flight connection handlers.
     cancel: CancellationToken,
     reclaim: Arc<ReclaimCounters>,
@@ -938,6 +1045,9 @@ impl Server {
         if let Some(t) = &self.ownership_task {
             t.abort();
         }
+        if let Some(t) = &self.fjord_task {
+            t.abort();
+        }
     }
 
     /// Gracefully stop: signal the serve loop to stop accepting and **drain** in-flight connection
@@ -957,6 +1067,9 @@ impl Server {
         }
         if let Some(ownership) = self.ownership_task.take() {
             ownership.abort();
+        }
+        if let Some(fjord) = self.fjord_task.take() {
+            fjord.abort();
         }
     }
 }
@@ -1068,12 +1181,36 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
+            let fjord_task = if change_record_sink::change_record_sink_is_fjord(
+                change_record_sink.endpoint.as_deref(),
+            )? {
+                Some(
+                    spawn_embedded_fjord_broker(
+                        node_id as i32,
+                        &config.embedded_fjord,
+                        change_record_sink.endpoint.as_deref().unwrap(),
+                        &queues,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let _change_record_emitter = spawn_change_record_emitter_if_enabled(
                 backend.clone(),
                 &queues,
                 &change_record_sink,
             )?;
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned_with_fjord_task(
+                backend,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+                fjord_task,
+            )
+            .await
         }
         (LogSpec::ObjectLog { root }, ProjectionSpec::HybridAsync { path }) => {
             // The `objectlog/hybrid-async` profile runs the same object-log + hybrid (hot-memory serving,
@@ -1099,12 +1236,36 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
+            let fjord_task = if change_record_sink::change_record_sink_is_fjord(
+                change_record_sink.endpoint.as_deref(),
+            )? {
+                Some(
+                    spawn_embedded_fjord_broker(
+                        node_id as i32,
+                        &config.embedded_fjord,
+                        change_record_sink.endpoint.as_deref().unwrap(),
+                        &queues,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let _change_record_emitter = spawn_change_record_emitter_if_enabled(
                 backend.clone(),
                 &queues,
                 &change_record_sink,
             )?;
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned_with_fjord_task(
+                backend,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+                fjord_task,
+            )
+            .await
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
@@ -1228,7 +1389,12 @@ where
     if queues.is_empty() {
         return Ok(None);
     }
-    let sink = Arc::new(NiflheimChangeRecordSink::new(config)?);
+    let sink: Arc<dyn pqueue_engine::ChangeRecordSink> =
+        if change_record_sink::change_record_sink_is_fjord(config.endpoint.as_deref())? {
+            Arc::new(FjordChangeRecordSink::new(config)?)
+        } else {
+            Arc::new(NiflheimChangeRecordSink::new(config)?)
+        };
     Ok(Some(spawn_change_record_emitter(
         backend,
         sink,
@@ -1252,6 +1418,20 @@ async fn run_owned<B: RespBackend>(
     let owner =
         OwnerId::new(format!("node-{node_id}")).map_err(|e| EngineError::Storage(e.to_string()))?;
     start_with_ownership(backend, cp, owner, clock, listen, reclaim_interval, queues).await
+}
+
+async fn run_owned_with_fjord_task<B: RespBackend>(
+    backend: Arc<B>,
+    node_id: u8,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+    fjord_task: Option<JoinHandle<()>>,
+) -> EngineResult<Server> {
+    let mut server = run_owned(backend, node_id, clock, listen, reclaim_interval, queues).await?;
+    server.fjord_task = fjord_task;
+    Ok(server)
 }
 
 /// Run the server over an already-constructed backend + clock (the generic core; tests inject a
@@ -1290,6 +1470,7 @@ pub async fn start_with<B: RespBackend>(
         serve_task: Some(serve_task),
         reclaim_task: Some(reclaim_task),
         ownership_task: None,
+        fjord_task: None,
         cancel,
         reclaim,
         ownership,
@@ -1367,6 +1548,7 @@ where
         serve_task: Some(serve_task),
         reclaim_task: Some(reclaim_task),
         ownership_task: Some(ownership_task),
+        fjord_task: None,
         cancel,
         reclaim,
         ownership,

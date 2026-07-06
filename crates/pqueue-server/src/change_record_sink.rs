@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -9,6 +10,10 @@ use pqueue_engine::{
     ChangeRecordSink, ComposedBackend, ControlPlane, EngineError, EngineResult, LogStore,
     ProjectionStore, QueueKey,
 };
+use rdkafka::message::{Header, OwnedHeaders};
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::ClientConfig;
+use crate::fjord_topic_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRecordSinkConfig {
@@ -35,7 +40,7 @@ impl ChangeRecordSinkConfig {
     pub(crate) fn validate(&self) -> EngineResult<()> {
         match self.endpoint.as_deref() {
             Some(endpoint) => {
-                parse_http_endpoint(endpoint)?;
+                parse_delivery_endpoint(endpoint)?;
             }
             None if self.enabled => {
                 return Err(EngineError::Invalid(
@@ -49,7 +54,7 @@ impl ChangeRecordSinkConfig {
 }
 
 pub trait ChangeRecordEmissionBackend {
-    fn emit_change_record_tail<S: ChangeRecordSink>(
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
         &self,
         shard: &QueueKey,
         sink: &S,
@@ -65,7 +70,7 @@ where
     P: ProjectionStore,
     C: ControlPlane,
 {
-    fn emit_change_record_tail<S: ChangeRecordSink>(
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
         &self,
         shard: &QueueKey,
         sink: &S,
@@ -92,6 +97,17 @@ struct ParsedEndpoint {
 }
 
 #[derive(Debug, Clone)]
+struct ParsedKafkaEndpoint {
+    bootstrap_servers: String,
+}
+
+#[derive(Debug, Clone)]
+enum ParsedDeliveryEndpoint {
+    Http(ParsedEndpoint),
+    Kafka(ParsedKafkaEndpoint),
+}
+
+#[derive(Debug, Clone)]
 pub struct NiflheimChangeRecordSink {
     endpoint: ParsedEndpoint,
     headers: BTreeMap<String, String>,
@@ -105,9 +121,16 @@ impl NiflheimChangeRecordSink {
             ));
         }
         config.validate()?;
-        let endpoint = parse_http_endpoint(config.endpoint.as_deref().ok_or(
+        let endpoint = match parse_delivery_endpoint(config.endpoint.as_deref().ok_or(
             EngineError::Invalid("change record sink endpoint is required"),
-        )?)?;
+        )?)? {
+            ParsedDeliveryEndpoint::Http(endpoint) => endpoint,
+            ParsedDeliveryEndpoint::Kafka(_) => {
+                return Err(EngineError::Invalid(
+                    "change record sink endpoint must use http:// for Niflheim delivery",
+                ));
+            }
+        };
         Ok(Self {
             endpoint,
             headers: config.headers.clone(),
@@ -171,11 +194,169 @@ impl ChangeRecordSink for NiflheimChangeRecordSink {
     }
 }
 
-fn parse_http_endpoint(input: &str) -> EngineResult<ParsedEndpoint> {
+fn change_record_key(record: &pqueue_engine::ChangeRecord) -> String {
+    let item_id = record
+        .item_id
+        .map(|item_id| item_id.to_string())
+        .unwrap_or_default();
+    format!(
+        "{item_id}:{}:{}",
+        record.position.backend_epoch, record.position.sequence
+    )
+}
+
+fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> OwnedHeaders {
+    let backend_epoch = record.position.backend_epoch.to_string();
+    let sequence = record.position.sequence.to_string();
+    let command_kind = format!("{:?}", record.command_kind);
+    let item_id = record.item_id.map(|value| value.to_string());
+    let mut headers = OwnedHeaders::new()
+        .insert(Header {
+            key: "pq-tenant-id",
+            value: Some(record.tenant_id.as_str()),
+        })
+        .insert(Header {
+            key: "pq-queue-id",
+            value: Some(record.queue_id.as_str()),
+        })
+        .insert(Header {
+            key: "pq-backend-epoch",
+            value: Some(backend_epoch.as_str()),
+        })
+        .insert(Header {
+            key: "pq-sequence",
+            value: Some(sequence.as_str()),
+        })
+        .insert(Header {
+            key: "pq-command-kind",
+            value: Some(command_kind.as_str()),
+    });
+    if let Some(item_id) = item_id.as_deref() {
+        headers = headers.insert(Header {
+            key: "pq-item-id",
+            value: Some(item_id),
+        });
+    }
+    headers
+}
+
+fn block_on_sync<F: Future>(fut: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(move || handle.block_on(fut)),
+        Err(_) => {
+            static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+            RT.get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("fallback runtime")
+            })
+            .block_on(fut)
+        }
+    }
+}
+
+impl ChangeRecordSink for FjordChangeRecordSink {
+    fn emit(&self, shard: &QueueKey, records: &[pqueue_engine::ChangeRecord]) -> EngineResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let topic = fjord_topic_name(shard);
+        block_on_sync(async {
+            for record in records {
+                let key = change_record_key(record);
+                let payload = serde_json::to_vec(record).map_err(|e| {
+                    EngineError::Storage(format!("serialize change record: {e}"))
+                })?;
+                let headers = change_record_headers(record);
+                self.producer
+                    .send(
+                        FutureRecord::to(&topic)
+                            .partition(0)
+                            .key(&key)
+                            .payload(&payload)
+                            .headers(headers),
+                        Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|(e, _)| {
+                        EngineError::Storage(format!("produce change record to fjord: {e}"))
+                    })?;
+            }
+            Ok(())
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct FjordChangeRecordSink {
+    producer: FutureProducer,
+}
+
+impl FjordChangeRecordSink {
+    pub fn new(config: &ChangeRecordSinkConfig) -> EngineResult<Self> {
+        if !config.enabled {
+            return Err(EngineError::Invalid(
+                "change record sink is disabled in config",
+            ));
+        }
+        config.validate()?;
+        let endpoint = match parse_delivery_endpoint(config.endpoint.as_deref().ok_or(
+            EngineError::Invalid("change record sink endpoint is required"),
+        )?)? {
+            ParsedDeliveryEndpoint::Kafka(endpoint) => endpoint,
+            ParsedDeliveryEndpoint::Http(_) => {
+                return Err(EngineError::Invalid(
+                    "change record sink endpoint must use kafka:// for fjord delivery",
+                ));
+            }
+        };
+
+        let producer = ClientConfig::new()
+            .set("bootstrap.servers", endpoint.bootstrap_servers)
+            .set("acks", "all")
+            .set("enable.idempotence", "true")
+            .set("message.timeout.ms", "10000")
+            .set("retries", "2147483647")
+            .create()
+            .map_err(|e| EngineError::Storage(format!("create fjord producer: {e}")))?;
+
+        Ok(Self { producer })
+    }
+}
+
+fn parse_delivery_endpoint(input: &str) -> EngineResult<ParsedDeliveryEndpoint> {
     let trimmed = input.trim();
-    let without_scheme = trimmed.strip_prefix("http://").ok_or(EngineError::Invalid(
-        "durable-ingest endpoint must use http://",
-    ))?;
+    if let Some(without_scheme) = trimmed.strip_prefix("http://") {
+        return Ok(ParsedDeliveryEndpoint::Http(parse_http_endpoint(
+            without_scheme,
+        )?));
+    }
+    if let Some(without_scheme) = trimmed.strip_prefix("kafka://") {
+        return Ok(ParsedDeliveryEndpoint::Kafka(parse_kafka_endpoint(
+            without_scheme,
+        )?));
+    }
+    if trimmed.contains("://") {
+        return Err(EngineError::Invalid(
+            "change record sink endpoint must use http:// or kafka://",
+        ));
+    }
+    Ok(ParsedDeliveryEndpoint::Kafka(parse_kafka_endpoint(trimmed)?))
+}
+
+pub(crate) fn change_record_sink_is_fjord(endpoint: Option<&str>) -> EngineResult<bool> {
+    match endpoint {
+        Some(endpoint) => Ok(matches!(
+            parse_delivery_endpoint(endpoint)?,
+            ParsedDeliveryEndpoint::Kafka(_)
+        )),
+        None => Ok(false),
+    }
+}
+
+fn parse_http_endpoint(without_scheme: &str) -> EngineResult<ParsedEndpoint> {
     let (host_port, path) = match without_scheme.split_once('/') {
         Some((host_port, path)) => (host_port, format!("/{}", path)),
         None => (without_scheme, "/".to_string()),
@@ -195,6 +376,24 @@ fn parse_http_endpoint(input: &str) -> EngineResult<ParsedEndpoint> {
         ));
     }
     Ok(ParsedEndpoint { host, port, path })
+}
+
+fn parse_kafka_endpoint(input: &str) -> EngineResult<ParsedKafkaEndpoint> {
+    let trimmed = input.trim();
+    let (host, port) = trimmed.rsplit_once(':').ok_or(EngineError::Invalid(
+        "change record sink endpoint must include host:port",
+    ))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| EngineError::Invalid("change record sink port must be a u16"))?;
+    if host.is_empty() {
+        return Err(EngineError::Invalid(
+            "change record sink host is required",
+        ));
+    }
+    Ok(ParsedKafkaEndpoint {
+        bootstrap_servers: format!("{host}:{port}"),
+    })
 }
 
 fn write_request_line(
@@ -254,7 +453,7 @@ fn enabled_change_record_queues<'a>(
 
 pub fn emit_change_record_tick<B>(
     backend: &B,
-    sink: &impl ChangeRecordSink,
+    sink: &(impl ChangeRecordSink + ?Sized),
     queues: &[QueueDefinition],
     batch_size: usize,
 ) -> EngineResult<usize>
@@ -278,7 +477,7 @@ where
 
 pub fn spawn_change_record_emitter<B>(
     backend: Arc<B>,
-    sink: Arc<NiflheimChangeRecordSink>,
+    sink: Arc<dyn ChangeRecordSink>,
     queues: Vec<QueueDefinition>,
     config: ChangeRecordSinkConfig,
 ) -> tokio::task::JoinHandle<()>
@@ -325,11 +524,22 @@ mod tests {
         let err = config.validate().expect_err("malformed endpoint must fail");
         assert!(
             err.to_string()
-                .contains("durable-ingest endpoint must use http://"),
+                .contains("change record sink endpoint must include host:port"),
             "{}",
             err
         );
         assert!(!config.enabled);
+    }
+
+    #[test]
+    fn TestChangeRecordSinkRecognizesKafkaEndpoints() {
+        let config = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        config.validate().expect("kafka endpoint should validate");
+        assert!(change_record_sink_is_fjord(config.endpoint.as_deref()).unwrap());
     }
 
     #[test]

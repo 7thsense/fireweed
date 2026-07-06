@@ -25,6 +25,13 @@ pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-projection = { path = "../pqueue-projection" }
 fjord = { git = "https://github.com/telepathdata/fjord.git", rev = "db260f607004483770f822764d9b07b192320bc8", package = "fjord-broker" }
+fjord-coordinator = { git = "https://github.com/telepathdata/fjord.git", rev = "db260f607004483770f822764d9b07b192320bc8", package = "fjord-coordinator" }
+fjord-heimq-backend = { git = "https://github.com/telepathdata/fjord.git", rev = "db260f607004483770f822764d9b07b192320bc8", package = "fjord-heimq-backend" }
+heimq = { git = "https://github.com/easel/heimq", rev = "cd17c1869c55ddd94b678e19df9ad08b21259372" }
+heimq-broker = { git = "https://github.com/easel/heimq", rev = "cd17c1869c55ddd94b678e19df9ad08b21259372" }
+object-log = { git = "https://github.com/easel/object-log", rev = "bb5dd2e741910c5bdf44d985de8c75cb92186f11", features = ["s3"] }
+rdkafka = { version = "0.36", features = ["cmake-build", "tokio"] }
+kafka-protocol = "0.15"
 # Optional: the SYNC postgres adapter, wired only behind the `postgres` feature and driven exclusively
 # through the blocking-safe `PostgresNativeBackend` wrapper (spawn_blocking) so no sync postgres client
 # call runs on a Tokio worker thread.

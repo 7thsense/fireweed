@@ -916,7 +916,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     }
 
     /// Read, emit, and durably advance the change-record tail cursor for one shard.
-    pub fn emit_change_record_tail<S: crate::port::ChangeRecordSink>(
+    pub fn emit_change_record_tail<S: crate::port::ChangeRecordSink + ?Sized>(
         &self,
         shard: &QueueKey,
         sink: &S,
