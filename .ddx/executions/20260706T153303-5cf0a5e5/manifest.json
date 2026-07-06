@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T153303-5cf0a5e5",
+  "bead_id": "pqueue-1515d288",
+  "base_rev": "df18c9511f909c75ee99ccc17b3883d649323876",
+  "created_at": "2026-07-06T15:33:04.017474631Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-1515d288",
+    "title": "Gate terminal reap on the emission frontier and ship evidence",
+    "description": "PROBLEM: TD-008 CL-6 says a terminal item must not be reaped until both retention has elapsed and the durable emission cursor has passed the terminal record position, but the reap predicate and lag metrics are still concentrated in the projection layer and need end-to-end verification.\nROOT CAUSE: docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:176-181 defines the frontier coupling, and crates/pqueue-projection/src/lib.rs:2100-2192 contains the current reap/metric predicate that must be proven against the emitter cursor and packaged into the conformance evidence set.\nPROPOSED FIX: Tighten the reap predicate so opted-in queues require both retention expiry and emission-cursor advancement, keep the opted-out path retention-only, and add the TD-008 conformance/evidence suite that demonstrates the frontier never drops a terminal record.\nNON-SCOPE: No Kafka offset work, no sink/config changes, no broker ACL work, and no claim-path behavior change; this is strictly the retention/reap safety gate plus its verification artifacts.",
+    "acceptance": "1. `TestTerminalReapWaitsForEmissionCursor` proves a terminal item cannot be reaped while the durable emission cursor is still behind its terminal `CommandPosition`.\n2. `TestTerminalReapAllowsOptOutAfterRetentionOnly` proves the opted-out queue path remains retention-only.\n3. `TestTD008ConformanceSuiteGreen` proves the TD-008 conformance/e2e suites pass with the new frontier rule in place.\n4. `TestTD008EvidenceBundleRecorded` proves the run writes the attached evidence artifact into the agreed docs/perf evidence location.\n5. `go test ./... -run 'TestTerminalReapWaitsForEmissionCursor|TestTerminalReapAllowsOptOutAfterRetentionOnly|TestTD008ConformanceSuiteGreen|TestTD008EvidenceBundleRecorded'`\n6. `lefthook run pre-commit`\n7. `lefthook run pre-push`",
+    "parent": "pqueue-a8a9e7e7",
+    "labels": [
+      "kind:build",
+      "area:pqueue-projection",
+      "area:change-log",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T153303-5cf0a5e5",
+    "prompt": ".ddx/executions/20260706T153303-5cf0a5e5/prompt.md",
+    "manifest": ".ddx/executions/20260706T153303-5cf0a5e5/manifest.json",
+    "result": ".ddx/executions/20260706T153303-5cf0a5e5/result.json",
+    "checks": ".ddx/executions/20260706T153303-5cf0a5e5/checks.json",
+    "usage": ".ddx/executions/20260706T153303-5cf0a5e5/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-1515d288-20260706T153303-5cf0a5e5"
+  },
+  "prompt_sha": "ab4ffd92b9cbcd5f5f835503622a9d8ea40ccb6ff21e3a9d343099d0889f6783"
+}
