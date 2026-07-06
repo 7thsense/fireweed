@@ -73,6 +73,14 @@ func TestKafkaTopicMapsOneQueueToOnePartition(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestKafkaTopicMapsOneQueueToOnePartition")
 }
 
+func TestKafkaIdempotencyKeyIsStableAcrossReemit(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestKafkaIdempotencyKeyIsStableAcrossReemit")
+}
+
+func TestKafkaOffsetNeverRegressesAcrossFailover(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestKafkaOffsetNeverRegressesAcrossFailover")
+}
+
 func TestTD008EvidenceBundleRecorded(t *testing.T) {
 	runCargoTestWithEnv(t, map[string]string{
 		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",

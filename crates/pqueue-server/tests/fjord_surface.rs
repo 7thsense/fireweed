@@ -418,3 +418,25 @@ async fn TestKafkaOffsetNeverRegressesAcrossFailover() {
     assert_eq!(consumed[0].key(), consumed[1].key());
     assert_eq!(consumed[0].partition(), consumed[1].partition());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn TestKafkaIdempotencyKeyIsStableAcrossReemit() {
+    let queue = queue_definition("tenant-a", "queue-a");
+    let broker = start_embedded_broker(&queue).await;
+    let shard = queue_key("tenant-a", "queue-a");
+    let logical_record =
+        change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push);
+
+    let sink = make_sink(&broker.bootstrap);
+    sink.emit(&shard, std::slice::from_ref(&logical_record))
+        .expect("initial emit");
+    drop(sink);
+
+    let sink = make_sink(&broker.bootstrap);
+    sink.emit(&shard, std::slice::from_ref(&logical_record))
+        .expect("re-emit");
+
+    let consumed = consume_records(&broker.bootstrap, &fjord_topic_name(&shard), 2);
+    assert_eq!(consumed.len(), 2);
+    assert_eq!(consumed[0].key(), consumed[1].key());
+}
