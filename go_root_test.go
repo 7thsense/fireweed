@@ -25,36 +25,13 @@ func TestGoCompatibilityModules(t *testing.T) {
 	}
 }
 
-func TestKafkaIdempotencyKeyIsStableAcrossReemit(t *testing.T) {
-	currentPrompt := readFile(t, filepath.Join(".ddx", "executions", "20260706T154907-9b4e8284", "prompt.md"))
-	changeRecordSpec := readFile(t, filepath.Join(".ddx", "executions", "20260706T043710-ff946509", "manifest.json"))
-
-	for _, want := range []string{
-		"record key {item_id}:{backend_epoch}:{sequence}",
-		"stable for the same logical record",
-		"(tenant_id, queue_id, item_id, backend_epoch, sequence)",
-		"stable idempotency key shape `(tenant_id, queue_id, item_id, backend_epoch, sequence)`",
-	} {
-		if !strings.Contains(currentPrompt, want) && !strings.Contains(changeRecordSpec, want) {
-			t.Fatalf("stable idempotency evidence missing %q\nprompt:\n%s\nmanifest:\n%s", want, currentPrompt, changeRecordSpec)
-		}
-	}
-}
-
-func TestKafkaOffsetAdvanceDoesNotChangeDedupKey(t *testing.T) {
-	currentPrompt := readFile(t, filepath.Join(".ddx", "executions", "20260706T154907-9b4e8284", "prompt.md"))
-	currentManifest := readFile(t, filepath.Join(".ddx", "executions", "20260706T154907-9b4e8284", "manifest.json"))
-
-	for _, want := range []string{
-		"re-emitted records appear at later offsets",
-		"dedupe by stable record identity instead of broker offset",
-		"later broker offset does not alter the logical dedupe key",
-	} {
-		if !strings.Contains(currentPrompt, want) && !strings.Contains(currentManifest, want) {
-			t.Fatalf("offset/dedupe evidence missing %q\nprompt:\n%s\nmanifest:\n%s", want, currentPrompt, currentManifest)
-		}
-	}
-}
+// NOTE (2026-07-06 review): two tests were removed here
+// (TestKafkaIdempotencyKeyIsStableAcrossReemit, TestKafkaOffsetAdvanceDoesNotChangeDedupKey).
+// They read the closing bead's own .ddx/executions prompt/manifest and asserted the PROMPT
+// contained the CL-3 requirement strings — verifying the task description, not the code.
+// The real epoch-stable dedup-key behavior is tested in
+// crates/pqueue-engine (emission_cursor_failover_keeps_stable_dedup_key); the Kafka-surface
+// CL-3 verification belongs to the embedded-fjord binding work (pqueue-a8a9e7e7 children).
 
 func TestTerminalReapWaitsForEmissionCursor(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-projection", "reap_waits_for_emission")
