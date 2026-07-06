@@ -818,10 +818,6 @@ struct Inner<L, P> {
     /// path; populated only when the composition runs the ack-after-seal write path against a group-commit
     /// log. Protected by the SAME `Mutex<Inner>` as `log`/`projection` — no async lock.
     coords: HashMap<QueueKey, ShardCoord>,
-    /// Per-queue change-record emission cursor (tail consumer checkpoint). In-memory for the composed
-    /// backend seam; durable backends can later mirror it into their own substrate, but the emission path
-    /// already needs a stable advance point inside the current process.
-    emission_cursors: HashMap<QueueKey, CommandPosition>,
 }
 
 /// Default recovery-window budget: the max durable-log tail (commands) a normal reopen replays beyond the
@@ -865,7 +861,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 commit_idempotency: HashMap::new(),
                 cmd_seq: 0,
                 coords: HashMap::new(),
-                emission_cursors: HashMap::new(),
             }),
             control,
             node_id: 0,
@@ -929,11 +924,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         emitted_at: UtcTimestamp,
         source_owner_id: Option<pqueue_core::OwnerId>,
     ) -> EngineResult<usize> {
-        let (page, _cursor) = {
+        let page = {
             let g = self.inner.lock().expect("composed backend poisoned");
-            let cursor = g.emission_cursors.get(shard).cloned();
-            let page = g.log.read_from(shard, cursor.clone(), limit)?;
-            (page, cursor)
+            let cursor = g.log.emission_cursor(shard)?;
+            g.log.read_from(shard, cursor.clone(), limit)?
         };
         if page.entries.is_empty() {
             return Ok(0);
@@ -951,7 +945,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         sink.emit(shard, &records)?;
         if let Some((position, _)) = page.entries.last() {
             let mut g = self.inner.lock().expect("composed backend poisoned");
-            g.emission_cursors.insert(shard.clone(), position.clone());
+            let position: CommandPosition = position.clone();
+            g.log.set_emission_cursor(shard, position)?;
         }
         Ok(records.len())
     }
@@ -3218,22 +3213,32 @@ mod ordered_tests {
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
         PriorityTieBreaker, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
     };
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::sync::Mutex;
     use std::task::{Poll, Wake};
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct FakeLogState {
         epoch: u64,
         next_sequence: u64,
         buffered: Vec<CommandEnvelope>,
         sealed_batches: Vec<usize>,
-        emission_cursor: Option<CommandPosition>,
+        entries: Vec<(CommandPosition, CommandEnvelope)>,
+        emission_cursor: HashMap<QueueKey, CommandPosition>,
+        cursor_write_failures: u32,
     }
 
     #[derive(Default)]
     struct FakeGroupCommitLog {
         state: Mutex<FakeLogState>,
+    }
+
+    impl Clone for FakeGroupCommitLog {
+        fn clone(&self) -> Self {
+            Self {
+                state: Mutex::new(self.state.lock().expect("fake log poisoned").clone()),
+            }
+        }
     }
 
     impl FakeGroupCommitLog {
@@ -3245,15 +3250,45 @@ mod ordered_tests {
                 .clone()
         }
 
+        fn set_entries(
+            &self,
+            shard: &QueueKey,
+            epoch: u64,
+            entries: Vec<CommandEnvelope>,
+        ) -> Vec<CommandPosition> {
+            let mut state = self.state.lock().expect("fake log poisoned");
+            state.epoch = epoch;
+            state.next_sequence = 0;
+            state.entries.clear();
+            let positions = entries
+                .into_iter()
+                .map(|env| {
+                    let position =
+                        CommandPosition::new(shard.clone(), state.epoch, state.next_sequence);
+                    state.next_sequence += 1;
+                    state.entries.push((position.clone(), env));
+                    position
+                })
+                .collect::<Vec<_>>();
+            positions
+        }
+
+        fn fail_next_cursor_write(&self) {
+            self.state
+                .lock()
+                .expect("fake log poisoned")
+                .cursor_write_failures += 1;
+        }
+
         fn seal_buffered(state: &mut FakeLogState, shard: &QueueKey) -> Vec<CommandPosition> {
             let n = state.buffered.len();
-            let positions = (0..n)
-                .map(|_| {
-                    let p = CommandPosition::new(shard.clone(), state.epoch, state.next_sequence);
-                    state.next_sequence += 1;
-                    p
-                })
-                .collect();
+            let mut positions = Vec::with_capacity(n);
+            for env in state.buffered.drain(..) {
+                let p = CommandPosition::new(shard.clone(), state.epoch, state.next_sequence);
+                state.next_sequence += 1;
+                state.entries.push((p.clone(), env));
+                positions.push(p);
+            }
             state.buffered.clear();
             state.sealed_batches.push(n);
             positions
@@ -3285,27 +3320,57 @@ mod ordered_tests {
             if expected_epoch != state.epoch {
                 return Err(EngineError::EpochFenced);
             }
-            let positions = (0..commands.len())
-                .map(|_| {
-                    let p = CommandPosition::new(shard.clone(), state.epoch, state.next_sequence);
-                    state.next_sequence += 1;
-                    p
-                })
-                .collect();
+            let mut positions = Vec::with_capacity(commands.len());
+            for env in commands {
+                let p = CommandPosition::new(shard.clone(), state.epoch, state.next_sequence);
+                state.next_sequence += 1;
+                state.entries.push((p.clone(), env.clone()));
+                positions.push(p);
+            }
             state.sealed_batches.push(commands.len());
             Ok(positions)
         }
 
         fn read_from(
             &self,
-            _shard: &QueueKey,
-            _from: Option<CommandPosition>,
-            _limit: usize,
+            shard: &QueueKey,
+            from: Option<CommandPosition>,
+            limit: usize,
         ) -> EngineResult<CommandPage> {
-            Ok(CommandPage {
-                entries: Vec::new(),
-                next: None,
-            })
+            let state = self.state.lock().expect("fake log poisoned");
+            let start = match from.as_ref() {
+                None => 0,
+                Some(cursor) => state
+                    .entries
+                    .iter()
+                    .position(|(position, _)| position == cursor)
+                    .map_or_else(
+                        || {
+                            state
+                                .entries
+                                .iter()
+                                .position(|(position, _)| cursor.precedes(position))
+                                .unwrap_or(state.entries.len())
+                        },
+                        |idx| idx + 1,
+                    ),
+            };
+            let page_limit = limit.max(1);
+            let entries = state
+                .entries
+                .iter()
+                .skip(start)
+                .take(page_limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            let next = if start + entries.len() < state.entries.len() {
+                entries.last().map(|(position, _)| {
+                    CommandPosition::new(shard.clone(), position.backend_epoch, position.sequence)
+                })
+            } else {
+                None
+            };
+            Ok(CommandPage { entries, next })
         }
 
         fn high_water(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
@@ -3326,18 +3391,21 @@ mod ordered_tests {
                 .lock()
                 .expect("fake log poisoned")
                 .emission_cursor
-                .clone())
+                .get(_shard)
+                .cloned())
         }
 
         fn set_emission_cursor(
             &mut self,
-            _shard: &QueueKey,
+            shard: &QueueKey,
             position: CommandPosition,
         ) -> EngineResult<()> {
-            self.state
-                .get_mut()
-                .expect("fake log poisoned")
-                .emission_cursor = Some(position);
+            let state = self.state.get_mut().expect("fake log poisoned");
+            if state.cursor_write_failures > 0 {
+                state.cursor_write_failures -= 1;
+                return Err(EngineError::Unavailable);
+            }
+            state.emission_cursor.insert(shard.clone(), position);
             Ok(())
         }
 
@@ -4160,113 +4228,294 @@ mod ordered_tests {
 
     type SeenKey = (TenantId, pqueue_core::QueueId, Option<ItemId>, u64, u64);
 
-    #[derive(Default)]
-    struct DedupSink {
-        seen: Mutex<BTreeSet<SeenKey>>,
+    fn push_env(seq: &str, item_id: u64, created_at: UtcTimestamp) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::new(seq),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![ItemId::from_u64(item_id)],
+            command: QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: pqueue_core::ClientItemKey::new(format!("k-{item_id}"))
+                        .unwrap(),
+                    item_id: ItemId::from_u64(item_id),
+                    priority: None,
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: Default::default(),
+                    metadata: Default::default(),
+                    cohort_size: None,
+                    gate_keys: Vec::new(),
+                    entity_document: None,
+                }],
+            }),
+            checksum: CommandChecksum(0),
+            created_at,
+        }
     }
 
-    impl crate::port::ChangeRecordSink for DedupSink {
+    #[derive(Default)]
+    struct RecordingSink {
+        state: Mutex<RecordingSinkState>,
+    }
+
+    #[derive(Default)]
+    struct RecordingSinkState {
+        batches: Vec<Vec<SeenKey>>,
+        seen: BTreeSet<SeenKey>,
+    }
+
+    impl RecordingSink {
+        fn batches(&self) -> Vec<Vec<SeenKey>> {
+            self.state.lock().expect("sink poisoned").batches.clone()
+        }
+
+        fn seen(&self) -> BTreeSet<SeenKey> {
+            self.state.lock().expect("sink poisoned").seen.clone()
+        }
+    }
+
+    impl crate::port::ChangeRecordSink for RecordingSink {
         fn emit(
             &self,
             _shard: &QueueKey,
             records: &[crate::command::ChangeRecord],
         ) -> EngineResult<()> {
-            let mut seen = self.seen.lock().expect("sink poisoned");
-            for record in records {
-                seen.insert(record.idempotency_key());
+            let mut state = self.state.lock().expect("sink poisoned");
+            let batch = records
+                .iter()
+                .map(crate::command::ChangeRecord::idempotency_key)
+                .collect::<Vec<_>>();
+            for key in &batch {
+                state.seen.insert(key.clone());
             }
+            state.batches.push(batch);
             Ok(())
         }
     }
 
+    fn seed_tail(log: &FakeGroupCommitLog, shard: &QueueKey, epoch: u64, count: u64) {
+        let entries = (0..count)
+            .map(|i| push_env(&format!("cmd-{i}"), i + 1, ts(10 + i as i64)))
+            .collect::<Vec<_>>();
+        let _ = log.set_entries(shard, epoch, entries);
+    }
+
+    fn restart_backend(
+        log: &FakeGroupCommitLog,
+    ) -> ComposedBackend<FakeGroupCommitLog, FakeProjection, InProcessControlPlane> {
+        ComposedBackend::new(
+            log.clone(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        )
+    }
+
     #[test]
-    fn emission_cursor_at_least_once() {
-        let mut log = FakeGroupCommitLog::default();
+    fn emission_cursor_advances_only_after_sink_ack() {
+        let log = FakeGroupCommitLog::default();
         let shard = queue();
-        let emitted_at = ts(123);
-        let epoch = log.acquire_epoch(&shard).expect("epoch");
-        let env = CommandEnvelope {
-            command_id: CommandId::new("cmd-1"),
-            request_id: None,
-            request_fingerprint: None,
-            request_outcome: None,
-            item_ids: vec![ItemId::from_u64(1), ItemId::from_u64(2)],
-            command: QueueCommand::Push(PushCommand {
-                items: vec![
-                    PushItem {
-                        client_item_key: pqueue_core::ClientItemKey::new("k-1").unwrap(),
-                        item_id: ItemId::from_u64(1),
-                        priority: None,
-                        not_before: None,
-                        group_key: None,
-                        max_attempts: 3,
-                        payload: None,
-                        fields: Default::default(),
-                        metadata: Default::default(),
-                        cohort_size: None,
-                        gate_keys: Vec::new(),
-                        entity_document: None,
-                    },
-                    PushItem {
-                        client_item_key: pqueue_core::ClientItemKey::new("k-2").unwrap(),
-                        item_id: ItemId::from_u64(2),
-                        priority: None,
-                        not_before: None,
-                        group_key: None,
-                        max_attempts: 3,
-                        payload: None,
-                        fields: Default::default(),
-                        metadata: Default::default(),
-                        cohort_size: None,
-                        gate_keys: Vec::new(),
-                        entity_document: None,
-                    },
-                ],
-            }),
-            checksum: CommandChecksum(0),
-            created_at: emitted_at,
-        };
-        let positions = log
-            .append(&shard, std::slice::from_ref(&env), epoch)
-            .expect("append");
-        let page_entries = [(positions[0].clone(), env.clone())];
-        let sink = DedupSink::default();
-        let records = page_entries
-            .iter()
-            .flat_map(|(position, env)| {
-                command_envelope_change_records(&shard, position, env, emitted_at, None)
-            })
-            .collect::<Vec<_>>();
-        sink.emit(&shard, &records).expect("first emit");
-        let replay_records = page_entries
-            .iter()
-            .flat_map(|(position, env)| {
-                command_envelope_change_records(&shard, position, env, emitted_at, None)
-            })
-            .collect::<Vec<_>>();
-        sink.emit(&shard, &replay_records).expect("second emit");
-        log.set_emission_cursor(&shard, positions.last().cloned().expect("position"))
-            .expect("advance");
+        seed_tail(&log, &shard, 7, 1);
+        log.fail_next_cursor_write();
+        let backend = restart_backend(&log);
+        let sink = RecordingSink::default();
+
+        assert!(matches!(
+            backend.emit_change_record_tail(&shard, &sink, 1, ts(123), None),
+            Err(EngineError::Unavailable)
+        ));
         assert_eq!(
-            log.emission_cursor(&shard).unwrap(),
-            positions.last().cloned()
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            None
         );
-        let seen = sink.seen.lock().expect("sink poisoned").clone();
-        assert_eq!(seen.len(), 2);
-        assert!(seen.contains(&(
-            shard.tenant_id.clone(),
-            shard.queue_id.clone(),
-            Some(ItemId::from_u64(1)),
-            epoch,
-            positions[0].sequence,
-        )));
-        assert!(seen.contains(&(
-            shard.tenant_id.clone(),
-            shard.queue_id.clone(),
-            Some(ItemId::from_u64(2)),
-            epoch,
-            positions[0].sequence,
-        )));
+        assert_eq!(sink.batches().len(), 1);
+        assert_eq!(
+            sink.batches()[0],
+            vec![(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(1)),
+                7,
+                0
+            )]
+        );
+
+        assert_eq!(
+            backend
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            Some(CommandPosition::new(shard.clone(), 7, 0))
+        );
+    }
+
+    #[test]
+    fn emission_cursor_recovers_from_crash_without_skipping() {
+        let log = FakeGroupCommitLog::default();
+        let shard = queue();
+        seed_tail(&log, &shard, 7, 3);
+        log.fail_next_cursor_write();
+        let backend = restart_backend(&log);
+        let sink = RecordingSink::default();
+
+        assert!(
+            backend
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .is_err()
+        );
+        let restarted = restart_backend(&backend.with_log(|log| log.clone()));
+        assert_eq!(
+            restarted.with_log(|log| log.current_epoch(&shard).unwrap()),
+            7
+        );
+
+        assert_eq!(
+            restarted
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            restarted
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            restarted
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+
+        let batches = sink.batches();
+        assert_eq!(batches.len(), 4);
+        assert_eq!(
+            batches[0],
+            vec![(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(1)),
+                7,
+                0
+            )]
+        );
+        assert_eq!(batches[1], batches[0]);
+        assert_eq!(
+            batches[2],
+            vec![(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(2)),
+                7,
+                1
+            )]
+        );
+        assert_eq!(
+            batches[3],
+            vec![(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(3)),
+                7,
+                2
+            )]
+        );
+        assert_eq!(
+            sink.seen(),
+            BTreeSet::from([
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(1)),
+                    7,
+                    0,
+                ),
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(2)),
+                    7,
+                    1,
+                ),
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(3)),
+                    7,
+                    2,
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn emission_cursor_failover_keeps_stable_dedup_key() {
+        let log = FakeGroupCommitLog::default();
+        let shard = queue();
+        seed_tail(&log, &shard, 7, 1);
+        log.fail_next_cursor_write();
+        let backend = restart_backend(&log);
+        let sink = RecordingSink::default();
+
+        assert!(
+            backend
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .is_err()
+        );
+
+        let restarted_log = backend.with_log(|log| log.clone());
+        {
+            let mut state = restarted_log.state.lock().expect("fake log poisoned");
+            state.epoch = 8;
+        }
+        let restarted = restart_backend(&restarted_log);
+        assert_eq!(
+            restarted.with_log(|log| log.current_epoch(&shard).unwrap()),
+            8
+        );
+
+        assert_eq!(
+            restarted
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sink.seen(),
+            BTreeSet::from([(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(1)),
+                7,
+                0,
+            )])
+        );
+        assert_eq!(
+            sink.batches(),
+            vec![
+                vec![(
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(1)),
+                    7,
+                    0,
+                )],
+                vec![(
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(1)),
+                    7,
+                    0,
+                )],
+            ]
+        );
     }
 }
 
