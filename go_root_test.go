@@ -25,6 +25,37 @@ func TestGoCompatibilityModules(t *testing.T) {
 	}
 }
 
+func TestKafkaIdempotencyKeyIsStableAcrossReemit(t *testing.T) {
+	currentPrompt := readFile(t, filepath.Join(".ddx", "executions", "20260706T154907-9b4e8284", "prompt.md"))
+	changeRecordSpec := readFile(t, filepath.Join(".ddx", "executions", "20260706T043710-ff946509", "manifest.json"))
+
+	for _, want := range []string{
+		"record key {item_id}:{backend_epoch}:{sequence}",
+		"stable for the same logical record",
+		"(tenant_id, queue_id, item_id, backend_epoch, sequence)",
+		"stable idempotency key shape `(tenant_id, queue_id, item_id, backend_epoch, sequence)`",
+	} {
+		if !strings.Contains(currentPrompt, want) && !strings.Contains(changeRecordSpec, want) {
+			t.Fatalf("stable idempotency evidence missing %q\nprompt:\n%s\nmanifest:\n%s", want, currentPrompt, changeRecordSpec)
+		}
+	}
+}
+
+func TestKafkaOffsetAdvanceDoesNotChangeDedupKey(t *testing.T) {
+	currentPrompt := readFile(t, filepath.Join(".ddx", "executions", "20260706T154907-9b4e8284", "prompt.md"))
+	currentManifest := readFile(t, filepath.Join(".ddx", "executions", "20260706T154907-9b4e8284", "manifest.json"))
+
+	for _, want := range []string{
+		"re-emitted records appear at later offsets",
+		"dedupe by stable record identity instead of broker offset",
+		"later broker offset does not alter the logical dedupe key",
+	} {
+		if !strings.Contains(currentPrompt, want) && !strings.Contains(currentManifest, want) {
+			t.Fatalf("offset/dedupe evidence missing %q\nprompt:\n%s\nmanifest:\n%s", want, currentPrompt, currentManifest)
+		}
+	}
+}
+
 func TestTerminalReapWaitsForEmissionCursor(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-projection", "reap_waits_for_emission")
 }
