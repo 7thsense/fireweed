@@ -48,6 +48,16 @@ jobs:
           repository: easel/heimq
           path: heimq
 
+      - name: Free runner disk space
+        working-directory: /
+        run: |
+          # The release gate (coverage via cargo-llvm-cov builds a second target tree) exhausts the
+          # 14GB free on stock ubuntu-latest runners; v0.8.0 and the first v0.9.0 run both died with
+          # "No space left on device". Drop the large preinstalled toolchains we never use.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
       - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
