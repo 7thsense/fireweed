@@ -313,7 +313,7 @@ fn postgres_high_water_concurrent_monotonic() {
         for result in results {
             match result {
                 Ok(()) => {}
-                Err(EngineError::Invalid(msg)) if msg == "high-water regression" => {}
+                Err(EngineError::Invalid("high-water regression")) => {}
                 Err(err) => panic!("unexpected high-water result: {err:?}"),
             }
         }

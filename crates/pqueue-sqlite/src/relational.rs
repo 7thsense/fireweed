@@ -7865,6 +7865,49 @@ impl ReclaimPort for SqliteRelationalBackend {
     }
 }
 
+impl pqueue_engine::HistoricalProjectionRead for SqliteRelationalBackend {
+    // TD-009: the relational family serves only "now" until the ADR-013 rebuild-from-log migration
+    // lands; `read_as_of` fails closed with `Unavailable` (mirrors `PostgresRelationalBackend`).
+    type AsOfProjection = SqliteProjectionStore;
+
+    fn current_position(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let (t, q) = parts(shard);
+            let row: Option<(i64, i64)> = st(g
+                .conn
+                .query_row(
+                    "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![t, q],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional())?;
+            row.and_then(|(next, epoch)| {
+                (next > 0)
+                    .then(|| CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1))
+            })
+            .ok_or(EngineError::NotFound)
+        })();
+        std::future::ready(result)
+    }
+
+    fn read_as_of<T, F>(
+        &self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+        _query: F,
+    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    where
+        T: Send,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
 impl ReclaimDriver for SqliteRelationalBackend {
     fn tick(
         &self,

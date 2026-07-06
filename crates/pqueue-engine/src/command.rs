@@ -11,9 +11,9 @@ use pqueue_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::QueueKey;
 use crate::error::{EngineError, EngineResult};
 use crate::types::CommandPosition;
-use crate::QueueKey;
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1676,7 +1676,7 @@ mod serde_tests {
             QueueId::new("queue-2").unwrap(),
         );
         let emitted_at = ts(99);
-        let batch = vec![
+        let batch = [
             (
                 CommandPosition::new(shard.clone(), 7, 1),
                 envelope(QueueCommand::Push(PushCommand {

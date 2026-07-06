@@ -159,11 +159,11 @@ fn change_record_sink_config(
         config.headers.insert("authorization".to_string(), value);
     }
     for (key, value) in env {
-        if let Some(name) = key.strip_prefix("PQUEUE_CHANGE_RECORD_SINK_HEADER_") {
-            if !value.trim().is_empty() {
-                let header = name.replace('_', "-").to_ascii_lowercase();
-                config.headers.insert(header, value.clone());
-            }
+        if let Some(name) = key.strip_prefix("PQUEUE_CHANGE_RECORD_SINK_HEADER_")
+            && !value.trim().is_empty()
+        {
+            let header = name.replace('_', "-").to_ascii_lowercase();
+            config.headers.insert(header, value.clone());
         }
     }
     if config.enabled && config.endpoint.is_none() {

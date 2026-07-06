@@ -37,27 +37,27 @@ use pqueue_core::{
     TenantId, UtcTimestamp,
 };
 
-use crate::claim_validation::{require_item_level_claim, ClaimCompatibility};
+use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
 use crate::command::{
-    build_push_items, command_envelope_change_records, validate_gate_command, validate_gate_push,
-    validate_request_replay_metadata, AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum,
-    CommandEnvelope, CommandId, FinalizeCommand, FinalizeOutcome, LeaseExpiredCommand,
-    PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters,
-    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate,
-    UpdateFieldsCommand, WriteSideRecordsCommand,
+    AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
+    FinalizeCommand, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand,
+    PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
+    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, UpdateFieldsCommand,
+    WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
+    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
 use crate::idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 use crate::port::{
-    validate_instance_fence, AsOfProjectionStore, Backend, ClaimPort, ClaimRef, ClaimRequest,
-    Claimed, ClaimedItem, CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus,
-    CommitRecovery, CommitTransition, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome,
-    EntryRecovery, FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView,
-    LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef,
-    SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    AsOfProjectionStore, Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem,
+    CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery,
+    CommitTransition, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery,
+    FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView, LeaseView,
+    LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
+    PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -532,7 +532,7 @@ pub trait ProjectionStore: Send {
     // -- pre-commit validation ----------------------------------------------
 
     fn finalize_validate(&self, shard: &QueueKey, outcomes: &[FinalizeOutcome])
-        -> EngineResult<()>;
+    -> EngineResult<()>;
     fn renew_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()>;
     fn reassign_validate(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()>;
     fn update_fields_validate(
@@ -3212,8 +3212,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortRenewL
 #[cfg(test)]
 mod ordered_tests {
     use super::*;
-    use crate::port::{ChangeRecordSink, ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
     use crate::PauseQueueCommand;
+    use crate::port::{ChangeRecordSink, ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
     use pqueue_core::{
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
         PriorityTieBreaker, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,

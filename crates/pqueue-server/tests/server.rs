@@ -1644,7 +1644,7 @@ async fn change_record_sink_delivers() {
     assert!(records[1].position.sequence < records[2].position.sequence);
     let keys: Vec<_> = records
         .iter()
-        .map(|record| record.idempotency_key(&shard))
+        .map(|record| record.idempotency_key())
         .collect();
     assert_eq!(keys[0].2, records[0].item_id);
     assert_eq!(keys[1].2, records[1].item_id);
@@ -1713,7 +1713,7 @@ async fn change_record_sink_failure_isolation() {
             .map(|record| {
                 (
                     record.item_id,
-                    record.position.clone(),
+                    record.position,
                     record.command_kind,
                     record.new_state,
                     record.terminal_at,
