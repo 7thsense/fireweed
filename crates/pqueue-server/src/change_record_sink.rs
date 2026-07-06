@@ -31,6 +31,23 @@ impl Default for ChangeRecordSinkConfig {
     }
 }
 
+impl ChangeRecordSinkConfig {
+    pub(crate) fn validate(&self) -> EngineResult<()> {
+        match self.endpoint.as_deref() {
+            Some(endpoint) => {
+                parse_http_endpoint(endpoint)?;
+            }
+            None if self.enabled => {
+                return Err(EngineError::Invalid(
+                    "change record sink endpoint is required",
+                ));
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
+
 pub trait ChangeRecordEmissionBackend {
     fn emit_change_record_tail<S: ChangeRecordSink>(
         &self,
@@ -87,6 +104,7 @@ impl NiflheimChangeRecordSink {
                 "change record sink is disabled in config",
             ));
         }
+        config.validate()?;
         let endpoint = parse_http_endpoint(config.endpoint.as_deref().ok_or(
             EngineError::Invalid("change record sink endpoint is required"),
         )?)?;
@@ -263,4 +281,34 @@ where
             }
         }
     })
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn TestChangeRecordSinkDefaultsDisabledUntilEndpointIsSet() {
+        let config = ChangeRecordSinkConfig::default();
+        assert!(!config.enabled);
+        assert!(config.endpoint.is_none());
+        config.validate().expect("disabled sink config remains valid");
+    }
+
+    #[test]
+    fn TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled() {
+        let config = ChangeRecordSinkConfig {
+            endpoint: Some("not-a-url".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        assert!(!config.enabled);
+        let err = config.validate().expect_err("malformed endpoint must fail");
+        assert!(
+            err.to_string().contains("durable-ingest endpoint must use http://"),
+            "{}",
+            err
+        );
+        assert!(!config.enabled);
+    }
 }

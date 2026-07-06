@@ -45,6 +45,14 @@ func TestTD008ConformanceSuiteGreen(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-projection", "reap_")
 }
 
+func TestChangeRecordSinkDefaultsDisabledUntilEndpointIsSet(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestChangeRecordSinkDefaultsDisabledUntilEndpointIsSet")
+}
+
+func TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled")
+}
+
 func TestTD008EvidenceBundleRecorded(t *testing.T) {
 	runCargoTestWithEnv(t, map[string]string{
 		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",

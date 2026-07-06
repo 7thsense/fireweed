@@ -136,11 +136,7 @@ fn change_record_sink_config(
         .get("PQUEUE_CHANGE_RECORD_SINK_ENDPOINT")
         .cloned()
         .filter(|v| !v.trim().is_empty());
-    config.enabled = parse_bool(
-        env,
-        "PQUEUE_CHANGE_RECORD_SINK_ENABLED",
-        config.endpoint.is_some(),
-    );
+    config.enabled = parse_bool(env, "PQUEUE_CHANGE_RECORD_SINK_ENABLED", false);
     config.tick_interval = parse_duration_ms(
         env,
         "PQUEUE_CHANGE_RECORD_SINK_TICK_INTERVAL_MS",
@@ -181,6 +177,9 @@ fn change_record_sink_config(
             "PQUEUE_CHANGE_RECORD_SINK_TICK_INTERVAL_MS must be greater than 0",
         ));
     }
+    config
+        .validate()
+        .map_err(|e| ConfigError::new(e.to_string()))?;
     Ok(config)
 }
 
