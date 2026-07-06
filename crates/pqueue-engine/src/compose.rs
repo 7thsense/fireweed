@@ -4438,6 +4438,106 @@ mod ordered_tests {
     }
 
     #[test]
+    fn emission_cursor_recovers_from_crash_without_skipping() {
+        let log = FakeGroupCommitLog::default();
+        let shard = queue();
+        seed_tail(&log, &shard, 7, 3);
+        log.fail_next_cursor_write();
+        let backend = restart_backend(&log);
+        let sink = RecordingSink::default();
+
+        assert!(
+            backend
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .is_err()
+        );
+        let restarted = restart_backend(&backend.with_log(|log| log.clone()));
+        assert_eq!(
+            restarted.with_log(|log| log.current_epoch(&shard).unwrap()),
+            7
+        );
+
+        assert_eq!(
+            restarted
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            restarted
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            restarted
+                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .unwrap(),
+            1
+        );
+
+        let batches = sink.batches();
+        assert_eq!(batches.len(), 4);
+        assert_eq!(
+            batches[0],
+            vec![(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(1)),
+                7,
+                0
+            )]
+        );
+        assert_eq!(batches[1], batches[0]);
+        assert_eq!(
+            batches[2],
+            vec![(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(2)),
+                7,
+                1
+            )]
+        );
+        assert_eq!(
+            batches[3],
+            vec![(
+                shard.tenant_id.clone(),
+                shard.queue_id.clone(),
+                Some(ItemId::from_u64(3)),
+                7,
+                2
+            )]
+        );
+        assert_eq!(
+            sink.seen(),
+            BTreeSet::from([
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(1)),
+                    7,
+                    0,
+                ),
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(2)),
+                    7,
+                    1,
+                ),
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(3)),
+                    7,
+                    2,
+                ),
+            ])
+        );
+    }
+
+    #[test]
     fn emission_cursor_failover_keeps_stable_dedup_key() {
         let log = FakeGroupCommitLog::default();
         let shard = queue();
