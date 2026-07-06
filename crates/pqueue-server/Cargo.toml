@@ -24,6 +24,7 @@ pqueue-memory = { path = "../pqueue-memory" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-projection = { path = "../pqueue-projection" }
+fjord = { git = "https://github.com/telepathdata/fjord.git", rev = "db260f607004483770f822764d9b07b192320bc8", package = "fjord-broker" }
 # Optional: the SYNC postgres adapter, wired only behind the `postgres` feature and driven exclusively
 # through the blocking-safe `PostgresNativeBackend` wrapper (spawn_blocking) so no sync postgres client
 # call runs on a Tokio worker thread.

@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use fjord::{
+    FjordClusterView, FjordGroupCoordinator, FjordLog, FjordOffsetStore, FjordTopicRegistry,
+};
 use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
     AcquireOutcome, AuthContext, Clock, ComposedBackend, EngineError, EngineResult,
@@ -132,6 +135,75 @@ pub enum ControlPlaneSpec {
     InProcess,
 }
 
+/// Typed configuration for the embedded fjord surface that pqueue-server boots behind the composition
+/// root seam. The namespace root is isolated from pqueue's own queue storage roots so the Kafka surface
+/// state never shares a directory with the queue commit path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedFjordConfig {
+    pub namespace_root: PathBuf,
+    pub cluster_id: String,
+}
+
+impl Default for EmbeddedFjordConfig {
+    fn default() -> Self {
+        Self {
+            namespace_root: PathBuf::from("/var/lib/pqueue/fjord"),
+            cluster_id: "pqueue-fjord".to_string(),
+        }
+    }
+}
+
+/// The in-process fjord surface materialized from [`EmbeddedFjordConfig`].
+pub struct EmbeddedFjordSurface {
+    namespace_root: PathBuf,
+    cluster_id: String,
+    pub topic_registry: Arc<FjordTopicRegistry>,
+    pub log: FjordLog,
+    pub offset_store: Arc<FjordOffsetStore>,
+    pub cluster_view: FjordClusterView,
+    pub group_coordinator: FjordGroupCoordinator,
+}
+
+impl EmbeddedFjordSurface {
+    pub fn namespace_root(&self) -> &PathBuf {
+        &self.namespace_root
+    }
+
+    pub fn cluster_id(&self) -> &str {
+        &self.cluster_id
+    }
+}
+
+/// Construct the embedded fjord surface from typed config. This stays separate from the queue commit path:
+/// the returned surface owns its own namespace root and state objects, and the queue backend never shares
+/// those directories or handles.
+pub fn build_embedded_fjord_surface(
+    node_id: i32,
+    config: &EmbeddedFjordConfig,
+) -> EmbeddedFjordSurface {
+    let namespace_root = config.namespace_root.join(format!("node-{node_id}"));
+    let topic_registry = FjordTopicRegistry::new(node_id);
+    let log = FjordLog::new_with_registry(Arc::clone(&topic_registry));
+    let offset_store = FjordOffsetStore::new();
+    let cluster_view = FjordClusterView::new_with_registry(
+        node_id,
+        "127.0.0.1",
+        0,
+        config.cluster_id.clone(),
+        Arc::clone(&topic_registry),
+    );
+
+    EmbeddedFjordSurface {
+        namespace_root,
+        cluster_id: config.cluster_id.clone(),
+        topic_registry,
+        log,
+        offset_store,
+        cluster_view,
+        group_coordinator: FjordGroupCoordinator::new(),
+    }
+}
+
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
 /// [`start`] assembles the concrete backend from this spec.
 ///
@@ -218,6 +290,9 @@ pub fn resolve_postgres_log(
 /// library reads no env vars at all.
 pub struct Config {
     pub backend: BackendSpec,
+    /// Typed configuration for the embedded fjord surface. The queue commit path does not share this
+    /// namespace; it is only booted as the Kafka-facing surface behind the composition root seam.
+    pub embedded_fjord: EmbeddedFjordConfig,
     /// This instance's node id, packed into the disambiguation byte of every minted `ItemId` (ADR-009) so
     /// distinct replicas over a shared store never mint a colliding id. It is a *configured* value: the
     /// deployment is responsible for handing each replica a distinct one (e.g. the Helm chart maps a
@@ -277,6 +352,7 @@ impl Config {
     ) -> Self {
         Self {
             backend,
+            embedded_fjord: EmbeddedFjordConfig::default(),
             node_id,
             listen,
             reclaim_interval,
@@ -869,6 +945,7 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 pub async fn start(config: Config) -> EngineResult<Server> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
+    let _fjord_surface = build_embedded_fjord_surface(node_id as i32, &config.embedded_fjord);
     let listen = config.listen.clone();
     let interval = config.reclaim_interval;
     let queues = config.queues.clone();

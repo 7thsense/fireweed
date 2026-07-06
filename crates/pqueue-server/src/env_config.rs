@@ -21,7 +21,7 @@ use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
-    LogSpec, ProjectionSpec, SegmentConfig, resolve_node_id,
+    EmbeddedFjordConfig, LogSpec, ProjectionSpec, SegmentConfig, resolve_node_id,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -361,6 +361,17 @@ fn parse_bootstrap_queues(
         .collect()
 }
 
+fn embedded_fjord_config(env: &BTreeMap<String, String>) -> EmbeddedFjordConfig {
+    EmbeddedFjordConfig {
+        namespace_root: PathBuf::from(env_or(
+            env,
+            "PQUEUE_FJORD_STATE_ROOT",
+            "/var/lib/pqueue/fjord",
+        )),
+        cluster_id: env_or(env, "PQUEUE_FJORD_CLUSTER_ID", "pqueue-fjord"),
+    }
+}
+
 impl Config {
     /// The SINGLE optional env-var populator: map the documented `PQUEUE_*` / `DATABRICKS_*` env names in
     /// `env` onto a typed [`Config`]. PURE over the supplied map — it does NOT read the process environment
@@ -369,6 +380,7 @@ impl Config {
     pub fn from_env(env: &BTreeMap<String, String>) -> Result<Config, ConfigError> {
         Ok(Config {
             backend: parse_backend(env)?,
+            embedded_fjord: embedded_fjord_config(env),
             node_id: resolve_node_id(&env_or(env, "PQUEUE_NODE_ID", "0")),
             listen: env_or(env, "PQUEUE_LISTEN_ADDR", "0.0.0.0:8080"),
             reclaim_interval: parse_duration_ms(env, "PQUEUE_RECLAIM_INTERVAL_MS", 1_000),
@@ -416,6 +428,11 @@ mod tests {
             config.backend.projection,
             ProjectionSpec::InMemory
         ));
+        assert_eq!(
+            config.embedded_fjord.namespace_root,
+            PathBuf::from("/var/lib/pqueue/fjord")
+        );
+        assert_eq!(config.embedded_fjord.cluster_id, "pqueue-fjord");
         assert_eq!(config.node_id, 0);
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.reclaim_interval, Duration::from_millis(1_000));
@@ -517,6 +534,20 @@ mod tests {
             }
             _ => panic!("expected objectlog log × hybrid projection"),
         }
+    }
+
+    #[test]
+    fn fjord_namespace_config_is_parsed_from_env() {
+        let config = Config::from_env(&map(&[
+            ("PQUEUE_FJORD_STATE_ROOT", "/data/fjord"),
+            ("PQUEUE_FJORD_CLUSTER_ID", "fjord-test"),
+        ]))
+        .expect("valid fjord namespace env");
+        assert_eq!(
+            config.embedded_fjord.namespace_root,
+            PathBuf::from("/data/fjord")
+        );
+        assert_eq!(config.embedded_fjord.cluster_id, "fjord-test");
     }
 
     #[test]
