@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T182656-834e2d8f",
+  "bead_id": "pqueue-58a04675",
+  "base_rev": "c82bf0bc5db2e7c25b9934da6be0a472137bd338",
+  "created_at": "2026-07-06T18:26:56.616389243Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-58a04675",
+    "title": "Surface release-workflow failures",
+    "description": "PROBLEM: A failed release run can finish without any visible alert.\nROOT CAUSE: `.github/workflows/release.yml:18-189` defines the release job and publish path, but it has no failure notification or explicit blocking status check around the release gate; the failed v0.8.0 run 28641569553 had no surfaced alert.\nPROPOSED FIX: add a release-workflow failure notification or required status check that visibly reports a failed release run before publication is considered healthy.\nNON-SCOPE: PR CI matrix expansion, backend compile fixes, and release artifact packaging logic.",
+    "acceptance": "1. TestReleaseFailureAlertExists: `rg -n 'failure|notify|status check|alert' .github/workflows/release.yml` shows the new alerting or blocking step.\n2. TestReleaseFailureIsVisible: a synthetic failed release-workflow run or workflow-unit test proves the alert/status is emitted.\n3. TestGoTestGate: `go test ./...` passes.\n4. TestLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-a5316d70",
+    "labels": [
+      "kind:build",
+      "area:ci",
+      "area:release",
+      "review-rework"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T182656-834e2d8f",
+    "prompt": ".ddx/executions/20260706T182656-834e2d8f/prompt.md",
+    "manifest": ".ddx/executions/20260706T182656-834e2d8f/manifest.json",
+    "result": ".ddx/executions/20260706T182656-834e2d8f/result.json",
+    "checks": ".ddx/executions/20260706T182656-834e2d8f/checks.json",
+    "usage": ".ddx/executions/20260706T182656-834e2d8f/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-58a04675-20260706T182656-834e2d8f"
+  },
+  "prompt_sha": "fcaf18bedf04b52e018c44f85ad6d5bd0d350fcacd8cdd867de74ba776663f75"
+}
