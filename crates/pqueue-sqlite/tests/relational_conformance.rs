@@ -138,6 +138,41 @@ mod composed_log_projection {
     use pqueue_sqlite::composed_sqlite_log_sqlite_projection_in_memory;
     pqueue_conformance::core_suite!(@atomic || composed_sqlite_log_sqlite_projection_in_memory()
         .expect("compose in-memory sqlite-log + sqlite-projection backend"));
+    pqueue_conformance::log_replay_suite!(|| composed_sqlite_log_sqlite_projection_in_memory()
+        .expect("compose in-memory sqlite-log + sqlite-projection backend"));
+}
+
+#[tokio::test]
+async fn sqlite_relational_log_replay_branch_read_as_of() {
+    use pqueue_engine::{HistoricalProjectionRead, ProjectionRead, ProjectionStore, PushPort};
+
+    let backend = pqueue_sqlite::composed_sqlite_log_sqlite_projection_in_memory()
+        .expect("compose in-memory sqlite-log + sqlite-projection backend");
+    backend.create_queue(qdef()).await.unwrap();
+
+    let shard = shard();
+    let first = backend
+        .push(&shard, vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    let branch_point = backend.current_position(&shard).await.unwrap();
+    let _second = backend
+        .push(&shard, vec![PushSpec::default()], ts(1), None)
+        .await
+        .unwrap();
+
+    let branched: Vec<pqueue_engine::ItemView> = backend
+        .read_as_of(&shard, branch_point, |projection| {
+            projection.peek(&shard, 10)
+        })
+        .await
+        .unwrap();
+    assert_eq!(branched.len(), 1);
+    assert_eq!(branched[0].item_id, first[0]);
+
+    let live = backend.peek(&shard, 10).await.unwrap();
+    assert_eq!(live.len(), 2);
+    assert_ne!(live[1].item_id, branched[0].item_id);
 }
 
 // ---------------------------------------------------------------------------
