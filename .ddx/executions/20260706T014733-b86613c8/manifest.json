@@ -1,0 +1,31 @@
+{
+  "attempt_id": "20260706T014733-b86613c8",
+  "bead_id": "pqueue-80f63f7d",
+  "base_rev": "50d59e9daf55d6926b8da366a8f57dc1e34b6ec8",
+  "created_at": "2026-07-06T01:47:34.110001269Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-80f63f7d",
+    "title": "ADR: change-log Kafka interface provider and shape (heimq vs fjord)",
+    "description": "Product requirement (2026-07-05): the change log needs a Kafka-protocol consumer interface, provided by heimq or possibly fjord. TD-008 'Delivery interfaces' records two admissible shapes: (a) pqueue-as-broker — pqueue-server embeds a Kafka read surface (Metadata/Fetch/consumer groups over heimq-wire) serving change topics from the committed log tail; (b) external broker — the emission task produces into a heimq/fjord deployment which owns consumer groups/offsets/fan-out. This ADR must settle: provider + shape; offset↦CommandPosition mapping (epoch-aware, never regresses across failover); consumer-group/offset ownership; retention alignment with the log/snapshot frontier; CL-8 tenant authz on the Kafka surface; reconciliation note vs ADR-005 (data-plane-only scope, already added).",
+    "acceptance": "New ADR accepted and stamped in the ddx graph; TD-008 'Open decisions' entry resolved and TD-008 updated to normative; provider/shape decision recorded with the offset mapping, offset ownership, retention frontier, and authz sections present; ddx doc stale clean after re-stamp.",
+    "labels": [
+      "kind:design",
+      "area:docs",
+      "area:contracts",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T014733-b86613c8",
+    "prompt": ".ddx/executions/20260706T014733-b86613c8/prompt.md",
+    "manifest": ".ddx/executions/20260706T014733-b86613c8/manifest.json",
+    "result": ".ddx/executions/20260706T014733-b86613c8/result.json",
+    "checks": ".ddx/executions/20260706T014733-b86613c8/checks.json",
+    "usage": ".ddx/executions/20260706T014733-b86613c8/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-80f63f7d-20260706T014733-b86613c8"
+  },
+  "prompt_sha": "9e2324505dfe4b6fe1c0e3ddef5e79758a88bf9dfac6a0550a82999ab9af6038"
+}

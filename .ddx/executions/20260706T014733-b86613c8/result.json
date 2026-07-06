@@ -1,0 +1,54 @@
+{
+  "bead_id": "pqueue-80f63f7d",
+  "attempt_id": "20260706T014733-b86613c8",
+  "base_rev": "50d59e9daf55d6926b8da366a8f57dc1e34b6ec8",
+  "result_rev": "adf6cfeffce1352a6581d0e9a3dcd34991e8c27b",
+  "implementation_rev": "adf6cfeffce1352a6581d0e9a3dcd34991e8c27b",
+  "outcome": "task_succeeded",
+  "status": "success",
+  "detail": "success",
+  "candidate_ref": "refs/ddx/iterations/20260706T014733-b86613c8/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260706T014733-b86613c8",
+      "result_rev": "adf6cfeffce1352a6581d0e9a3dcd34991e8c27b",
+      "implementer_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "requested_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "actual_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "review_result": {},
+      "final_decision": "success",
+      "failure_class": "none",
+      "retry_action": "close",
+      "escalation_count": 0,
+      "review_status": "skipped",
+      "review_skip_reason": "review_not_configured",
+      "review_classification": "review_skipped",
+      "land_status": "landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "codex",
+  "model": "gpt-5.4-mini",
+  "session_id": "eb-da1ba63b",
+  "duration_ms": 370126,
+  "tokens": 1808509,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260706T014733-b86613c8",
+  "prompt_file": ".ddx/executions/20260706T014733-b86613c8/prompt.md",
+  "manifest_file": ".ddx/executions/20260706T014733-b86613c8/manifest.json",
+  "result_file": ".ddx/executions/20260706T014733-b86613c8/result.json",
+  "usage_file": ".ddx/executions/20260706T014733-b86613c8/usage.json",
+  "started_at": "2026-07-06T01:47:34.114393834Z",
+  "finished_at": "2026-07-06T01:53:44.241103899Z"
+}
