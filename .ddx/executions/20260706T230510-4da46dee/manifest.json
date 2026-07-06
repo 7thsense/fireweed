@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T230510-4da46dee",
+  "bead_id": "pqueue-b08d91df",
+  "base_rev": "5b49023971e0ce6fbba2e00444725d12b294427c",
+  "created_at": "2026-07-06T23:05:10.762995706Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b08d91df",
+    "title": "Shared composed recovery wiring",
+    "description": "PROBLEM\n`ComposedBackend::recover` already expects a projection high-water plus tail replay, but the relational family currently feeds it a replayless, authoritative-store contract, so the shared recovery choke point cannot rebuild relational state from the log.\nROOT CAUSE\n`crates/pqueue-engine/src/compose.rs:673-680, 1190-1274` defaults `recovery_high_water` to `None` and then replays from whatever the projection reports, while the relational backends still return replayless state.\nPROPOSED FIX\nWire the composed recovery path to consume the relational family’s persisted applied-high-water, replay the durable log tail through `ComposedBackend::recover`, and preserve counter seeding plus definition hydration so exact acknowledged state survives reopen.\nNON-SCOPE\nbackend-specific persistence details, conformance-label changes, docs wording cleanup, and the `pqueue-b59f4897` prerequisite implementation.",
+    "acceptance": "1. `TestComposedRelationalRecoverReplaysTail` proves `ComposedBackend::recover` replays from the relational family’s applied high-water instead of genesis.\n2. `TestComposedRelationalRecoverySeedsCounters` proves item-id counters still resume monotonically after reopen.\n3. `cargo test -p pqueue-postgres --test composed_relational_reconnect` and `cargo test -p pqueue-sqlite --test composed_relational_reconnect` pass with the new recovery seam.\n4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-3c5aa2e0",
+    "labels": [
+      "kind:build",
+      "area:pqueue-engine",
+      "area:pqueue-relational",
+      "adr-013"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T230510-4da46dee",
+    "prompt": ".ddx/executions/20260706T230510-4da46dee/prompt.md",
+    "manifest": ".ddx/executions/20260706T230510-4da46dee/manifest.json",
+    "result": ".ddx/executions/20260706T230510-4da46dee/result.json",
+    "checks": ".ddx/executions/20260706T230510-4da46dee/checks.json",
+    "usage": ".ddx/executions/20260706T230510-4da46dee/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b08d91df-20260706T230510-4da46dee"
+  },
+  "prompt_sha": "2ea34b0a96d873a5c3ba0775e07065228c1a9a63310b686d3dc2b8d134ae0b37"
+}
