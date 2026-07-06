@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T150202-4f1053db",
+  "bead_id": "pqueue-e6e19154",
+  "base_rev": "f583d85351a7941448a721e5e1d4ad4aa9a41d6b",
+  "created_at": "2026-07-06T15:02:03.270622139Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-e6e19154",
+    "title": "Persist and recover the emission cursor",
+    "description": "PROBLEM: TD-008 CL-2 and CL-5 require the change-log emitter to stay off the commit path while durably resuming from the last safe cursor after crash/failover, but the current tail-emission seam only advances an in-memory cursor in the composed backend.\nROOT CAUSE: docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:57-59 and crates/pqueue-engine/src/compose.rs:923-956 describe the required durable resumability, but the current cursor advance lives only inside the composed backend lock and has no separate persistence contract or failover regression test in this slice.\nPROPOSED FIX: Add durable per-queue emission-cursor persistence and replay logic around `emit_change_record_tail`, then prove that a crash before cursor advance re-emits the same logical records and that a failover never regresses the visible offset/cursor state.\nNON-SCOPE: No Kafka surface, no broker ACLs, no opt-out config work, and no change to the command-log append path; emission must remain out of band from commit.",
+    "acceptance": "1. `TestEmissionCursorAdvancesOnlyAfterSinkAck` proves the cursor only moves after the sink accepts the batch.\n2. `TestEmissionCursorRecoversFromCrashWithoutSkipping` proves a restart resumes from the last durable cursor and never skips records.\n3. `TestEmissionCursorFailoverKeepsStableDedupKey` proves re-emission under a new epoch still dedupes by the stable change-record identity.\n4. `go test ./... -run 'TestEmissionCursorAdvancesOnlyAfterSinkAck|TestEmissionCursorRecoversFromCrashWithoutSkipping|TestEmissionCursorFailoverKeepsStableDedupKey'`\n5. `lefthook run pre-commit`\n6. `lefthook run pre-push`",
+    "parent": "pqueue-a8a9e7e7",
+    "labels": [
+      "kind:build",
+      "area:pqueue-engine",
+      "area:change-log",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T150202-4f1053db",
+    "prompt": ".ddx/executions/20260706T150202-4f1053db/prompt.md",
+    "manifest": ".ddx/executions/20260706T150202-4f1053db/manifest.json",
+    "result": ".ddx/executions/20260706T150202-4f1053db/result.json",
+    "checks": ".ddx/executions/20260706T150202-4f1053db/checks.json",
+    "usage": ".ddx/executions/20260706T150202-4f1053db/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-e6e19154-20260706T150202-4f1053db"
+  },
+  "prompt_sha": "81a4471c3dafe8436c1a7edd0c5fe898063754baa8c3124ac298261d2480296b"
+}
