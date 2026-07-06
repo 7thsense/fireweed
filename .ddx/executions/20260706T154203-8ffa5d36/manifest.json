@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T154203-8ffa5d36",
+  "bead_id": "pqueue-a7e08725",
+  "base_rev": "8c3b0840d3d9e0f4c22900f57bffa12f9c321277",
+  "created_at": "2026-07-06T15:42:04.021852305Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-a7e08725",
+    "title": "Stream each queue's committed tail in order",
+    "description": "PROBLEM: TD-008 CL-1, CL-4, and CL-5 require the emitter to walk the committed log tail in `CommandPosition` order and only advance after successful emit, but the current emission cursor is still an in-memory field on the composed backend.\nROOT CAUSE: docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:157-161 and 176-181 define at-least-once delivery, the durable emission cursor, and the reap gate, while crates/pqueue-engine/src/compose.rs:821-956 currently reads a page, emits it, and updates `emission_cursors` only inside the same process lock.\nPROPOSED FIX: Add a queue-local emission flow that reads from the committed tail, preserves per-queue ordering across pages, and advances the durable cursor only after the sink ack returns success.\nNON-SCOPE: No Kafka topic/partition work, no tenant authz, no reap-frontier coupling, and no HTTP config changes.\n1. `TestChangeRecordTailIsEmittedInCommandPositionOrder` proves a queue's emitted batch stays in `CommandPosition` order.\n2. `TestChangeRecordCursorAdvancesOnlyAfterSuccessfulEmit` proves a failed sink call does not advance the cursor.\n3. `go test ./... -run 'TestChangeRecordTailIsEmittedInCommandPositionOrder|TestChangeRecordCursorAdvancesOnlyAfterSuccessfulEmit'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "acceptance": "1. `TestChangeRecordTailIsEmittedInCommandPositionOrder` proves a queue's emitted batch stays in `CommandPosition` order.\n2. `TestChangeRecordCursorAdvancesOnlyAfterSuccessfulEmit` proves a failed sink call does not advance the cursor.\n3. `go test ./... -run 'TestChangeRecordTailIsEmittedInCommandPositionOrder|TestChangeRecordCursorAdvancesOnlyAfterSuccessfulEmit'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-0b38f31f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-engine",
+      "area:change-log",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T154203-8ffa5d36",
+    "prompt": ".ddx/executions/20260706T154203-8ffa5d36/prompt.md",
+    "manifest": ".ddx/executions/20260706T154203-8ffa5d36/manifest.json",
+    "result": ".ddx/executions/20260706T154203-8ffa5d36/result.json",
+    "checks": ".ddx/executions/20260706T154203-8ffa5d36/checks.json",
+    "usage": ".ddx/executions/20260706T154203-8ffa5d36/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-a7e08725-20260706T154203-8ffa5d36"
+  },
+  "prompt_sha": "0e40c583084dac2c5ebfc4712e630d4fca0ea4eb6d0dd65ab544e5be121e131f"
+}

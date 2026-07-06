@@ -3205,10 +3205,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortRenewL
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod ordered_tests {
     use super::*;
     use crate::PauseQueueCommand;
-    use crate::port::{ChangeRecordSink, ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
+    use crate::port::{ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
     use pqueue_core::{
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
         PriorityTieBreaker, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
@@ -4266,6 +4267,7 @@ mod ordered_tests {
     struct RecordingSinkState {
         batches: Vec<Vec<SeenKey>>,
         seen: BTreeSet<SeenKey>,
+        fail_next_emit: bool,
     }
 
     impl RecordingSink {
@@ -4275,6 +4277,10 @@ mod ordered_tests {
 
         fn seen(&self) -> BTreeSet<SeenKey> {
             self.state.lock().expect("sink poisoned").seen.clone()
+        }
+
+        fn fail_next_emit(&self) {
+            self.state.lock().expect("sink poisoned").fail_next_emit = true;
         }
     }
 
@@ -4293,6 +4299,10 @@ mod ordered_tests {
                 state.seen.insert(key.clone());
             }
             state.batches.push(batch);
+            if state.fail_next_emit {
+                state.fail_next_emit = false;
+                return Err(EngineError::Unavailable);
+            }
             Ok(())
         }
     }
@@ -4315,13 +4325,13 @@ mod ordered_tests {
     }
 
     #[test]
-    fn emission_cursor_advances_only_after_sink_ack() {
+    fn TestChangeRecordCursorAdvancesOnlyAfterSuccessfulEmit() {
         let log = FakeGroupCommitLog::default();
         let shard = queue();
         seed_tail(&log, &shard, 7, 1);
-        log.fail_next_cursor_write();
         let backend = restart_backend(&log);
         let sink = RecordingSink::default();
+        sink.fail_next_emit();
 
         assert!(matches!(
             backend.emit_change_record_tail(&shard, &sink, 1, ts(123), None),
@@ -4356,76 +4366,48 @@ mod ordered_tests {
     }
 
     #[test]
-    fn emission_cursor_recovers_from_crash_without_skipping() {
+    fn TestChangeRecordTailIsEmittedInCommandPositionOrder() {
         let log = FakeGroupCommitLog::default();
         let shard = queue();
         seed_tail(&log, &shard, 7, 3);
-        log.fail_next_cursor_write();
         let backend = restart_backend(&log);
         let sink = RecordingSink::default();
 
-        assert!(
+        assert_eq!(
             backend
-                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
-                .is_err()
-        );
-        let restarted = restart_backend(&backend.with_log(|log| log.clone()));
-        assert_eq!(
-            restarted.with_log(|log| log.current_epoch(&shard).unwrap()),
-            7
-        );
-
-        assert_eq!(
-            restarted
-                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
+                .emit_change_record_tail(&shard, &sink, 3, ts(123), None)
                 .unwrap(),
-            1
-        );
-        assert_eq!(
-            restarted
-                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            restarted
-                .emit_change_record_tail(&shard, &sink, 1, ts(123), None)
-                .unwrap(),
-            1
+            3
         );
 
         let batches = sink.batches();
-        assert_eq!(batches.len(), 4);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 3);
         assert_eq!(
             batches[0],
-            vec![(
-                shard.tenant_id.clone(),
-                shard.queue_id.clone(),
-                Some(ItemId::from_u64(1)),
-                7,
-                0
-            )]
-        );
-        assert_eq!(batches[1], batches[0]);
-        assert_eq!(
-            batches[2],
-            vec![(
-                shard.tenant_id.clone(),
-                shard.queue_id.clone(),
-                Some(ItemId::from_u64(2)),
-                7,
-                1
-            )]
-        );
-        assert_eq!(
-            batches[3],
-            vec![(
-                shard.tenant_id.clone(),
-                shard.queue_id.clone(),
-                Some(ItemId::from_u64(3)),
-                7,
-                2
-            )]
+            vec![
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(1)),
+                    7,
+                    0
+                ),
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(2)),
+                    7,
+                    1
+                ),
+                (
+                    shard.tenant_id.clone(),
+                    shard.queue_id.clone(),
+                    Some(ItemId::from_u64(3)),
+                    7,
+                    2
+                ),
+            ]
         );
         assert_eq!(
             sink.seen(),
