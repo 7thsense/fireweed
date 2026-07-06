@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
@@ -10,7 +11,7 @@ use pqueue_engine::{AuthContext, EngineError, QueueKey};
 use pqueue_server::{
     BackendSpec, Config, ControlPlaneSpec, EmbeddedFjordConfig, LogSpec, ProjectionSpec,
     authorize_fjord_topic_read, build_embedded_fjord_surface, fjord_topic_name,
-    register_embedded_fjord_topics,
+    register_embedded_fjord_topics, start,
 };
 
 fn queue_definition(tenant: &str, queue: &str) -> QueueDefinition {
@@ -51,7 +52,7 @@ fn queue_key(tenant: &str, queue: &str) -> QueueKey {
 }
 
 #[test]
-fn TestFjordDependencyIsGitPinnedAndNoPathDeps() {
+fn TestFjordDependencyIsGitPinnedNoPathDeps() {
     let cargo_toml =
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
             .expect("read pqueue-server Cargo.toml");
@@ -70,8 +71,8 @@ fn TestFjordDependencyIsGitPinnedAndNoPathDeps() {
     );
 }
 
-#[test]
-fn TestPqueueServerBootsEmbeddedFjordFromConfig() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn TestFjordBootstrapConfigWiresEmbeddedSurface() {
     let mut config = Config::new(
         BackendSpec {
             log: LogSpec::Memory,
@@ -80,7 +81,7 @@ fn TestPqueueServerBootsEmbeddedFjordFromConfig() {
         },
         7,
         "127.0.0.1:0".to_string(),
-        std::time::Duration::from_millis(100),
+        Duration::from_millis(100),
         vec![queue_definition("t1", "q1")],
     );
     config.embedded_fjord = EmbeddedFjordConfig {
@@ -95,6 +96,15 @@ fn TestPqueueServerBootsEmbeddedFjordFromConfig() {
         &PathBuf::from("/var/lib/pqueue/fjord-test/node-7")
     );
     assert_eq!(surface.cluster_id(), "fjord-test-cluster");
+
+    let server = start(config)
+        .await
+        .expect("start pqueue-server with embedded fjord");
+    assert!(
+        server.is_running(),
+        "server must boot with embedded fjord config"
+    );
+    server.shutdown();
 
     surface.topic_registry.register_topic("t1:q1", 1);
     assert_eq!(

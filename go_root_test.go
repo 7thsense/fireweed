@@ -61,6 +61,14 @@ func TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut")
 }
 
+func TestFjordDependencyIsGitPinnedNoPathDeps(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestFjordDependencyIsGitPinnedNoPathDeps")
+}
+
+func TestFjordBootstrapConfigWiresEmbeddedSurface(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestFjordBootstrapConfigWiresEmbeddedSurface")
+}
+
 func TestTD008EvidenceBundleRecorded(t *testing.T) {
 	runCargoTestWithEnv(t, map[string]string{
 		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",
