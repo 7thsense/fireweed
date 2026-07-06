@@ -1,0 +1,45 @@
+{
+  "attempt_id": "20260706T231521-6f63c57d",
+  "bead_id": "pqueue-219a4ee7",
+  "base_rev": "94b1bac32ad10e8ec76f5b2567be9c2ff4356f95",
+  "created_at": "2026-07-06T23:15:21.982782939Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-219a4ee7",
+    "title": "Relational log conformance expansion",
+    "description": "PROBLEM\nThe relational family is still only exercised as a relational-reconnect backend in the current conformance files, so the log-class contract in TD-001 is not enforced for the rebuilt-from-log path.\nROOT CAUSE\n`crates/pqueue-postgres/tests/relational_conformance.rs:1-24` and `crates/pqueue-sqlite/tests/relational_conformance.rs:1-29` explicitly scope the relational suites to core/reconnect behavior and state that log scenarios do not apply yet.\nPROPOSED FIX\nExpand the relational family test harness to cover the log conformance class once the recovery seam lands, and ensure the relational backends pass the same replay/snapshot recovery expectations as the other log-bearing families.\nNON-SCOPE\nbackend recovery plumbing, docs wording cleanup, and the `pqueue-b59f4897` prerequisite implementation.",
+    "acceptance": "1. `TestRelationalLogConformanceClassGreen` runs the log-class scenarios against the relational family after rebuild-from-log recovery is in place.\n2. `TestRelationalReplayBranchReadAsOf` proves the relational family can serve replay-from-log, branch-at-position, and read-as-of expectations required by TD-001 once enabled.\n3. `cargo test -p pqueue-postgres --test conformance` and `cargo test -p pqueue-sqlite --test conformance` pass with the relational family included in the log-class coverage.\n4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-3c5aa2e0",
+    "labels": [
+      "kind:build",
+      "area:pqueue-postgres",
+      "area:pqueue-sqlite",
+      "area:pqueue-conformance",
+      "adr-013"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"the description explicitly depends on missing prerequisite functionality.: The bead is well-scoped at a high level and names concrete tests, but it is not claimable as written because it explicitly depends on a future recovery seam and a prerequisite implementation that are both outside the current scope. The work can be split into a prerequisite enablement bead and a follow-on conformance bead.\",\"fingerprint\":\"3c5e29cfff39054f52e05b1f1917763fde3bca12e880de40cd634c1ee8352508\",\"policy_mode\":\"warn-only\",\"reason\":\"readiness_best_effort\",\"rule_id\":\"pre_claim_intake.readiness_best_effort\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"3c5e29cfff39054f52e05b1f1917763fde3bca12e880de40cd634c1ee8352508\"}",
+          "created_at": "2026-07-06T23:15:19.675932523Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "readiness_best_effort"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T231521-6f63c57d",
+    "prompt": ".ddx/executions/20260706T231521-6f63c57d/prompt.md",
+    "manifest": ".ddx/executions/20260706T231521-6f63c57d/manifest.json",
+    "result": ".ddx/executions/20260706T231521-6f63c57d/result.json",
+    "checks": ".ddx/executions/20260706T231521-6f63c57d/checks.json",
+    "usage": ".ddx/executions/20260706T231521-6f63c57d/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-219a4ee7-20260706T231521-6f63c57d"
+  },
+  "prompt_sha": "7b439b62283f8e7f03ec6c9b9383dfa19235976c1cf72abada07c3d56013290b"
+}
