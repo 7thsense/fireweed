@@ -1,0 +1,36 @@
+{
+  "attempt_id": "20260706T195144-8ff1c3ef",
+  "bead_id": "pqueue-08fb25fa",
+  "base_rev": "66e5334b1ad2cf0c3ede7ac2445bbcea3e4fadf5",
+  "created_at": "2026-07-06T19:51:44.812756858Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-08fb25fa",
+    "title": "Isolate embedded Fjord storage namespace",
+    "description": "PROBLEM: Fjord state is not explicitly proven to live in a namespace separate from pqueue's queue storage, and topic/group state isolation is only implied by config values. ROOT CAUSE: `crates/pqueue-server/src/lib.rs:141-208` builds the embedded surface and exposes `namespace_root`, `offset_store`, and `group_coordinator`, while `crates/pqueue-server/src/lib.rs:287-316` configures the embedded broker with memory-only storage backends and `crates/pqueue-server/src/lib.rs:1110-1111` registers topics at startup without a regression that asserts the namespace boundary. PROPOSED FIX: keep fjord log, offset, and consumer-group state under the embedded namespace root, verify tenant-prefixed topic registration against that root, and add a regression that proves the broker state cannot bleed into pqueue storage. NON-SCOPE: implementing a second Kafka broker, reopening ADR-005 queue-data-plane consumer semantics, or restoring the superseded heimq target.",
+    "acceptance": "1. `TestEmbeddedFjordSurfaceUsesDedicatedNamespaceRoot` proves the embedded broker builds its own namespace root instead of sharing pqueue storage.\n2. `TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped` proves topic and consumer-group state stay tenant-scoped inside the embedded surface.\n3. `go test ./... -run 'TestEmbeddedFjordSurfaceUsesDedicatedNamespaceRoot|TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-0b450534",
+    "labels": [
+      "kind:build",
+      "area:storage",
+      "area:tenant",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014",
+      "adr-002"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T195144-8ff1c3ef",
+    "prompt": ".ddx/executions/20260706T195144-8ff1c3ef/prompt.md",
+    "manifest": ".ddx/executions/20260706T195144-8ff1c3ef/manifest.json",
+    "result": ".ddx/executions/20260706T195144-8ff1c3ef/result.json",
+    "checks": ".ddx/executions/20260706T195144-8ff1c3ef/checks.json",
+    "usage": ".ddx/executions/20260706T195144-8ff1c3ef/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-08fb25fa-20260706T195144-8ff1c3ef"
+  },
+  "prompt_sha": "0e613acbb641da43b9cba71cdad2d0345d3058b81e29e28702426794e4345e8e"
+}
