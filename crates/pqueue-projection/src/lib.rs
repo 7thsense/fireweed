@@ -3066,6 +3066,7 @@ mod tests {
             }],
             entity_schema: None,
             typed_indexes: Vec::new(),
+            emit_change_records: true,
         }
     }
     fn push_item(id: &str, key: &str, priority: i64) -> PushItem {
@@ -3418,6 +3419,20 @@ mod tests {
         );
         projection.metrics.complete = 1;
 
+        let now_before_retention = ts(30);
+        let cursor_passed = CommandPosition::new(shard(), 0, 3);
+        assert!(
+            projection
+                .reap_terminal_items(
+                    now_before_retention,
+                    definition.terminal_retention_ms,
+                    true,
+                    Some(&cursor_passed),
+                )
+                .is_empty()
+        );
+        assert!(projection.items.contains_key(&item_id));
+
         let now = ts(90);
         let cursor_behind = CommandPosition::new(shard(), 0, 2);
         assert!(
@@ -3440,7 +3455,6 @@ mod tests {
             }
         );
 
-        let cursor_passed = CommandPosition::new(shard(), 0, 3);
         assert_eq!(
             projection.terminal_emission_metrics(now, true, Some(&cursor_passed)),
             TerminalEmissionMetrics {
