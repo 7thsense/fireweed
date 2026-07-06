@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260706T193604-e7719428",
+  "bead_id": "pqueue-57b2f52c",
+  "base_rev": "b5f0bd894dcb4ac049be11f973f6be8c40aa4b50",
+  "created_at": "2026-07-06T19:36:05.087794928Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-57b2f52c",
+    "title": "Preserve Kafka identity and offset monotonicity",
+    "description": "PROBLEM: Crash and failover re-emission must preserve logical record identity and never move broker offsets backward.\nROOT CAUSE: `docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:54` through `docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:60` and `docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:143` through `docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:147` define stable identity and monotonic offsets, but `crates/pqueue-engine/src/command.rs:564` through `crates/pqueue-engine/src/command.rs:592` only define the engine-level idempotency key and `crates/pqueue-engine/src/compose.rs:918` through `crates/pqueue-engine/src/compose.rs:951` advance a backend emission cursor without any Kafka offset contract at the embedded surface.\nPROPOSED FIX: Carry the canonical record key through fjord emission, persist the per-stream offset advance only after successful delivery, and prove failover replay keeps the logical key stable while offsets move forward.\nNON-SCOPE: Dependency pinning, ACL scoping, and consumer-group ownership are handled by sibling beads.",
+    "acceptance": "1. `TestKafkaIdempotencyKeyIsStableAcrossReemit` proves the emitted identity stays stable across re-emission.\n2. `TestKafkaOffsetNeverRegressesAcrossFailover` proves failover replay does not regress the broker offset stream.\n3. `go test ./... -run 'TestKafkaIdempotencyKeyIsStableAcrossReemit|TestKafkaOffsetNeverRegressesAcrossFailover'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-37a8fd9d",
+    "labels": [
+      "kind:build",
+      "area:fjord",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"description supplied without changed_fields\",\"fingerprint\":\"95264d3cb9fd69a6c9f452cd76df0e00d0ba9aeae5be0c59a4877d846c3d1616\",\"policy_mode\":\"warn-only\",\"reason\":\"rewrite_rejected\",\"rule_id\":\"pre_claim_intake.rewrite_rejected\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"95264d3cb9fd69a6c9f452cd76df0e00d0ba9aeae5be0c59a4877d846c3d1616\"}",
+          "created_at": "2026-07-06T19:36:03.110024176Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "rewrite_rejected"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T193604-e7719428",
+    "prompt": ".ddx/executions/20260706T193604-e7719428/prompt.md",
+    "manifest": ".ddx/executions/20260706T193604-e7719428/manifest.json",
+    "result": ".ddx/executions/20260706T193604-e7719428/result.json",
+    "checks": ".ddx/executions/20260706T193604-e7719428/checks.json",
+    "usage": ".ddx/executions/20260706T193604-e7719428/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-57b2f52c-20260706T193604-e7719428"
+  },
+  "prompt_sha": "8445504ca72ba702e65cc8a7f8370e78eba55ebdab36eed4161d8fc26edba026"
+}
