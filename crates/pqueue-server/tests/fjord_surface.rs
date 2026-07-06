@@ -341,6 +341,59 @@ async fn TestKafkaChangeLogConsumesInCommandPositionOrder() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn TestKafkaTopicMapsOneQueueToOnePartition() {
+    let queue_a = queue_definition("tenant-a", "queue-a");
+    let queue_b = queue_definition("tenant-b", "queue-b");
+    let port = free_port();
+    let bootstrap = format!("127.0.0.1:{port}");
+    let broker = spawn_embedded_fjord_broker(
+        7,
+        &EmbeddedFjordConfig {
+            namespace_root: std::env::temp_dir()
+                .join(format!("pqueue-fjord-test-{}", std::process::id())),
+            cluster_id: "fjord-test-cluster".to_string(),
+        },
+        &format!("kafka://{bootstrap}"),
+        &[queue_a.clone(), queue_b.clone()],
+    )
+    .await
+    .expect("spawn embedded fjord broker");
+
+    let topic_a = fjord_topic_name(&queue_key(
+        queue_a.tenant_id.as_str(),
+        queue_a.queue_id.as_str(),
+    ));
+    let topic_b = fjord_topic_name(&queue_key(
+        queue_b.tenant_id.as_str(),
+        queue_b.queue_id.as_str(),
+    ));
+
+    tokio::task::block_in_place(|| {
+        let consumer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &bootstrap)
+            .set("group.id", format!("fjord-test-{}", std::process::id()))
+            .create()
+            .expect("metadata consumer");
+        let metadata = consumer
+            .fetch_metadata(None, Duration::from_secs(5))
+            .expect("fetch metadata");
+        let partition_count = |topic_name: &str| {
+            metadata
+                .topics()
+                .iter()
+                .find(|topic| topic.name() == topic_name)
+                .map(|topic| topic.partitions().len())
+                .expect("topic metadata")
+        };
+
+        assert_eq!(partition_count(&topic_a), 1);
+        assert_eq!(partition_count(&topic_b), 1);
+    });
+
+    drop(broker);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn TestKafkaOffsetNeverRegressesAcrossFailover() {
     let queue = queue_definition("tenant-a", "queue-a");
     let broker = start_embedded_broker(&queue).await;

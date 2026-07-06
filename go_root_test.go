@@ -69,6 +69,10 @@ func TestFjordBootstrapConfigWiresEmbeddedSurface(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestFjordBootstrapConfigWiresEmbeddedSurface")
 }
 
+func TestKafkaTopicMapsOneQueueToOnePartition(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestKafkaTopicMapsOneQueueToOnePartition")
+}
+
 func TestTD008EvidenceBundleRecorded(t *testing.T) {
 	runCargoTestWithEnv(t, map[string]string{
 		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",
