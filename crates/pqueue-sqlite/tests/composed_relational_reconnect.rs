@@ -9,10 +9,10 @@
 use pqueue_conformance::{claim_req, qdef, shard, ts};
 use pqueue_core::{ItemId, PriorityValue};
 use pqueue_engine::{
-    ClaimPort, CommandPosition, ControlPlaneStore, ProjectionRead, ProjectionStore, PushPort,
-    PushSpec,
+    ClaimPort, CommandPosition, ControlPlaneStore, LogStore, ProjectionRead, ProjectionStore,
+    PushPort, PushSpec,
 };
-use pqueue_sqlite::composed_sqlite_relational;
+use pqueue_sqlite::{SqliteRelational, composed_sqlite_relational};
 use std::cell::Cell;
 use std::future::Future;
 
@@ -124,5 +124,38 @@ fn TestComposedRelationalRecoverySeedsCounters() {
         third[0],
         ItemId::mint(0, 0, 2),
         "item-id counters must resume past the durable projection snapshot"
+    );
+}
+
+#[tokio::test]
+async fn TestEmissionCursorPersistsAcrossReopen_SqliteRelational() {
+    let path = unique_path("emission-cursor");
+    let _ = std::fs::remove_file(&path);
+
+    let mut store = SqliteRelational::open(&path).expect("open sqlite relational store");
+    ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
+    assert_eq!(store.emission_cursor(&shard()).unwrap(), None);
+    store
+        .set_emission_cursor(&shard(), CommandPosition::new(shard(), 0, 0))
+        .unwrap();
+    assert_eq!(
+        store.emission_cursor(&shard()).unwrap(),
+        Some(CommandPosition::new(shard(), 0, 0))
+    );
+
+    drop(store);
+
+    let reopened = SqliteRelational::open(&path).expect("reopen sqlite relational store");
+    assert_eq!(
+        reopened.emission_cursor(&shard()).unwrap(),
+        Some(CommandPosition::new(shard(), 0, 0))
+    );
+    let mut reopened = reopened;
+    reopened
+        .set_emission_cursor(&shard(), CommandPosition::new(shard(), 0, 1))
+        .unwrap();
+    assert_eq!(
+        reopened.emission_cursor(&shard()).unwrap(),
+        Some(CommandPosition::new(shard(), 0, 1))
     );
 }

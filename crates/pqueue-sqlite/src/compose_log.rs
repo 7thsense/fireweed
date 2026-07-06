@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS high_water (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
+CREATE TABLE IF NOT EXISTS emission_cursor (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
 CREATE TABLE IF NOT EXISTS snapshots (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, ref_id TEXT NOT NULL,
     epoch INTEGER NOT NULL, seq INTEGER NOT NULL, payload BLOB NOT NULL,
@@ -237,6 +241,46 @@ impl LogStore for SqliteLog {
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         ))?;
         Ok(row.map(|(epoch, seq)| CommandPosition::new(shard.clone(), epoch as u64, seq as u64)))
+    }
+
+    fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let (t, q) = parts(shard);
+        let row = opt(self.conn.query_row(
+            "SELECT epoch, seq FROM emission_cursor WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        ))?;
+        Ok(row.map(|(epoch, seq)| CommandPosition::new(shard.clone(), epoch as u64, seq as u64)))
+    }
+
+    fn set_emission_cursor(
+        &mut self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        let (t, q) = parts(shard);
+        let current = opt(self.conn.query_row(
+            "SELECT epoch, seq FROM emission_cursor WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        ))?;
+        if let Some((epoch, seq)) = current {
+            let cur = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
+            if !cur.precedes(&position) && cur != position {
+                return Err(EngineError::Invalid("emission cursor regression"));
+            }
+        }
+        st(self.conn.execute(
+            "INSERT INTO emission_cursor(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
+            params![
+                t,
+                q,
+                position.backend_epoch as i64,
+                position.sequence as i64
+            ],
+        ))?;
+        Ok(())
     }
 
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()> {
