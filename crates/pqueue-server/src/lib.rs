@@ -204,6 +204,55 @@ pub fn build_embedded_fjord_surface(
     }
 }
 
+/// Canonical Kafka topic name for a queue namespace.
+///
+/// ADR-014 scopes each change stream to a tenant-prefixed topic so the embedded surface can
+/// authorize reads by exact `(tenant_id, queue_id)` identity instead of broad tenant-only access.
+pub fn fjord_topic_name(queue: &QueueKey) -> String {
+    format!("{}:{}", queue.tenant_id.as_str(), queue.queue_id.as_str())
+}
+
+/// Register the tenant-prefixed change-log topics owned by the configured queues.
+pub fn register_embedded_fjord_topics(
+    topic_registry: &FjordTopicRegistry,
+    queues: &[QueueDefinition],
+) {
+    for queue in queues {
+        let key = QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+        topic_registry.register_topic(&fjord_topic_name(&key), 1);
+    }
+}
+
+fn parse_fjord_topic_name(topic: &str) -> EngineResult<QueueKey> {
+    let (tenant, queue) = topic
+        .split_once(':')
+        .ok_or(EngineError::Invalid("fjord topic must be tenant-prefixed"))?;
+    Ok(QueueKey::new(
+        TenantId::new(tenant).map_err(|_| EngineError::Invalid("bad tenant"))?,
+        QueueId::new(queue).map_err(|_| EngineError::Invalid("bad queue"))?,
+    ))
+}
+
+/// Deny-by-default tenant/queue ACL bridge for the embedded change-log surface.
+///
+/// The caller is authorized only for its exact namespace. A different tenant or a different queue in
+/// the same tenant is rejected.
+pub fn authorize_fjord_topic_read(
+    auth: &AuthContext,
+    allowed_queue: &QueueKey,
+    requested_topic: &str,
+) -> EngineResult<()> {
+    auth.authorize_tenant(allowed_queue.tenant_id.as_str())?;
+    let requested_queue = parse_fjord_topic_name(requested_topic)?;
+    if requested_queue == *allowed_queue {
+        Ok(())
+    } else {
+        Err(EngineError::Forbidden(
+            "principal is not authorized for the requested queue namespace",
+        ))
+    }
+}
+
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
 /// [`start`] assembles the concrete backend from this spec.
 ///
@@ -945,7 +994,8 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 pub async fn start(config: Config) -> EngineResult<Server> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
-    let _fjord_surface = build_embedded_fjord_surface(node_id as i32, &config.embedded_fjord);
+    let fjord_surface = build_embedded_fjord_surface(node_id as i32, &config.embedded_fjord);
+    register_embedded_fjord_topics(&fjord_surface.topic_registry, &config.queues);
     let listen = config.listen.clone();
     let interval = config.reclaim_interval;
     let queues = config.queues.clone();
