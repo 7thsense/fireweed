@@ -1,0 +1,16 @@
+{
+  "attempt_id": "20260706T021205-92bb7426",
+  "bead_id": "pqueue-3c5aa2e0",
+  "trigger": "agent: provider process exited without emitting a final event",
+  "scanned_at": "2026-07-06T02:47:17.054051218Z",
+  "reaped": [
+    {
+      "pid": 1197716,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 221,
+      "action": "terminated",
+      "reason": "attempt_ended"
+    }
+  ]
+}

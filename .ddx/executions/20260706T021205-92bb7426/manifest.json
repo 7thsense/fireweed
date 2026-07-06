@@ -1,0 +1,43 @@
+{
+  "attempt_id": "20260706T021205-92bb7426",
+  "bead_id": "pqueue-3c5aa2e0",
+  "base_rev": "19f6bceb48c577b26ff6d27997013627f0c0f549",
+  "created_at": "2026-07-06T02:12:06.104012536Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-3c5aa2e0",
+    "title": "Relational family rebuild-from-log migration (ADR-013)",
+    "description": "ADR-013: the relational projection (pqueue_items and peers) is a materialized cache, not authoritative. Rework the Postgres/sqlite relational backends so recovery_high_water returns the applied position and replays the log tail (today relational.rs returns 'nothing to replay'); persist the applied-high-water; make projection tables truncatable and rebuildable from the persisted command log (genesis or snapshot). Verify the closed TOCTOU bead pqueue-b59f4897 (MAX(seq)+1 append allocation under pooling) actually holds multi-node before relying on the append seam as sole serialization point — ADR-013 names it a hard prerequisite. Retire 'DB-authoritative' language from relational.rs doc comments. Relational backends then join the 'log' conformance class per TD-001.",
+    "acceptance": "Truncate-projection-then-recover test reproduces exact acknowledged state (items, leases, counters, idempotency, fences, metrics) on postgres and sqlite relational; recovery_high_water + tail replay wired through ComposedBackend::recover; log conformance class green on the relational family; multi-node TOCTOU regression test referenced/green; 'authoritative' wording removed from relational module docs.",
+    "labels": [
+      "kind:build",
+      "area:pqueue-postgres",
+      "area:pqueue-sqlite",
+      "adr-013"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"project root mutation rejected\",\"fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"14dfad3e8360df050ef8e97beebd6d35f6bab18d3a57e1a8d7acdc94828e3b7f\"}",
+          "created_at": "2026-07-06T02:11:59.823109808Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T021205-92bb7426",
+    "prompt": ".ddx/executions/20260706T021205-92bb7426/prompt.md",
+    "manifest": ".ddx/executions/20260706T021205-92bb7426/manifest.json",
+    "result": ".ddx/executions/20260706T021205-92bb7426/result.json",
+    "checks": ".ddx/executions/20260706T021205-92bb7426/checks.json",
+    "usage": ".ddx/executions/20260706T021205-92bb7426/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-3c5aa2e0-20260706T021205-92bb7426"
+  },
+  "prompt_sha": "808615058702da11aa6a96e436dd2a9cf6b67aa2e79bd6aa416cb2fbf5886be1"
+}
