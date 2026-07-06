@@ -1093,11 +1093,19 @@ where
     if !config.enabled {
         return Ok(None);
     }
+    let queues = queues
+        .iter()
+        .filter(|queue| queue.emit_change_records)
+        .cloned()
+        .collect::<Vec<_>>();
+    if queues.is_empty() {
+        return Ok(None);
+    }
     let sink = Arc::new(NiflheimChangeRecordSink::new(config)?);
     Ok(Some(spawn_change_record_emitter(
         backend,
         sink,
-        queues.to_vec(),
+        queues,
         config.clone(),
     )))
 }

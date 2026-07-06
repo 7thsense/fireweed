@@ -53,6 +53,14 @@ func TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled")
 }
 
+func TestEmitChangeRecordTickSkipsOptedOutQueues(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestEmitChangeRecordTickSkipsOptedOutQueues")
+}
+
+func TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut")
+}
+
 func TestTD008EvidenceBundleRecorded(t *testing.T) {
 	runCargoTestWithEnv(t, map[string]string{
 		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",

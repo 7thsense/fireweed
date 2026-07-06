@@ -246,6 +246,12 @@ fn now_timestamp() -> UtcTimestamp {
     .expect("system time produces a valid UTC timestamp")
 }
 
+fn enabled_change_record_queues<'a>(
+    queues: &'a [QueueDefinition],
+) -> impl Iterator<Item = &'a QueueDefinition> + 'a {
+    queues.iter().filter(|queue| queue.emit_change_records)
+}
+
 pub fn emit_change_record_tick<B>(
     backend: &B,
     sink: &impl ChangeRecordSink,
@@ -257,7 +263,7 @@ where
 {
     let emitted_at = now_timestamp();
     let mut total = 0usize;
-    for definition in queues.iter().filter(|queue| queue.emit_change_records) {
+    for definition in enabled_change_record_queues(queues) {
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         match backend.emit_change_record_tail(&shard, sink, batch_size, emitted_at, None) {
             Ok(emitted) => total += emitted,
@@ -297,6 +303,7 @@ where
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn TestChangeRecordSinkDefaultsDisabledUntilEndpointIsSet() {
@@ -364,6 +371,158 @@ mod tests {
         assert!(request.contains("X-Pqueue-Queue: queue-a"));
         assert!(request.contains("authorization: Bearer test"));
         assert!(request.contains("x-custom-header: custom-value"));
+    }
+
+    #[derive(Default)]
+    struct RecordingEmissionBackend {
+        emitted_shards: Mutex<Vec<QueueKey>>,
+        cursor_advances: Mutex<Vec<QueueKey>>,
+    }
+
+    impl ChangeRecordEmissionBackend for RecordingEmissionBackend {
+        fn emit_change_record_tail<S: ChangeRecordSink>(
+            &self,
+            shard: &QueueKey,
+            sink: &S,
+            _limit: usize,
+            emitted_at: UtcTimestamp,
+            _source_owner_id: Option<pqueue_core::OwnerId>,
+        ) -> EngineResult<usize> {
+            self.emitted_shards
+                .lock()
+                .expect("poisoned")
+                .push(shard.clone());
+            self.cursor_advances
+                .lock()
+                .expect("poisoned")
+                .push(shard.clone());
+            let record = pqueue_engine::ChangeRecord {
+                tenant_id: shard.tenant_id.clone(),
+                queue_id: shard.queue_id.clone(),
+                item_id: Some(pqueue_core::ItemId::from_u64(1)),
+                position: pqueue_engine::ChangeRecordPosition {
+                    backend_epoch: 7,
+                    sequence: 1,
+                },
+                command_kind: pqueue_engine::ChangeRecordKind::Push,
+                new_state: Some(pqueue_engine::ChangeRecordState::Pending),
+                item_version: Some(1),
+                terminal_at: None,
+                emitted_at: Some(emitted_at),
+                source_owner_id: None,
+                source_epoch: 7,
+            };
+            sink.emit(shard, &[record])?;
+            Ok(1)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        emitted_shards: Mutex<Vec<QueueKey>>,
+    }
+
+    impl ChangeRecordSink for RecordingSink {
+        fn emit(
+            &self,
+            shard: &QueueKey,
+            _records: &[pqueue_engine::ChangeRecord],
+        ) -> EngineResult<()> {
+            self.emitted_shards
+                .lock()
+                .expect("poisoned")
+                .push(shard.clone());
+            Ok(())
+        }
+    }
+
+    fn queue_definition(tenant: &str, queue: &str, emit_change_records: bool) -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: pqueue_core::TenantId::new(tenant).unwrap(),
+            queue_id: pqueue_core::QueueId::new(queue).unwrap(),
+            priority_model: pqueue_core::PriorityModel {
+                kind: pqueue_core::PriorityModelKind::Int64,
+                direction: pqueue_core::PriorityDirection::Ascending,
+                tie_breaker: pqueue_core::PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: pqueue_core::OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: pqueue_core::EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: pqueue_core::RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: pqueue_core::RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
+            emit_change_records,
+        }
+    }
+
+    #[test]
+    fn TestEmitChangeRecordTickSkipsOptedOutQueues() {
+        let backend = RecordingEmissionBackend::default();
+        let sink = RecordingSink::default();
+        let enabled_def = queue_definition("tenant-a", "queue-a", true);
+        let disabled_def = queue_definition("tenant-b", "queue-b", false);
+        let enabled_shard =
+            QueueKey::new(enabled_def.tenant_id.clone(), enabled_def.queue_id.clone());
+        let disabled_shard = QueueKey::new(
+            disabled_def.tenant_id.clone(),
+            disabled_def.queue_id.clone(),
+        );
+
+        let emitted = emit_change_record_tick(&backend, &sink, &[enabled_def, disabled_def], 64)
+            .expect("tick should succeed");
+
+        assert_eq!(emitted, 1);
+        assert_eq!(
+            backend.emitted_shards.lock().expect("poisoned").as_slice(),
+            &[enabled_shard.clone()]
+        );
+        assert_eq!(
+            sink.emitted_shards.lock().expect("poisoned").as_slice(),
+            &[enabled_shard]
+        );
+        assert!(
+            !backend
+                .emitted_shards
+                .lock()
+                .expect("poisoned")
+                .contains(&disabled_shard)
+        );
+    }
+
+    #[test]
+    fn TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut() {
+        let backend = RecordingEmissionBackend::default();
+        let sink = RecordingSink::default();
+        let enabled_def = queue_definition("tenant-a", "queue-a", true);
+        let disabled_def = queue_definition("tenant-b", "queue-b", false);
+        let enabled_shard =
+            QueueKey::new(enabled_def.tenant_id.clone(), enabled_def.queue_id.clone());
+        let disabled_shard = QueueKey::new(
+            disabled_def.tenant_id.clone(),
+            disabled_def.queue_id.clone(),
+        );
+
+        emit_change_record_tick(&backend, &sink, &[enabled_def, disabled_def], 64)
+            .expect("tick should succeed");
+
+        let advances = backend.cursor_advances.lock().expect("poisoned").clone();
+        assert_eq!(advances, vec![enabled_shard.clone()]);
+        assert!(!advances.contains(&disabled_shard));
+        assert_eq!(
+            sink.emitted_shards.lock().expect("poisoned").as_slice(),
+            &[enabled_shard]
+        );
     }
 
     #[test]
