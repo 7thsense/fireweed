@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T162220-e94b0cb7",
+  "bead_id": "pqueue-3f77d8d2",
+  "base_rev": "8c5919332ab3cbda29b855ca4c9e1c75dd9ca47e",
+  "created_at": "2026-07-06T16:22:20.787735186Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-3f77d8d2",
+    "title": "Wire tenant, queue, and custom headers into sink delivery",
+    "description": "PROBLEM: TD-008 CL-7 requires each delivered change record to carry tenant/queue identity plus configured custom headers, but the current sink request construction is still partial and split from the validation path.\nROOT CAUSE: docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md:31-37 and crates/pqueue-server/src/change_record_sink.rs:78-143 show the delivery envelope and header assembly logic that still need to be finished together.\nPROPOSED FIX: Complete the sink request builder so tenant and queue headers are always injected, configured custom headers are preserved, and the HTTP delivery envelope is built from one consistent request path.\nNON-SCOPE: No Kafka consumer surface, no engine record-mapping changes, no retention-frontier changes, and no claim-path coupling; this remains a background delivery feature only.",
+    "acceptance": "1. `TestChangeRecordSinkWritesTenantQueueAndCustomHeaders` proves the sink emits tenant, queue, and configured custom headers.\n2. `TestChangeRecordSinkBuildsDeliveryRequestWithTenantAndQueueMetadata` proves the request envelope carries the required queue identity metadata.\n3. `go test ./... -run 'TestChangeRecordSinkWritesTenantQueueAndCustomHeaders|TestChangeRecordSinkBuildsDeliveryRequestWithTenantAndQueueMetadata'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-842ac11f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:change-log",
+      "td-008"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T162220-e94b0cb7",
+    "prompt": ".ddx/executions/20260706T162220-e94b0cb7/prompt.md",
+    "manifest": ".ddx/executions/20260706T162220-e94b0cb7/manifest.json",
+    "result": ".ddx/executions/20260706T162220-e94b0cb7/result.json",
+    "checks": ".ddx/executions/20260706T162220-e94b0cb7/checks.json",
+    "usage": ".ddx/executions/20260706T162220-e94b0cb7/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-3f77d8d2-20260706T162220-e94b0cb7"
+  },
+  "prompt_sha": "fcd0817a43fe300869d807b252082afced347104943eeae03f362f6cfca0a927"
+}
