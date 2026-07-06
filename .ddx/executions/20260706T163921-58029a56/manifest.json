@@ -1,0 +1,34 @@
+{
+  "attempt_id": "20260706T163921-58029a56",
+  "bead_id": "pqueue-706ac569",
+  "base_rev": "1c4332d73371fe168c90218d3e00d609cba7a5fb",
+  "created_at": "2026-07-06T16:39:22.377256437Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-706ac569",
+    "title": "Pin fjord and bootstrap the embedded Kafka surface",
+    "description": "PROBLEM: The embedded fjord surface cannot be exercised until pqueue-server names fjord as a real dependency and boots it from typed config behind the existing composition root seam.\nROOT CAUSE: The current repo has pqueue-server config and startup wiring, but no fjord dependency pin or embedded Kafka bootstrap path.\nPROPOSED FIX: Add fjord as a git-pinned dependency with no path deps, thread the embedder config through pqueue-server startup, and allocate fjord state into its own storage namespace without changing the queue commit path.\nNON-SCOPE: Kafka record ordering, offset semantics, ACL enforcement, and consumer-group ownership are handled by sibling beads.",
+    "acceptance": "1. `TestFjordDependencyIsGitPinnedAndNoPathDeps` proves fjord is pinned from git and not from a path dependency.\n2. `TestPqueueServerBootsEmbeddedFjordFromConfig` proves pqueue-server can construct the embedded fjord surface from config.\n3. `go test ./... -run 'TestFjordDependencyIsGitPinnedAndNoPathDeps|TestPqueueServerBootsEmbeddedFjordFromConfig'`\\n4. `lefthook run pre-commit`\\n5. `lefthook run pre-push`",
+    "parent": "pqueue-a391c196",
+    "labels": [
+      "kind:build",
+      "area:fjord",
+      "area:kafka",
+      "area:change-log",
+      "td-008",
+      "adr-014"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T163921-58029a56",
+    "prompt": ".ddx/executions/20260706T163921-58029a56/prompt.md",
+    "manifest": ".ddx/executions/20260706T163921-58029a56/manifest.json",
+    "result": ".ddx/executions/20260706T163921-58029a56/result.json",
+    "checks": ".ddx/executions/20260706T163921-58029a56/checks.json",
+    "usage": ".ddx/executions/20260706T163921-58029a56/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-706ac569-20260706T163921-58029a56"
+  },
+  "prompt_sha": "0a1420d62f1846e7371285b1edcbfe8e0935d34dfb62dce867fadca2c0dd57ce"
+}
