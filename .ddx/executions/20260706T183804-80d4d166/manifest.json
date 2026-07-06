@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T183804-80d4d166",
+  "bead_id": "pqueue-1217b46d",
+  "base_rev": "2866aa5675cbd57694b691f21e5567a6bdb342ec",
+  "created_at": "2026-07-06T18:38:04.582014982Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-1217b46d",
+    "title": "Fix blocking postgres wrapper construction",
+    "description": "PROBLEM: The postgres composition root still needs a blocking-safe wrapper for the composed backend, and the wrong constructor seam can surface an `E0308` under the release matrix.\nROOT CAUSE: `crates/pqueue-server/src/lib.rs:983-1005` constructs the postgres backend and immediately wraps it, while `crates/pqueue-server/src/postgres_native.rs:70-82` exposes `BlockingBackend::from_arc` for an already-constructed shared backend; that seam is where the `BlockingBackend::from_arc` mismatch showed up.\nPROPOSED FIX: thread the composed postgres backend through the `Arc`-based blocking wrapper path, keep the sync client confined off the reactor, and cover the construction path with a focused compile/runtime test.\nNON-SCOPE: CI workflow edits, release alerting, sqlite historical-read wiring, and unrelated formatting/clippy cleanup.",
+    "acceptance": "1. TestBlockingBackendFromArcCompiles: the postgres wrapper path compiles when the composed backend is handed through the Arc-based constructor seam.\n2. TestBlockingBackendKeepsReactorIsolation: sync postgres work still runs only under `spawn_blocking` or an equivalent non-reactor thread boundary.\n3. TestGoTestGate: `go test ./...` passes.\n4. TestLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-a5316d70",
+    "labels": [
+      "kind:build",
+      "area:ci",
+      "area:release",
+      "review-rework"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T183804-80d4d166",
+    "prompt": ".ddx/executions/20260706T183804-80d4d166/prompt.md",
+    "manifest": ".ddx/executions/20260706T183804-80d4d166/manifest.json",
+    "result": ".ddx/executions/20260706T183804-80d4d166/result.json",
+    "checks": ".ddx/executions/20260706T183804-80d4d166/checks.json",
+    "usage": ".ddx/executions/20260706T183804-80d4d166/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-1217b46d-20260706T183804-80d4d166"
+  },
+  "prompt_sha": "b9164728140c2dcc9deadc7cb68100d43244d71f25e0b9c47dbc1e5578f2665c"
+}
