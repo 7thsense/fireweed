@@ -360,6 +360,10 @@ fn bulk_string(value: &Value) -> Vec<u8> {
     }
 }
 
+fn bulk_string_text(value: &Value) -> String {
+    String::from_utf8(bulk_string(value)).expect("RESP bulk string must be valid UTF-8")
+}
+
 fn field_value(fields: &[Value], name: &str) -> Option<Vec<u8>> {
     for pair in fields.chunks_exact(2) {
         if bulk_string(&pair[0]) == name.as_bytes() {
@@ -436,6 +440,99 @@ fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &Claim
         entry.get::<Vec<u8>>("field-b").as_deref(),
         None,
         "removed fields stay absent from the claimed shape"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(non_snake_case)]
+async fn TestKafkaConsumerGroupsStayBrokerOwnedByHeimq() {
+    let (mut con, _backend) = setup().await;
+
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(11)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: String = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg("t1:q1")
+        .arg("heimq-group")
+        .arg("0")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("heimq-group")
+        .arg("heimq-consumer")
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(reply.keys[0].ids.len(), 1);
+    let claimed_id = reply.keys[0].ids[0].id.clone();
+
+    let _: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("heimq-group")
+        .arg(&claimed_id)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let groups: Value = redis::cmd("XINFO")
+        .arg("GROUPS")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let Value::Array(groups) = groups else {
+        panic!("XINFO GROUPS must be an array, got {groups:?}");
+    };
+    assert_eq!(groups.len(), 1, "pqueue keeps only its implicit group");
+    let Value::Array(group) = &groups[0] else {
+        panic!("group entry must be an array");
+    };
+    let mut group_fields = std::collections::HashMap::new();
+    for pair in group.chunks_exact(2) {
+        group_fields.insert(bulk_string_text(&pair[0]), pair[1].clone());
+    }
+    assert_eq!(
+        group_fields.get("name").map(bulk_string_text),
+        Some("default".to_string()),
+        "named consumer groups are not stored in pqueue"
+    );
+    assert_eq!(
+        group_fields.get("pending").and_then(|v| match v {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        }),
+        Some(0),
+        "acked leases are not retained as group-owned offset state"
+    );
+
+    let stream_info: std::collections::HashMap<String, Value> = redis::cmd("XINFO")
+        .arg("STREAM")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        stream_info
+            .get("last-delivered-id")
+            .map(bulk_string_text)
+            .as_deref(),
+        Some("0-0"),
+        "pqueue does not persist committed-stream offsets"
     );
 }
 
