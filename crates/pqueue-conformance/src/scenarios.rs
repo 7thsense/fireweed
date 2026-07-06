@@ -2066,16 +2066,20 @@ pub async fn claimed_item_shape_whole_cohort_omits_per_item_lease_token<B: Confo
     });
     b.create_queue(def).await.unwrap();
 
-    let members = ["1", "2", "3"]
-        .into_iter()
-        .zip(["ka", "kb", "kc"])
-        .map(|(id, key)| {
-            let mut member = item(id, key, 5);
-            member.group_key = Some(GroupKey::new("cohort-a").unwrap());
-            member.cohort_size = Some(3);
-            member
-        })
-        .collect();
+    let members: Vec<_> = [
+        ("1", "ka", "field-a", b"value-a".as_slice()),
+        ("2", "kb", "field-b", b"value-b".as_slice()),
+        ("3", "kc", "field-c", b"value-c".as_slice()),
+    ]
+    .into_iter()
+    .map(|(id, key, field, value)| {
+        let mut member = item(id, key, 5);
+        member.group_key = Some(GroupKey::new("cohort-a").unwrap());
+        member.cohort_size = Some(3);
+        member.fields = BTreeMap::from([(field.to_string(), Bytes::from_static(value))]);
+        member
+    })
+    .collect();
     commit(
         &b,
         envelope(QueueCommand::Push(PushCommand { items: members }), vec![]),
@@ -2106,6 +2110,27 @@ pub async fn claimed_item_shape_whole_cohort_omits_per_item_lease_token<B: Confo
         claimed.items.iter().all(|item| item.lease_token.is_none()),
         "whole_cohort item rows omit per-item lease_token"
     );
+    let expected_fields = BTreeMap::from([
+        (
+            ItemId::new("1").unwrap(),
+            BTreeMap::from([("field-a".to_string(), Bytes::from_static(b"value-a"))]),
+        ),
+        (
+            ItemId::new("2").unwrap(),
+            BTreeMap::from([("field-b".to_string(), Bytes::from_static(b"value-b"))]),
+        ),
+        (
+            ItemId::new("3").unwrap(),
+            BTreeMap::from([("field-c".to_string(), Bytes::from_static(b"value-c"))]),
+        ),
+    ]);
+    for item in &claimed.items {
+        assert_eq!(
+            item.fields,
+            expected_fields.get(&item.item_id).cloned().unwrap(),
+            "whole_cohort item rows retain the current fields map"
+        );
+    }
 }
 
 pub async fn structured_live_items_are_ordered_and_only_live<B: ConformanceCore>(
