@@ -62,22 +62,23 @@ use pqueue_core::{
 };
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::{
-    ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
-    ClaimRef, ClaimRequest, Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand,
-    CohortFinalizeCommand, CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand,
-    CohortRenewLeasePort, CommandEnvelope, CommandPosition, CommitCapabilities, CommitEntryOutcome,
-    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry, ControlPlaneStore,
-    CreateQueueOutcome, DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError,
-    EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
-    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView,
-    LogLineageIdentity, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
-    RequestOutcome, SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
-    compile_entity_schema, project_scopes, validate_claim_compatibility, validate_entity,
-    validate_gate_push, validate_instance_fence, validate_purge_force,
+    ActiveScope, AdvanceInstanceFenceCommand, AsOfProjectionStore, Backend, ClaimCommand,
+    ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem,
+    CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand, CohortFinalizePort,
+    CohortLeaseTarget, CohortRenewLeaseCommand, CohortRenewLeasePort, CommandEnvelope,
+    CommandPosition, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery,
+    CommitTransition, CommitTransitionEntry, ControlPlaneStore, CreateQueueOutcome,
+    DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort,
+    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogLineageIdentity, LogWriter,
+    PayloadUpdate, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
+    PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestOutcome, SetGatesCommand,
+    SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
+    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
+    validate_purge_force,
 };
 use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
@@ -9329,6 +9330,24 @@ impl ProjectionStore for SqliteProjectionStore {
         _key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
         Err(EngineError::Unavailable)
+    }
+}
+
+impl AsOfProjectionStore for SqliteProjectionStore {
+    type AsOfProjection = InMemoryProjection;
+
+    fn reconstruct_as_of(
+        &self,
+        definition: &QueueDefinition,
+        snapshot: Option<ProjectionSnapshot>,
+    ) -> EngineResult<Self::AsOfProjection> {
+        let mut projection = InMemoryProjection::new();
+        projection.ensure_shard(definition)?;
+        if let Some(snapshot) = snapshot {
+            let image = ProjectionImage::from_bytes(&snapshot.payload)?;
+            projection.hydrate_shard(definition, image)?;
+        }
+        Ok(projection)
     }
 }
 
