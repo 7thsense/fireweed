@@ -1,0 +1,16 @@
+{
+  "attempt_id": "20260706T150202-4f1053db",
+  "bead_id": "pqueue-e6e19154",
+  "trigger": "attempt_ended",
+  "scanned_at": "2026-07-06T15:11:45.886544502Z",
+  "reaped": [
+    {
+      "pid": 2053279,
+      "provider": "codex",
+      "command": "/home/linuxbrew/.linuxbrew/bin/codex --no-alt-screen",
+      "age_seconds": 279,
+      "action": "terminated",
+      "reason": "attempt_ended"
+    }
+  ]
+}
