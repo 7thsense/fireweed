@@ -1920,7 +1920,13 @@ async fn run_suite_named(suite: &str, command: &str, release: bool) -> HybridGat
     let load_batch = env_u64("PQUEUE_HYBRID_LOAD_BATCH", default_batch).max(1);
     let claim_batch = env_u64("PQUEUE_HYBRID_CLAIM_BATCH", default_batch).max(1) as usize;
     let target_bytes = env_u64("PQUEUE_HYBRID_SEGMENT_TARGET_BYTES", 262_144) as usize;
-    let max_latency_ms = env_u64("PQUEUE_HYBRID_SEGMENT_MAX_LATENCY_MS", 5);
+    // 500ms (not 5ms) so smoke-tier sealing is SIZE-driven, not timing-driven: on slow shared CI
+    // runners a 5ms latency bound fires between pushes and seals one-command segments, failing the
+    // density gate nondeterministically (v0.9.0 release runs 28802824669/28804163186) while the same
+    // workload packs by target_bytes on any faster machine. Density must measure the workload shape,
+    // not runner speed. Release-tier evidence overrides via PQUEUE_HYBRID_SEGMENT_MAX_LATENCY_MS to
+    // sweep the real commit-latency dial (TP-002 E3).
+    let max_latency_ms = env_u64("PQUEUE_HYBRID_SEGMENT_MAX_LATENCY_MS", 500);
     let cfg = SegmentConfig::new(target_bytes, max_latency_ms).expect("valid segment config");
 
     let inmemory = run_inmemory(resident, load_batch, claim_batch, cfg).await;
