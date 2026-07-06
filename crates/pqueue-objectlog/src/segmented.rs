@@ -1494,10 +1494,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             };
             let blob = self.read_snapshot_blob(shard, ref_id)?;
             let snapshot_position = CommandPosition::new(shard.clone(), blob.epoch, blob.seq);
-            if snapshot_position.precedes(position) || snapshot_position == *position {
-                if best.as_ref().is_none_or(|(bn, _, _)| n > *bn) {
-                    best = Some((n, ref_id.to_string(), snapshot_position));
-                }
+            if (snapshot_position.precedes(position) || snapshot_position == *position)
+                && best.as_ref().is_none_or(|(bn, _, _)| n > *bn)
+            {
+                best = Some((n, ref_id.to_string(), snapshot_position));
             }
         }
         Ok(best.map(|(_, ref_id, position)| (ref_id, position)))

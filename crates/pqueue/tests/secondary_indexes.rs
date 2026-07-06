@@ -53,6 +53,7 @@ fn queue_definition() -> QueueDefinition {
         max_eligible_group_size: None,
         secondary_indexes: vec![],
         entity_schema: None,
+        emit_change_records: true,
         typed_indexes: vec![
             typed_index(
                 "by_score",

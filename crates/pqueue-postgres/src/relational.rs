@@ -4740,13 +4740,12 @@ impl HistoricalProjectionRead for PostgresRelationalBackend {
                 "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
                 &[&t, &q],
             ))?;
-            row.map(|row| {
+            row.and_then(|row| {
                 let next: i64 = row.get(0);
                 let epoch: i64 = row.get(1);
                 (next > 0)
                     .then(|| CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1))
             })
-            .flatten()
             .ok_or(EngineError::NotFound)
         })();
         std::future::ready(result)

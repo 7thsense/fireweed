@@ -1746,17 +1746,19 @@ mod coverage_tests {
             until: None,
         };
         let err = request.validate(&policy()).unwrap_err();
-        assert!(err
-            .message
-            .contains("required when recurrence.mode=recurring"));
+        assert!(
+            err.message
+                .contains("required when recurrence.mode=recurring")
+        );
 
         // max_eligible_group_size == 0
         let mut request = valid_create_queue();
         request.max_eligible_group_size = Some(0);
         let err = request.validate(&policy()).unwrap_err();
-        assert!(err
-            .message
-            .contains("max_eligible_group_size must be greater"));
+        assert!(
+            err.message
+                .contains("max_eligible_group_size must be greater")
+        );
 
         // None branch of the max_eligible_group_size guard validates.
         let mut request = valid_create_queue();

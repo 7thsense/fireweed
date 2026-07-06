@@ -1001,7 +1001,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(BlockingBackend::from_arc(backend));
+            let backend = Arc::new(BlockingBackend::new(backend));
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
         }
         (log, projection) => Err(EngineError::Storage(format!(

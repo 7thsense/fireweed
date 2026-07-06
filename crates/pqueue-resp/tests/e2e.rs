@@ -285,7 +285,10 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
             &shard(),
             item_id,
             BTreeMap::from([
-                ("field-a".to_string(), Some(Bytes::from_static(b"value-a-2"))),
+                (
+                    "field-a".to_string(),
+                    Some(Bytes::from_static(b"value-a-2")),
+                ),
                 ("field-b".to_string(), None),
                 ("field-c".to_string(), Some(Bytes::from_static(b"value-c"))),
             ]),
@@ -314,10 +317,7 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
     let claimed = &reply.keys[0].ids[0];
     assert_eq!(claimed.id, id);
 
-    let claimed_view: Vec<ClaimedItem> = backend
-        .claimed_view(&shard(), &[item_id])
-        .await
-        .unwrap();
+    let claimed_view: Vec<ClaimedItem> = backend.claimed_view(&shard(), &[item_id]).await.unwrap();
     assert_eq!(claimed_view.len(), 1);
     assert_eq!(
         claimed.get::<u64>("item_version"),
@@ -400,7 +400,10 @@ fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &Claim
         entry.get::<i64>("lease_expires_at"),
         Some(ts_millis(claimed.lease_expires_at))
     );
-    assert_eq!(entry.get::<u32>("attempt_count"), Some(claimed.attempt_count));
+    assert_eq!(
+        entry.get::<u32>("attempt_count"),
+        Some(claimed.attempt_count)
+    );
     assert_eq!(
         entry.get::<Vec<u8>>("payload").as_deref(),
         claimed.payload.as_deref()
