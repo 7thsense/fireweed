@@ -1,0 +1,28 @@
+{
+  "ran": true,
+  "changed_docs": [
+    "docs/helix/02-design/contracts/API-003-workload-integration-profiles.md",
+    "docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md",
+    "docs/helix/02-design/technical-designs/TD-005-sqlite-native-embedded-durable-mode.md",
+    "docs/helix/02-design/technical-designs/TD-006-resp-wire-adapter.md",
+    "docs/helix/02-design/technical-designs/TD-007-durability-reclaim-and-durable-state.md",
+    "docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md",
+    "docs/helix/02-design/technical-designs/TD-009-experimentation-pause-branch-read-as-of.md",
+    "docs/helix/03-test/test-plans/TP-001-governing-test-traceability.md",
+    "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md",
+    "docs/helix/04-build/BUILD-001-implementation-plan.md",
+    "docs/helix/04-build/DEPLOYMENT-READINESS.md",
+    "docs/helix/04-build/hybrid-plan-review-convergence.md",
+    "docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/helix/02-design/technical-designs/TD-007-durability-reclaim-and-durable-state.md",
+      "line": 72,
+      "rule_id": "prose.structure.repeated_opening",
+      "severity": "advisory",
+      "rationale": "The same opening sentence is repeated, which reads like filler rather than new information.",
+      "suggested_edit": "Keep the first instance and replace the duplicate with a distinct sentence that adds new information."
+    }
+  ]
+}
