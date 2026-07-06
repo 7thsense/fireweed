@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T225415-1ce41ac2",
+  "bead_id": "pqueue-3e8ba11f",
+  "base_rev": "72b25e9d5033d5292324281d437ff0045ceba262",
+  "created_at": "2026-07-06T22:54:16.352508353Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-3e8ba11f",
+    "title": "Sqlite relational recover-from-log",
+    "description": "PROBLEM\n`SqliteRelationalBackend` still describes the relational projection as DB-authoritative and its reopen path as replay-free, so the sqlite relational family cannot be rebuilt from the durable log tail.\nROOT CAUSE\n`crates/pqueue-sqlite/src/relational.rs:1691-1693, 4039-4040, 8425-8428, 9330-9335` still says the item projection is already durable, the backend is DB-authoritative, and recovery only repopulates control-plane state and counters.\nPROPOSED FIX\nPersist the sqlite relational applied high-water, make `recovery_high_water` return the applied position, and update the reopen/composed recovery path so sqlite relational state is restored by replaying the durable log tail instead of treating `pqueue_items` as authoritative.\nNON-SCOPE\npostgres family changes, shared compose wiring, conformance-suite expansion, docs wording cleanup, and the `pqueue-b59f4897` TOCTOU prerequisite fix.",
+    "acceptance": "1. `TestSqliteRelationalRecoveryHighWater` proves `SqliteRelationalBackend::recovery_high_water` returns the applied position after a truncate/reopen cycle.\n2. `TestSqliteRelationalTruncateThenRecoverExactState` reproduces exact acknowledged state on sqlite relational for items, leases, counters, idempotency, fences, and metrics.\n3. `cargo test -p pqueue-sqlite --test relational_conformance` and `cargo test -p pqueue-sqlite --test composed_relational_reconnect` pass for the sqlite relational path.\n4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-3c5aa2e0",
+    "labels": [
+      "kind:build",
+      "area:pqueue-sqlite",
+      "area:pqueue-relational",
+      "adr-013"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T225415-1ce41ac2",
+    "prompt": ".ddx/executions/20260706T225415-1ce41ac2/prompt.md",
+    "manifest": ".ddx/executions/20260706T225415-1ce41ac2/manifest.json",
+    "result": ".ddx/executions/20260706T225415-1ce41ac2/result.json",
+    "checks": ".ddx/executions/20260706T225415-1ce41ac2/checks.json",
+    "usage": ".ddx/executions/20260706T225415-1ce41ac2/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-3e8ba11f-20260706T225415-1ce41ac2"
+  },
+  "prompt_sha": "64b751565d5ba14f1ae213d9dbbac423c9d9df2fbecdffc8cbb18464108e51e0"
+}
