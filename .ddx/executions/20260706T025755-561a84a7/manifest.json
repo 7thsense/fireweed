@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260706T025755-561a84a7",
+  "bead_id": "pqueue-87784326",
+  "base_rev": "8b522655700e20491ba864126555814dbf81ada7",
+  "created_at": "2026-07-06T02:57:56.679617634Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-87784326",
+    "title": "Extend shared claimed-item conformance for post-update_fields fields",
+    "description": "PROBLEM: API-001 now requires the claimed-item shape to carry the current structured `fields` map as of claim time, including after `update_fields`, but the shared conformance coverage still stops at the original push/claim shape checks. ROOT CAUSE: `crates/pqueue-conformance/src/scenarios.rs:1804` defines the claimed-item shape scenario, yet it only exercises the initial claim state and does not re-claim after `update_fields`; the TP-001 traceability row at `docs/helix/03-test/test-plans/TP-001-governing-test-traceability.md:117` still reflects the older closed shape. PROPOSED FIX: add a dedicated shared scenario that pushes an item, claims it, mutates `fields` with `update_fields`, re-claims or reads the claimed shape, and asserts the current `fields` map plus conditional presence/omission rules; wire that scenario into the existing claimed-item-shape conformance macro and update the TP-001 coverage row. This extends the closed claimed-shape work (`pqueue-9c77d5e7` / `pqueue-922eaf00`). NON-SCOPE: RESP wire changes, backend-specific SQL fixes, and API-003 worker-flow behavior.",
+    "acceptance": "1. TestClaimedItemShapeAfterUpdateFields: `cargo test -p pqueue-sqlite relational_conformance claimed_item_shape -- --nocapture` and `cargo test -p pqueue-postgres conformance claimed_item_shape -- --nocapture` both pass after the shared scenario re-claims an item after `update_fields` and asserts the current `fields` map.\n2. TestClaimedItemShapeTraceability: `rg -n 'API-001 claimed-item response shape' docs/helix/03-test/test-plans/TP-001-governing-test-traceability.md` shows the row updated to include the new fields-after-update_fields coverage.\n3. TestGoTestGate: `go test ./...` passes.\n4. TestLefthookGate: `lefthook run pre-commit` passes.",
+    "parent": "pqueue-7bed1610",
+    "labels": [
+      "kind:test",
+      "area:pqueue-conformance",
+      "area:contracts",
+      "api-001"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T025755-561a84a7",
+    "prompt": ".ddx/executions/20260706T025755-561a84a7/prompt.md",
+    "manifest": ".ddx/executions/20260706T025755-561a84a7/manifest.json",
+    "result": ".ddx/executions/20260706T025755-561a84a7/result.json",
+    "checks": ".ddx/executions/20260706T025755-561a84a7/checks.json",
+    "usage": ".ddx/executions/20260706T025755-561a84a7/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-87784326-20260706T025755-561a84a7"
+  },
+  "prompt_sha": "49d41c505a3d8c9c4ec8cd6475c1c7dec9352dc5fff7638bb4043e1e053a2f30"
+}
