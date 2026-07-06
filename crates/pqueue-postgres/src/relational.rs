@@ -4837,12 +4837,17 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
-    // -- recovery-on-open (ADR-012 P2): the DB-authoritative store holds the full projection + definitions,
-    //    so there is nothing to replay (the default `recovery_high_water` → `None`). Recovery only
-    //    repopulates the in-process control plane and re-seeds the id-mint counters from `pqueue_items`.
+    // -- recovery-on-open (ADR-012 P2): the DB-authoritative store persists the applied cursor in
+    //    `relational_cursor`, so recovery can resume from that durable high-water and only replay the
+    //    retained log tail. Recovery also repopulates the in-process control plane and re-seeds the
+    //    id-mint counters from `pqueue_items`.
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         Ok(self.lock().queues.values().cloned().collect())
+    }
+
+    fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        LogStore::high_water(self, shard)
     }
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
