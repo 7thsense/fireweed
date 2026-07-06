@@ -25,6 +25,38 @@ func TestGoCompatibilityModules(t *testing.T) {
 	}
 }
 
+func TestTerminalReapWaitsForEmissionCursor(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-projection", "reap_waits_for_emission")
+}
+
+func TestTerminalReapAllowsOptOutAfterRetentionOnly(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-projection", "reap_ignores_emission_when_disabled")
+}
+
+func TestTD008ConformanceSuiteGreen(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-projection", "reap_")
+}
+
+func TestTD008EvidenceBundleRecorded(t *testing.T) {
+	runCargoTestWithEnv(t, map[string]string{
+		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",
+	}, "-p", "pqueue-release", "--test", "td008_evidence", "td008_evidence_bundle_recorded")
+	path := filepath.Join("docs", "perf", "evidence", "td008-terminal-reap-frontier.jsonl")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected evidence bundle at %s: %v", path, err)
+	}
+	content := readFile(t, path)
+	for _, needle := range []string{
+		"td008_terminal_reap_frontier",
+		"docs/perf/evidence/td008-terminal-reap-frontier.jsonl",
+		"TestTD008EvidenceBundleRecorded",
+	} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("evidence bundle missing %q:\n%s", needle, content)
+		}
+	}
+}
+
 func TestReleaseWorkflowPublishesContainerDigest(t *testing.T) {
 	workflow := readFile(t, ".github/workflows/release.yml")
 
@@ -70,6 +102,23 @@ func TestReleaseWorkflowPublishesContainerDigest(t *testing.T) {
 		if !strings.Contains(evidence, needle) {
 			t.Fatalf("container evidence helper missing %q", needle)
 		}
+	}
+}
+
+func runCargoTest(t *testing.T, args ...string) {
+	runCargoTestWithEnv(t, nil, args...)
+}
+
+func runCargoTestWithEnv(t *testing.T, env map[string]string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("cargo", append([]string{"test"}, args...)...)
+	cmd.Env = append(os.Environ(), "CARGO_TERM_COLOR=never")
+	for key, value := range env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cargo test %v failed: %v\n%s", args, err, out)
 	}
 }
 
