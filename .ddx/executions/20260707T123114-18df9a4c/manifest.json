@@ -1,0 +1,85 @@
+{
+  "attempt_id": "20260707T123114-18df9a4c",
+  "bead_id": "pqueue-2734d269",
+  "base_rev": "351605b57b4f8d86dabe4160332bbbc2bd4735e9",
+  "created_at": "2026-07-07T12:31:14.692681038Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-2734d269",
+    "title": "Separate listener bind config from Kafka bootstrap config",
+    "description": "PROBLEM: the sink endpoint is doing two jobs, so the server cannot express a listener bind address and an external Kafka bootstrap address independently. ROOT CAUSE: `crates/pqueue-server/src/config.rs:41` conflates `fjord.listen` with producer bootstrap selection and accepts schemeless `host:port` values that are silently treated as Kafka. PROPOSED FIX: add distinct `fjord.listen` and `kafka.bootstrap` settings, require an explicit `kafka://` scheme for Kafka bootstrap, and keep listener parsing/binding separate from producer bootstrap selection. NON-SCOPE: topic encoding, wire-format serialization, batching changes, startup sleep cleanup.",
+    "acceptance": "1. `TestConfigSeparatesListenFromKafkaBootstrap` proves the listener bind address and Kafka bootstrap address can be configured independently.\n2. `TestConfigRejectsSchemalessKafkaBootstrap` rejects schemeless `host:port` bootstrap values and accepts explicit `kafka://` bootstrap values.\n3. `TestConfigKeepsListenerDefaultsWhenBootstrapChanges` confirms listener defaults remain unchanged when only Kafka bootstrap changes.\n4. `go test ./crates/pqueue-server/...` passes for config parsing and validation.\n5. `lefthook run pre-commit` passes with the config split and tests.",
+    "parent": "pqueue-0f9be25f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:fjord",
+      "adr-014",
+      "review-rework"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-07T10:09:50.72024069Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260707T100001-f9cfba9e\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":3672896,\"output_tokens\":33465,\"total_tokens\":3706361,\"cost_usd\":0,\"duration_ms\":588826,\"exit_code\":0}",
+          "created_at": "2026-07-07T10:09:50.751203066Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=3706361 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260707T100001-f9cfba9e\",\"bead_id\":\"pqueue-2734d269\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-07T10:09:51.946339138Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"c2b569428e15d0082b01ea9d8c92265e44774bbd\",\"classification\":\"transport\",\"decode_warnings\":[{\"field\":\"suggested_amendments\",\"warning\":\"expected array; dropped malformed field\",\"raw_excerpt\":\"[\\\"Inspect result_rev 5b8ede733fdf2eb4cbf5fbef2d0cc73e019773fe before discarding it; if it contains useful config-split work, rerun validation from that revision or salvage the patch in a fresh attempt.\\\",\\\"Do not mark the bead complete from this attempt because acceptance validation did not complete cleanly.\\\"]\"},{\"field\":\"suggested_followup_beads\",\"warning\":\"expected array; dropped malformed field\",\"raw_excerpt\":\"[\\\"Investigate unrelated failing pqueue-server object_log_sqlite recovery tests: file_clean_restart_resumes_at_high_water, segmented_clean_restart_recovers_from_snapshot_not_genesis, segmented_lagging_tail_replayed_exactly_once.\\\"]\"}],\"detail\":\"mixed_commit_and_no_changes_rationale\",\"malformed\":true,\"rationale\":\"The attempt report is internally inconsistent: it produced a result_rev/implementation_rev different from base_rev but also supplied a no_changes_rationale, causing mixed_commit_and_no_changes_rationale. Treat this as an execution/reporting transport failure rather than a validated bead outcome. The cited failing tests appear outside the bead scope and should not be used to close or fail the config-split work without inspecting the implementation commit.\",\"recommended_action\":\"release_claim_retry\",\"result_rev\":\"5b8ede733fdf2eb4cbf5fbef2d0cc73e019773fe\",\"session_id\":\"eb-1965f8c4\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-07T10:10:44.441871262Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "transport: release_claim_retry (warnings=2)"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\nrationale: status: open\nreason: `cargo test -p pqueue-server --lib` still fails in `object_log_sqlite::recovery_tests::{file_clean_restart_resumes_at_high_water, segmented_clean_restart_recovers_from_snapshot_not_genesis, segmented_lagging_tail_replayed_exactly_once}` even when run with `RUST_TEST_THREADS=1`; this is a retryable blocker outside the config-split changes in this bead.\ndecision_audit={\"failure_class\":\"transport\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=5b8ede733fdf2eb4cbf5fbef2d0cc73e019773fe\nbase_rev=c2b569428e15d0082b01ea9d8c92265e44774bbd\noutcome_reason=transport",
+          "created_at": "2026-07-07T10:10:44.476112101Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode readiness classification result: json: cannot unmarshal array into Go struct field preClaimIntakePromptRewrite.rewrite.acceptance of type string\",\"fingerprint\":\"4d3ef910fa5fa4ed32056aae58b6a22d70d8b7522ba884a15b06d485686c716e\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"4d3ef910fa5fa4ed32056aae58b6a22d70d8b7522ba884a15b06d485686c716e\"}",
+          "created_at": "2026-07-07T12:31:12.030518456Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T123114-18df9a4c",
+    "prompt": ".ddx/executions/20260707T123114-18df9a4c/prompt.md",
+    "manifest": ".ddx/executions/20260707T123114-18df9a4c/manifest.json",
+    "result": ".ddx/executions/20260707T123114-18df9a4c/result.json",
+    "checks": ".ddx/executions/20260707T123114-18df9a4c/checks.json",
+    "usage": ".ddx/executions/20260707T123114-18df9a4c/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-2734d269-20260707T123114-18df9a4c"
+  },
+  "prompt_sha": "a0b7cd31c7915c9d424b210aaf7a48e2607a643b65e04329043bc826223c4c8e"
+}

@@ -1,0 +1,2 @@
+status: blocked
+reason: cargo test -p pqueue-server still fails in pre-existing object_log_sqlite recovery tests (file_clean_restart_resumes_at_high_water, segmented_clean_restart_recovers_from_snapshot_not_genesis, segmented_lagging_tail_replayed_exactly_once) even with -- --test-threads=1; the config split and new explicit-kafka tests pass, but the package-wide gate remains red outside this bead's scope.
