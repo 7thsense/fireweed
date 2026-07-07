@@ -3024,12 +3024,168 @@ mod tests {
     use pqueue_core::{
         CohortPolicy, EligibilityPolicy, IndexSpec, MetadataValue, PriorityDirection,
         PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RetryPolicy, TenantId,
+        WorkerId,
     };
     use pqueue_engine::{
-        AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandId, FinalizeCommand,
-        FinalizeKind, FinalizeOutcome, PauseQueueCommand, PurgeItemsCommand, PushCommand,
-        RenewLeaseCommand, SideRecord, UpdateFieldsCommand, WriteSideRecordsCommand,
+        AdvanceInstanceFenceCommand, ChangeRecordSink, ClaimCommand, ClaimCompatibility, ClaimPort,
+        ClaimRequest, CommandChecksum, CommandId, ComposedBackend, ControlPlaneStore,
+        FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, InProcessControlPlane,
+        LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand, PushCommand, PushPort,
+        PushSpec, QueueKey, QueueMetrics, RenewLeaseCommand, SideRecord, UpdateFieldsCommand,
+        WriteSideRecordsCommand,
     };
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        Pin::new(future).poll(&mut cx)
+    }
+
+    #[derive(Default)]
+    struct NullChangeRecordSink;
+
+    impl ChangeRecordSink for NullChangeRecordSink {
+        fn emit(
+            &self,
+            _shard: &QueueKey,
+            _records: &[pqueue_engine::ChangeRecord],
+        ) -> EngineResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct ObservedLog {
+        logs: FastHashMap<QueueKey, LogData>,
+        emission_cursor: FastHashMap<QueueKey, CommandPosition>,
+        definitions: BTreeMap<QueueKey, QueueDefinition>,
+    }
+
+    impl LogStore for ObservedLog {
+        fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {
+            self.logs.entry(shard.clone()).or_default();
+            Ok(())
+        }
+
+        fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
+            self.logs
+                .get(shard)
+                .map(LogData::epoch)
+                .ok_or(EngineError::NotFound)
+        }
+
+        fn acquire_epoch(&mut self, shard: &QueueKey) -> EngineResult<u64> {
+            self.logs
+                .get_mut(shard)
+                .map(LogData::advance_epoch)
+                .ok_or(EngineError::NotFound)
+        }
+
+        fn append(
+            &mut self,
+            shard: &QueueKey,
+            commands: &[CommandEnvelope],
+            expected_epoch: u64,
+        ) -> EngineResult<Vec<CommandPosition>> {
+            self.logs
+                .get_mut(shard)
+                .ok_or(EngineError::NotFound)?
+                .append(shard, commands, expected_epoch)
+        }
+
+        fn read_from(
+            &self,
+            shard: &QueueKey,
+            from: Option<CommandPosition>,
+            limit: usize,
+        ) -> EngineResult<pqueue_engine::CommandPage> {
+            Ok(self
+                .logs
+                .get(shard)
+                .ok_or(EngineError::NotFound)?
+                .read_from(shard, from, limit))
+        }
+
+        fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+            Ok(self.logs.get(shard).and_then(LogData::high_water))
+        }
+
+        fn set_high_water(
+            &mut self,
+            shard: &QueueKey,
+            position: CommandPosition,
+        ) -> EngineResult<()> {
+            self.logs
+                .get_mut(shard)
+                .ok_or(EngineError::NotFound)?
+                .set_high_water(position)
+        }
+
+        fn write_snapshot(
+            &mut self,
+            shard: &QueueKey,
+            position: CommandPosition,
+            snapshot: pqueue_engine::ProjectionSnapshot,
+        ) -> EngineResult<pqueue_engine::SnapshotRef> {
+            Ok(self
+                .logs
+                .get_mut(shard)
+                .ok_or(EngineError::NotFound)?
+                .write_snapshot(shard, position, snapshot))
+        }
+
+        fn latest_snapshot(
+            &self,
+            shard: &QueueKey,
+        ) -> EngineResult<Option<pqueue_engine::SnapshotRef>> {
+            Ok(self.logs.get(shard).and_then(LogData::latest_snapshot))
+        }
+
+        fn read_snapshot(
+            &self,
+            snapshot_ref: &pqueue_engine::SnapshotRef,
+        ) -> EngineResult<pqueue_engine::ProjectionSnapshot> {
+            self.logs
+                .get(&snapshot_ref.queue)
+                .ok_or(EngineError::NotFound)?
+                .read_snapshot(snapshot_ref)
+        }
+
+        fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+            Ok(self.emission_cursor.get(shard).cloned())
+        }
+
+        fn set_emission_cursor(
+            &mut self,
+            shard: &QueueKey,
+            position: CommandPosition,
+        ) -> EngineResult<()> {
+            self.emission_cursor.insert(shard.clone(), position);
+            Ok(())
+        }
+
+        fn persist_definition(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            self.definitions.insert(key, definition.clone());
+            Ok(())
+        }
+
+        fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+            Ok(self.definitions.values().cloned().collect())
+        }
+    }
+
+    type ObservedBackend = ComposedBackend<ObservedLog, InMemoryProjection, InProcessControlPlane>;
 
     fn shard() -> QueueKey {
         QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -3120,6 +3276,63 @@ mod tests {
             checksum: CommandChecksum(0),
             created_at: ts(0),
         }
+    }
+
+    fn observed_backend() -> ObservedBackend {
+        ComposedBackend::new(
+            ObservedLog::default(),
+            InMemoryProjection::new(),
+            InProcessControlPlane::new(),
+        )
+    }
+
+    fn create_observed_queue(backend: &ObservedBackend) {
+        let mut create = backend.create_queue(qdef());
+        assert!(matches!(poll_once(&mut create), Poll::Ready(Ok(_))));
+    }
+
+    fn seed_terminal_item_via_commit(
+        backend: &ObservedBackend,
+        claim_lease_expires_at: UtcTimestamp,
+    ) -> (ItemId, CommandPosition) {
+        create_observed_queue(backend);
+        let shard = shard();
+        let mut push = backend.push(&shard, vec![PushSpec::default()], ts(0), None);
+        let pushed = match poll_once(&mut push) {
+            Poll::Ready(Ok(ids)) => ids,
+            other => panic!("unexpected push result: {other:?}"),
+        };
+        let item_id = pushed[0];
+
+        let mut claim = backend.claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("claimer").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: claim_lease_expires_at,
+            now: ts(1),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        });
+        assert!(matches!(poll_once(&mut claim), Poll::Ready(Ok(_))));
+
+        let mut finalize = backend.finalize(
+            &shard,
+            vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+            ts(2),
+            None,
+        );
+        assert!(matches!(poll_once(&mut finalize), Poll::Ready(Ok(()))));
+
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(Some(ItemState::Complete)),
+            "finalize must leave the item terminal"
+        );
+        let terminal_position = backend
+            .with_log(|log| log.high_water(&shard).unwrap())
+            .expect("finalize must advance the durable high-water");
+        (item_id, terminal_position)
     }
     fn version_of(proj: &ProjectionData, id: &str) -> u64 {
         proj.items.get(&iid(id)).unwrap().item_version
@@ -3540,6 +3753,140 @@ mod tests {
 
         println!(
             "TD008_OBSERVED reap_ignores_emission_when_disabled reaped=1 emit_change_records=false"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestTD008ObservedTerminalReapFrontierRun() {
+        let backend = observed_backend();
+        let shard = shard();
+        let definition = qdef();
+        let (item_id, terminal_position) = seed_terminal_item_via_commit(&backend, ts(120));
+        let sink = NullChangeRecordSink;
+        let expired_now = ts(63);
+
+        assert_eq!(
+            backend.with_projection(|projection| projection.metrics(&shard)),
+            Ok(QueueMetrics {
+                pending: 0,
+                leased: 0,
+                complete: 1,
+                failed: 0,
+                resident_terminal_count: 1,
+            })
+        );
+
+        assert_eq!(
+            backend.reap_terminal_items(
+                &shard,
+                expired_now,
+                definition.terminal_retention_ms,
+                true,
+            ),
+            Ok(0),
+            "emit-enabled queues must stay fail-closed until a durable emission cursor exists"
+        );
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(Some(ItemState::Complete))
+        );
+
+        backend
+            .emit_change_record_tail(&shard, &sink, 2, ts(61), None)
+            .unwrap();
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            Some(CommandPosition::new(shard.clone(), 0, 1)),
+            "partial emission must advance the cursor only to the last emitted command"
+        );
+        assert_eq!(
+            backend.reap_terminal_items(
+                &shard,
+                expired_now,
+                definition.terminal_retention_ms,
+                true,
+            ),
+            Ok(0),
+            "the terminal item must survive until the cursor reaches its terminal position"
+        );
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(Some(ItemState::Complete))
+        );
+
+        backend
+            .emit_change_record_tail(&shard, &sink, 1, ts(61), None)
+            .unwrap();
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            Some(terminal_position.clone()),
+            "the durable cursor must advance to the terminal command position"
+        );
+        assert_eq!(
+            backend.reap_terminal_items(
+                &shard,
+                expired_now,
+                definition.terminal_retention_ms,
+                true,
+            ),
+            Ok(1),
+            "once the frontier is satisfied, reap should remove the terminal item immediately"
+        );
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestTD008ObservedTerminalReapNoPrematureDeletion() {
+        let backend = observed_backend();
+        let shard = shard();
+        let definition = qdef();
+        let (item_id, terminal_position) = seed_terminal_item_via_commit(&backend, ts(120));
+        let sink = NullChangeRecordSink;
+        let not_yet_expired = ts(30);
+        let expired_now = ts(63);
+
+        backend
+            .emit_change_record_tail(&shard, &sink, 8, ts(10), None)
+            .unwrap();
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            Some(terminal_position.clone()),
+            "the committed terminal command should be fully emitted before we test retention"
+        );
+
+        assert_eq!(
+            backend.reap_terminal_items(
+                &shard,
+                not_yet_expired,
+                definition.terminal_retention_ms,
+                true,
+            ),
+            Ok(0),
+            "retention must keep the terminal row alive even after the frontier is satisfied"
+        );
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(Some(ItemState::Complete))
+        );
+
+        assert_eq!(
+            backend.reap_terminal_items(
+                &shard,
+                expired_now,
+                definition.terminal_retention_ms,
+                true,
+            ),
+            Ok(1),
+            "the row should be reaped immediately after retention expires"
+        );
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(None)
         );
     }
 
