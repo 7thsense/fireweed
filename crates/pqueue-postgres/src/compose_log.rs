@@ -133,6 +133,10 @@ impl PostgresLog {
 }
 
 impl LogStore for PostgresLog {
+    fn supports_emission_cursor(&self) -> bool {
+        true
+    }
+
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {
         let (t, q) = parts(shard);
         st(self.client.get_mut().execute(

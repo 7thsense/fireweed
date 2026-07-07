@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::fjord_topic_name;
 use pqueue_core::{QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
-    ChangeRecordSink, ComposedBackend, ControlPlane, EngineError, EngineResult, LogStore,
-    ProjectionStore, QueueKey,
+    ChangeRecordSink, ComposedBackend, ControlPlane, ControlPlaneStore, EngineError, EngineResult,
+    LogStore, ProjectionStore, QueueKey,
 };
 use rdkafka::ClientConfig;
 use rdkafka::message::{Header, OwnedHeaders};
@@ -73,6 +73,10 @@ pub trait ChangeRecordEmissionBackend {
     ) -> EngineResult<usize> {
         Ok(0)
     }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        false
+    }
 }
 
 impl<L, P, C> ChangeRecordEmissionBackend for ComposedBackend<L, P, C>
@@ -113,6 +117,10 @@ where
             terminal_retention_ms,
             emit_change_records,
         )
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        self.with_log(|log| log.supports_emission_cursor())
     }
 }
 
@@ -199,31 +207,39 @@ impl ChangeRecordSink for NiflheimChangeRecordSink {
             return Ok(());
         }
         let request = build_delivery_request(&self.endpoint, shard, &self.headers, records)?;
-
         let addr = format!("{}:{}", self.endpoint.host, self.endpoint.port);
-        let mut stream = TcpStream::connect(addr)
-            .map_err(|e| EngineError::Storage(format!("connect durable-ingest endpoint: {e}")))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(5))))
-            .map_err(|e| EngineError::Storage(format!("configure durable-ingest socket: {e}")))?;
-        stream
-            .write_all(&request)
-            .map_err(|e| EngineError::Storage(format!("write durable-ingest request: {e}")))?;
-        let _ = stream.shutdown(std::net::Shutdown::Write);
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|e| EngineError::Storage(format!("read durable-ingest response: {e}")))?;
-        let status = parse_status_code(&response)?;
-        if (200..300).contains(&status) {
-            Ok(())
-        } else {
-            Err(EngineError::Storage(format!(
-                "durable-ingest returned HTTP {status}: {}",
-                response.lines().next().unwrap_or("<empty>")
-            )))
-        }
+        block_on_sync(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut stream = TcpStream::connect(addr).map_err(|e| {
+                    EngineError::Storage(format!("connect durable-ingest endpoint: {e}"))
+                })?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(5))))
+                    .map_err(|e| {
+                        EngineError::Storage(format!("configure durable-ingest socket: {e}"))
+                    })?;
+                stream.write_all(&request).map_err(|e| {
+                    EngineError::Storage(format!("write durable-ingest request: {e}"))
+                })?;
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let mut response = String::new();
+                stream.read_to_string(&mut response).map_err(|e| {
+                    EngineError::Storage(format!("read durable-ingest response: {e}"))
+                })?;
+                let status = parse_status_code(&response)?;
+                if (200..300).contains(&status) {
+                    Ok(())
+                } else {
+                    Err(EngineError::Storage(format!(
+                        "durable-ingest returned HTTP {status}: {}",
+                        response.lines().next().unwrap_or("<empty>")
+                    )))
+                }
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("durable-ingest worker join failed: {e}")))?
+        })
     }
 }
 
@@ -508,6 +524,24 @@ fn enabled_change_record_queues<'a>(
     queues.iter().filter(|queue| queue.emit_change_records)
 }
 
+pub(crate) async fn resolve_change_record_queues<B>(
+    backend: &B,
+    queues: &[QueueDefinition],
+) -> EngineResult<Vec<QueueDefinition>>
+where
+    B: ControlPlaneStore + ?Sized,
+{
+    let mut resolved = Vec::new();
+    for queue in queues {
+        let key = QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+        let definition = backend.queue_definition(&key).await?;
+        if definition.emit_change_records {
+            resolved.push(definition);
+        }
+    }
+    Ok(resolved)
+}
+
 pub fn emit_change_record_tick<B>(
     backend: &B,
     sink: &(impl ChangeRecordSink + ?Sized),
@@ -552,22 +586,86 @@ pub fn spawn_change_record_emitter<B>(
     config: ChangeRecordSinkConfig,
 ) -> tokio::task::JoinHandle<()>
 where
-    B: ChangeRecordEmissionBackend + Send + Sync + 'static,
+    B: ChangeRecordEmissionBackend + ControlPlaneStore + Send + Sync + 'static,
 {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(config.tick_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            if let Err(e) =
-                emit_change_record_tick(backend.as_ref(), sink.as_ref(), &queues, config.batch_size)
-            {
-                eprintln!("[change-record] emission tick failed: {e}");
+            match resolve_change_record_queues(backend.as_ref(), &queues).await {
+                Ok(current_queues) => {
+                    if let Err(e) = emit_change_record_tick(
+                        backend.as_ref(),
+                        sink.as_ref(),
+                        &current_queues,
+                        config.batch_size,
+                    ) {
+                        eprintln!("[change-record] emission tick failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[change-record] queue refresh failed: {e}");
+                }
             }
         }
     })
 }
 
+fn backend_supports_change_record_cursor<B>(backend: &B) -> bool
+where
+    B: ChangeRecordEmissionBackend + ?Sized,
+{
+    backend.supports_change_record_emission_cursor()
+}
+
+fn enabled_boot_queues(queues: &[QueueDefinition]) -> Vec<QueueDefinition> {
+    queues
+        .iter()
+        .filter(|queue| queue.emit_change_records)
+        .cloned()
+        .collect()
+}
+
+fn change_record_sink_requires_durable_cursor<B>(backend: &B) -> EngineResult<()>
+where
+    B: ChangeRecordEmissionBackend + ?Sized,
+{
+    if backend_supports_change_record_cursor(backend) {
+        Ok(())
+    } else {
+        Err(EngineError::Invalid(
+            "change record sink requires a durable emission cursor store",
+        ))
+    }
+}
+
+pub(crate) fn spawn_change_record_emitter_if_enabled<B>(
+    backend: Arc<B>,
+    queues: &[QueueDefinition],
+    config: &ChangeRecordSinkConfig,
+) -> EngineResult<Option<JoinHandle<()>>>
+where
+    B: ChangeRecordEmissionBackend + ControlPlaneStore + Send + Sync + 'static,
+{
+    if !config.enabled {
+        return Ok(None);
+    }
+    let queues = enabled_boot_queues(queues);
+    if queues.is_empty() {
+        return Ok(None);
+    }
+    change_record_sink_requires_durable_cursor(backend.as_ref())?;
+    let sink = build_change_record_sink(config)?;
+    Ok(Some(spawn_change_record_emitter(
+        backend,
+        sink,
+        queues,
+        config.clone(),
+    )))
+}
+
+#[cfg(test)]
 fn spawn_change_record_emitter_if_enabled_with_builders<B, FHttp, FKafka>(
     backend: Arc<B>,
     queues: &[QueueDefinition],
@@ -583,11 +681,7 @@ where
     if !config.enabled {
         return Ok(None);
     }
-    let queues = queues
-        .iter()
-        .filter(|queue| queue.emit_change_records)
-        .cloned()
-        .collect::<Vec<_>>();
+    let queues = enabled_boot_queues(queues);
     if queues.is_empty() {
         return Ok(None);
     }
@@ -600,40 +694,20 @@ where
             ));
         }
     };
-    Ok(Some(spawn_change_record_emitter(
-        backend,
-        sink,
-        queues,
-        config.clone(),
-    )))
-}
-
-pub(crate) fn spawn_change_record_emitter_if_enabled<B>(
-    backend: Arc<B>,
-    queues: &[QueueDefinition],
-    config: &ChangeRecordSinkConfig,
-) -> EngineResult<Option<JoinHandle<()>>>
-where
-    B: ChangeRecordEmissionBackend + Send + Sync + 'static,
-{
-    if !config.enabled {
-        return Ok(None);
-    }
-    let queues = queues
-        .iter()
-        .filter(|queue| queue.emit_change_records)
-        .cloned()
-        .collect::<Vec<_>>();
-    if queues.is_empty() {
-        return Ok(None);
-    }
-    let sink = build_change_record_sink(config)?;
-    Ok(Some(spawn_change_record_emitter(
-        backend,
-        sink,
-        queues,
-        config.clone(),
-    )))
+    let tick_interval = config.tick_interval;
+    let batch_size = config.batch_size;
+    Ok(Some(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tick_interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            if let Err(e) =
+                emit_change_record_tick(backend.as_ref(), sink.as_ref(), &queues, batch_size)
+            {
+                eprintln!("[change-record] emission tick failed: {e}");
+            }
+        }
+    })))
 }
 
 #[cfg(test)]
@@ -766,6 +840,86 @@ mod tests {
         assert_eq!(http_calls.load(Ordering::SeqCst), 0);
         assert_eq!(kafka_calls.load(Ordering::SeqCst), 1);
         handle.abort();
+    }
+
+    struct MutableControlPlane {
+        queue: Mutex<QueueDefinition>,
+    }
+
+    impl MutableControlPlane {
+        fn new(queue: QueueDefinition) -> Self {
+            Self {
+                queue: Mutex::new(queue),
+            }
+        }
+
+        fn set_emit_change_records(&self, enabled: bool) {
+            self.queue.lock().expect("poisoned").emit_change_records = enabled;
+        }
+    }
+
+    impl ControlPlaneStore for MutableControlPlane {
+        fn create_queue(
+            &self,
+            _definition: QueueDefinition,
+        ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::CreateQueueOutcome>> + Send
+        {
+            std::future::ready(Err(EngineError::Unavailable))
+        }
+
+        fn queue_definition(
+            &self,
+            _key: &QueueKey,
+        ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
+            std::future::ready(Ok(self.queue.lock().expect("poisoned").clone()))
+        }
+
+        fn list_queues(
+            &self,
+            _tenant: &pqueue_core::TenantId,
+        ) -> impl std::future::Future<Output = EngineResult<Vec<pqueue_core::QueueId>>> + Send
+        {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn current_epoch(
+            &self,
+            _shard: &QueueKey,
+        ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+            std::future::ready(Err(EngineError::Unavailable))
+        }
+
+        fn acquire_epoch(
+            &self,
+            _shard: &QueueKey,
+        ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+            std::future::ready(Err(EngineError::Unavailable))
+        }
+    }
+
+    #[test]
+    fn TestResolveChangeRecordQueuesUsesControlPlaneDefinitions() {
+        let queue = queue_definition("tenant-a", "queue-a", false);
+        let backend = MutableControlPlane::new(queue.clone());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+        let resolved = runtime
+            .block_on(resolve_change_record_queues(
+                &backend,
+                std::slice::from_ref(&queue),
+            ))
+            .expect("resolve definitions");
+        assert!(resolved.is_empty());
+
+        backend.set_emit_change_records(true);
+        let resolved = runtime
+            .block_on(resolve_change_record_queues(
+                &backend,
+                std::slice::from_ref(&queue),
+            ))
+            .expect("resolve definitions");
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].emit_change_records);
     }
 
     #[test]

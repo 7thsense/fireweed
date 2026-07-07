@@ -1355,6 +1355,66 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn change_record_sink_rejected_on_unwired_profile() {
+    let config = Config::new(
+        BackendSpec {
+            log: LogSpec::Memory,
+            projection: ProjectionSpec::InMemory,
+            control_plane: ControlPlaneSpec::InProcess,
+        },
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    );
+    let mut config = config;
+    config.change_record_sink = ChangeRecordSinkConfig {
+        enabled: true,
+        endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+        ..ChangeRecordSinkConfig::default()
+    };
+
+    match start(config).await {
+        Ok(_) => panic!("memory backend must refuse sink startup"),
+        Err(err) => assert!(
+            err.to_string().contains("only wired for objectlog/hybrid"),
+            "{}",
+            err
+        ),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn change_record_sink_rejected_without_durable_cursor_store() {
+    let (object_root, projection_path) = tmp_runtime_paths("change-record-sink-no-cursor");
+    let mut config = Config::new(
+        objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    );
+    config.segment_config =
+        pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+    config.change_record_sink = ChangeRecordSinkConfig {
+        enabled: true,
+        endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+        ..ChangeRecordSinkConfig::default()
+    };
+
+    match start(config).await {
+        Ok(_) => panic!("objectlog/hybrid must refuse sink startup without a durable cursor"),
+        Err(err) => assert!(
+            err.to_string().contains("durable emission cursor store"),
+            "{}",
+            err
+        ),
+    }
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-force-seal");
     let backend = Arc::new(open_direct_objectlog_hybrid(&object_root, &projection_path));

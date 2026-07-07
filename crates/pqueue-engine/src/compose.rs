@@ -141,6 +141,12 @@ pub trait LogStore: Send {
         Ok(None)
     }
 
+    /// Whether the log axis persists a durable change-record emission cursor. If false, the
+    /// change-record emitter must stay disabled: otherwise a restart can re-read from genesis.
+    fn supports_emission_cursor(&self) -> bool {
+        false
+    }
+
     /// Persist the change-record emission cursor after a successful sink emit.
     fn set_emission_cursor(
         &mut self,
@@ -945,11 +951,16 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         emitted_at: UtcTimestamp,
         source_owner_id: Option<pqueue_core::OwnerId>,
     ) -> EngineResult<usize> {
-        let page = {
+        let cursor = {
             let g = self.inner.lock().expect("composed backend poisoned");
-            let cursor = g.log.emission_cursor(shard)?;
-            g.log.read_from(shard, cursor.clone(), limit)?
+            g.log.emission_cursor(shard)?
         };
+        let page = self
+            .inner
+            .lock()
+            .expect("composed backend poisoned")
+            .log
+            .read_from(shard, cursor.clone(), limit)?;
         if page.entries.is_empty() {
             return Ok(0);
         }
@@ -3551,6 +3562,10 @@ mod ordered_tests {
                 .emission_cursor
                 .get(_shard)
                 .cloned())
+        }
+
+        fn supports_emission_cursor(&self) -> bool {
+            true
         }
 
         fn set_emission_cursor(

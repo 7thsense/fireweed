@@ -752,6 +752,7 @@ impl<B: LibBackend> Pqueue<B> {
             .map(|item_id| FinalizeOutcome {
                 item_id,
                 kind,
+                applied_state: None,
                 not_before,
             })
             .collect();

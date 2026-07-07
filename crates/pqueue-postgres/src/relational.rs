@@ -1887,6 +1887,7 @@ fn apply_command_sql(
                 .map(|item_id| FinalizeOutcome {
                     item_id: *item_id,
                     kind: c.kind,
+                    applied_state: None,
                     not_before: c.not_before,
                 })
                 .collect();
@@ -4726,6 +4727,10 @@ impl PostgresRelational {
 impl LogStore for PostgresRelational {
     fn durability_class(&self) -> DurabilityClass {
         DurabilityClass::Atomic
+    }
+
+    fn supports_emission_cursor(&self) -> bool {
+        true
     }
 
     fn ensure_shard(&mut self, _shard: &QueueKey) -> EngineResult<()> {

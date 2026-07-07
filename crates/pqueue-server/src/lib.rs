@@ -138,6 +138,17 @@ pub enum ControlPlaneSpec {
     InProcess,
 }
 
+fn change_record_sink_profile_is_wired(log: &LogSpec, projection: &ProjectionSpec) -> bool {
+    matches!(
+        (log, projection),
+        (LogSpec::ObjectLog { .. }, ProjectionSpec::Hybrid { .. })
+            | (
+                LogSpec::ObjectLog { .. },
+                ProjectionSpec::HybridAsync { .. }
+            )
+    )
+}
+
 /// Typed configuration for the embedded fjord surface that pqueue-server boots behind the composition
 /// root seam. The namespace root is isolated from pqueue's own queue storage roots so the Kafka surface
 /// state never shares a directory with the queue commit path.
@@ -1133,6 +1144,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     } = config.backend;
     // Only the in-process control plane (queue definitions + placement) is wired today.
     let ControlPlaneSpec::InProcess = control_plane;
+    if config.change_record_sink.enabled
+        && config.queues.iter().any(|queue| queue.emit_change_records)
+        && !change_record_sink_profile_is_wired(&log, &projection)
+    {
+        return Err(EngineError::Invalid(
+            "change record sink is only wired for objectlog/hybrid and objectlog/hybrid-async",
+        ));
+    }
 
     // ADR-012 P2: the server selects on the two-axis [`BackendSpec`] and assembles every wired family from
     // the ONE generic recovery-capable `ComposedBackend` (the monoliths are gone). The memory family needs

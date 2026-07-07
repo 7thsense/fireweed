@@ -109,6 +109,10 @@ impl SqliteLog {
 }
 
 impl LogStore for SqliteLog {
+    fn supports_emission_cursor(&self) -> bool {
+        true
+    }
+
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {
         let (t, q) = parts(shard);
         st(self.conn.execute(
