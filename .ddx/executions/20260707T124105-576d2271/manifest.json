@@ -1,0 +1,77 @@
+{
+  "attempt_id": "20260707T124105-576d2271",
+  "bead_id": "pqueue-415824be",
+  "base_rev": "2656dc347dea56842f3e8e185cec85b37e444116",
+  "created_at": "2026-07-07T12:41:06.941050222Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-415824be",
+    "title": "Decouple embedded broker binding from external Kafka startup",
+    "description": "PROBLEM: external-Kafka deployments still follow the embedded-broker binding path, so startup tries to bind the broker endpoint even when only an external bootstrap should be configured. ROOT CAUSE: `crates/pqueue-server/src/main.rs:73` couples startup wiring to `fjord.listen`, so the runtime uses the same endpoint for broker binding and Kafka producer bootstrap. PROPOSED FIX: update startup wiring so embedded mode binds its own internal broker address while external-Kafka mode only configures `kafka.bootstrap`, never binding the external broker endpoint. NON-SCOPE: topic encoding, wire-format serialization, batching changes, startup sleep cleanup.",
+    "acceptance": "1. `TestExternalKafkaModeSkipsBrokerBind` proves external-Kafka mode configures producer bootstrap without attempting to bind the broker endpoint.\n2. `TestEmbeddedBrokerStillBindsItsOwnAddress` proves embedded mode continues to bind its own internal broker address.\n3. `TestRuntimeUsesKafkaBootstrapIndependently` proves startup consumes `kafka.bootstrap` without deriving it from `fjord.listen`.\n4. `go test ./crates/pqueue-server/...` passes for the startup wiring path and its callers.\n5. `lefthook run pre-commit` passes with the runtime wiring changes and tests.",
+    "parent": "pqueue-0f9be25f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:fjord",
+      "adr-014",
+      "review-rework"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-07T10:27:56.132414828Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260707T101237-eb86d66a\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":5314075,\"output_tokens\":45849,\"total_tokens\":5359924,\"cost_usd\":0,\"duration_ms\":917897,\"exit_code\":0}",
+          "created_at": "2026-07-07T10:27:56.15266555Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=5359924 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260707T101237-eb86d66a\",\"bead_id\":\"pqueue-415824be\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-07T10:27:57.234473675Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"8fd213131478471e842563a5450919651fa5a5cc\",\"classification\":\"implementation\",\"decode_warnings\":[{\"field\":\"suggested_amendments\",\"warning\":\"expected array; dropped malformed field\",\"raw_excerpt\":\"[\\\"Replace the no_changes_rationale with an implementation summary that identifies the committed wiring changes and test coverage.\\\",\\\"Record the out-of-scope failing tests explicitly as pre-existing validation blockers, including the failing test names from object_log_sqlite recovery tests.\\\",\\\"Attach or reference the passing Fjord wiring test output for the new tests added by this attempt.\\\"]\"},{\"field\":\"classification\",\"warning\":\"unknown classification\",\"raw_excerpt\":\"implementation\"},{\"field\":\"recommended_action\",\"warning\":\"unknown recommended_action\",\"raw_excerpt\":\"amend_attempt\"}],\"detail\":\"mixed_commit_and_no_changes_rationale\",\"malformed\":true,\"rationale\":\"The attempt produced an implementation commit, and the added Fjord wiring tests reportedly pass, but the execution was marked failed because the package-wide gate remains red due to pre-existing object_log_sqlite recovery tests outside this bead's scope. This is not a provider transport failure and not a clean no-change attempt; the mixed commit plus no-changes rationale needs normalization and verification of the committed diff against acceptance criteria.\",\"recommended_action\":\"amend_attempt\",\"result_rev\":\"5e47c90f35453464e8fdf6513391de2b997ce11a\",\"session_id\":\"eb-f0ac164f\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[{\"title\":\"Fix pre-existing object_log_sqlite recovery test failures\",\"description\":\"Package-wide validation for pqueue-server is blocked by existing failures in crates/pqueue-server/src/object_log_sqlite.rs recovery tests. Investigate and fix those failures so `cargo test -p pqueue-server` can pass independently of the Kafka startup wiring change.\"}]}",
+          "created_at": "2026-07-07T10:28:20.773747354Z",
+          "kind": "bead-quality.triage-warning",
+          "source": "ddx work",
+          "summary": "unusable triage classification: implementation"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\nrationale: status: blocked\nreason: cargo test -p pqueue-server fails consistently in pre-existing object_log_sqlite recovery tests (crates/pqueue-server/src/object_log_sqlite.rs) that are outside this bead's scope; the Fjord wiring tests added in this pass pass, but the package-wide gate is still red.\ndecision_audit={\"failure_class\":\"unknown\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=5e47c90f35453464e8fdf6513391de2b997ce11a\nbase_rev=8fd213131478471e842563a5450919651fa5a5cc\noutcome_reason=unknown",
+          "created_at": "2026-07-07T10:28:20.798352402Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T124105-576d2271",
+    "prompt": ".ddx/executions/20260707T124105-576d2271/prompt.md",
+    "manifest": ".ddx/executions/20260707T124105-576d2271/manifest.json",
+    "result": ".ddx/executions/20260707T124105-576d2271/result.json",
+    "checks": ".ddx/executions/20260707T124105-576d2271/checks.json",
+    "usage": ".ddx/executions/20260707T124105-576d2271/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-415824be-20260707T124105-576d2271"
+  },
+  "prompt_sha": "fc096990aef35a4fc828cfd1f2292372e42f134c82af032a3451a5d873d7ce1f"
+}

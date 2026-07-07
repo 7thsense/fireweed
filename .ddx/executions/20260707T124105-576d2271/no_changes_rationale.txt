@@ -1,0 +1,2 @@
+status: open
+reason: `cargo test -p pqueue-server` is red on three preexisting `object_log_sqlite::recovery_tests` cases even when run in isolation (`segmented_clean_restart_recovers_from_snapshot_not_genesis`, `segmented_lagging_tail_replayed_exactly_once`, `file_clean_restart_resumes_at_high_water`). The startup wiring change is implemented, but I cannot truthfully claim the bead is complete while the package suite remains red.
