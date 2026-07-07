@@ -1,0 +1,76 @@
+{
+  "attempt_id": "20260707T070225-590cc1a6",
+  "bead_id": "pqueue-15937d2e",
+  "base_rev": "a7b7aa5043067f1aa7caa8d19f11c9a11e8d0238",
+  "created_at": "2026-07-07T07:02:25.582096766Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-15937d2e",
+    "title": "SQLite terminal reap sweep",
+    "description": "PROBLEM: the sqlite relational backend reclaims leases and cohorts but does not sweep terminal rows with the required retention-and-cursor conjunction, so opt-in terminal records never age out. ROOT CAUSE: `crates/pqueue-sqlite/src/relational.rs:8063-8166` implements `ReclaimDriver::tick` for lease and cohort expiry only; the terminal reap predicate already exists in `crates/pqueue-sqlite/src/relational.rs:2206-2265` but is not invoked from the tick path. PROPOSED FIX: wire the sqlite tick path to the terminal sweep using the durable emission cursor from `pqueue-657e5f8d`, reaping terminal rows only when retention has elapsed and the cursor has passed for emit-enabled queues, while preserving retention-only behavior for opt-out queues. NON-SCOPE: do not change Postgres, the composed backend tick wiring, metrics export, evidence ledger, or unrelated lease/cohort reclamation semantics; dependency `pqueue-509a70d0` stays intact.",
+    "acceptance": "1. `TestSqliteTerminalReapSweepsWithCursorConjunction` covers emit-enabled queues and proves terminal rows are reaped only after both retention and cursor conditions are satisfied. 2. `TestTerminalReapOptOutIgnoresCursor` covers opt-out queues and proves terminal rows reap on retention alone. 3. `go test ./...` passes. 4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-daecad34",
+    "labels": [
+      "kind:build",
+      "area:pqueue-sqlite",
+      "td-008",
+      "review-rework"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-07T05:30:05.267140968Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260707T051848-3f7d08ba\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":4533940,\"output_tokens\":37797,\"total_tokens\":4571737,\"cost_usd\":0,\"duration_ms\":676190,\"exit_code\":0}",
+          "created_at": "2026-07-07T05:30:05.285690807Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=4571737 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260707T051848-3f7d08ba\",\"bead_id\":\"pqueue-15937d2e\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-07T05:30:07.828685046Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"735b1795f7560c68e978170f722e9bd3f5a91565\",\"classification\":\"tests_red\",\"detail\":\"mixed_commit_and_no_changes_rationale\",\"rationale\":\"The attempt produced an implementation commit (base_rev 735b1795f7560c68e978170f722e9bd3f5a91565 to result_rev 001a8c584c2a17a50d34bfa0fddc5cff628624ff), but the required workspace verification did not pass because cargo test --workspace failed in unrelated crates/pqueue product_validation_tests with pre-existing Unavailable errors. Under the triage contract, red tests after code changes classify as tests_red even when the failing gate appears unrelated.\",\"recommended_action\":\"release_claim_retry\",\"result_rev\":\"001a8c584c2a17a50d34bfa0fddc5cff628624ff\",\"session_id\":\"eb-6657e15b\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-07T05:30:39.742252169Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "tests_red: release_claim_retry"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\nrationale: status: blocked\nreason: cargo test --workspace fails in unrelated crates/pqueue product_validation_tests with pre-existing Unavailable errors, so the bead cannot be closed against the workspace gate in this worktree.\ndecision_audit={\"failure_class\":\"tests_red\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=001a8c584c2a17a50d34bfa0fddc5cff628624ff\nbase_rev=735b1795f7560c68e978170f722e9bd3f5a91565\noutcome_reason=tests_red",
+          "created_at": "2026-07-07T05:30:39.773115443Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T070225-590cc1a6",
+    "prompt": ".ddx/executions/20260707T070225-590cc1a6/prompt.md",
+    "manifest": ".ddx/executions/20260707T070225-590cc1a6/manifest.json",
+    "result": ".ddx/executions/20260707T070225-590cc1a6/result.json",
+    "checks": ".ddx/executions/20260707T070225-590cc1a6/checks.json",
+    "usage": ".ddx/executions/20260707T070225-590cc1a6/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-15937d2e-20260707T070225-590cc1a6"
+  },
+  "prompt_sha": "c10e14a479de57cf08a334b5d215614de0a1fa7cd8b9074da6ce08da4e833261"
+}
