@@ -138,6 +138,12 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
+CREATE TABLE IF NOT EXISTS relational_emission_cursor (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL,
+    epoch BIGINT NOT NULL,
+    seq BIGINT NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
 CREATE TABLE IF NOT EXISTS pqueue_group_summary (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
     oldest_eligible_at BIGINT,
@@ -914,7 +920,7 @@ fn insert_typed_index_rows(
 
 /// Delete all `pqueue_item_index` rows for the given item IDs.
 fn delete_typed_index_rows(
-    tx: &mut postgres::Transaction<'_>,
+    tx: &mut impl GenericClient,
     t: &str,
     q: &str,
     item_ids: &[String],
@@ -4518,6 +4524,60 @@ fn all_expired_leases_sql(
     Ok(by_queue)
 }
 
+/// Terminal records that are past both the retention window and, for emit-enabled queues, the durable
+/// emission frontier. `emit_change_records=false` keeps the retention-only opt-out path.
+fn reap_terminal_items_sql(
+    client: &mut impl GenericClient,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    terminal_retention_ms: u64,
+    emit_change_records: bool,
+    emission_cursor: Option<&CommandPosition>,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let cutoff = now_n.saturating_sub((terminal_retention_ms as i64).saturating_mul(1_000_000));
+    let rows = if emit_change_records {
+        let Some(cursor) = emission_cursor else {
+            return Ok(Vec::new());
+        };
+        let cursor_seq = cursor.sequence as i64;
+        st(client.query(
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+             AND superseded=false AND lifecycle_state IN ('Complete','Failed') \
+             AND terminal_at IS NOT NULL AND terminal_at<=$3 \
+             AND last_command_sequence<=$4 ORDER BY item_id",
+            &[&t, &q, &cutoff, &cursor_seq],
+        ))?
+    } else {
+        st(client.query(
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+             AND superseded=false AND lifecycle_state IN ('Complete','Failed') \
+             AND terminal_at IS NOT NULL AND terminal_at<=$3 ORDER BY item_id",
+            &[&t, &q, &cutoff],
+        ))?
+    };
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.get(0);
+        ids.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let id_strs: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    st(client.execute(
+        "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+        &[&t, &q, &id_strs],
+    ))?;
+    st(client.execute(
+        "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+        &[&t, &q, &id_strs],
+    ))?;
+    delete_typed_index_rows(client, &t, &q, &id_strs)?;
+    Ok(ids)
+}
+
 /// In-place field/payload update pre-commit validation (absent → `NotFound`, fenced → `StaleLease`,
 /// terminal → `Terminal`, superseded → `Superseded`, version mismatch → `Conflict`). Mutates nothing.
 fn update_fields_validate_sql(
@@ -4699,6 +4759,52 @@ impl LogStore for PostgresRelational {
             let epoch: i64 = row.get(1);
             (next > 0).then(|| CommandPosition::new(shard.clone(), epoch as u64, (next as u64) - 1))
         }))
+    }
+
+    fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let mut g = self.lock();
+        let (t, q) = parts(shard);
+        let row: Option<postgres::Row> = st(g.client.query_opt(
+            "SELECT epoch, seq FROM relational_emission_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?;
+        Ok(row.map(|row| {
+            let epoch: i64 = row.get(0);
+            let seq: i64 = row.get(1);
+            CommandPosition::new(shard.clone(), epoch as u64, seq as u64)
+        }))
+    }
+
+    fn set_emission_cursor(
+        &mut self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        let mut g = self.lock();
+        let (t, q) = parts(shard);
+        let row: Option<postgres::Row> = st(g.client.query_opt(
+            "SELECT epoch, seq FROM relational_emission_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?;
+        if let Some(row) = row {
+            let epoch: i64 = row.get(0);
+            let seq: i64 = row.get(1);
+            let current = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
+            if !current.precedes(&position) && current != position {
+                return Err(EngineError::Invalid("emission cursor regression"));
+            }
+        }
+        st(g.client.execute(
+            "INSERT INTO relational_emission_cursor(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
+             ON CONFLICT (tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+            &[
+                &t,
+                &q,
+                &(position.backend_epoch as i64),
+                &(position.sequence as i64),
+            ],
+        ))?;
+        Ok(())
     }
 
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()> {
@@ -5033,6 +5139,28 @@ impl ProjectionStore for PostgresRelational {
         live_items_sql(&mut self.lock().client, shard, keys)
     }
 
+    fn reap_terminal_items(
+        &mut self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<ItemId>> {
+        let mut g = self.lock();
+        let mut tx = st(g.client.transaction())?;
+        let reaped = reap_terminal_items_sql(
+            &mut tx,
+            shard,
+            now,
+            terminal_retention_ms,
+            emit_change_records,
+            emission_cursor,
+        )?;
+        st(tx.commit())?;
+        Ok(reaped)
+    }
+
     fn index_get_unique(
         &self,
         _shard: &QueueKey,
@@ -5137,6 +5265,7 @@ mod sql_shape_tests {
             "pqueue_group_summary",
             "pqueue_item_key_retention",
             "pqueue_cohorts",
+            "relational_emission_cursor",
             "pqueue_item_gates",
             "pqueue_gate_state",
             "pqueue_item_index",
