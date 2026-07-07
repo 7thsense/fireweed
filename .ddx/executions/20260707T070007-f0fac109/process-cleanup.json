@@ -1,0 +1,9 @@
+{
+  "attempt_id": "20260707T070007-f0fac109",
+  "bead_id": "pqueue-9d89d1e7",
+  "worktree": "/Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-9d89d1e7-20260707T070007-f0fac109",
+  "trigger": "context canceled",
+  "started_at": "2026-07-07T07:00:21.744865097Z",
+  "finished_at": "2026-07-07T07:00:21.751538758Z",
+  "scanned": 90
+}

@@ -1,0 +1,31 @@
+{
+  "attempt_id": "20260707T070007-f0fac109",
+  "bead_id": "pqueue-9d89d1e7",
+  "base_rev": "3bc2fe07810857eb6c356688fac2a003933e9bae",
+  "created_at": "2026-07-07T07:00:07.73169706Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-9d89d1e7",
+    "title": "Add literal wire assertions to RESP post-update e2e",
+    "description": "PROBLEM: the RESP e2e oracle compares the stream entry to the backend's claimed_view, so the post-update check is circular and can pass even when the wire payload is wrong. ROOT CAUSE: `crates/pqueue-resp/tests/e2e.rs:283-326` updates the item through the backend and then validates the claimed stream entry with `assert_claimed_entry_parity` (`crates/pqueue-resp/tests/e2e.rs:380-444`), which never asserts the literal post-update wire values. PROPOSED FIX: add direct wire assertions for `field-a == value-a-2` and `field-c == value-c` in the claimed entry after `update_fields`, while keeping the backend-view parity check as a secondary guard. NON-SCOPE: conformance gating, postgres CI, reserved-name policy, and whole_group coverage. Parent bead pqueue-7bed1610; review basis dbf97f1/14d04ac on beads pqueue-46ea00f4 and pqueue-5c70706b.",
+    "acceptance": "1. `TestRespWireCarriesUpdatedFieldAAndFieldC` asserts the RESP entry contains `field-a == value-a-2` and `field-c == value-c` after the update.\n2. `TestRespOracleDoesNotUseBackendEcho` proves the wire assertion is independent of the backend's claimed_view echo.\n3. `go test ./...` passes.\n4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-05005abb",
+    "labels": [
+      "kind:test",
+      "area:pqueue-resp",
+      "review-rework"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T070007-f0fac109",
+    "prompt": ".ddx/executions/20260707T070007-f0fac109/prompt.md",
+    "manifest": ".ddx/executions/20260707T070007-f0fac109/manifest.json",
+    "result": ".ddx/executions/20260707T070007-f0fac109/result.json",
+    "checks": ".ddx/executions/20260707T070007-f0fac109/checks.json",
+    "usage": ".ddx/executions/20260707T070007-f0fac109/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-9d89d1e7-20260707T070007-f0fac109"
+  },
+  "prompt_sha": "c87ed0c94f93959d9154cd1bfec90e7e5b745afdba08c5a27c95d07cca93b783"
+}
