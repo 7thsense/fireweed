@@ -199,14 +199,22 @@ impl ObjectLogSqliteBackend {
         // Seed the mint counter from the snapshot's materialized items (full-genesis observe replacement).
         self.projection
             .observe_item_counters(shard, &self.counters)?;
-        let snapshot_used = matches!(high_water, Some(n) if n > 0);
+        let high_water_seq = high_water
+            .as_ref()
+            .map(|position| position.sequence)
+            .unwrap_or(0);
+        let snapshot_used = high_water_seq > 0;
         // `read_from` is exclusive (starts at `from.sequence + 1`), so resume at `high_water - 1` to make the
         // first replayed entry exactly `high_water`. No snapshot → genesis.
         let mut from = match high_water {
-            Some(n) if n > 0 => Some(CommandPosition::new(shard.clone(), 0, n - 1)),
+            Some(position) if position.sequence > 0 => Some(CommandPosition::new(
+                shard.clone(),
+                position.backend_epoch,
+                position.sequence - 1,
+            )),
             _ => None,
         };
-        let start_seq = high_water.unwrap_or(0);
+        let start_seq = high_water_seq;
         let mut tail_replayed: u64 = 0;
         loop {
             let page = self.log.read_from(shard, from.clone(), 256).await?;
@@ -1083,8 +1091,11 @@ impl SegmentedObjectLogSqliteBackend {
         // Seed the mint counter from the snapshot's materialized items (full-genesis observe replacement).
         self.projection
             .observe_item_counters(shard, &self.counters)?;
-        let snapshot_used = matches!(high_water, Some(n) if n > 0);
-        let start_seq = high_water.unwrap_or(0);
+        let start_seq = high_water
+            .as_ref()
+            .map(|position| position.sequence)
+            .unwrap_or(0);
+        let snapshot_used = start_seq > 0;
         let entries = self.log.read_from(shard, start_seq)?;
         let tail_replayed = entries.len() as u64;
         if !entries.is_empty() {

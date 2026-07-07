@@ -1204,11 +1204,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             } else {
                 None
             };
-            let _change_record_emitter = spawn_change_record_emitter_if_enabled(
-                backend.clone(),
-                &queues,
-                &change_record_sink,
-            )?;
+            let _change_record_emitter =
+                change_record_sink::spawn_change_record_emitter_if_enabled(
+                    backend.clone(),
+                    &queues,
+                    &change_record_sink,
+                )?;
             run_owned_with_fjord_task(
                 backend, node_id, clock, &listen, interval, &queues, fjord_task,
             )
@@ -1253,11 +1254,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             } else {
                 None
             };
-            let _change_record_emitter = spawn_change_record_emitter_if_enabled(
-                backend.clone(),
-                &queues,
-                &change_record_sink,
-            )?;
+            let _change_record_emitter =
+                change_record_sink::spawn_change_record_emitter_if_enabled(
+                    backend.clone(),
+                    &queues,
+                    &change_record_sink,
+                )?;
             run_owned_with_fjord_task(
                 backend, node_id, clock, &listen, interval, &queues, fjord_task,
             )
@@ -1364,39 +1366,6 @@ fn spawn_hybrid_flusher(
             }
         }
     })
-}
-
-fn spawn_change_record_emitter_if_enabled<B>(
-    backend: Arc<B>,
-    queues: &[QueueDefinition],
-    config: &ChangeRecordSinkConfig,
-) -> EngineResult<Option<JoinHandle<()>>>
-where
-    B: change_record_sink::ChangeRecordEmissionBackend + Send + Sync + 'static,
-{
-    if !config.enabled {
-        return Ok(None);
-    }
-    let queues = queues
-        .iter()
-        .filter(|queue| queue.emit_change_records)
-        .cloned()
-        .collect::<Vec<_>>();
-    if queues.is_empty() {
-        return Ok(None);
-    }
-    let sink: Arc<dyn pqueue_engine::ChangeRecordSink> =
-        if change_record_sink::change_record_sink_is_fjord(config.endpoint.as_deref())? {
-            Arc::new(FjordChangeRecordSink::new(config)?)
-        } else {
-            Arc::new(NiflheimChangeRecordSink::new(config)?)
-        };
-    Ok(Some(spawn_change_record_emitter(
-        backend,
-        sink,
-        queues,
-        config.clone(),
-    )))
 }
 
 /// Wrap an already-`Arc`-shared backend in the single-node ownership runtime and run it: a per-node

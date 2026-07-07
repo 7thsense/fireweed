@@ -14,6 +14,7 @@ use pqueue_engine::{
 use rdkafka::ClientConfig;
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRecordSinkConfig {
@@ -105,6 +106,12 @@ struct ParsedKafkaEndpoint {
 enum ParsedDeliveryEndpoint {
     Http(ParsedEndpoint),
     Kafka(ParsedKafkaEndpoint),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeRecordSinkSelection {
+    Http,
+    Kafka,
 }
 
 #[derive(Debug, Clone)]
@@ -348,12 +355,37 @@ fn parse_delivery_endpoint(input: &str) -> EngineResult<ParsedDeliveryEndpoint> 
 }
 
 pub(crate) fn change_record_sink_is_fjord(endpoint: Option<&str>) -> EngineResult<bool> {
+    Ok(matches!(
+        change_record_sink_selection(endpoint)?,
+        Some(ChangeRecordSinkSelection::Kafka)
+    ))
+}
+
+fn change_record_sink_selection(
+    endpoint: Option<&str>,
+) -> EngineResult<Option<ChangeRecordSinkSelection>> {
     match endpoint {
-        Some(endpoint) => Ok(matches!(
-            parse_delivery_endpoint(endpoint)?,
-            ParsedDeliveryEndpoint::Kafka(_)
+        Some(endpoint) => Ok(Some(match parse_delivery_endpoint(endpoint)? {
+            ParsedDeliveryEndpoint::Http(_) => ChangeRecordSinkSelection::Http,
+            ParsedDeliveryEndpoint::Kafka(_) => ChangeRecordSinkSelection::Kafka,
+        })),
+        None => Ok(None),
+    }
+}
+
+fn build_change_record_sink(
+    config: &ChangeRecordSinkConfig,
+) -> EngineResult<Arc<dyn ChangeRecordSink>> {
+    match change_record_sink_selection(config.endpoint.as_deref())? {
+        Some(ChangeRecordSinkSelection::Http) => {
+            Ok(Arc::new(NiflheimChangeRecordSink::new(config)?) as Arc<dyn ChangeRecordSink>)
+        }
+        Some(ChangeRecordSinkSelection::Kafka) => {
+            Ok(Arc::new(FjordChangeRecordSink::new(config)?) as Arc<dyn ChangeRecordSink>)
+        }
+        None => Err(EngineError::Invalid(
+            "change record sink endpoint is required",
         )),
-        None => Ok(false),
     }
 }
 
@@ -497,11 +529,80 @@ where
     })
 }
 
+fn spawn_change_record_emitter_if_enabled_with_builders<B, FHttp, FKafka>(
+    backend: Arc<B>,
+    queues: &[QueueDefinition],
+    config: &ChangeRecordSinkConfig,
+    build_http_sink: FHttp,
+    build_kafka_sink: FKafka,
+) -> EngineResult<Option<JoinHandle<()>>>
+where
+    B: ChangeRecordEmissionBackend + Send + Sync + 'static,
+    FHttp: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
+    FKafka: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
+{
+    if !config.enabled {
+        return Ok(None);
+    }
+    let queues = queues
+        .iter()
+        .filter(|queue| queue.emit_change_records)
+        .cloned()
+        .collect::<Vec<_>>();
+    if queues.is_empty() {
+        return Ok(None);
+    }
+    let sink = match change_record_sink_selection(config.endpoint.as_deref())? {
+        Some(ChangeRecordSinkSelection::Http) => build_http_sink(config)?,
+        Some(ChangeRecordSinkSelection::Kafka) => build_kafka_sink(config)?,
+        None => {
+            return Err(EngineError::Invalid(
+                "change record sink endpoint is required",
+            ));
+        }
+    };
+    Ok(Some(spawn_change_record_emitter(
+        backend,
+        sink,
+        queues,
+        config.clone(),
+    )))
+}
+
+pub(crate) fn spawn_change_record_emitter_if_enabled<B>(
+    backend: Arc<B>,
+    queues: &[QueueDefinition],
+    config: &ChangeRecordSinkConfig,
+) -> EngineResult<Option<JoinHandle<()>>>
+where
+    B: ChangeRecordEmissionBackend + Send + Sync + 'static,
+{
+    if !config.enabled {
+        return Ok(None);
+    }
+    let queues = queues
+        .iter()
+        .filter(|queue| queue.emit_change_records)
+        .cloned()
+        .collect::<Vec<_>>();
+    if queues.is_empty() {
+        return Ok(None);
+    }
+    let sink = build_change_record_sink(config)?;
+    Ok(Some(spawn_change_record_emitter(
+        backend,
+        sink,
+        queues,
+        config.clone(),
+    )))
+}
+
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn TestChangeRecordSinkDefaultsDisabledUntilEndpointIsSet() {
@@ -539,6 +640,93 @@ mod tests {
         };
         config.validate().expect("kafka endpoint should validate");
         assert!(change_record_sink_is_fjord(config.endpoint.as_deref()).unwrap());
+    }
+
+    #[test]
+    fn TestChangeRecordSinkConfigSelectsKafkaProducerPath() {
+        let http = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("http://127.0.0.1:8080/ingest".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        let kafka = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+
+        assert!(matches!(
+            change_record_sink_selection(http.endpoint.as_deref()).unwrap(),
+            Some(ChangeRecordSinkSelection::Http)
+        ));
+        assert!(matches!(
+            change_record_sink_selection(kafka.endpoint.as_deref()).unwrap(),
+            Some(ChangeRecordSinkSelection::Kafka)
+        ));
+        assert!(
+            !change_record_sink_is_fjord(http.endpoint.as_deref()).unwrap(),
+            "http endpoint must keep the default niflheim path"
+        );
+        assert!(
+            change_record_sink_is_fjord(kafka.endpoint.as_deref()).unwrap(),
+            "kafka endpoint must select the producer path"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn TestChangeRecordEmitterStartsChosenSinkOnly() {
+        #[derive(Default)]
+        struct NoopBackend;
+
+        impl ChangeRecordEmissionBackend for NoopBackend {
+            fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+                &self,
+                _shard: &QueueKey,
+                _sink: &S,
+                _limit: usize,
+                _emitted_at: UtcTimestamp,
+                _source_owner_id: Option<pqueue_core::OwnerId>,
+            ) -> EngineResult<usize> {
+                Ok(0)
+            }
+        }
+
+        let backend = Arc::new(NoopBackend::default());
+        let queues = vec![queue_definition("tenant-a", "queue-a", true)];
+        let http_calls = Arc::new(AtomicUsize::new(0));
+        let kafka_calls = Arc::new(AtomicUsize::new(0));
+        let config = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+            tick_interval: Duration::from_millis(1),
+            ..ChangeRecordSinkConfig::default()
+        };
+
+        let handle = spawn_change_record_emitter_if_enabled_with_builders(
+            backend,
+            &queues,
+            &config,
+            {
+                let http_calls = Arc::clone(&http_calls);
+                move |_| {
+                    http_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Arc::new(RecordingSink::default()) as Arc<dyn ChangeRecordSink>)
+                }
+            },
+            {
+                let kafka_calls = Arc::clone(&kafka_calls);
+                move |_| {
+                    kafka_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Arc::new(RecordingSink::default()) as Arc<dyn ChangeRecordSink>)
+                }
+            },
+        )
+        .expect("emitter should start")
+        .expect("enabled config with emit-change-record queues should spawn");
+
+        assert_eq!(http_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(kafka_calls.load(Ordering::SeqCst), 1);
+        handle.abort();
     }
 
     #[test]
