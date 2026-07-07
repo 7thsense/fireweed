@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     terminal_at INTEGER,
+    terminal_command_epoch INTEGER,
     fenced INTEGER NOT NULL DEFAULT 0,
     superseded INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL,
@@ -804,6 +805,29 @@ fn ensure_item_entity_document_column(conn: &Connection) -> EngineResult<()> {
         }
         Err(e) => Err(EngineError::Storage(e.to_string())),
     }
+}
+
+fn ensure_item_integer_column(conn: &Connection, column: &str) -> EngineResult<()> {
+    if !column
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(EngineError::Invalid("column name must be [A-Za-z0-9_]"));
+    }
+    let sql = format!("ALTER TABLE pqueue_items ADD COLUMN {column} INTEGER");
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(EngineError::Storage(e.to_string())),
+    }
+}
+
+fn ensure_item_terminal_command_epoch_column(conn: &Connection) -> EngineResult<()> {
+    ensure_item_integer_column(conn, "terminal_command_epoch")
 }
 
 fn ensure_cohort_column(conn: &Connection, column: &str, definition: &str) -> EngineResult<()> {
@@ -1790,6 +1814,7 @@ impl Inner {
             claim_scan_default_fifo,
             &mut token_ops,
             shard,
+            &CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
             seq as u64,
             now,
             &command,
@@ -1889,7 +1914,7 @@ fn insert_items(
         ]);
     }
     const ROW_PH: &str =
-        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,0,0,?,?)";
+        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
     for chunk in rows.chunks(SQLITE_BATCH) {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
@@ -1897,7 +1922,7 @@ fn insert_items(
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
               not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
-              updated_at,terminal_at,fenced,superseded,max_attempts,created_seq) VALUES {values}"
+              updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
         let flat = chunk.iter().flatten();
         st(tx.execute(&sql, params_from_iter(flat)))?;
@@ -1931,15 +1956,15 @@ fn insert_default_empty_items(
     now_n: i64,
     base_seq: i64,
 ) -> EngineResult<()> {
-    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,NULL,'{}','{}',NULL,0,1,NULL,NULL,NULL,?,?,?,NULL,0,0,?,?)";
+    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,NULL,'{}','{}',NULL,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
     for (chunk_idx, chunk) in items.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO pqueue_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
               not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
-              item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
-              updated_at,terminal_at,fenced,superseded,max_attempts,created_seq) VALUES {values}"
+             item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
+              updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
         let mut params = Vec::with_capacity(chunk.len() * 10);
         let offset = chunk_idx * SQLITE_BATCH;
@@ -2178,6 +2203,86 @@ fn exec_items_in(
     Ok(())
 }
 
+fn reap_terminal_items_sql(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+    terminal_retention_ms: u64,
+    emit_change_records: bool,
+    emission_cursor: Option<&CommandPosition>,
+) -> EngineResult<Vec<ItemId>> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let cutoff = now_n.saturating_sub((terminal_retention_ms as i64).saturating_mul(1_000_000));
+    let (sql, params): (String, Vec<Value>) = if emit_change_records {
+        let Some(cursor) = emission_cursor else {
+            return Ok(Vec::new());
+        };
+        (
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND superseded=0 AND lifecycle_state IN ('Complete','Failed') \
+             AND terminal_at IS NOT NULL AND terminal_at<=?3 \
+             AND terminal_command_epoch IS NOT NULL \
+             AND (terminal_command_epoch<?4 \
+                  OR (terminal_command_epoch=?4 AND last_command_sequence<=?5))"
+                .to_string(),
+            vec![
+                Value::Text(t.clone()),
+                Value::Text(q.clone()),
+                Value::Integer(cutoff),
+                Value::Integer(cursor.backend_epoch as i64),
+                Value::Integer(cursor.sequence as i64),
+            ],
+        )
+    } else {
+        (
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND superseded=0 AND lifecycle_state IN ('Complete','Failed') \
+             AND terminal_at IS NOT NULL AND terminal_at<=?3"
+                .to_string(),
+            vec![
+                Value::Text(t.clone()),
+                Value::Text(q.clone()),
+                Value::Integer(cutoff),
+            ],
+        )
+    };
+    let mut stmt = st(tx.prepare(&sql))?;
+    let rows = st(stmt.query_map(params_from_iter(params.iter()), |row| {
+        row.get::<_, String>(0)
+    }))?;
+    let mut id_strs = Vec::new();
+    for row in rows {
+        id_strs.push(st(row)?);
+    }
+    let ids: Vec<ItemId> = id_strs
+        .into_iter()
+        .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+        .collect::<EngineResult<Vec<_>>>()?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    exec_items_in(
+        tx,
+        "DELETE FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN",
+        &[],
+        &t,
+        &q,
+        &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+    )?;
+    let id_strs = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    exec_items_in(
+        tx,
+        "DELETE FROM pqueue_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
+        &[],
+        &t,
+        &q,
+        &id_strs,
+    )?;
+    delete_typed_index_rows(tx, &t, &q, &id_strs)?;
+    Ok(ids)
+}
+
 /// A deferred mutation of the in-RAM live-token map, collected during apply and replayed onto the map
 /// ONLY after the transaction commits — so a commit failure can never leave the RAM tokens ahead of the
 /// durable `pqueue_items` state (F4).
@@ -2361,6 +2466,7 @@ fn apply_command_sql(
     claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
     token_ops: &mut Vec<TokenOp>,
     shard: &QueueKey,
+    position: &CommandPosition,
     seq: u64,
     now: UtcTimestamp,
     command: &QueueCommand,
@@ -2720,24 +2826,28 @@ fn apply_command_sql(
             }
             const FINALIZE_SET: &str = "UPDATE pqueue_items SET lifecycle_state=?, lease_token_hash=NULL, \
                  lease_expires_at=NULL, fenced=0, item_version=item_version+1, \
-                 retry_count=CASE WHEN ? THEN 0 ELSE retry_count END, terminal_at=?, updated_at=?, \
-                 last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN";
+                 retry_count=CASE WHEN ? THEN 0 ELSE retry_count END, terminal_at=?, \
+                 terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+                 WHERE tenant_id=? AND queue_id=? AND item_id IN";
             let buckets = [
                 (
                     state_str(ItemState::Complete),
                     false,
                     Value::Integer(now_n),
+                    Value::Integer(position.backend_epoch as i64),
                     &to_complete,
                 ),
                 (
                     state_str(ItemState::Failed),
                     false,
                     Value::Integer(now_n),
+                    Value::Integer(position.backend_epoch as i64),
                     &to_failed,
                 ),
                 (
                     state_str(ItemState::Pending),
                     false,
+                    Value::Null,
                     Value::Null,
                     &to_pending,
                 ),
@@ -2745,10 +2855,11 @@ fn apply_command_sql(
                     state_str(ItemState::Pending),
                     true,
                     Value::Null,
+                    Value::Null,
                     &to_pending_rearm,
                 ),
             ];
-            for (state, reset, terminal_at, ids) in buckets {
+            for (state, reset, terminal_at, terminal_epoch, ids) in buckets {
                 if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
                     && matches!(state, "Complete" | "Failed")
                     && let Some((min_rowid, max_rowid)) =
@@ -2758,12 +2869,13 @@ fn apply_command_sql(
                         "UPDATE pqueue_items SET lifecycle_state=?1, lease_token_hash=NULL, \
                          lease_expires_at=NULL, fenced=0, item_version=item_version+1, \
                          retry_count=CASE WHEN ?2 THEN 0 ELSE retry_count END, terminal_at=?3, \
-                         updated_at=?4, last_command_sequence=?5 \
-                         WHERE tenant_id=?6 AND queue_id=?7 AND rowid BETWEEN ?8 AND ?9",
+                         terminal_command_epoch=?4, updated_at=?5, last_command_sequence=?6 \
+                         WHERE tenant_id=?7 AND queue_id=?8 AND rowid BETWEEN ?9 AND ?10",
                         params![
                             state,
                             reset as i64,
                             terminal_at,
+                            terminal_epoch,
                             now_n,
                             seq as i64,
                             t,
@@ -2786,6 +2898,7 @@ fn apply_command_sql(
                             Value::Text(state.to_string()),
                             Value::Integer(reset as i64),
                             terminal_at,
+                            terminal_epoch,
                             Value::Integer(now_n),
                             Value::Integer(seq as i64),
                         ],
@@ -2843,6 +2956,7 @@ fn apply_command_sql(
                 claim_scan_default_fifo,
                 token_ops,
                 shard,
+                position,
                 seq,
                 now,
                 &QueueCommand::Finalize(FinalizeCommand { outcomes }),
@@ -2952,10 +3066,11 @@ fn apply_command_sql(
             exec_items_in(
                 tx,
                 "UPDATE pqueue_items SET lifecycle_state='Failed', item_version=item_version+1, \
-                 terminal_at=?, updated_at=?, last_command_sequence=? \
+                 terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
                  WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[
                     Value::Integer(now_n),
+                    Value::Integer(position.backend_epoch as i64),
                     Value::Integer(now_n),
                     Value::Integer(seq as i64),
                 ],
@@ -5224,6 +5339,7 @@ fn checkpoint_batch_sql(
             claim_scan_default_fifo,
             &mut token_ops,
             shard,
+            pos,
             pos.sequence,
             env.created_at,
             &env.command,
@@ -5306,6 +5422,7 @@ fn open_inner(conn: Connection) -> EngineResult<Inner> {
     ensure_item_fields_column(&conn)?;
     ensure_item_metadata_column(&conn)?;
     ensure_item_entity_document_column(&conn)?;
+    ensure_item_terminal_command_epoch_column(&conn)?;
     ensure_cohort_lifecycle_columns(&conn)?;
     let mut inner = Inner {
         conn,
@@ -5552,6 +5669,7 @@ fn apply_committed_sql(
         claim_scan_default_fifo,
         &mut token_ops,
         &position.queue,
+        &position,
         position.sequence,
         envelope.created_at,
         &envelope.command,
@@ -5637,6 +5755,7 @@ fn apply_committed_batch_sql(
             claim_scan_default_fifo,
             &mut token_ops,
             &pos.queue,
+            pos,
             pos.sequence,
             env.created_at,
             &env.command,
@@ -5736,6 +5855,7 @@ impl ProjectionWriter for RelProjectionWriter<'_> {
                 self.claim_scan_default_fifo,
                 self.token_ops,
                 &pos.queue,
+                pos,
                 pos.sequence,
                 env.created_at,
                 &env.command,
@@ -6303,6 +6423,7 @@ impl PushPort for SqliteRelationalBackend {
                 claim_scan_default_fifo,
                 &mut token_ops,
                 shard,
+                &CommandPosition::new(shard.clone(), cursor_epoch as u64, seq as u64),
                 seq as u64,
                 now,
                 &QueueCommand::Push(PushCommand { items: push_items }),
@@ -6480,6 +6601,7 @@ impl ClaimPort for SqliteRelationalBackend {
                 claim_scan_default_fifo,
                 &mut token_ops,
                 &req.shard,
+                &CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq as u64),
                 seq as u64,
                 req.now,
                 &claim_command,
@@ -6719,6 +6841,7 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                         claim_scan_default_fifo,
                         token_ops,
                         shard,
+                        &CommandPosition::new(shard.clone(), cursor_epoch as u64, seq),
                         seq,
                         now,
                         command,
@@ -7394,6 +7517,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 claim_scan_default_fifo,
                 &mut token_ops,
                 shard,
+                &CommandPosition::new(shard.clone(), 0, seq as u64),
                 seq as u64,
                 created_at,
                 &claim_command,
@@ -8711,6 +8835,28 @@ impl ProjectionStore for SqliteRelational {
         live_items_sql(&self.lock().conn, shard, keys)
     }
 
+    fn reap_terminal_items(
+        &mut self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<ItemId>> {
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        let reaped = reap_terminal_items_sql(
+            &tx,
+            shard,
+            now,
+            terminal_retention_ms,
+            emit_change_records,
+            emission_cursor,
+        )?;
+        st(tx.commit())?;
+        Ok(reaped)
+    }
+
     fn index_get_unique(
         &self,
         _shard: &QueueKey,
@@ -9367,6 +9513,28 @@ impl ProjectionStore for SqliteProjectionStore {
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
         live_items_sql(&self.lock().conn, shard, keys)
+    }
+
+    fn reap_terminal_items(
+        &mut self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<ItemId>> {
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        let reaped = reap_terminal_items_sql(
+            &tx,
+            shard,
+            now,
+            terminal_retention_ms,
+            emit_change_records,
+            emission_cursor,
+        )?;
+        st(tx.commit())?;
+        Ok(reaped)
     }
 
     fn index_get_unique(
