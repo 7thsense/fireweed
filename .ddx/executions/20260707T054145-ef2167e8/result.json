@@ -1,0 +1,71 @@
+{
+  "bead_id": "pqueue-eff7a0b8",
+  "attempt_id": "20260707T054145-ef2167e8",
+  "base_rev": "2718f230f7ca1c8c5dd333ff951e6ace7dc91695",
+  "result_rev": "2da7569577fcc8d512b681ab05a0fd1f4f8eca38",
+  "implementation_rev": "2da7569577fcc8d512b681ab05a0fd1f4f8eca38",
+  "landed_rev": "2da7569577fcc8d512b681ab05a0fd1f4f8eca38",
+  "landed_branch": "main",
+  "outcome": "merged",
+  "status": "success",
+  "detail": "success",
+  "orchestrator_status": "success",
+  "candidate_ref": "refs/ddx/iterations/20260707T054145-ef2167e8/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260707T054145-ef2167e8",
+      "result_rev": "2da7569577fcc8d512b681ab05a0fd1f4f8eca38",
+      "implementer_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "requested_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "actual_route": {
+        "harness": "codex",
+        "model": "gpt-5.4-mini"
+      },
+      "review_group_id": "20260707T055436-81f27524",
+      "reviewer_indices": [
+        0,
+        1
+      ],
+      "review_verdicts": [
+        "",
+        ""
+      ],
+      "reviewer_route": {
+        "model": "smart"
+      },
+      "review_result": {
+        "classification": "review_malfunction"
+      },
+      "final_decision": "review_malfunction",
+      "failure_class": "review_malfunction",
+      "retry_action": "retry",
+      "escalation_count": 0,
+      "review_status": "malformed",
+      "review_skip_reason": "",
+      "review_classification": "review_malfunction",
+      "land_status": "not_landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "codex",
+  "model": "gpt-5.4-mini",
+  "session_id": "eb-0943b6bb",
+  "duration_ms": 769834,
+  "tokens": 8295330,
+  "exit_code": 0,
+  "project_root": "/Users/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260707T054145-ef2167e8",
+  "prompt_file": ".ddx/executions/20260707T054145-ef2167e8/prompt.md",
+  "manifest_file": ".ddx/executions/20260707T054145-ef2167e8/manifest.json",
+  "result_file": ".ddx/executions/20260707T054145-ef2167e8/result.json",
+  "usage_file": ".ddx/executions/20260707T054145-ef2167e8/usage.json",
+  "started_at": "2026-07-07T05:41:46.328183396Z",
+  "finished_at": "2026-07-07T05:54:36.162332523Z"
+}
