@@ -14,7 +14,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
+    self_hash: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -27,7 +27,7 @@ ddx:
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-07T06:16:09Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -250,13 +250,25 @@ pending, without making SQLite an authority.
 
 | Element | Rule |
 |---------|------|
-| Authority boundary | SQLite holds NO acknowledged lease until `apply_committed` runs (pipeline step 6). Reservations are a separate, non-authoritative, in-memory-or-local bookkeeping state (e.g., a `pending_reservations` table or in-process index) that records "these item rows are tentatively claimed by pending command `command_id` at epoch E." It is rebuilt from the in-flight buffer on restart and is never snapshotted. |
+| Authority boundary | SQLite holds NO acknowledged lease until `apply_committed` runs (pipeline step 6). Reservations are a separate, non-authoritative, in-memory-or-local bookkeeping state (e.g., a `pending_reservations` table or in-process index) that records "these item rows are tentatively claimed by pending command `command_id` at epoch E." It is rebuilt from the in-flight buffer on restart and is never snapshotted. Mutable-write commands do not rely on this table for closure; they are revalidated against the hot projection and committed claim state during apply, in the same unit of work that releases success. |
 | Select + reserve atomically | A `BatchClaim` MUST, in one SQLite write transaction: (1) evaluate the API-001 Eligibility Precedence predicate and the unified `ClaimPlan` to select candidate items, (2) mark those items reserved against the new claim `command_id`, and (3) append the claim command to the pending segment buffer. Reserved items MUST be excluded from candidate selection by any concurrent claim, so no duplicate local claim can occur while the segment is pending. (SQLite serializes writers, making (1)–(3) atomic.) |
 | Commit → promote | When the segment's manifest entry commits and `apply_committed` applies the claim command, the reservation is promoted to a durable lease (lease row written, reservation cleared). Only then is committed lease state exposed to reads/metrics. |
 | Roll back on CAS/timeout/fence | If the segment's manifest CAS fails (fenced or raced), the commit deadline elapses (`commit-timeout`), or the writer is fenced, the writer MUST clear the reservations for that command so the items return to the candidate pool. No lease is created and no ack is returned; the caller retries by `request_id` (claim idempotency). |
 | Crash before manifest | If the writer crashes after reserving but before the manifest commits, the reservation is lost (it was never durable) and the claim command is lost with the unacked buffer. The new epoch holder recovers from snapshot + committed log; the un-acked claim simply never happened, and the caller's retry by `request_id` either re-claims or returns `request-expired` per API-001 claim idempotency. |
 | Reservation TTL | Reservations MUST have a bound tied to the commit deadline so a stuck writer cannot pin items indefinitely; a reservation older than the commit deadline MUST be reclaimable. |
 | Idempotent re-claim | A retried claim `request_id` whose original command did commit MUST converge to the same lease set (replay-response, "Replay-Response Idempotency Model"); a retry whose original never committed is a fresh claim subject to current eligibility. |
+
+## Mutable-write race closure (normative)
+
+`objectlog/hybrid-strict` and `objectlog/hybrid-async` MAY admit
+`replace_if_pending`, `update_fields`, and `reschedule` only when the command's
+apply phase performs deterministic re-validation against the current hot
+projection in the same committed unit of work that makes the response visible.
+The pre-commit hot read is a fast path, not the closure mechanism. The
+deterministic apply step re-checks the target item after any concurrent claim
+reservation has been materialized, so a command that loses the race fails
+closed, never acks, and replays to the same rejection. This is the group-commit
+buffered-window closure for mutable writes.
 
 ## Response / Apply Ordering and Read-After-Write (normative)
 
@@ -279,8 +291,8 @@ telemetry, verification ledgers, and release notes.
 
 | Mode | Success barrier | SQLite projection role | Failure semantics |
 |------|-----------------|------------------------|-------------------|
-| `objectlog/hybrid-strict` | Manifest commit + durable SQLite apply + synchronous memory apply/render for the operation's own result | SQLite is on the response path and is the owner-local restart accelerator/high-water source; the hot memory image is current before success returns | SQLite apply failure returns no success; SQLite commit followed by memory apply failure poisons the store; upsert/update/reschedule race closure is conformance-gated |
-| `objectlog/hybrid-async` | Manifest commit + synchronous memory apply/render for the operation's own result | SQLite is an asynchronous projection fed from the committed object log and MAY lag behind memory; the hot memory image is current before success returns | SQLite lag/failure after success is retried from the object log; memory apply/render failure before success produces an unknown-outcome retry path; upsert/update/reschedule race closure is conformance-gated |
+| `objectlog/hybrid-strict` | Manifest commit + durable SQLite apply + synchronous memory apply/render for the operation's own result | SQLite is on the response path and is the owner-local restart accelerator/high-water source; the hot memory image is current before success returns | SQLite apply failure returns no success; SQLite commit followed by memory apply failure poisons the store; upsert/update/reschedule race closure is conformance-gated through deterministic apply-time re-validation |
+| `objectlog/hybrid-async` | Manifest commit + synchronous memory apply/render for the operation's own result | SQLite is an asynchronous projection fed from the committed object log and MAY lag behind memory; the hot memory image is current before success returns | SQLite lag/failure after success is retried from the object log; memory apply/render failure before success produces an unknown-outcome retry path; upsert/update/reschedule race closure is conformance-gated through deterministic apply-time re-validation |
 
 Both modes use the same manifest ack boundary and group-commit pipeline as the
 other object-log profiles. The difference is which projection applies are inside
@@ -288,10 +300,11 @@ the success barrier.
 
 For mutable item changes, the ban is profile-specific rather than universal:
 `objectlog/hybrid-strict` and `objectlog/hybrid-async` MAY admit
-`replace_if_pending`, `update_fields`, and `reschedule` because the hot
-projection is applied before success returns and the request validates against
-current state. Pure lagging-projection log-then-apply profiles remain unable to
-close the same race and must keep the `-ERR pqueue unavailable` behavior.
+`replace_if_pending`, `update_fields`, and `reschedule` because TD-004's
+mutable-write closure runs deterministic apply-time re-validation in the same
+ack-after-apply unit of work. Pure lagging-projection log-then-apply profiles
+remain unable to close the same race and must keep the
+`-ERR pqueue unavailable` behavior.
 
 ### `objectlog/hybrid-strict` apply path
 
@@ -756,11 +769,13 @@ The following cases define the required evidence surface:
   barrier for push, claim, renew, finalize, retry/release, update, purge, and
   operator-style mutations; same-body retry returns the original result without
   append, different-body retry returns `request-id-conflict`.
-- Mutable-write race closure: on `objectlog/hybrid-strict` and
-  `objectlog/hybrid-async`, race `replace_if_pending`/`update_fields`/`reschedule`
-  against a concurrent claim for the same pending item under group commit;
-  exactly one path succeeds, the winner is visible on the response path, and
-  the loser fails closed.
+- Mutable-write race closure: for profiles that admit mutable writes
+  (`objectlog/hybrid-strict` and `objectlog/hybrid-async`), race
+  `replace_if_pending`/`update_fields`/`reschedule` against a concurrent claim
+  for the same pending item under group commit; exactly one path succeeds, the
+  winner is visible on the response path, and the loser fails closed. The
+  legacy `eventual_apply_suite` keeps asserting `upsert_is_unavailable` for the
+  pure lagging-projection profiles, while this case covers the lifted profiles.
 - Hybrid segment retention: prove local SQLite high-water alone never authorizes
   object-log segment expiry; compute the retention frontier as the minimum of
   committed snapshot coverage, active manifest tail, request-id retention,

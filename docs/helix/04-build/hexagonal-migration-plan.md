@@ -51,9 +51,13 @@ method has a conformance test that fails if the impl returns a default/no-op** (
 - **Atomic** (memory lock / sqlite / postgres one txn): append+apply commit together; post-commit
   projection globally consistent. **Invariant 1 & 2 strong guarantees hold only here.**
 - **Eventual-apply** (objectlog): ack after log commit, apply within a bounded window; guarantee is
-  self-read-after-write only. Priority order is "over applied state, eventual"; **upsert is forbidden**
-  (re-`XADD` on an existing key returns `-ERR pqueue unavailable`) because the upsert↔claim race is
-  unclosable when the claim reads a lagging projection (§3 flavor-difference 5).
+  self-read-after-write only. Priority order is "over applied state, eventual"; pure
+  lagging-projection objectlog profiles keep **upsert forbidden** (re-`XADD` on an existing key returns
+  `-ERR pqueue unavailable`) because the upsert↔claim race is unclosable when the claim reads a
+  lagging projection (§3 flavor-difference 5).
+- `objectlog/hybrid-strict` and `objectlog/hybrid-async` are the profile-qualified exception: they may
+  lift the mutable-write ban only after TD-004 proves deterministic apply-time re-validation with
+  ack-after-apply.
 
 **2.3 Single *logical* claim path.** Engine is the single logical claim authority; a backend MAY
 implement claim atomically behind `ClaimPort` (postgres keeps `FOR UPDATE SKIP LOCKED`). Upsert and
@@ -85,9 +89,11 @@ command holds even where pqueue's flavor differs. Two implementation invariants:
 - **Invariant 2 — upsert = atomic `XDEL old` + `XADD new`, pending-only, atomic-class-only.** Re-`XADD`
   colliding with a **pending** item (via `UpsertPort`, same UoW as claim) returns a new monotonic id;
   old id reads deleted; `XLEN` nets unchanged. Collision with **claimed/terminal** → reject. Absent
-  `client_item_key` ⇒ always append. On eventual-apply ⇒ `-ERR pqueue unavailable` (§2.2). A later
-  `XACK`/`XCLAIM` of a **superseded** old id returns **`-ERR pqueue superseded`** (never a silent
-  `nil` — preserves at-least-once "no silent drop").
+  `client_item_key` ⇒ always append. On pure lagging-projection eventual-apply profiles ⇒
+  `-ERR pqueue unavailable` (§2.2). On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the
+  same upsert path may be admitted only after TD-004's deterministic apply-time re-validation /
+  ack-after-apply proof. A later `XACK`/`XCLAIM` of a **superseded** old id returns
+  **`-ERR pqueue superseded`** (never a silent `nil` — preserves at-least-once "no silent drop").
 
 **Stock surface (faithful per contract):**
 - `XADD` — upsert-on-key (Inv 2).
@@ -202,7 +208,10 @@ image + health probe); none halted.
 - e2e RESP suite green with pinned off-the-shelf client(s): drain-reconcile, cursor loop, crash
   recovery, fence=`-ERR pqueue stale_lease`, upsert effects+collision+superseded, intra-group exclusion.
 - One conformance suite green on memory+sqlite+postgres+objectlog; eventual-apply asserts the *weaker*
-  guarantee; upsert-on-eventual-apply returns `-ERR pqueue unavailable`.
+  guarantee; pure lagging-projection eventual-apply profiles keep
+  `upsert-on-eventual-apply` at `-ERR pqueue unavailable`, while the hybrid
+  profiles may lift the ban only after TD-004 proves deterministic
+  apply-time re-validation with ack-after-apply.
 - Two driving adapters + one composition root; **dependency-direction test passes**.
 - Durable-state debt closed (idempotency/fences/pause/`command_position` reconstructable from the log).
 - Docs consistent; ADR-007/TD-006(refolded)/TD-007 recorded; capability asymmetry recorded.

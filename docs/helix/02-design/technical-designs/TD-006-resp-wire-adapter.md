@@ -10,7 +10,7 @@ ddx:
     - td-sharding-and-shard-ownership
   status: draft
   review:
-    self_hash: 0414829c85906588637eba5fdf9bc25a05e4e3ba86cac15edec9e73557e7e807
+    self_hash: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
@@ -18,7 +18,7 @@ ddx:
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-07T06:16:09Z"
 ---
 
 # Technical Design
@@ -162,9 +162,11 @@ Rules:
 - If the key collides with **claimed (leased, non-terminal)** work, the call returns
   `-ERR pqueue invalid` (no lifecycle transition on in-flight work). If it collides with **terminal**
   work, the call returns `-ERR pqueue terminal`. (Mapping pinned in TD-007 §2.3.)
-- On log-then-apply backends, replacement is unavailable until the backend can close the
-  replacement/claim race under the same external transaction contract; unavailable replacement returns
+- On pure lagging-projection log-then-apply backends, replacement is unavailable and returns
   `-ERR pqueue unavailable`.
+- On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, replacement MAY be enabled only after
+  TD-004 proves deterministic apply-time re-validation with ack-after-apply. Until that proof lands,
+  they also return `-ERR pqueue unavailable`.
 - Non-reserved field/value pairs are stored as structured item fields. `payload` is stored separately as
   the existing opaque payload slot. Claims and `PQ.*` reads return both.
 
@@ -268,7 +270,7 @@ interface. The RESP launch contract is the stock worker hot path.
 | Operation | RESP stock | Rust library |
 |---|---:|---:|
 | Push append | pass (`XADD`) | pass |
-| Pending-item replacement | pass on atomic backends (`XADD` with `client_item_key`); pass on `objectlog/hybrid-strict` and `objectlog/hybrid-async` once TD-004's race-closure conformance is met | pass |
+| Pending-item replacement | pass on atomic backends (`XADD` with `client_item_key`); pass on `objectlog/hybrid-strict` and `objectlog/hybrid-async` once TD-004 proves deterministic apply-time re-validation with ack-after-apply | pass |
 | Claim item, unfiltered | pass (`XREADGROUP >`) | pass |
 | Claim filtered by group or metadata | library-only-intentional | pass |
 | Claim whole group or whole cohort | library-only-intentional | pass |
@@ -302,7 +304,7 @@ Launch custom RESP commands are read-only and scoped to live item access.
 6. **Log-then-apply backends preserve the same durable queue contract through a response barrier.**
    Pure lagging-projection profiles still return `-ERR pqueue unavailable` for pending-item
    replacement; `objectlog/hybrid-strict` and `objectlog/hybrid-async` lift that ban only after they
-   prove the race-closure conformance cases in TD-004.
+   prove deterministic apply-time re-validation with ack-after-apply in TD-004.
 7. **`PQ.H*` commands are pqueue live-item reads, not Redis hashes.** They emulate Redis hash read
    response shapes over pqueue's structured item fields. They do not create independent hash keys, and
    data disappears from the live view when the queue item completes, fails, is purged, or is superseded.

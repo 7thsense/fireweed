@@ -10,12 +10,12 @@ ddx:
   review:
     self_hash: 64af1d72d4246cb1cbe23c851fcf7f7ffbc7ccbc210ea6b5ab494cc46d5ea61a
     deps:
-      adr-log-single-source-of-truth: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
+      adr-log-single-source-of-truth: 59aa04e425cda6e2ba888b4fc58108be7727fa9fd168fa9e951909346427c601
       adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
       td-queue-history-change-records: 02808f93dee17f6f31facc9719b7c3b534ba871d430255eceafa37b0aea67ddf
-      td-s3-object-log-sqlite-projection-mode: 47f10c9ec69454100ac9250c87805c6a17a893fd81e6be3dfe3c9f3c361b4b5d
+      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-07T06:16:24Z"
 ---
 
 # TD-009: Experimentation surface — pause, branch-at-position, read-as-of-position
