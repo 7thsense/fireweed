@@ -1,0 +1,3 @@
+status: open
+orchestrator_action: decompose
+reason: split into child beads pqueue-6f6b6c19, pqueue-f21b637f, pqueue-857fc10d, pqueue-85c668d3, pqueue-716ef4c4 because the parent scope spans production wiring, two relational backends, metrics export, and evidence capture
