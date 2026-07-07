@@ -11,9 +11,9 @@ use pqueue_core::{
     RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    ChangeRecord, ChangeRecordKind, ClaimPort, ClaimRequest, Clock, ComposedBackend,
-    ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
-    InMemoryControlPlane, InProcessControlPlane, ProjectionRead, PushPort, PushSpec,
+    ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest, Clock,
+    ComposedBackend, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
+    InMemoryControlPlane, InProcessControlPlane, LogStore, ProjectionRead, PushPort, PushSpec,
     QueueControlPlane, QueueKey,
 };
 use pqueue_memory::{ManualClock, composed_memory_backend};
@@ -24,7 +24,7 @@ use pqueue_server::{
     NiflheimChangeRecordSink, OwnershipRuntime, ProjectionSpec, emit_change_record_tick, start,
     start_with,
 };
-use pqueue_sqlite::HybridProjectionStore;
+use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend_in_memory};
 
 /// The composed objectlog-LOG + sqlite-PROJECTION spec (replaces the retired `Backend::ObjectLogSqlite` /
 /// `Backend::SegmentedObjectLogSqlite` variants — both are now this one composition).
@@ -1724,4 +1724,92 @@ async fn change_record_sink_failure_isolation() {
             .collect::<Vec<_>>()
     };
     assert_eq!(stable(&received[0]), stable(&received[1]));
+}
+
+#[derive(Default)]
+struct RecordingChangeRecordSink {
+    batches: std::sync::Mutex<Vec<Vec<ChangeRecordKind>>>,
+}
+
+impl RecordingChangeRecordSink {
+    fn batches(&self) -> Vec<Vec<ChangeRecordKind>> {
+        self.batches.lock().expect("sink poisoned").clone()
+    }
+}
+
+impl ChangeRecordSink for RecordingChangeRecordSink {
+    fn emit(&self, _shard: &QueueKey, records: &[ChangeRecord]) -> pqueue_engine::EngineResult<()> {
+        self.batches
+            .lock()
+            .expect("sink poisoned")
+            .push(records.iter().map(|record| record.command_kind).collect());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn emit_enabled_queues_reap_terminal_items_only_after_cursor_reaches_terminal_record() {
+    let backend = Arc::new(composed_sqlite_backend_in_memory().unwrap());
+    let shard = qkey();
+    backend.create_queue(qdef()).await.unwrap();
+
+    let ids = backend
+        .push(&shard, vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    let claim = backend
+        .claim(ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("worker-1").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("lease-1").unwrap(),
+            lease_expires_at: ts(60),
+            now: ts(1),
+            compatibility: Default::default(),
+            expected_epoch: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(claim.items[0].item_id, ids[0]);
+    backend
+        .finalize(
+            &shard,
+            vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let sink = RecordingChangeRecordSink::default();
+    let queues = vec![qdef()];
+
+    emit_change_record_tick(backend.as_ref(), &sink, &queues, 1).unwrap();
+    assert_eq!(
+        backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+        Some(pqueue_engine::CommandPosition::new(shard.clone(), 0, 0))
+    );
+    assert_eq!(backend.metrics(&shard).await.unwrap().complete, 1);
+
+    emit_change_record_tick(backend.as_ref(), &sink, &queues, 1).unwrap();
+    assert_eq!(
+        backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+        Some(pqueue_engine::CommandPosition::new(shard.clone(), 0, 1))
+    );
+    assert_eq!(backend.metrics(&shard).await.unwrap().complete, 1);
+
+    emit_change_record_tick(backend.as_ref(), &sink, &queues, 1).unwrap();
+    assert_eq!(
+        backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+        Some(pqueue_engine::CommandPosition::new(shard.clone(), 0, 2))
+    );
+    assert_eq!(backend.metrics(&shard).await.unwrap().complete, 0);
+    assert_eq!(
+        sink.batches(),
+        vec![
+            vec![ChangeRecordKind::Push],
+            vec![ChangeRecordKind::Claim],
+            vec![ChangeRecordKind::Finalize],
+        ]
+    );
 }

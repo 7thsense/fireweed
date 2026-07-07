@@ -621,6 +621,19 @@ pub trait ProjectionStore: Send {
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>>;
 
+    /// Reap terminal items that are now durable-emission safe for one shard. Projections that do not
+    /// materialize terminal-item deletion can keep the default no-op.
+    fn reap_terminal_items(
+        &mut self,
+        _shard: &QueueKey,
+        _now: UtcTimestamp,
+        _terminal_retention_ms: u64,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<ItemId>> {
+        Ok(Vec::new())
+    }
+
     fn range_scan(
         &self,
         _shard: &QueueKey,
@@ -949,6 +962,37 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             g.log.set_emission_cursor(shard, position)?;
         }
         Ok(records.len())
+    }
+
+    /// Reap terminal items that are now past the durable emission cursor for one shard.
+    ///
+    /// The emission gate stays fail-closed while the cursor is unavailable: emit-enabled queues only
+    /// reap after the change-record emitter has durably advanced the cursor past the terminal record.
+    pub fn reap_terminal_items(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+    ) -> EngineResult<usize> {
+        let mut g = self.inner.lock().expect("composed backend poisoned");
+        let emission_cursor = if emit_change_records {
+            g.log.emission_cursor(shard)?
+        } else {
+            None
+        };
+        if emit_change_records && emission_cursor.is_none() {
+            return Ok(0);
+        }
+        Ok(g.projection
+            .reap_terminal_items(
+                shard,
+                now,
+                terminal_retention_ms,
+                emit_change_records,
+                emission_cursor.as_ref(),
+            )?
+            .len())
     }
 
     // -- group-commit write-path helpers (ADR-012 P2) -----------------------

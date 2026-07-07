@@ -63,6 +63,16 @@ pub trait ChangeRecordEmissionBackend {
         emitted_at: UtcTimestamp,
         source_owner_id: Option<pqueue_core::OwnerId>,
     ) -> EngineResult<usize>;
+
+    fn reap_terminal_items(
+        &self,
+        _shard: &QueueKey,
+        _now: UtcTimestamp,
+        _terminal_retention_ms: u64,
+        _emit_change_records: bool,
+    ) -> EngineResult<usize> {
+        Ok(0)
+    }
 }
 
 impl<L, P, C> ChangeRecordEmissionBackend for ComposedBackend<L, P, C>
@@ -86,6 +96,22 @@ where
             limit,
             emitted_at,
             source_owner_id,
+        )
+    }
+
+    fn reap_terminal_items(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+    ) -> EngineResult<usize> {
+        ComposedBackend::reap_terminal_items(
+            self,
+            shard,
+            now,
+            terminal_retention_ms,
+            emit_change_records,
         )
     }
 }
@@ -496,7 +522,20 @@ where
     for definition in enabled_change_record_queues(queues) {
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         match backend.emit_change_record_tail(&shard, sink, batch_size, emitted_at, None) {
-            Ok(emitted) => total += emitted,
+            Ok(emitted) => {
+                total += emitted;
+                if let Err(e) = backend.reap_terminal_items(
+                    &shard,
+                    emitted_at,
+                    definition.terminal_retention_ms,
+                    definition.emit_change_records,
+                ) {
+                    eprintln!(
+                        "[change-record] terminal reap failed for {}:{}: {e}",
+                        definition.tenant_id, definition.queue_id
+                    );
+                }
+            }
             Err(e) => eprintln!(
                 "[change-record] emit failed for {}:{}: {e}",
                 definition.tenant_id, definition.queue_id

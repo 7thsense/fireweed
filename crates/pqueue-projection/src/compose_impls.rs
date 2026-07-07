@@ -397,6 +397,22 @@ impl ProjectionStore for InMemoryProjection {
         Ok(self.get(shard)?.live_items_by_key(keys))
     }
 
+    fn reap_terminal_items(
+        &mut self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<ItemId>> {
+        Ok(self.get_mut(shard)?.reap_terminal_items(
+            now,
+            terminal_retention_ms,
+            emit_change_records,
+            emission_cursor,
+        ))
+    }
+
     fn range_scan(
         &self,
         shard: &QueueKey,
