@@ -26,6 +26,7 @@ use pqueue_engine::{
     OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
     QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
     ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort, acquire_and_fence,
+    validate_api001_reserved_write_fields,
 };
 
 // ---------------------------------------------------------------------------
@@ -1061,8 +1062,9 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// In-place merge of a **live** item's hot-storage `fields`/`payload` (FAC-1) — the write half of the
     /// [`live_item`](Self::live_item) map, so an owner-runtime can keep compound per-item work state in
-    /// pqueue instead of a side shadow store. Legal while the item is Pending OR Leased; touches neither
-    /// lifecycle state nor the lease. `field_ops`: `Some(bytes)` sets/overwrites a key, `None` removes it.
+    /// pqueue instead of a side shadow store. Field names reserved by API-001 are rejected before the
+    /// backend sees the write; legal only while the item is Pending OR Leased; touches neither lifecycle
+    /// state nor the lease. `field_ops`: `Some(bytes)` sets/overwrites a key, `None` removes it.
     /// `payload`: [`PayloadUpdate::Keep`] leaves the body, `Set(_)` replaces (`Set(None)` clears).
     /// `expected_item_version`: optional CAS — a mismatch rejects with [`EngineError::Conflict`] and commits
     /// nothing (for rolling concurrent updates). Bumps and returns the new `item_version`. Fenced by the
@@ -1076,6 +1078,7 @@ impl<B: LibBackend> Pqueue<B> {
         entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
     ) -> EngineResult<u64> {
+        validate_api001_reserved_write_fields(&field_ops)?;
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let r = self

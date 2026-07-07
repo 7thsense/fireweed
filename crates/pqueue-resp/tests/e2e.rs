@@ -15,8 +15,8 @@ use pqueue_core::{
 use pqueue_engine::Clock;
 use pqueue_engine::{
     Backend, ClaimedItem, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore,
-    FenceLeaseCommand, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter, QueueCommand,
-    QueueKey, UpdateFieldsPort,
+    EngineError, FenceLeaseCommand, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
+    QueueCommand, QueueKey, UpdateFieldsPort,
 };
 use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 use pqueue_resp::{RespBackend, SystemClock, serve};
@@ -327,8 +327,9 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn xadd_rejects_claimed_shape_reserved_lease_token_field() {
-    let (mut con, _) = setup().await;
+#[allow(non_snake_case)]
+async fn TestReservedNamesRejectedOnWritePaths() {
+    let (mut con, backend) = setup().await;
     let result: redis::RedisResult<String> = redis::cmd("XADD")
         .arg("t1:q1")
         .arg("*")
@@ -344,6 +345,39 @@ async fn xadd_rejects_claimed_shape_reserved_lease_token_field() {
         err.to_string().contains("field 'lease_token' is reserved"),
         "unexpected error: {err}"
     );
+
+    let id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(7)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let item_id = ItemId::new(&id).unwrap();
+    let err = backend
+        .update_fields(
+            &shard(),
+            item_id,
+            BTreeMap::from([
+                (
+                    "lease_token".to_string(),
+                    Some(Bytes::from_static(b"user-value")),
+                ),
+                (
+                    "payload".to_string(),
+                    Some(Bytes::from_static(b"user-payload")),
+                ),
+            ]),
+            PayloadUpdate::Keep,
+            None,
+            None,
+            UtcTimestamp::new(1, 0).unwrap(),
+            None,
+        )
+        .await
+        .expect_err("reserved fields are rejected before commit");
+    assert!(matches!(err, EngineError::Invalid(_)));
 }
 
 fn value_array(value: Value) -> Vec<Value> {

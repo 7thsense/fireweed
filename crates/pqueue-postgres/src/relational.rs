@@ -74,8 +74,8 @@ use pqueue_engine::{
     RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
     TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
     UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
-    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
-    validate_purge_force,
+    validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogStore,
@@ -4160,6 +4160,7 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
             let (t, q) = parts(shard);
             let id_str = item_id.to_string();
             let mut g = self.inner.lock().expect("poisoned");
+            validate_api001_reserved_write_fields(&field_ops)?;
             // Pre-commit entity schema validation (ADR-011): reject before any mutation.
             validate_entity(g.schemas.get(shard), entity.as_ref())?;
             // Pre-validate exactly like the in-memory `update_fields_validate`: absent=NotFound,

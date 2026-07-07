@@ -26,6 +26,39 @@ use crate::command::{
 use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
+/// API-001 write-reserved item field names. These names are emitted by the claimed-item / lease wire
+/// shapes, so user-authored field writes must reject them before commit or RESP rendering.
+pub fn is_api001_reserved_write_field(field: &str) -> bool {
+    field.eq_ignore_ascii_case("item_id")
+        || field.eq_ignore_ascii_case("client_item_key")
+        || field.eq_ignore_ascii_case("item_version")
+        || field.eq_ignore_ascii_case("lifecycle_state")
+        || field.eq_ignore_ascii_case("priority")
+        || field.eq_ignore_ascii_case("attempt_count")
+        || field.eq_ignore_ascii_case("payload")
+        || field.eq_ignore_ascii_case("group_key")
+        || field.eq_ignore_ascii_case("not_before")
+        || field.eq_ignore_ascii_case("metadata")
+        || field.eq_ignore_ascii_case("max_attempts")
+        || field.eq_ignore_ascii_case("gate_keys")
+        || field.eq_ignore_ascii_case("cohort_id")
+        || field.eq_ignore_ascii_case("lease_token")
+        || field.eq_ignore_ascii_case("lease_expires_at")
+}
+
+/// Reject a write delta that collides with API-001 reserved field names.
+pub fn validate_api001_reserved_write_fields(
+    field_ops: &BTreeMap<String, Option<Bytes>>,
+) -> EngineResult<()> {
+    if field_ops
+        .keys()
+        .any(|field| is_api001_reserved_write_field(field))
+    {
+        return Err(EngineError::Invalid("reserved field name"));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Write side (sync; runs inside a Backend unit of work)
 // ---------------------------------------------------------------------------
@@ -754,13 +787,15 @@ pub trait RecoveryReadPort: Send + Sync {
     }
 }
 
-/// In-place merge of a **live** item's hot-storage `fields`/`payload` — the write half of the
-/// `LiveItemView` map (FAC-1, ADR-009). Pre-validated like finalize/renew: an absent / terminal /
-/// superseded id rejects and nothing is appended; an `expected_item_version` mismatch rejects with
-/// `EngineError::Conflict` (optimistic concurrency for the rolling-update case). Legal while the item is
-/// Pending OR Leased; touches neither lifecycle state nor the lease. Bumps and returns the new
-/// `item_version`. Atomic class only; on eventual-apply the engine returns `EngineError::Unavailable`.
 #[doc(hidden)]
+/// In-place merge of a **live** item's hot-storage `fields`/`payload` — the write half of the
+/// `LiveItemView` map (FAC-1, ADR-009). User field names that collide with the API-001 reserved
+/// claimed-item / lease shape are rejected before commit, then the normal live-item validation runs:
+/// an absent / terminal / superseded id rejects and nothing is appended; an `expected_item_version`
+/// mismatch rejects with `EngineError::Conflict` (optimistic concurrency for the rolling-update case).
+/// Legal while the item is Pending OR Leased; touches neither lifecycle state nor the lease. Bumps and
+/// returns the new `item_version`. Atomic class only; on eventual-apply the engine returns
+/// `EngineError::Unavailable`.
 pub trait UpdateFieldsPort: Send + Sync {
     /// `expected_epoch`: the owner's cached acquire-time fence epoch — `Some(e)` fences the commit
     /// (superseded owner → `EpochFenced`, nothing appended); `None` is the sole-owner path.

@@ -73,7 +73,8 @@ pub use port::{
     LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec,
     QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
     ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, is_api001_reserved_write_field,
+    validate_api001_reserved_write_fields, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};

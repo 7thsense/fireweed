@@ -381,24 +381,6 @@ fn arg_eq(a: &[u8], s: &str) -> bool {
     a.eq_ignore_ascii_case(s.as_bytes())
 }
 
-fn is_read_reserved_field(field: &str) -> bool {
-    field.eq_ignore_ascii_case("item_id")
-        || field.eq_ignore_ascii_case("client_item_key")
-        || field.eq_ignore_ascii_case("item_version")
-        || field.eq_ignore_ascii_case("lifecycle_state")
-        || field.eq_ignore_ascii_case("priority")
-        || field.eq_ignore_ascii_case("attempt_count")
-        || field.eq_ignore_ascii_case("payload")
-        || field.eq_ignore_ascii_case("group_key")
-        || field.eq_ignore_ascii_case("not_before")
-        || field.eq_ignore_ascii_case("metadata")
-        || field.eq_ignore_ascii_case("max_attempts")
-        || field.eq_ignore_ascii_case("gate_keys")
-        || field.eq_ignore_ascii_case("cohort_id")
-        || field.eq_ignore_ascii_case("lease_token")
-        || field.eq_ignore_ascii_case("lease_expires_at")
-}
-
 async fn dispatch<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
     hooks: &Arc<H>,
@@ -557,7 +539,7 @@ async fn xadd<B: RespBackend, H: RespHooks>(
             let Ok(field) = std::str::from_utf8(&pair[0]) else {
                 return Resp::Error("ERR field names must be utf-8".into());
             };
-            if is_read_reserved_field(field) {
+            if pqueue_engine::is_api001_reserved_write_field(field) {
                 return Resp::Error(format!("ERR field '{field}' is reserved"));
             }
             fields.insert(field.to_string(), bytes::Bytes::copy_from_slice(&pair[1]));

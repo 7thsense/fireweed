@@ -58,7 +58,7 @@ use crate::port::{
     PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
     RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore,
     TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    validate_instance_fence,
+    validate_api001_reserved_write_fields, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -2380,6 +2380,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
             if !self.is_atomic() {
                 return Err(EngineError::Unavailable);
             }
+            validate_api001_reserved_write_fields(&field_ops)?;
             let def = self.control.queue_definition(shard)?;
             let schema = def
                 .entity_schema

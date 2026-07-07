@@ -78,8 +78,8 @@ use pqueue_engine::{
     RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestOutcome, SetGatesCommand,
     SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
     WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
-    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
-    validate_purge_force,
+    validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
@@ -7939,6 +7939,7 @@ impl UpdateFieldsPort for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
+            validate_api001_reserved_write_fields(&field_ops)?;
             // Pre-commit entity schema validation (ADR-011): reject before any mutation.
             validate_entity(g.schemas.get(shard), entity.as_ref())?;
             // Pre-validate with the SAME error precedence as `ProjectionData::update_fields_validate`

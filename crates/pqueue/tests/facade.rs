@@ -543,6 +543,61 @@ async fn update_fields_rejects_terminal_over_memory() {
     assert!(matches!(r, Err(EngineError::Terminal)));
 }
 
+/// API-001: reserved write-field names are blocked before the library facade dispatches to the backend.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestApi001ReservationPolicyIsRecordedOrEnforced() {
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let id = pq.push(&q, at(5)).await.unwrap();
+    pq.claim(&q, 1, 30_000).await.unwrap();
+
+    let payload_ok = pq
+        .update_fields(
+            &q,
+            id,
+            BTreeMap::new(),
+            PayloadUpdate::Set(Some(Bytes::from_static(b"payload-1"))),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(payload_ok >= 2);
+
+    let err = pq
+        .update_fields(
+            &q,
+            id,
+            BTreeMap::from([
+                (
+                    "lease_token".to_string(),
+                    Some(Bytes::from_static(b"user-value")),
+                ),
+                (
+                    "payload".to_string(),
+                    Some(Bytes::from_static(b"user-payload")),
+                ),
+            ]),
+            PayloadUpdate::Keep,
+            None,
+            None,
+        )
+        .await
+        .expect_err("reserved names must be rejected");
+    assert!(matches!(err, EngineError::Invalid(_)));
+    let live = pq
+        .live_item(&q, ClientItemKey::new(id.to_string()).unwrap())
+        .await
+        .unwrap()
+        .expect("live");
+    assert_eq!(live.payload.as_deref(), Some(&b"payload-1"[..]));
+}
+
 /// FAC-1: the eventual-apply class cannot serve a read-your-write field mutation — `Unavailable`.
 #[tokio::test]
 async fn update_fields_unavailable_over_objectlog() {
