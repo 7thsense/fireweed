@@ -257,7 +257,7 @@ fn change_record_key(record: &pqueue_engine::ChangeRecord) -> String {
 fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> OwnedHeaders {
     let backend_epoch = record.position.backend_epoch.to_string();
     let sequence = record.position.sequence.to_string();
-    let command_kind = format!("{:?}", record.command_kind);
+    let command_kind = change_record_kind_wire_value(record.command_kind);
     let item_id = record.item_id.map(|value| value.to_string());
     let mut headers = OwnedHeaders::new()
         .insert(Header {
@@ -278,7 +278,7 @@ fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> OwnedHeaders {
         })
         .insert(Header {
             key: "pq-command-kind",
-            value: Some(command_kind.as_str()),
+            value: Some(command_kind),
         });
     if let Some(item_id) = item_id.as_deref() {
         headers = headers.insert(Header {
@@ -289,9 +289,44 @@ fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> OwnedHeaders {
     headers
 }
 
-fn block_on_sync<F: Future>(fut: F) -> F::Output {
+fn change_record_kind_wire_value(kind: pqueue_engine::ChangeRecordKind) -> &'static str {
+    match kind {
+        pqueue_engine::ChangeRecordKind::Push => "push",
+        pqueue_engine::ChangeRecordKind::Claim => "claim",
+        pqueue_engine::ChangeRecordKind::CohortClaim => "cohort-claim",
+        pqueue_engine::ChangeRecordKind::RenewLease => "renew-lease",
+        pqueue_engine::ChangeRecordKind::CohortRenewLease => "cohort-renew-lease",
+        pqueue_engine::ChangeRecordKind::ReassignLease => "reassign-lease",
+        pqueue_engine::ChangeRecordKind::Finalize => "finalize",
+        pqueue_engine::ChangeRecordKind::CohortFinalize => "cohort-finalize",
+        pqueue_engine::ChangeRecordKind::ReplacePending => "replace-pending",
+        pqueue_engine::ChangeRecordKind::UpdateFields => "update-fields",
+        pqueue_engine::ChangeRecordKind::LeaseExpired => "lease-expired",
+        pqueue_engine::ChangeRecordKind::CohortExpired => "cohort-expired",
+        pqueue_engine::ChangeRecordKind::FenceLease => "fence-lease",
+        pqueue_engine::ChangeRecordKind::UnfenceLease => "unfence-lease",
+        pqueue_engine::ChangeRecordKind::PauseQueue => "pause-queue",
+        pqueue_engine::ChangeRecordKind::ResumeQueue => "resume-queue",
+        pqueue_engine::ChangeRecordKind::PurgeItems => "purge-items",
+        pqueue_engine::ChangeRecordKind::SetGates => "set-gates",
+    }
+}
+
+fn block_on_sync<F>(fut: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(move || handle.block_on(fut)),
+        Ok(_) => std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("blocking runtime")
+                .block_on(fut)
+        })
+        .join()
+        .expect("change record sync task panicked"),
         Err(_) => {
             static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
             RT.get_or_init(|| {
@@ -312,13 +347,15 @@ impl ChangeRecordSink for FjordChangeRecordSink {
             return Ok(());
         }
         let topic = fjord_topic_name(shard)?;
-        block_on_sync(async {
-            for record in records {
+        let producer = self.producer.clone();
+        let records = records.to_vec();
+        block_on_sync(async move {
+            for record in &records {
                 let key = change_record_key(record);
                 let payload = serde_json::to_vec(record)
                     .map_err(|e| EngineError::Storage(format!("serialize change record: {e}")))?;
                 let headers = change_record_headers(record);
-                self.producer
+                producer
                     .send(
                         FutureRecord::to(&topic)
                             .partition(0)
@@ -714,6 +751,7 @@ where
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use rdkafka::message::Headers;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -963,8 +1001,52 @@ mod tests {
         assert!(request.contains("x-custom-header: custom-value"));
     }
 
+    #[test]
+    fn TestCommandKindWireSerializationIsStable() {
+        let shard = QueueKey::new(
+            pqueue_core::TenantId::new("tenant-a").unwrap(),
+            pqueue_core::QueueId::new("queue-a").unwrap(),
+        );
+        let record = pqueue_engine::ChangeRecord {
+            tenant_id: shard.tenant_id.clone(),
+            queue_id: shard.queue_id.clone(),
+            item_id: None,
+            position: pqueue_engine::ChangeRecordPosition {
+                backend_epoch: 7,
+                sequence: 42,
+            },
+            command_kind: pqueue_engine::ChangeRecordKind::PauseQueue,
+            new_state: None,
+            item_version: None,
+            terminal_at: None,
+            emitted_at: Some(UtcTimestamp::new(1, 0).unwrap()),
+            source_owner_id: None,
+            source_epoch: 7,
+        };
+
+        assert_eq!(
+            change_record_kind_wire_value(pqueue_engine::ChangeRecordKind::Push),
+            "push"
+        );
+        assert_eq!(
+            change_record_kind_wire_value(pqueue_engine::ChangeRecordKind::Finalize),
+            "finalize"
+        );
+
+        let headers = change_record_headers(&record);
+        let command_kind = headers.get(4);
+        assert_eq!(command_kind.key, "pq-command-kind");
+        assert_eq!(command_kind.value, Some(b"pause-queue".as_ref()));
+    }
+
     #[derive(Default)]
     struct RecordingEmissionBackend {
+        emitted_shards: Mutex<Vec<QueueKey>>,
+        cursor_advances: Mutex<Vec<QueueKey>>,
+    }
+
+    #[derive(Default)]
+    struct BatchRecordingEmissionBackend {
         emitted_shards: Mutex<Vec<QueueKey>>,
         cursor_advances: Mutex<Vec<QueueKey>>,
     }
@@ -1007,21 +1089,82 @@ mod tests {
         }
     }
 
+    impl ChangeRecordEmissionBackend for BatchRecordingEmissionBackend {
+        fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+            &self,
+            shard: &QueueKey,
+            sink: &S,
+            _limit: usize,
+            emitted_at: UtcTimestamp,
+            _source_owner_id: Option<pqueue_core::OwnerId>,
+        ) -> EngineResult<usize> {
+            self.emitted_shards
+                .lock()
+                .expect("poisoned")
+                .push(shard.clone());
+            self.cursor_advances
+                .lock()
+                .expect("poisoned")
+                .push(shard.clone());
+            let records = vec![
+                pqueue_engine::ChangeRecord {
+                    tenant_id: shard.tenant_id.clone(),
+                    queue_id: shard.queue_id.clone(),
+                    item_id: Some(pqueue_core::ItemId::from_u64(1)),
+                    position: pqueue_engine::ChangeRecordPosition {
+                        backend_epoch: 7,
+                        sequence: 1,
+                    },
+                    command_kind: pqueue_engine::ChangeRecordKind::Push,
+                    new_state: Some(pqueue_engine::ChangeRecordState::Pending),
+                    item_version: Some(1),
+                    terminal_at: None,
+                    emitted_at: Some(emitted_at),
+                    source_owner_id: None,
+                    source_epoch: 7,
+                },
+                pqueue_engine::ChangeRecord {
+                    tenant_id: shard.tenant_id.clone(),
+                    queue_id: shard.queue_id.clone(),
+                    item_id: Some(pqueue_core::ItemId::from_u64(2)),
+                    position: pqueue_engine::ChangeRecordPosition {
+                        backend_epoch: 7,
+                        sequence: 2,
+                    },
+                    command_kind: pqueue_engine::ChangeRecordKind::Claim,
+                    new_state: Some(pqueue_engine::ChangeRecordState::Leased),
+                    item_version: Some(1),
+                    terminal_at: None,
+                    emitted_at: Some(emitted_at),
+                    source_owner_id: None,
+                    source_epoch: 7,
+                },
+            ];
+            sink.emit(shard, &records)?;
+            Ok(records.len())
+        }
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         emitted_shards: Mutex<Vec<QueueKey>>,
+        batch_sizes: Mutex<Vec<usize>>,
     }
 
     impl ChangeRecordSink for RecordingSink {
         fn emit(
             &self,
             shard: &QueueKey,
-            _records: &[pqueue_engine::ChangeRecord],
+            records: &[pqueue_engine::ChangeRecord],
         ) -> EngineResult<()> {
             self.emitted_shards
                 .lock()
                 .expect("poisoned")
                 .push(shard.clone());
+            self.batch_sizes
+                .lock()
+                .expect("poisoned")
+                .push(records.len());
             Ok(())
         }
     }
@@ -1113,6 +1256,19 @@ mod tests {
             sink.emitted_shards.lock().expect("poisoned").as_slice(),
             &[enabled_shard]
         );
+    }
+
+    #[test]
+    fn TestProducesBatchRecordsWithoutBlockInPlace() {
+        let backend = BatchRecordingEmissionBackend::default();
+        let sink = RecordingSink::default();
+        let enabled_def = queue_definition("tenant-a", "queue-a", true);
+
+        let emitted = emit_change_record_tick(&backend, &sink, &[enabled_def], 64)
+            .expect("tick should succeed");
+
+        assert_eq!(emitted, 2);
+        assert_eq!(sink.batch_sizes.lock().expect("poisoned").as_slice(), &[2]);
     }
 
     #[test]
