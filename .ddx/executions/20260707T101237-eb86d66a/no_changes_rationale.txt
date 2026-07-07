@@ -1,0 +1,2 @@
+status: blocked
+reason: cargo test -p pqueue-server fails consistently in pre-existing object_log_sqlite recovery tests (crates/pqueue-server/src/object_log_sqlite.rs) that are outside this bead's scope; the Fjord wiring tests added in this pass pass, but the package-wide gate is still red.

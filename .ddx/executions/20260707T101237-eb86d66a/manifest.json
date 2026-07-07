@@ -1,0 +1,33 @@
+{
+  "attempt_id": "20260707T101237-eb86d66a",
+  "bead_id": "pqueue-415824be",
+  "base_rev": "8fd213131478471e842563a5450919651fa5a5cc",
+  "created_at": "2026-07-07T10:12:38.083226381Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-415824be",
+    "title": "Decouple embedded broker binding from external Kafka startup",
+    "description": "PROBLEM: external-Kafka deployments still follow the embedded-broker binding path, so startup tries to bind the broker endpoint even when only an external bootstrap should be configured. ROOT CAUSE: `crates/pqueue-server/src/main.rs:73` couples startup wiring to `fjord.listen`, so the runtime uses the same endpoint for broker binding and Kafka producer bootstrap. PROPOSED FIX: update startup wiring so embedded mode binds its own internal broker address while external-Kafka mode only configures `kafka.bootstrap`, never binding the external broker endpoint. NON-SCOPE: topic encoding, wire-format serialization, batching changes, startup sleep cleanup.",
+    "acceptance": "1. `TestExternalKafkaModeSkipsBrokerBind` proves external-Kafka mode configures producer bootstrap without attempting to bind the broker endpoint.\n2. `TestEmbeddedBrokerStillBindsItsOwnAddress` proves embedded mode continues to bind its own internal broker address.\n3. `TestRuntimeUsesKafkaBootstrapIndependently` proves startup consumes `kafka.bootstrap` without deriving it from `fjord.listen`.\n4. `go test ./crates/pqueue-server/...` passes for the startup wiring path and its callers.\n5. `lefthook run pre-commit` passes with the runtime wiring changes and tests.",
+    "parent": "pqueue-0f9be25f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:fjord",
+      "adr-014",
+      "review-rework"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T101237-eb86d66a",
+    "prompt": ".ddx/executions/20260707T101237-eb86d66a/prompt.md",
+    "manifest": ".ddx/executions/20260707T101237-eb86d66a/manifest.json",
+    "result": ".ddx/executions/20260707T101237-eb86d66a/result.json",
+    "checks": ".ddx/executions/20260707T101237-eb86d66a/checks.json",
+    "usage": ".ddx/executions/20260707T101237-eb86d66a/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-415824be-20260707T101237-eb86d66a"
+  },
+  "prompt_sha": "53e1c202ed2eb73a3b4fa6d6b4ac1c2fd39d82d8a9c3eb2fc97a4bbafadb82b1"
+}
