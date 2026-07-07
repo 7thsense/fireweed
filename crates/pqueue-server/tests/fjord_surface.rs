@@ -111,7 +111,8 @@ async fn start_embedded_broker(queue: &QueueDefinition) -> EmbeddedBroker {
     let topic = fjord_topic_name(&queue_key(
         queue.tenant_id.as_str(),
         queue.queue_id.as_str(),
-    ));
+    ))
+    .expect("valid fjord topic");
     let handle = spawn_embedded_fjord_broker(
         7,
         &EmbeddedFjordConfig {
@@ -254,9 +255,12 @@ fn TestKafkaTenantAclRejectsCrossTenantRead() {
     let allowed = queue_key("tenant-a", "queue-a");
     let denied = queue_key("tenant-b", "queue-b");
     let auth = AuthContext::new("fjord-reader", [allowed.tenant_id.as_str()]);
-    let denied_topic = fjord_topic_name(&denied);
+    let denied_topic = fjord_topic_name(&denied).expect("valid fjord topic");
 
-    assert_eq!(fjord_topic_name(&allowed), "tenant-a.queue-a");
+    assert_eq!(
+        fjord_topic_name(&allowed).expect("valid fjord topic"),
+        "tenant-a.queue-a"
+    );
 
     let surface = build_embedded_fjord_surface(
         7,
@@ -271,7 +275,8 @@ fn TestKafkaTenantAclRejectsCrossTenantRead() {
             queue_definition("tenant-a", "queue-a"),
             queue_definition("tenant-b", "queue-b"),
         ],
-    );
+    )
+    .expect("register embedded fjord topics");
 
     let mut topics = surface.topic_registry.topic_list();
     topics.sort();
@@ -299,7 +304,7 @@ fn TestKafkaTenantAclRejectsCrossQueueRead() {
     let allowed = queue_key("tenant-a", "queue-a");
     let denied = queue_key("tenant-a", "queue-b");
     let auth = AuthContext::new("fjord-reader", [allowed.tenant_id.as_str()]);
-    let denied_topic = fjord_topic_name(&denied);
+    let denied_topic = fjord_topic_name(&denied).expect("valid fjord topic");
 
     assert_eq!(
         authorize_fjord_topic_read(&auth, &allowed, "tenant-a.queue-a"),
@@ -311,6 +316,67 @@ fn TestKafkaTenantAclRejectsCrossQueueRead() {
             "principal is not authorized for the requested queue namespace"
         ))
     );
+}
+
+#[test]
+fn TestRejectAmbiguousTenantQueueMappings() {
+    let left = queue_key("a.b", "c");
+    let right = queue_key("a", "b.c");
+
+    assert!(fjord_topic_name(&left).is_err());
+    assert!(fjord_topic_name(&right).is_err());
+
+    let surface = build_embedded_fjord_surface(
+        7,
+        &EmbeddedFjordConfig {
+            namespace_root: PathBuf::from("/var/lib/pqueue/fjord-test"),
+            cluster_id: "fjord-test-cluster".to_string(),
+        },
+    );
+
+    let result = register_embedded_fjord_topics(
+        &surface.topic_registry,
+        &[
+            QueueDefinition {
+                tenant_id: left.tenant_id.clone(),
+                queue_id: left.queue_id.clone(),
+                ..queue_definition("tenant-a", "queue-a")
+            },
+            QueueDefinition {
+                tenant_id: right.tenant_id.clone(),
+                queue_id: right.queue_id.clone(),
+                ..queue_definition("tenant-a", "queue-a")
+            },
+        ],
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn TestRejectKafkaIllegalTenantAndQueueIds() {
+    let illegal = queue_key("tenant with space", "queue/1");
+
+    assert!(fjord_topic_name(&illegal).is_err());
+
+    let surface = build_embedded_fjord_surface(
+        7,
+        &EmbeddedFjordConfig {
+            namespace_root: PathBuf::from("/var/lib/pqueue/fjord-test"),
+            cluster_id: "fjord-test-cluster".to_string(),
+        },
+    );
+
+    let result = register_embedded_fjord_topics(
+        &surface.topic_registry,
+        &[QueueDefinition {
+            tenant_id: illegal.tenant_id.clone(),
+            queue_id: illegal.queue_id.clone(),
+            ..queue_definition("tenant-a", "queue-a")
+        }],
+    );
+
+    assert!(result.is_err());
 }
 
 #[test]
@@ -329,7 +395,8 @@ fn TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped() {
     register_embedded_fjord_topics(
         &surface.topic_registry,
         &[tenant_a.clone(), tenant_b.clone()],
-    );
+    )
+    .expect("register embedded fjord topics");
 
     let mut topics = surface.topic_registry.topic_list();
     topics.sort();
@@ -341,8 +408,8 @@ fn TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped() {
         ]
     );
 
-    let topic_a = fjord_topic_name(&queue_key("tenant-a", "queue-a"));
-    let topic_b = fjord_topic_name(&queue_key("tenant-b", "queue-b"));
+    let topic_a = fjord_topic_name(&queue_key("tenant-a", "queue-a")).expect("valid fjord topic");
+    let topic_b = fjord_topic_name(&queue_key("tenant-b", "queue-b")).expect("valid fjord topic");
 
     surface
         .offset_store
@@ -464,7 +531,11 @@ async fn TestKafkaChangeLogConsumesInCommandPositionOrder() {
 
     sink.emit(&shard, &records).expect("emit records");
 
-    let consumed = consume_records(&broker.bootstrap, &fjord_topic_name(&shard), 3);
+    let consumed = consume_records(
+        &broker.bootstrap,
+        &fjord_topic_name(&shard).expect("valid fjord topic"),
+        3,
+    );
     assert_eq!(consumed.len(), 3);
     for (idx, message) in consumed.iter().enumerate() {
         let payload = message.payload().expect("payload");
@@ -503,11 +574,13 @@ async fn TestKafkaTopicMapsOneQueueToOnePartition() {
     let topic_a = fjord_topic_name(&queue_key(
         queue_a.tenant_id.as_str(),
         queue_a.queue_id.as_str(),
-    ));
+    ))
+    .expect("valid fjord topic");
     let topic_b = fjord_topic_name(&queue_key(
         queue_b.tenant_id.as_str(),
         queue_b.queue_id.as_str(),
-    ));
+    ))
+    .expect("valid fjord topic");
 
     tokio::task::block_in_place(|| {
         let consumer: BaseConsumer = ClientConfig::new()
@@ -551,7 +624,11 @@ async fn TestKafkaOffsetNeverRegressesAcrossFailover() {
     sink.emit(&shard, std::slice::from_ref(&logical_record))
         .expect("re-emit");
 
-    let consumed = consume_records(&broker.bootstrap, &fjord_topic_name(&shard), 2);
+    let consumed = consume_records(
+        &broker.bootstrap,
+        &fjord_topic_name(&shard).expect("valid fjord topic"),
+        2,
+    );
     assert_eq!(consumed.len(), 2);
     let first = consumed[0].offset();
     let second = consumed[1].offset();
@@ -577,7 +654,11 @@ async fn TestKafkaIdempotencyKeyIsStableAcrossReemit() {
     sink.emit(&shard, std::slice::from_ref(&logical_record))
         .expect("re-emit");
 
-    let consumed = consume_records(&broker.bootstrap, &fjord_topic_name(&shard), 2);
+    let consumed = consume_records(
+        &broker.bootstrap,
+        &fjord_topic_name(&shard).expect("valid fjord topic"),
+        2,
+    );
     assert_eq!(consumed.len(), 2);
     assert_eq!(consumed[0].key(), consumed[1].key());
 }

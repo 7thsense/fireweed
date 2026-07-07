@@ -226,29 +226,68 @@ pub fn build_embedded_fjord_surface(
 ///
 /// ADR-014 scopes each change stream to a tenant-prefixed topic so the embedded surface can
 /// authorize reads by exact `(tenant_id, queue_id)` identity instead of broad tenant-only access.
-pub fn fjord_topic_name(queue: &QueueKey) -> String {
-    format!("{}.{}", queue.tenant_id.as_str(), queue.queue_id.as_str())
+pub fn fjord_topic_name(queue: &QueueKey) -> EngineResult<String> {
+    validate_fjord_topic_segment(queue.tenant_id.as_str())?;
+    validate_fjord_topic_segment(queue.queue_id.as_str())?;
+
+    let topic = format!("{}.{}", queue.tenant_id.as_str(), queue.queue_id.as_str());
+    if topic.len() > 249 {
+        return Err(EngineError::Invalid(
+            "fjord topic name exceeds Kafka's 249-character limit",
+        ));
+    }
+    Ok(topic)
 }
 
 /// Register the tenant-prefixed change-log topics owned by the configured queues.
 pub fn register_embedded_fjord_topics(
     topic_registry: &FjordTopicRegistry,
     queues: &[QueueDefinition],
-) {
+) -> EngineResult<()> {
     for queue in queues {
         let key = QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
-        topic_registry.register_topic(&fjord_topic_name(&key), 1);
+        topic_registry.register_topic(&fjord_topic_name(&key)?, 1);
     }
+    Ok(())
 }
 
 fn parse_fjord_topic_name(topic: &str) -> EngineResult<QueueKey> {
+    if topic.len() > 249 {
+        return Err(EngineError::Invalid(
+            "fjord topic name exceeds Kafka's 249-character limit",
+        ));
+    }
     let (tenant, queue) = topic
         .split_once('.')
         .ok_or(EngineError::Invalid("fjord topic must be tenant-prefixed"))?;
+    validate_fjord_topic_segment(tenant)?;
+    validate_fjord_topic_segment(queue)?;
     Ok(QueueKey::new(
         TenantId::new(tenant).map_err(|_| EngineError::Invalid("bad tenant"))?,
         QueueId::new(queue).map_err(|_| EngineError::Invalid("bad queue"))?,
     ))
+}
+
+fn validate_fjord_topic_segment(value: &str) -> EngineResult<()> {
+    if value.is_empty() {
+        return Err(EngineError::Invalid(
+            "fjord topic components must not be empty",
+        ));
+    }
+    if value.contains('.') {
+        return Err(EngineError::Invalid(
+            "fjord topic components must not contain '.' because fjord topics use '.' as the tenant/queue separator",
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return Err(EngineError::Invalid(
+            "fjord topic components must contain only ASCII alphanumerics, '_' or '-'",
+        ));
+    }
+    Ok(())
 }
 
 /// Deny-by-default tenant/queue ACL bridge for the embedded change-log surface.
@@ -297,7 +336,7 @@ pub async fn spawn_embedded_fjord_broker(
 ) -> EngineResult<JoinHandle<()>> {
     let (host, port) = parse_kafka_bootstrap(endpoint)?;
     let surface = build_embedded_fjord_surface(node_id, config);
-    register_embedded_fjord_topics(&surface.topic_registry, queues);
+    register_embedded_fjord_topics(&surface.topic_registry, queues)?;
     let namespace_root = surface.namespace_root().clone();
 
     let broker_config = HeimqConfig {
@@ -316,15 +355,13 @@ pub async fn spawn_embedded_fjord_broker(
         create_topics: queues
             .iter()
             .map(|queue| {
-                format!(
-                    "{}:1",
-                    fjord_topic_name(&QueueKey::new(
-                        queue.tenant_id.clone(),
-                        queue.queue_id.clone(),
-                    ))
-                )
+                fjord_topic_name(&QueueKey::new(
+                    queue.tenant_id.clone(),
+                    queue.queue_id.clone(),
+                ))
+                .map(|topic| format!("{topic}:1"))
             })
-            .collect(),
+            .collect::<EngineResult<Vec<_>>>()?,
         // The embedded change-log surface only serves the exact queue topics we pre-register.
         // Unknown topics must not be auto-created, otherwise Metadata can leak or mint
         // namespaces outside the configured tenant/queue set.
@@ -1127,7 +1164,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
     let fjord_surface = build_embedded_fjord_surface(node_id as i32, &config.embedded_fjord);
-    register_embedded_fjord_topics(&fjord_surface.topic_registry, &config.queues);
+    register_embedded_fjord_topics(&fjord_surface.topic_registry, &config.queues)?;
     let listen = config.listen.clone();
     let interval = config.reclaim_interval;
     let queues = config.queues.clone();

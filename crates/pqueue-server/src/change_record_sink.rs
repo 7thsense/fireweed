@@ -311,7 +311,7 @@ impl ChangeRecordSink for FjordChangeRecordSink {
         if records.is_empty() {
             return Ok(());
         }
-        let topic = fjord_topic_name(shard);
+        let topic = fjord_topic_name(shard)?;
         block_on_sync(async {
             for record in records {
                 let key = change_record_key(record);
