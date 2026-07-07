@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260707T062431-4cac4872",
+  "bead_id": "pqueue-b3167f23",
+  "base_rev": "c11ac91564bf56873563ddcbf2cec654d05172d5",
+  "created_at": "2026-07-07T06:24:32.19241257Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b3167f23",
+    "title": "Make composed atomic update_fields conformance non-vacuous",
+    "description": "PROBLEM: the claimed-item update_fields scenario is skipped for composed atomic backends, so the non-relational family does not prove the update_fields path. ROOT CAUSE: `crates/pqueue-conformance/src/lib.rs:315-327` returns early when `caps.consistency.contains(`composed`)`, even though composed atomic backends still support `update_fields` (`crates/pqueue-engine/src/compose.rs:2379-2383`). PROPOSED FIX: replace the substring gate with a real capability check (`commit_capabilities().is_atomic()` or an `EngineError::Unavailable` probe) so composed atomic backends execute the scenario. NON-SCOPE: postgres provisioning, RESP wire assertions, reserved-name policy, and whole_group coverage. Parent bead pqueue-7bed1610; review basis dbf97f1/14d04ac on beads pqueue-46ea00f4 and pqueue-5c70706b.",
+    "acceptance": "1. `TestComposedAtomicUpdateFieldsExecutes` proves the claimed-item update_fields scenario runs on composed atomic backends and records at least one assertion.\n2. `TestCapabilityGateUsesAtomicProbe` proves the skip is capability-based and still excludes eventual-apply backends.\n3. `go test ./...` passes.\n4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-05005abb",
+    "labels": [
+      "kind:test",
+      "area:pqueue-conformance",
+      "review-rework",
+      "area:engine"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T062431-4cac4872",
+    "prompt": ".ddx/executions/20260707T062431-4cac4872/prompt.md",
+    "manifest": ".ddx/executions/20260707T062431-4cac4872/manifest.json",
+    "result": ".ddx/executions/20260707T062431-4cac4872/result.json",
+    "checks": ".ddx/executions/20260707T062431-4cac4872/checks.json",
+    "usage": ".ddx/executions/20260707T062431-4cac4872/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b3167f23-20260707T062431-4cac4872"
+  },
+  "prompt_sha": "07dc05f159b8dc9b8aad16c6a6fe1cc6fc730ce8a857fdd3da287ff821dc261d"
+}

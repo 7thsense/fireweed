@@ -1,0 +1,2 @@
+status: open
+reason: `cargo test --workspace` fails in `crates/pqueue/tests/product_validation_tests.rs` with three `Unavailable` unwraps (`callback_cohort_e2e`, `marketo_group_batching_e2e`, `noisy_neighbor_scale_e2e`), which is outside the bead scope and still needs a separate fix.
