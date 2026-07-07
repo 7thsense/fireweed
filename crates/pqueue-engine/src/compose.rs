@@ -968,23 +968,23 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     ///
     /// The emission gate stays fail-closed while the cursor is unavailable: emit-enabled queues only
     /// reap after the change-record emitter has durably advanced the cursor past the terminal record.
-    pub fn reap_terminal_items(
-        &self,
+    fn reap_terminal_items_locked(
+        inner: &mut Inner<L, P>,
         shard: &QueueKey,
         now: UtcTimestamp,
         terminal_retention_ms: u64,
         emit_change_records: bool,
     ) -> EngineResult<usize> {
-        let mut g = self.inner.lock().expect("composed backend poisoned");
         let emission_cursor = if emit_change_records {
-            g.log.emission_cursor(shard)?
+            inner.log.emission_cursor(shard)?
         } else {
             None
         };
         if emit_change_records && emission_cursor.is_none() {
             return Ok(0);
         }
-        Ok(g.projection
+        Ok(inner
+            .projection
             .reap_terminal_items(
                 shard,
                 now,
@@ -993,6 +993,40 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 emission_cursor.as_ref(),
             )?
             .len())
+    }
+
+    pub fn reap_terminal_items(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+    ) -> EngineResult<usize> {
+        let mut g = self.inner.lock().expect("composed backend poisoned");
+        Self::reap_terminal_items_locked(
+            &mut g,
+            shard,
+            now,
+            terminal_retention_ms,
+            emit_change_records,
+        )
+    }
+
+    fn durable_definitions_locked(inner: &Inner<L, P>) -> EngineResult<Vec<QueueDefinition>> {
+        let mut seen: std::collections::HashSet<QueueKey> = std::collections::HashSet::new();
+        let mut defs = Vec::new();
+        for def in inner
+            .projection
+            .recover_definitions()?
+            .into_iter()
+            .chain(inner.log.recover_definitions()?)
+        {
+            let key = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+            if seen.insert(key) {
+                defs.push(def);
+            }
+        }
+        Ok(defs)
     }
 
     // -- group-commit write-path helpers (ADR-012 P2) -----------------------
@@ -1254,20 +1288,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         // 1. Gather the durable definitions, projection catalog first then log catalog, deduped by key.
         let definitions: Vec<QueueDefinition> = {
             let g = self.inner.lock().expect("composed backend poisoned");
-            let mut seen: std::collections::HashSet<QueueKey> = std::collections::HashSet::new();
-            let mut defs = Vec::new();
-            for def in g
-                .projection
-                .recover_definitions()?
-                .into_iter()
-                .chain(g.log.recover_definitions()?)
-            {
-                let key = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-                if seen.insert(key) {
-                    defs.push(def);
-                }
-            }
-            defs
+            Self::durable_definitions_locked(&g)?
         };
         if definitions.is_empty() {
             return Ok(());
@@ -2453,6 +2474,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                 }
             }
             let expired = g.projection.all_expired_leases(now);
+            let definitions = Self::durable_definitions_locked(&g)?;
             let mut report = TickReport::default();
             for (shard, ids) in expired {
                 let env = Self::make_envelope(
@@ -2470,6 +2492,19 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     Self::commit_locked(&mut g, &shard, env, None)?;
                 }
                 report.leases_reclaimed += ids.len() as u64;
+            }
+            for def in definitions {
+                if !def.emit_change_records {
+                    continue;
+                }
+                let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+                Self::reap_terminal_items_locked(
+                    &mut g,
+                    &shard,
+                    now,
+                    def.terminal_retention_ms,
+                    def.emit_change_records,
+                )?;
             }
             Ok(report)
         })();
@@ -3253,12 +3288,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortRenewL
 mod ordered_tests {
     use super::*;
     use crate::PauseQueueCommand;
-    use crate::port::{ClaimPort, ControlPlaneStore, ProjectionRead, PushPort};
+    use crate::port::{ClaimPort, ControlPlaneStore, ProjectionRead, PushPort, ReclaimDriver};
+    use crate::{LogStore, QueueMetrics};
     use pqueue_core::{
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
         PriorityTieBreaker, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
     };
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Mutex;
     use std::task::{Poll, Wake};
 
@@ -3270,6 +3306,7 @@ mod ordered_tests {
         sealed_batches: Vec<usize>,
         entries: Vec<(CommandPosition, CommandEnvelope)>,
         emission_cursor: HashMap<QueueKey, CommandPosition>,
+        definitions: BTreeMap<QueueKey, QueueDefinition>,
         cursor_write_failures: u32,
     }
 
@@ -3322,6 +3359,15 @@ mod ordered_tests {
                 .lock()
                 .expect("fake log poisoned")
                 .cursor_write_failures += 1;
+        }
+
+        fn record_definition(&self, definition: &QueueDefinition) {
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            self.state
+                .lock()
+                .expect("fake log poisoned")
+                .definitions
+                .insert(key, definition.clone());
         }
 
         fn seal_buffered(state: &mut FakeLogState, shard: &QueueKey) -> Vec<CommandPosition> {
@@ -3427,6 +3473,22 @@ mod ordered_tests {
             _position: CommandPosition,
         ) -> EngineResult<()> {
             Ok(())
+        }
+
+        fn persist_definition(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
+            self.record_definition(definition);
+            Ok(())
+        }
+
+        fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+            Ok(self
+                .state
+                .lock()
+                .expect("fake log poisoned")
+                .definitions
+                .values()
+                .cloned()
+                .collect())
         }
 
         fn emission_cursor(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
@@ -3541,9 +3603,16 @@ mod ordered_tests {
         pending: Vec<ItemId>,
         leased: BTreeMap<ItemId, LeaseToken>,
         lease_expires_at: BTreeMap<ItemId, UtcTimestamp>,
+        terminal: HashMap<ItemId, FakeTerminalRecord>,
         paused: bool,
         pause_drain_intake: bool,
         apply_batches: Vec<Vec<&'static str>>,
+    }
+
+    #[derive(Clone)]
+    struct FakeTerminalRecord {
+        terminal_at: UtcTimestamp,
+        terminal_position: Option<CommandPosition>,
     }
 
     impl FakeProjection {
@@ -3553,6 +3622,25 @@ mod ordered_tests {
                 .expect("fake projection poisoned")
                 .apply_batches
                 .clone()
+        }
+
+        fn seed_terminal_item(
+            &self,
+            item_id: ItemId,
+            terminal_at: UtcTimestamp,
+            terminal_position: Option<CommandPosition>,
+        ) {
+            self.state
+                .lock()
+                .expect("fake projection poisoned")
+                .terminal
+                .insert(
+                    item_id,
+                    FakeTerminalRecord {
+                        terminal_at,
+                        terminal_position,
+                    },
+                );
         }
     }
 
@@ -3791,9 +3879,15 @@ mod ordered_tests {
                 .expect("fake projection poisoned")
                 .pending
                 .len() as u64;
+            let resident_terminal_count = self
+                .state
+                .lock()
+                .expect("fake projection poisoned")
+                .terminal
+                .len() as u64;
             Ok(QueueMetrics {
                 pending,
-                resident_terminal_count: 0,
+                resident_terminal_count,
                 ..Default::default()
             })
         }
@@ -3838,6 +3932,39 @@ mod ordered_tests {
             _key: &[Vec<u8>],
         ) -> EngineResult<Vec<IndexHit>> {
             Ok(Vec::new())
+        }
+
+        fn reap_terminal_items(
+            &mut self,
+            _shard: &QueueKey,
+            now: UtcTimestamp,
+            terminal_retention_ms: u64,
+            emit_change_records: bool,
+            emission_cursor: Option<&CommandPosition>,
+        ) -> EngineResult<Vec<ItemId>> {
+            let state = self.state.get_mut().expect("fake projection poisoned");
+            let mut ids = Vec::new();
+            for (id, rec) in &state.terminal {
+                if add_millis(rec.terminal_at, terminal_retention_ms) > now {
+                    continue;
+                }
+                if emit_change_records {
+                    let Some(terminal_position) = rec.terminal_position.as_ref() else {
+                        continue;
+                    };
+                    let Some(cursor) = emission_cursor else {
+                        continue;
+                    };
+                    if cursor.precedes(terminal_position) {
+                        continue;
+                    }
+                }
+                ids.push(*id);
+            }
+            for id in &ids {
+                state.terminal.remove(id);
+            }
+            Ok(ids)
         }
     }
 
@@ -3888,6 +4015,16 @@ mod ordered_tests {
 
     fn ts(seconds: i64) -> UtcTimestamp {
         UtcTimestamp::new(seconds, 0).unwrap()
+    }
+
+    fn add_millis(timestamp: UtcTimestamp, millis: u64) -> UtcTimestamp {
+        let seconds = timestamp.seconds + (millis / 1_000) as i64;
+        let nanos = timestamp.nanoseconds as u64 + (millis % 1_000) * 1_000_000;
+        UtcTimestamp::new(
+            seconds + (nanos / 1_000_000_000) as i64,
+            (nanos % 1_000_000_000) as u32,
+        )
+        .unwrap()
     }
 
     fn pause_envelope(
@@ -4641,6 +4778,130 @@ mod ordered_tests {
                     0,
                 )],
             ]
+        );
+    }
+
+    #[test]
+    fn TestComposedTerminalReapOnReclaimLoop() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        );
+        let shard = queue();
+        assert!(matches!(
+            poll_once(&mut backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+
+        let item_id = ItemId::from_u64(99);
+        let terminal_position = CommandPosition::new(shard.clone(), 0, 2);
+        backend
+            .inner
+            .lock()
+            .expect("backend poisoned")
+            .projection
+            .seed_terminal_item(item_id, ts(0), Some(terminal_position.clone()));
+        {
+            let mut g = backend.inner.lock().expect("backend poisoned");
+            g.log
+                .set_emission_cursor(&shard, terminal_position.clone())
+                .expect("seed emission cursor");
+        }
+
+        assert!(matches!(
+            poll_once(&mut backend.tick(ts(61))),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(
+            poll_once(&mut backend.metrics(&shard)),
+            Poll::Ready(Ok(QueueMetrics {
+                pending: 0,
+                resident_terminal_count: 0,
+                ..Default::default()
+            }))
+        );
+        assert!(
+            backend
+                .inner
+                .lock()
+                .expect("backend poisoned")
+                .projection
+                .state
+                .lock()
+                .expect("fake projection poisoned")
+                .terminal
+                .is_empty(),
+            "scheduled reclaim should remove durable terminal rows once the cursor is safe"
+        );
+    }
+
+    #[test]
+    fn TestComposedTerminalReapWaitsForDurableEmissionCursor() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        );
+        let shard = queue();
+        assert!(matches!(
+            poll_once(&mut backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+
+        let item_id = ItemId::from_u64(100);
+        let terminal_position = CommandPosition::new(shard.clone(), 0, 2);
+        backend
+            .inner
+            .lock()
+            .expect("backend poisoned")
+            .projection
+            .seed_terminal_item(item_id, ts(0), Some(terminal_position.clone()));
+
+        assert!(matches!(
+            poll_once(&mut backend.tick(ts(61))),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(
+            poll_once(&mut backend.metrics(&shard)),
+            Poll::Ready(Ok(QueueMetrics {
+                pending: 0,
+                resident_terminal_count: 1,
+                ..Default::default()
+            }))
+        );
+        assert!(
+            backend
+                .inner
+                .lock()
+                .expect("backend poisoned")
+                .projection
+                .state
+                .lock()
+                .expect("fake projection poisoned")
+                .terminal
+                .contains_key(&item_id),
+            "emit-enabled queues must stay fail-closed while the durable cursor is missing"
+        );
+
+        {
+            let mut g = backend.inner.lock().expect("backend poisoned");
+            g.log
+                .set_emission_cursor(&shard, terminal_position)
+                .expect("seed emission cursor");
+        }
+
+        assert!(matches!(
+            poll_once(&mut backend.tick(ts(61))),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(
+            poll_once(&mut backend.metrics(&shard)),
+            Poll::Ready(Ok(QueueMetrics {
+                pending: 0,
+                resident_terminal_count: 0,
+                ..Default::default()
+            }))
         );
     }
 }
