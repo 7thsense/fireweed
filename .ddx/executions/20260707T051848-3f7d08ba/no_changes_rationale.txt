@@ -1,0 +1,2 @@
+status: blocked
+reason: cargo test --workspace fails in unrelated crates/pqueue product_validation_tests with pre-existing Unavailable errors, so the bead cannot be closed against the workspace gate in this worktree.

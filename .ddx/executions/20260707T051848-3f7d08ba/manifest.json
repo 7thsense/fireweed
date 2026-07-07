@@ -1,0 +1,32 @@
+{
+  "attempt_id": "20260707T051848-3f7d08ba",
+  "bead_id": "pqueue-15937d2e",
+  "base_rev": "735b1795f7560c68e978170f722e9bd3f5a91565",
+  "created_at": "2026-07-07T05:18:48.944724088Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-15937d2e",
+    "title": "SQLite terminal reap sweep",
+    "description": "PROBLEM: the sqlite relational backend reclaims leases and cohorts but does not sweep terminal rows with the required retention-and-cursor conjunction, so opt-in terminal records never age out. ROOT CAUSE: `crates/pqueue-sqlite/src/relational.rs:8063-8166` implements `ReclaimDriver::tick` for lease and cohort expiry only; the terminal reap predicate already exists in `crates/pqueue-sqlite/src/relational.rs:2206-2265` but is not invoked from the tick path. PROPOSED FIX: wire the sqlite tick path to the terminal sweep using the durable emission cursor from `pqueue-657e5f8d`, reaping terminal rows only when retention has elapsed and the cursor has passed for emit-enabled queues, while preserving retention-only behavior for opt-out queues. NON-SCOPE: do not change Postgres, the composed backend tick wiring, metrics export, evidence ledger, or unrelated lease/cohort reclamation semantics; dependency `pqueue-509a70d0` stays intact.",
+    "acceptance": "1. `TestSqliteTerminalReapSweepsWithCursorConjunction` covers emit-enabled queues and proves terminal rows are reaped only after both retention and cursor conditions are satisfied. 2. `TestTerminalReapOptOutIgnoresCursor` covers opt-out queues and proves terminal rows reap on retention alone. 3. `go test ./...` passes. 4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-daecad34",
+    "labels": [
+      "kind:build",
+      "area:pqueue-sqlite",
+      "td-008",
+      "review-rework"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T051848-3f7d08ba",
+    "prompt": ".ddx/executions/20260707T051848-3f7d08ba/prompt.md",
+    "manifest": ".ddx/executions/20260707T051848-3f7d08ba/manifest.json",
+    "result": ".ddx/executions/20260707T051848-3f7d08ba/result.json",
+    "checks": ".ddx/executions/20260707T051848-3f7d08ba/checks.json",
+    "usage": ".ddx/executions/20260707T051848-3f7d08ba/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-15937d2e-20260707T051848-3f7d08ba"
+  },
+  "prompt_sha": "a014e4c9cd92029c82d86fdbd5e1737f69e639f690072cfcee952b0d48825115"
+}
