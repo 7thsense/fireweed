@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260707T131435-196dbd57",
+  "bead_id": "pqueue-b9cbe0b6",
+  "base_rev": "d2ba617d067d96617e0cac23844df2dddf6a816d",
+  "created_at": "2026-07-07T13:14:35.741369375Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b9cbe0b6",
+    "title": "Harden command wire format and producer path: part 3: part 2",
+    "description": "PROBLEM\nParent bead pqueue-b4992731 is too broad for one execution pass. This child owns part 2 of 2 of that parent scope.\n\nROOT CAUSE\nPROBLEM\nParent bead pqueue-60f3bccc is too broad for one execution pass. This child owns part 3 of 3 of that parent scope.\n\nROOT CAUSE\nPROBLEM: the command-kind header is treated as a Rust `Debug` string, records are produced sequentially with blocking timeouts inside the tick path, and startup relies on a fixed sleep to hide readiness races. ROOT CAUSE: `crates/pqueue-server/src/wire.rs:29`, `crates/pqueue-server/src/producer.rs:88`, and `crates/pqueue-server/src/main.rs:101` serialize wire data with implicit formatting, call `block_in_place` on the hot path, and wait on `sleep(Duration::from_millis(400))` during startup. PROPOSED FIX: define explicit command-kind serialization/deserialization, batch or async-produce records outside the current-thread reactor, remove the fixed sleep, and make startup readiness event-driven.\nNON-SCOPE: tenant/topic canonicalization, listen/bootstrap split.\n\nPROPOSED FIX\nImplement only this child acceptance slice:\n- `go test ./...` passes for the wire/producer path and its callers.\n- `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.\n\nNON-SCOPE\nDo not implement parent acceptance criteria assigned to sibling child beads. Preserve every parent non-scope constraint unless this child explicitly narrows it.\n\nPROPOSED FIX\nImplement only this child acceptance slice:\n- `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.\n\nNON-SCOPE\nDo not implement parent acceptance criteria assigned to sibling child beads. Preserve every parent non-scope constraint unless this child explicitly narrows it.",
+    "acceptance": "1. `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.",
+    "parent": "pqueue-b4992731",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:fjord",
+      "adr-014",
+      "review-rework",
+      "decomposed"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field preClaimIntakePromptRewrite.rewrite.acceptance of type string\",\"fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\"}",
+          "created_at": "2026-07-07T13:14:32.888806016Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T131435-196dbd57",
+    "prompt": ".ddx/executions/20260707T131435-196dbd57/prompt.md",
+    "manifest": ".ddx/executions/20260707T131435-196dbd57/manifest.json",
+    "result": ".ddx/executions/20260707T131435-196dbd57/result.json",
+    "checks": ".ddx/executions/20260707T131435-196dbd57/checks.json",
+    "usage": ".ddx/executions/20260707T131435-196dbd57/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b9cbe0b6-20260707T131435-196dbd57"
+  },
+  "prompt_sha": "2e52a6c401f42de3e6faf977db6e749f173f15afae86174d210d01e07dc94a4c"
+}

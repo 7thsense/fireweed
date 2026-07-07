@@ -1,0 +1,2 @@
+status: open
+reason: cargo test -p pqueue-server --lib is red before any bead-scoped edits, failing three unrelated object_log_sqlite recovery tests (file_clean_restart_resumes_at_high_water, segmented_clean_restart_recovers_from_snapshot_not_genesis, segmented_lagging_tail_replayed_exactly_once). Retry once the base suite is green or the failing tests are narrowed to this bead's wire/producer/startup scope.
