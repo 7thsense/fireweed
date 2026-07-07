@@ -1,0 +1,1 @@
+verification_command: cargo test -p pqueue-server --tests && lefthook run pre-commit

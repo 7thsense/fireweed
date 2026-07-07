@@ -1,0 +1,94 @@
+{
+  "attempt_id": "20260707T131955-59164c91",
+  "bead_id": "pqueue-b9cbe0b6",
+  "base_rev": "ba7bb8b1dd4af2c791e32ad1ad867d4b75d283ec",
+  "created_at": "2026-07-07T13:19:56.514999019Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b9cbe0b6",
+    "title": "Harden command wire format and producer path: part 3: part 2",
+    "description": "PROBLEM\nParent bead pqueue-b4992731 is too broad for one execution pass. This child owns part 2 of 2 of that parent scope.\n\nROOT CAUSE\nPROBLEM\nParent bead pqueue-60f3bccc is too broad for one execution pass. This child owns part 3 of 3 of that parent scope.\n\nROOT CAUSE\nPROBLEM: the command-kind header is treated as a Rust `Debug` string, records are produced sequentially with blocking timeouts inside the tick path, and startup relies on a fixed sleep to hide readiness races. ROOT CAUSE: `crates/pqueue-server/src/wire.rs:29`, `crates/pqueue-server/src/producer.rs:88`, and `crates/pqueue-server/src/main.rs:101` serialize wire data with implicit formatting, call `block_in_place` on the hot path, and wait on `sleep(Duration::from_millis(400))` during startup. PROPOSED FIX: define explicit command-kind serialization/deserialization, batch or async-produce records outside the current-thread reactor, remove the fixed sleep, and make startup readiness event-driven.\nNON-SCOPE: tenant/topic canonicalization, listen/bootstrap split.\n\nPROPOSED FIX\nImplement only this child acceptance slice:\n- `go test ./...` passes for the wire/producer path and its callers.\n- `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.\n\nNON-SCOPE\nDo not implement parent acceptance criteria assigned to sibling child beads. Preserve every parent non-scope constraint unless this child explicitly narrows it.\n\nPROPOSED FIX\nImplement only this child acceptance slice:\n- `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.\n\nNON-SCOPE\nDo not implement parent acceptance criteria assigned to sibling child beads. Preserve every parent non-scope constraint unless this child explicitly narrows it.",
+    "acceptance": "1. `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.",
+    "parent": "pqueue-b4992731",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:fjord",
+      "adr-014",
+      "review-rework",
+      "decomposed"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field preClaimIntakePromptRewrite.rewrite.acceptance of type string\",\"fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\"}",
+          "created_at": "2026-07-07T13:14:32.888806016Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-07T13:17:02.042261344Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260707T131435-196dbd57\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":603181,\"output_tokens\":6695,\"total_tokens\":609876,\"cost_usd\":0,\"duration_ms\":146133,\"exit_code\":0}",
+          "created_at": "2026-07-07T13:17:02.062258894Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=609876 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260707T131435-196dbd57\",\"bead_id\":\"pqueue-b9cbe0b6\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-07T13:17:03.386219751Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"d2ba617d067d96617e0cac23844df2dddf6a816d\",\"classification\":\"transport\",\"detail\":\"mixed_commit_and_no_changes_rationale\",\"rationale\":\"The attempt produced an inconsistent execution result: it reports both a result/implementation revision and a no_changes_rationale, with detail mixed_commit_and_no_changes_rationale. The stated blocker is a pre-existing red cargo test suite outside the bead's wire/producer/startup scope, so no bead-scoped implementation outcome can be evaluated from this attempt.\",\"recommended_action\":\"release_claim_retry\",\"result_rev\":\"c1be402a9d14f4425709c5fb6d15bf1e92d8ad47\",\"session_id\":\"eb-f848a2d8\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-07T13:17:31.220574059Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "transport: release_claim_retry"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\nrationale: status: open\nreason: cargo test -p pqueue-server --lib is red before any bead-scoped edits, failing three unrelated object_log_sqlite recovery tests (file_clean_restart_resumes_at_high_water, segmented_clean_restart_recovers_from_snapshot_not_genesis, segmented_lagging_tail_replayed_exactly_once). Retry once the base suite is green or the failing tests are narrowed to this bead's wire/producer/startup scope.\ndecision_audit={\"failure_class\":\"transport\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=c1be402a9d14f4425709c5fb6d15bf1e92d8ad47\nbase_rev=d2ba617d067d96617e0cac23844df2dddf6a816d\noutcome_reason=transport",
+          "created_at": "2026-07-07T13:17:31.247726373Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field preClaimIntakePromptRewrite.rewrite.acceptance of type string\",\"fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\"}",
+          "created_at": "2026-07-07T13:19:53.722483532Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T131955-59164c91",
+    "prompt": ".ddx/executions/20260707T131955-59164c91/prompt.md",
+    "manifest": ".ddx/executions/20260707T131955-59164c91/manifest.json",
+    "result": ".ddx/executions/20260707T131955-59164c91/result.json",
+    "checks": ".ddx/executions/20260707T131955-59164c91/checks.json",
+    "usage": ".ddx/executions/20260707T131955-59164c91/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b9cbe0b6-20260707T131955-59164c91"
+  },
+  "prompt_sha": "fd4b72bc89ec9d37c8a9110847c1a3e978d069b4fdcd48bd00bbe39b42244b60"
+}
