@@ -4423,6 +4423,41 @@ impl ReclaimDriver for PostgresRelationalBackend {
                 )?;
                 report.cohorts_expired += 1;
             }
+            let terminal_sweeps: Vec<(QueueKey, u64, bool)> = g
+                .queues
+                .iter()
+                .map(|(shard, definition)| {
+                    (
+                        shard.clone(),
+                        definition.terminal_retention_ms,
+                        definition.emit_change_records,
+                    )
+                })
+                .collect();
+            for (shard, terminal_retention_ms, emit_change_records) in terminal_sweeps {
+                let emission_cursor = if emit_change_records {
+                    let (t, q) = parts(&shard);
+                    let row: Option<postgres::Row> = st(g.client.query_opt(
+                        "SELECT epoch, seq FROM relational_emission_cursor WHERE tenant=$1 AND queue=$2",
+                        &[&t, &q],
+                    ))?;
+                    row.map(|row| {
+                        let epoch: i64 = row.get(0);
+                        let seq: i64 = row.get(1);
+                        CommandPosition::new(shard.clone(), epoch as u64, seq as u64)
+                    })
+                } else {
+                    None
+                };
+                let _ = reap_terminal_items_sql(
+                    &mut g.client,
+                    &shard,
+                    now,
+                    terminal_retention_ms,
+                    emit_change_records,
+                    emission_cursor.as_ref(),
+                )?;
+            }
             Ok(report)
         })();
         std::future::ready(result)
