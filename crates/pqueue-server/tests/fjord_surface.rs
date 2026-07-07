@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use heimq_broker::consumer_group::{GroupCoordinatorBackend as _, JoinRequest};
 use heimq_broker::storage::OffsetStore as _;
@@ -153,6 +153,57 @@ async fn start_embedded_broker(queue: &QueueDefinition) -> EmbeddedBroker {
     }
 
     EmbeddedBroker { handle, bootstrap }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn TestStartupDoesNotDependOnFixedSleep() {
+    let queue = queue_definition("tenant-a", "queue-a");
+    let port = free_port();
+    let bootstrap = format!("127.0.0.1:{port}");
+    let broker = spawn_embedded_fjord_broker(
+        7,
+        &EmbeddedFjordConfig {
+            namespace_root: std::env::temp_dir()
+                .join(format!("pqueue-fjord-test-{}", std::process::id())),
+            cluster_id: "fjord-test-cluster".to_string(),
+        },
+        &format!("kafka://{bootstrap}"),
+        std::slice::from_ref(&queue),
+    )
+    .await
+    .expect("spawn embedded fjord broker");
+
+    let topic = fjord_topic_name(&queue_key(
+        queue.tenant_id.as_str(),
+        queue.queue_id.as_str(),
+    ))
+    .expect("valid fjord topic");
+
+    tokio::task::block_in_place(|| {
+        let consumer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &bootstrap)
+            .set("group.id", format!("fjord-startup-{}", std::process::id()))
+            .create()
+            .expect("metadata consumer");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(metadata) = consumer.fetch_metadata(Some(&topic), Duration::from_millis(500))
+            {
+                if metadata.topics().iter().any(|topic_meta| {
+                    topic_meta.name() == topic && topic_meta.partitions().len() == 1
+                }) {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "embedded fjord broker did not publish metadata for {topic} within 10s"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    });
+
+    drop(broker);
 }
 
 fn make_sink(bootstrap: &str) -> FjordChangeRecordSink {

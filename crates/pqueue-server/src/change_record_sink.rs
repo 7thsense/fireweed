@@ -1039,6 +1039,47 @@ mod tests {
         assert_eq!(command_kind.value, Some(b"pause-queue".as_ref()));
     }
 
+    #[test]
+    fn TestRecordKeyIncludesPqItemId() {
+        let shard = QueueKey::new(
+            pqueue_core::TenantId::new("tenant-a").unwrap(),
+            pqueue_core::QueueId::new("queue-a").unwrap(),
+        );
+        let with_item = pqueue_engine::ChangeRecord {
+            tenant_id: shard.tenant_id.clone(),
+            queue_id: shard.queue_id.clone(),
+            item_id: Some(pqueue_core::ItemId::from_u64(17)),
+            position: pqueue_engine::ChangeRecordPosition {
+                backend_epoch: 9,
+                sequence: 3,
+            },
+            command_kind: pqueue_engine::ChangeRecordKind::Push,
+            new_state: Some(pqueue_engine::ChangeRecordState::Pending),
+            item_version: Some(1),
+            terminal_at: None,
+            emitted_at: Some(UtcTimestamp::new(1, 0).unwrap()),
+            source_owner_id: None,
+            source_epoch: 9,
+        };
+        let without_item = pqueue_engine::ChangeRecord {
+            item_id: None,
+            ..with_item.clone()
+        };
+
+        assert_eq!(change_record_key(&with_item), "17:9:3");
+        assert_eq!(change_record_key(&without_item), ":9:3");
+
+        let headers_with_item = change_record_headers(&with_item);
+        assert_eq!(headers_with_item.count(), 6);
+        let pq_item_id = headers_with_item.get(5);
+        assert_eq!(pq_item_id.key, "pq-item-id");
+        assert_eq!(pq_item_id.value, Some(b"17".as_ref()));
+
+        let headers_without_item = change_record_headers(&without_item);
+        assert_eq!(headers_without_item.count(), 5);
+        assert_eq!(headers_without_item.get(4).key, "pq-command-kind");
+    }
+
     #[derive(Default)]
     struct RecordingEmissionBackend {
         emitted_shards: Mutex<Vec<QueueKey>>,

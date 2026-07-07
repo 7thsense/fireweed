@@ -34,6 +34,8 @@ use pqueue_resp::{
     serve_with_shutdown_and_hooks,
 };
 use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend};
+use rdkafka::ClientConfig;
+use rdkafka::consumer::{BaseConsumer, Consumer};
 // Re-exported: it is the type of the public `Config::hybrid_async` field, so composition-root callers and
 // tests that construct a `Config` directly can name the async-apply threshold config.
 pub use pqueue_sqlite::HybridAsyncThresholds;
@@ -268,6 +270,50 @@ fn parse_fjord_topic_name(topic: &str) -> EngineResult<QueueKey> {
     ))
 }
 
+async fn embedded_fjord_topics_ready(bootstrap: &str, topics: &[String]) -> EngineResult<()> {
+    if topics.is_empty() {
+        return Ok(());
+    }
+
+    let bootstrap = bootstrap.to_string();
+    let topics = topics.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let consumer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &bootstrap)
+            .set("group.id", format!("fjord-startup-{}", std::process::id()))
+            .set("auto.offset.reset", "earliest")
+            .set("enable.auto.commit", "false")
+            .create()
+            .map_err(|e| {
+                EngineError::Storage(format!("build embedded fjord metadata consumer: {e}"))
+            })?;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let metadata = consumer
+                .fetch_metadata(None, Duration::from_millis(500))
+                .map_err(|e| EngineError::Storage(format!("fetch embedded fjord metadata: {e}")))?;
+            let ready = topics.iter().all(|topic| {
+                metadata.topics().iter().any(|topic_meta| {
+                    topic_meta.name() == topic && topic_meta.partitions().len() == 1
+                })
+            });
+            if ready {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(EngineError::Storage(format!(
+                    "embedded fjord broker did not publish metadata for {:?} within 10s",
+                    topics
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })
+    .await
+    .map_err(|e| EngineError::Storage(format!("embedded fjord readiness task failed: {e}")))?
+}
+
 fn validate_fjord_topic_segment(value: &str) -> EngineResult<()> {
     if value.is_empty() {
         return Err(EngineError::Invalid(
@@ -336,6 +382,15 @@ pub async fn spawn_embedded_fjord_broker(
 ) -> EngineResult<JoinHandle<()>> {
     let (host, port) = parse_kafka_bootstrap(endpoint)?;
     let surface = build_embedded_fjord_surface(node_id, config);
+    let topics = queues
+        .iter()
+        .map(|queue| {
+            fjord_topic_name(&QueueKey::new(
+                queue.tenant_id.clone(),
+                queue.queue_id.clone(),
+            ))
+        })
+        .collect::<EngineResult<Vec<_>>>()?;
     register_embedded_fjord_topics(&surface.topic_registry, queues)?;
     let namespace_root = surface.namespace_root().clone();
 
@@ -409,8 +464,7 @@ pub async fn spawn_embedded_fjord_broker(
             }
         }
     }
-
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    embedded_fjord_topics_ready(&bootstrap, &topics).await?;
 
     Ok(handle)
 }
