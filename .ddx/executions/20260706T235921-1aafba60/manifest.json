@@ -1,0 +1,44 @@
+{
+  "attempt_id": "20260706T235921-1aafba60",
+  "bead_id": "pqueue-61b1557d",
+  "base_rev": "de445c6bb54f34aa1fbc3b544d507becaa901926",
+  "created_at": "2026-07-06T23:59:21.958901043Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-61b1557d",
+    "title": "Feed embedded fjord through the delivery seam beside the HTTP sink",
+    "description": "PROBLEM: the server boots only the niflheim HTTP delivery path; ADR-014's embedded-fjord binding needs a sibling startup/config seam. Wire the embedded fjord feed as a second ChangeRecordSink consumer beside the HTTP sink (same seam, feed-forward only, never on the commit path — CL-2). The optional external-Kafka PRODUCER sink (deployment mode where the embedded fjord idles) shares this seam; implement the seam so both attachments are config-selectable.",
+    "acceptance": "1. `TestChangeRecordSinkConfigSelectsKafkaProducerPath` proves config can choose the Kafka/heimq sink without breaking the HTTP default.\n2. `TestChangeRecordEmitterStartsChosenSinkOnly` proves startup only spawns the selected sink path.\n3. `go test ./... -run 'TestChangeRecordSinkConfigSelectsKafkaProducerPath|TestChangeRecordEmitterStartsChosenSinkOnly'`\n4. `lefthook run pre-commit`\n5. `lefthook run pre-push`",
+    "parent": "pqueue-0b38f31f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:change-log",
+      "td-008"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field .readiness_checks.evidence of type string\",\"fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"348bad2af67345ed6eca7d4ff85e6e3a57001c9b2ddae93f1a8f4ec784ec96ce\"}",
+          "created_at": "2026-07-06T23:59:19.745002907Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260706T235921-1aafba60",
+    "prompt": ".ddx/executions/20260706T235921-1aafba60/prompt.md",
+    "manifest": ".ddx/executions/20260706T235921-1aafba60/manifest.json",
+    "result": ".ddx/executions/20260706T235921-1aafba60/result.json",
+    "checks": ".ddx/executions/20260706T235921-1aafba60/checks.json",
+    "usage": ".ddx/executions/20260706T235921-1aafba60/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-61b1557d-20260706T235921-1aafba60"
+  },
+  "prompt_sha": "4e864cadb938cce90fdfc95d66db3f9bff62a66a9531ab5c842ca1ea3fbb317b"
+}
