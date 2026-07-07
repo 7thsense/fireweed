@@ -40,7 +40,7 @@ use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeKind, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PayloadUpdate,
     ProjectionSnapshot, PushItem, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
-    ScheduleUpdate, SnapshotRef,
+    ScheduleUpdate, SnapshotRef, TerminalEmissionMetrics,
 };
 use serde_json::Value;
 
@@ -161,13 +161,6 @@ impl From<ProjectionImageItem> for ItemRecord {
             terminal_position: item.terminal_position,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalEmissionMetrics {
-    pub resident_terminal_count: u64,
-    pub emission_lag_commands: u64,
-    pub emission_oldest_unemitted_age_ms: u64,
 }
 
 /// Complete queue projection image at a durable high-water.

@@ -1428,12 +1428,29 @@ async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
         Ok(m) => m,
         Err(e) => return err_reply(&e),
     };
+    let terminal_metrics = match backend.queue_definition(&shard).await {
+        Ok(definition) => match backend
+            .terminal_emission_metrics(
+                &shard,
+                UtcTimestamp::new(0, 0).expect("valid timestamp"),
+                definition.emit_change_records,
+                None,
+            )
+            .await
+        {
+            Ok(metrics) => metrics,
+            Err(e) => return err_reply(&e),
+        },
+        Err(e) => return err_reply(&e),
+    };
     let live = (m.pending + m.leased) as i64;
     let sub = String::from_utf8_lossy(&args[1]).to_ascii_uppercase();
     match sub.as_str() {
         "STREAM" => Resp::Array(vec![
             Resp::Bulk(b"length".to_vec()),
             Resp::Int(live),
+            Resp::Bulk(b"resident-terminal-count".to_vec()),
+            Resp::Int(terminal_metrics.resident_terminal_count as i64),
             Resp::Bulk(b"groups".to_vec()),
             Resp::Int(1), // single implicit consumer group (pqueue has no named-group state)
             Resp::Bulk(b"last-generated-id".to_vec()),

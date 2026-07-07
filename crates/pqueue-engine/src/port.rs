@@ -166,6 +166,14 @@ pub struct QueueMetrics {
     pub resident_terminal_count: u64,
 }
 
+/// Terminal-item residency plus emission-lag observability for production metrics surfaces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TerminalEmissionMetrics {
+    pub resident_terminal_count: u64,
+    pub emission_lag_commands: u64,
+    pub emission_oldest_unemitted_age_ms: u64,
+}
+
 pub trait ProjectionRead: Send + Sync {
     /// Priority-ordered eligible candidates (Eligibility Precedence, API-001). The claim path
     /// leases from these in the same unit of work (Invariant 1: per-item delivery, no cursor).
@@ -209,6 +217,14 @@ pub trait ProjectionRead: Send + Sync {
         &self,
         queue: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send;
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&crate::types::CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send;
 }
 
 // ---------------------------------------------------------------------------

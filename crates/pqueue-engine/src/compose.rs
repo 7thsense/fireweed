@@ -56,8 +56,9 @@ use crate::port::{
     FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView, LeaseView,
     LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
     PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
+    RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore,
+    TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -615,6 +616,13 @@ pub trait ProjectionStore: Send {
     fn peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>>;
     fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>>;
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics>;
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<TerminalEmissionMetrics>;
     fn live_items(
         &self,
         shard: &QueueKey,
@@ -2620,6 +2628,22 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
             .metrics(queue);
         std::future::ready(result)
     }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .terminal_emission_metrics(shard, now, emit_change_records, emission_cursor);
+        std::future::ready(result)
+    }
 }
 
 impl<L, P, C> HistoricalProjectionRead for ComposedBackend<L, P, C>
@@ -3889,6 +3913,26 @@ mod ordered_tests {
                 pending,
                 resident_terminal_count,
                 ..Default::default()
+            })
+        }
+
+        fn terminal_emission_metrics(
+            &self,
+            _shard: &QueueKey,
+            _now: UtcTimestamp,
+            _emit_change_records: bool,
+            _emission_cursor: Option<&CommandPosition>,
+        ) -> EngineResult<TerminalEmissionMetrics> {
+            let resident_terminal_count = self
+                .state
+                .lock()
+                .expect("fake projection poisoned")
+                .terminal
+                .len() as u64;
+            Ok(TerminalEmissionMetrics {
+                resident_terminal_count,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
             })
         }
 

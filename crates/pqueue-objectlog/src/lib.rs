@@ -51,9 +51,10 @@ use pqueue_engine::{
     ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
     QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, ReassignLeaseCommand,
     ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
-    RequestOutcome, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
-    validate_gate_command, validate_gate_push, validate_purge_force,
+    RequestOutcome, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
+    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
+    validate_purge_force,
 };
 use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 
@@ -1543,6 +1544,21 @@ impl ProjectionRead for ObjectLogBackend {
             let shard = queue.clone();
             let proj = g.projections.get(&shard).ok_or(EngineError::NotFound)?;
             Ok(proj.metrics())
+        })();
+        std::future::ready(result)
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(proj.terminal_emission_metrics(now, emit_change_records, emission_cursor))
         })();
         std::future::ready(result)
     }

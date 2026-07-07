@@ -72,8 +72,8 @@ use pqueue_engine::{
     PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
     RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
-    TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
+    TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
     validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
     validate_purge_force,
 };
@@ -3220,6 +3220,24 @@ impl ProjectionRead for PostgresRelationalBackend {
         };
         std::future::ready(result)
     }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        _now: UtcTimestamp,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            metrics_sql(&mut g.client, shard).map(|metrics| TerminalEmissionMetrics {
+                resident_terminal_count: metrics.resident_terminal_count,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
+            })
+        };
+        std::future::ready(result)
+    }
 }
 
 /// ADR-011 (pqueue-f4ffd679): typed secondary index queries backed by `pqueue_item_index`.
@@ -5130,6 +5148,21 @@ impl ProjectionStore for PostgresRelational {
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         metrics_sql(&mut self.lock().client, shard)
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        _now: UtcTimestamp,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<TerminalEmissionMetrics> {
+        let metrics = metrics_sql(&mut self.lock().client, shard)?;
+        Ok(TerminalEmissionMetrics {
+            resident_terminal_count: metrics.resident_terminal_count,
+            emission_lag_commands: 0,
+            emission_oldest_unemitted_age_ms: 0,
+        })
     }
 
     fn live_items(

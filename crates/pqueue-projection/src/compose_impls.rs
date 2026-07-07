@@ -25,7 +25,7 @@ use pqueue_engine::{
     AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
     EngineError, EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView,
     LogStore, ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey, QueueMetrics,
-    SnapshotRef,
+    SnapshotRef, TerminalEmissionMetrics,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -387,6 +387,18 @@ impl ProjectionStore for InMemoryProjection {
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         Ok(self.get(shard)?.metrics())
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<TerminalEmissionMetrics> {
+        Ok(self
+            .get(shard)?
+            .terminal_emission_metrics(now, emit_change_records, emission_cursor))
     }
 
     fn live_items(

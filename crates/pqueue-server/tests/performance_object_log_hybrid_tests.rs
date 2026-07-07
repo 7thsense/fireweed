@@ -852,6 +852,7 @@ async fn run_hybrid(
                         .recovery_high_water(&sample_shard)
                         .ok()
                         .flatten()
+                        .map(|pos| pos.sequence)
                         .unwrap_or(0)
                 });
                 let lag = committed.saturating_sub(applied);
@@ -950,6 +951,7 @@ async fn run_hybrid(
         .unwrap_or(0);
     let rec_sqlite_high_water = rec_backend
         .with_projection(|p| p.sqlite().recovery_high_water(&rec_shard).unwrap())
+        .map(|pos| pos.sequence)
         .unwrap_or(0);
     let rec_tail_to_replay = rec_log_head.saturating_sub(rec_sqlite_high_water);
     rec_flusher.abort();
@@ -3334,7 +3336,9 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
         "metrics must be served from memory before SQLite checkpoint catch-up"
     );
     assert_eq!(
-        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        backend
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(0),
         "SQLite high-water should lag the memory-served push"
     );
@@ -3346,7 +3350,9 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
         .flush_deferred_projection()
         .expect("flush deferred push apply");
     assert_eq!(
-        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        backend
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(1),
         "SQLite should catch up after the deferred projection flush"
     );
@@ -3386,7 +3392,9 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
     assert_eq!(before_reopen.pending, 0);
     assert_eq!(before_reopen.complete, 4);
     assert_eq!(
-        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        backend
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(1),
         "SQLite remains behind on claim/finalize before the simulated partial-batch restart"
     );
@@ -3411,7 +3419,9 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
     assert_eq!(after_reopen.pending, 0);
     assert_eq!(after_reopen.complete, 4);
     assert_eq!(
-        reopened.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        reopened
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(1),
         "recovery serves memory from the object-log tail while SQLite remains at its prior high-water"
     );
@@ -3425,7 +3435,9 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
             .expect("flush recovered deferred tail");
     }
     assert_eq!(
-        reopened.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        reopened
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(3),
         "deferred catch-up should durably apply each recovered push, claim, and finalize exactly once"
     );
@@ -3500,7 +3512,9 @@ async fn performance_object_log_hybrid_deferred_flush_chunking() {
          not held for the whole backlog"
     );
     assert_eq!(
-        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        backend
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(CHUNK as u64),
         "sqlite high-water should advance by exactly one chunk after the partial flush"
     );
@@ -3518,7 +3532,9 @@ async fn performance_object_log_hybrid_deferred_flush_chunking() {
     }
     assert_eq!(backend.with_projection(|p| p.deferred_command_count()), 0);
     assert_eq!(
-        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        backend
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(PUSHES as u64),
         "after catch-up sqlite must reflect exactly the applied prefix"
     );
@@ -3528,7 +3544,9 @@ async fn performance_object_log_hybrid_deferred_flush_chunking() {
         .flush_deferred_projection()
         .expect("flush on an empty backlog is a no-op");
     assert_eq!(
-        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        backend
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(PUSHES as u64),
         "flushing an empty backlog must not re-apply or advance high-water"
     );
@@ -3618,7 +3636,9 @@ async fn performance_object_log_hybrid_tail_replay_after_partial_sqlite_high_wat
         .flush_deferred_projection()
         .expect("partial deferred flush");
     assert_eq!(
-        backend.with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap()),
+        backend
+            .with_projection(|p| p.sqlite().recovery_high_water(&test_shard).unwrap())
+            .map(|pos| pos.sequence),
         Some(CHUNK as u64),
         "sqlite high-water must have advanced by exactly one partial chunk before the restart"
     );

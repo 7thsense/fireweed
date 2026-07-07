@@ -659,6 +659,73 @@ async fn start_provisions_queues_and_serves_end_to_end() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn TestTerminalEmissionMetricsReachServerSurface() {
+    let server = start(Config::new(
+        BackendSpec::memory(),
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
+    .await
+    .unwrap();
+
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(11)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let claimed_id = reply.keys[0].ids[0].id.clone();
+    let _: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&claimed_id)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let info: std::collections::HashMap<String, redis::Value> = redis::cmd("XINFO")
+        .arg("STREAM")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        match &info["resident-terminal-count"] {
+            redis::Value::Int(n) => *n,
+            other => panic!("XINFO STREAM resident-terminal-count should be an int, got {other:?}"),
+        },
+        1,
+        "the server surface reads terminal emission metrics"
+    );
+    assert_eq!(
+        match &info["length"] {
+            redis::Value::Int(n) => *n,
+            other => panic!("XINFO STREAM length should be an int, got {other:?}"),
+        },
+        0,
+        "live-count behavior stays unchanged"
+    );
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing() {
     let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
     let first_id = {

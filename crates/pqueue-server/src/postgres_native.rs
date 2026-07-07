@@ -29,11 +29,11 @@ use pqueue_core::{
     RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, ItemView, LeaseView,
-    LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgePort, PushPort, PushSpec,
-    QueueKey, QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort, TickReport,
-    UpsertOutcome, UpsertPort,
+    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
+    ItemView, LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgePort,
+    PushPort, PushSpec, QueueKey, QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
+    TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_postgres::PostgresBackend;
 use pqueue_resp::RespBackend;
@@ -423,5 +423,24 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
         let inner = self.arc();
         let queue = queue.clone();
         blocking(move || futures::executor::block_on(inner.metrics(&queue)))
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let inner = self.arc();
+        let shard = shard.clone();
+        blocking(move || {
+            futures::executor::block_on(inner.terminal_emission_metrics(
+                &shard,
+                now,
+                emit_change_records,
+                emission_cursor,
+            ))
+        })
     }
 }

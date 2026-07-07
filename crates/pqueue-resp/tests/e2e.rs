@@ -1369,6 +1369,68 @@ async fn xlen_xdel_xinfo_over_offtheshelf_client() {
     assert_eq!(deleted_again, 0, "deleting an absent id is a no-op");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn TestResidentTerminalCountPublishedInMetrics() {
+    let (mut con, _backend) = setup().await;
+
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let claimed_id = reply.keys[0].ids[0].id.clone();
+    let _: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&claimed_id)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let len: i64 = redis::cmd("XLEN")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(len, 0, "terminal entries stay out of the live count");
+
+    let info: std::collections::HashMap<String, redis::Value> = redis::cmd("XINFO")
+        .arg("STREAM")
+        .arg("t1:q1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        match &info["resident-terminal-count"] {
+            redis::Value::Int(n) => *n,
+            other => panic!("XINFO STREAM resident-terminal-count should be an int, got {other:?}"),
+        },
+        1,
+        "terminal residency is surfaced in production metrics",
+    );
+    assert_eq!(
+        match &info["length"] {
+            redis::Value::Int(n) => *n,
+            other => panic!("XINFO STREAM length should be an int, got {other:?}"),
+        },
+        0,
+        "the live-count semantic stays unchanged",
+    );
+}
+
 /// Paginated XAUTOCLAIM (owed-item E.3 / Chunk 6c): the PEL is scanned in a stable id order; COUNT bounds
 /// each page; the returned cursor advances and lands on `0-0` once the whole PEL is covered. A client
 /// loops `0-0`→…→`0-0` and reclaims every in-flight entry EXACTLY once.

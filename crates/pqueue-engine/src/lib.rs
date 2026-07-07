@@ -72,8 +72,8 @@ pub use port::{
     IdGen, IndexHit, IndexQueryPort, InstanceFence, ItemView, LeaseView, LiveItemView, LogRead,
     LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec,
     QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore, TickReport, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, validate_instance_fence,
+    ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};

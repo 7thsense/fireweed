@@ -23,8 +23,9 @@ use pqueue_engine::{
     LogWriter, ProjectionRead, ProjectionWriter, PurgePort, PushCommand, PushPort, PushSpec,
     QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    TickReport, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
-    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
+    TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
+    validate_gate_push,
 };
 use pqueue_objectlog::LocalObjectLog;
 use pqueue_objectlog::segmented::{
@@ -681,6 +682,17 @@ impl ProjectionRead for ObjectLogSqliteBackend {
         queue: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         self.projection.metrics(queue)
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        self.projection
+            .terminal_emission_metrics(shard, now, emit_change_records, emission_cursor)
     }
 }
 
@@ -1570,6 +1582,17 @@ impl ProjectionRead for SegmentedObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         self.projection.metrics(queue)
     }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        self.projection
+            .terminal_emission_metrics(shard, now, emit_change_records, emission_cursor)
+    }
 }
 
 // ===========================================================================
@@ -2339,6 +2362,21 @@ impl ProjectionRead for SegmentedObjectLogInMemoryBackend {
             let proj = self.projection_for(queue)?;
             let p = proj.lock().expect("segmented inmemory projection poisoned");
             Ok(p.metrics())
+        })();
+        std::future::ready(result)
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let result = (|| {
+            let proj = self.projection_for(shard)?;
+            let p = proj.lock().expect("segmented inmemory projection poisoned");
+            Ok(p.terminal_emission_metrics(now, emit_change_records, emission_cursor))
         })();
         std::future::ready(result)
     }

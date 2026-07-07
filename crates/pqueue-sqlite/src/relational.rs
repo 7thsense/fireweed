@@ -61,6 +61,7 @@ use pqueue_core::{
     TenantId, TypedValue, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::ClaimUnit;
+use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, AsOfProjectionStore, Backend, ClaimCommand,
     ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem,
@@ -6103,6 +6104,24 @@ impl ProjectionRead for SqliteRelationalBackend {
         };
         std::future::ready(result)
     }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        _now: UtcTimestamp,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            metrics_sql(&g.conn, shard).map(|metrics| TerminalEmissionMetrics {
+                resident_terminal_count: metrics.resident_terminal_count,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
+            })
+        };
+        std::future::ready(result)
+    }
 }
 
 impl ProjectionRead for SqliteProjectionStore {
@@ -6186,6 +6205,24 @@ impl ProjectionRead for SqliteProjectionStore {
         let result = {
             let g = self.inner.lock().expect("projection store poisoned");
             metrics_sql(&g.conn, queue)
+        };
+        std::future::ready(result)
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        _now: UtcTimestamp,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("projection store poisoned");
+            metrics_sql(&g.conn, shard).map(|metrics| TerminalEmissionMetrics {
+                resident_terminal_count: metrics.resident_terminal_count,
+                emission_lag_commands: 0,
+                emission_oldest_unemitted_age_ms: 0,
+            })
         };
         std::future::ready(result)
     }
@@ -8828,6 +8865,21 @@ impl ProjectionStore for SqliteRelational {
         metrics_sql(&self.lock().conn, shard)
     }
 
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        _now: UtcTimestamp,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<TerminalEmissionMetrics> {
+        let metrics = metrics_sql(&self.lock().conn, shard)?;
+        Ok(TerminalEmissionMetrics {
+            resident_terminal_count: metrics.resident_terminal_count,
+            emission_lag_commands: 0,
+            emission_oldest_unemitted_age_ms: 0,
+        })
+    }
+
     fn live_items(
         &self,
         shard: &QueueKey,
@@ -9255,6 +9307,22 @@ impl ProjectionStore for HybridProjectionStore {
         self.memory.metrics(shard)
     }
 
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        _now: UtcTimestamp,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<TerminalEmissionMetrics> {
+        self.require_hydrated(shard)?;
+        let metrics = self.memory.metrics(shard)?;
+        Ok(TerminalEmissionMetrics {
+            resident_terminal_count: metrics.resident_terminal_count,
+            emission_lag_commands: 0,
+            emission_oldest_unemitted_age_ms: 0,
+        })
+    }
+
     fn live_items(
         &self,
         shard: &QueueKey,
@@ -9506,6 +9574,21 @@ impl ProjectionStore for SqliteProjectionStore {
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         metrics_sql(&self.lock().conn, shard)
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+        _now: UtcTimestamp,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<TerminalEmissionMetrics> {
+        let metrics = metrics_sql(&self.lock().conn, shard)?;
+        Ok(TerminalEmissionMetrics {
+            resident_terminal_count: metrics.resident_terminal_count,
+            emission_lag_commands: 0,
+            emission_oldest_unemitted_age_ms: 0,
+        })
     }
 
     fn live_items(
