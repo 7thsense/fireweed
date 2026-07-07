@@ -250,7 +250,8 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn xreadgroup_returns_api001_claimed_item_shape() {
+#[allow(non_snake_case)]
+async fn TestRespWireCarriesUpdatedFieldAAndFieldC() {
     let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con, _) = serve_backend(backend.clone(), Arc::new(ManualClock::at(1_000))).await;
@@ -316,6 +317,16 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
         .unwrap();
     let claimed = &reply.keys[0].ids[0];
     assert_eq!(claimed.id, id);
+    assert_eq!(
+        claimed.get::<Vec<u8>>("field-a").as_deref(),
+        Some(b"value-a-2".as_slice()),
+        "RESP wire must carry the updated field-a value"
+    );
+    assert_eq!(
+        claimed.get::<Vec<u8>>("field-c").as_deref(),
+        Some(b"value-c".as_slice()),
+        "RESP wire must carry the newly added field-c value"
+    );
 
     let claimed_view: Vec<ClaimedItem> = backend.claimed_view(&shard(), &[item_id]).await.unwrap();
     assert_eq!(claimed_view.len(), 1);
@@ -324,6 +335,101 @@ async fn xreadgroup_returns_api001_claimed_item_shape() {
         Some(claimed_view[0].item_version)
     );
     assert_claimed_entry_parity(claimed, &claimed_view[0]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(non_snake_case)]
+async fn TestRespOracleDoesNotUseBackendEcho() {
+    let backend = Arc::new(LyingClaimedViewBackend::new(composed_memory_backend()));
+    backend.create_queue(qdef()).await.unwrap();
+    let (mut con, _) = serve_backend(backend.clone(), Arc::new(ManualClock::at(1_000))).await;
+
+    let id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("client_item_key")
+        .arg("echo-key")
+        .arg("priority")
+        .arg(7)
+        .arg("group_key")
+        .arg("group-a")
+        .arg("not_before")
+        .arg(1_000_000_i64)
+        .arg("payload")
+        .arg("opaque")
+        .arg("metadata")
+        .arg(r#"{"tenant_segment":{"String":"vip"}}"#)
+        .arg("recipient_ref")
+        .arg("r-1")
+        .arg("field-a")
+        .arg("value-a")
+        .arg("field-b")
+        .arg("value-b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let item_id = ItemId::new(&id).unwrap();
+    let updated_version = backend
+        .update_fields(
+            &shard(),
+            item_id,
+            BTreeMap::from([
+                (
+                    "field-a".to_string(),
+                    Some(Bytes::from_static(b"value-a-2")),
+                ),
+                ("field-b".to_string(), None),
+                ("field-c".to_string(), Some(Bytes::from_static(b"value-c"))),
+            ]),
+            PayloadUpdate::Keep,
+            None,
+            Some(1),
+            UtcTimestamp::new(1_000, 0).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated_version, 2, "update_fields bumps item_version");
+
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("COUNT")
+        .arg(1)
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let claimed = &reply.keys[0].ids[0];
+    assert_eq!(
+        claimed.get::<Vec<u8>>("field-a").as_deref(),
+        Some(b"value-a-2".as_slice()),
+        "the wire assertion must use the response payload, not backend echo"
+    );
+    assert_eq!(
+        claimed.get::<Vec<u8>>("field-c").as_deref(),
+        Some(b"value-c".as_slice()),
+        "the wire assertion must use the response payload, not backend echo"
+    );
+
+    let claimed_view: Vec<ClaimedItem> = backend.claimed_view(&shard(), &[item_id]).await.unwrap();
+    assert_eq!(claimed_view.len(), 1);
+    assert_eq!(
+        claimed_view[0]
+            .fields
+            .get("field-a")
+            .map(|bytes| bytes.as_ref()),
+        Some(b"value-a".as_slice()),
+        "the backend echo is intentionally stale in this test"
+    );
+    assert!(
+        !claimed_view[0].fields.contains_key("field-c"),
+        "the backend echo is intentionally stale in this test"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -409,6 +515,308 @@ fn field_value(fields: &[Value], name: &str) -> Option<Vec<u8>> {
 
 fn ts_millis(ts: UtcTimestamp) -> i64 {
     ts.seconds * 1_000 + i64::from(ts.nanoseconds / 1_000_000)
+}
+
+struct LyingClaimedViewBackend {
+    inner: Arc<pqueue_memory::ComposedMemoryBackend>,
+}
+
+impl LyingClaimedViewBackend {
+    fn new(inner: pqueue_memory::ComposedMemoryBackend) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+}
+
+impl pqueue_engine::Backend for LyingClaimedViewBackend {
+    fn durability_class(&self) -> pqueue_engine::DurabilityClass {
+        self.inner.durability_class()
+    }
+
+    fn supports_gates(&self) -> bool {
+        self.inner.supports_gates()
+    }
+
+    fn commit_capabilities(&self) -> pqueue_engine::CommitCapabilities {
+        self.inner.commit_capabilities()
+    }
+
+    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = pqueue_engine::EngineResult<R>> + Send
+    where
+        F: FnOnce(&mut dyn pqueue_engine::LogWriter, &mut dyn pqueue_engine::ProjectionWriter) -> pqueue_engine::EngineResult<R> + Send,
+        R: Send,
+    {
+        self.inner.write(f)
+    }
+}
+
+impl pqueue_engine::PushPort for LyingClaimedViewBackend {
+    fn push(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        items: Vec<pqueue_engine::PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<ItemId>>> + Send {
+        self.inner.push(shard, items, now, expected_epoch)
+    }
+
+    fn push_with_request_id(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        request_id: pqueue_core::RequestId,
+        items: Vec<pqueue_engine::PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<ItemId>>> + Send {
+        self.inner
+            .push_with_request_id(shard, request_id, items, now, expected_epoch)
+    }
+}
+
+impl pqueue_engine::ClaimPort for LyingClaimedViewBackend {
+    fn claim(
+        &self,
+        req: pqueue_engine::ClaimRequest,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::Claimed>> + Send
+    {
+        self.inner.claim(req)
+    }
+}
+
+impl pqueue_engine::UpsertPort for LyingClaimedViewBackend {
+    fn replace_if_pending(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        client_item_key: &pqueue_core::ClientItemKey,
+        priority: Option<pqueue_core::PriorityValue>,
+        group_key: Option<pqueue_core::GroupKey>,
+        not_before: Option<UtcTimestamp>,
+        payload: Option<Bytes>,
+        fields: BTreeMap<String, Bytes>,
+        metadata: pqueue_core::Metadata,
+        entity: Option<serde_json::Value>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::UpsertOutcome>> + Send
+    {
+        self.inner.replace_if_pending(
+            shard,
+            client_item_key,
+            priority,
+            group_key,
+            not_before,
+            payload,
+            fields,
+            metadata,
+            entity,
+            now,
+            expected_epoch,
+        )
+    }
+}
+
+impl UpdateFieldsPort for LyingClaimedViewBackend {
+    fn update_fields(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<u64>> + Send {
+        self.inner.update_fields(
+            shard,
+            item_id,
+            field_ops,
+            payload,
+            entity,
+            expected_item_version,
+            now,
+            expected_epoch,
+        )
+    }
+}
+
+impl pqueue_engine::FinalizePort for LyingClaimedViewBackend {
+    fn finalize(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        outcomes: Vec<pqueue_engine::FinalizeOutcome>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<()>> + Send {
+        self.inner.finalize(shard, outcomes, now, expected_epoch)
+    }
+}
+
+impl pqueue_engine::RenewLeasePort for LyingClaimedViewBackend {
+    fn renew(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        item_ids: Vec<ItemId>,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<()>> + Send {
+        self.inner
+            .renew(shard, item_ids, new_lease_expires_at, now, expected_epoch)
+    }
+}
+
+impl pqueue_engine::ReassignLeasePort for LyingClaimedViewBackend {
+    fn reassign(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: pqueue_core::LeaseToken,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<()>> + Send {
+        self.inner.reassign(
+            shard,
+            item_ids,
+            new_lease_token,
+            new_lease_expires_at,
+            now,
+            expected_epoch,
+        )
+    }
+}
+
+impl pqueue_engine::PurgePort for LyingClaimedViewBackend {
+    fn purge(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        item_ids: Vec<ItemId>,
+        force: bool,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<u64>> + Send {
+        self.inner.purge(shard, item_ids, force, now, expected_epoch)
+    }
+}
+
+impl pqueue_engine::ReclaimDriver for LyingClaimedViewBackend {
+    fn tick(
+        &self,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::TickReport>> + Send {
+        self.inner.tick(now)
+    }
+}
+
+impl pqueue_engine::ControlPlaneStore for LyingClaimedViewBackend {
+    fn create_queue(
+        &self,
+        definition: pqueue_core::QueueDefinition,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::CreateQueueOutcome>> + Send {
+        self.inner.create_queue(definition)
+    }
+
+    fn queue_definition(
+        &self,
+        key: &pqueue_engine::QueueKey,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_core::QueueDefinition>> + Send {
+        self.inner.queue_definition(key)
+    }
+
+    fn list_queues(
+        &self,
+        tenant: &pqueue_core::TenantId,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_core::QueueId>>> + Send {
+        self.inner.list_queues(tenant)
+    }
+
+    fn current_epoch(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<u64>> + Send {
+        self.inner.current_epoch(shard)
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<u64>> + Send {
+        self.inner.acquire_epoch(shard)
+    }
+}
+
+impl pqueue_engine::ProjectionRead for LyingClaimedViewBackend {
+    fn select_eligible(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        now: UtcTimestamp,
+        limit: usize,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<ItemId>>> + Send {
+        self.inner.select_eligible(shard, now, limit)
+    }
+
+    fn peek(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        limit: usize,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>>> + Send {
+        self.inner.peek(shard, limit)
+    }
+
+    fn pending(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_engine::LeaseView>>> + Send {
+        self.inner.pending(shard)
+    }
+
+    fn claimed_view(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<ClaimedItem>>> + Send {
+        let inner = self.inner.clone();
+        let shard = shard.clone();
+        let ids = ids.to_vec();
+        async move {
+            let mut items = inner.claimed_view(&shard, &ids).await?;
+            for item in &mut items {
+                item.fields
+                    .insert("field-a".to_string(), Bytes::from_static(b"value-a"));
+                item.fields.remove("field-c");
+            }
+            Ok(items)
+        }
+    }
+
+    fn live_items(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        keys: &[pqueue_core::ClientItemKey],
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<Option<pqueue_engine::LiveItemView>>>> + Send {
+        self.inner.live_items(shard, keys)
+    }
+
+    fn metrics(
+        &self,
+        queue: &pqueue_engine::QueueKey,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::QueueMetrics>> + Send {
+        self.inner.metrics(queue)
+    }
+
+    fn terminal_emission_metrics(
+        &self,
+        shard: &pqueue_engine::QueueKey,
+        now: UtcTimestamp,
+        emit_change_records: bool,
+        emission_cursor: Option<&pqueue_engine::CommandPosition>,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::TerminalEmissionMetrics>> + Send {
+        self.inner
+            .terminal_emission_metrics(shard, now, emit_change_records, emission_cursor)
+    }
 }
 
 fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &ClaimedItem) {
