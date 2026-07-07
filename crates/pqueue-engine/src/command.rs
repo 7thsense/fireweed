@@ -11,9 +11,9 @@ use pqueue_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::QueueKey;
 use crate::error::{EngineError, EngineResult};
 use crate::types::CommandPosition;
+use crate::QueueKey;
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -802,14 +802,30 @@ pub fn command_envelope_change_records(
                 )
             })
             .collect(),
-        QueueCommand::CohortFinalize(_c) => vec![queue_scoped_change_record(
-            shard,
-            position,
-            ChangeRecordKind::CohortFinalize,
-            emitted_at,
-            source_owner_id,
-            source_epoch,
-        )],
+        QueueCommand::CohortFinalize(c) => env
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                let new_state = finalize_state(c.kind, None).map(change_record_state);
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::CohortFinalize,
+                    new_state,
+                    None,
+                    matches!(
+                        new_state,
+                        Some(ChangeRecordState::Complete) | Some(ChangeRecordState::Failed)
+                    )
+                    .then_some(env.created_at),
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
         QueueCommand::ReplacePending(c) => vec![
             item_change_record(
                 shard,
@@ -867,14 +883,25 @@ pub fn command_envelope_change_records(
                 )
             })
             .collect(),
-        QueueCommand::CohortExpired(_) => vec![queue_scoped_change_record(
-            shard,
-            position,
-            ChangeRecordKind::CohortExpired,
-            emitted_at,
-            source_owner_id,
-            source_epoch,
-        )],
+        QueueCommand::CohortExpired(_) => env
+            .item_ids
+            .iter()
+            .copied()
+            .map(|item_id| {
+                item_change_record(
+                    shard,
+                    item_id,
+                    position,
+                    ChangeRecordKind::CohortExpired,
+                    Some(ChangeRecordState::Failed),
+                    None,
+                    Some(env.created_at),
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
         QueueCommand::FenceLease(c) => c
             .item_ids
             .iter()
@@ -1042,12 +1069,16 @@ mod serde_tests {
     }
 
     fn envelope(command: QueueCommand) -> CommandEnvelope {
+        envelope_with_item_ids(command, vec![iid("a")])
+    }
+
+    fn envelope_with_item_ids(command: QueueCommand, item_ids: Vec<ItemId>) -> CommandEnvelope {
         CommandEnvelope {
             command_id: CommandId::new("c1"),
             request_id: Some(RequestId::new("r1").unwrap()),
             request_fingerprint: None,
             request_outcome: None,
-            item_ids: vec![iid("a")],
+            item_ids,
             command,
             checksum: CommandChecksum(42),
             created_at: ts(1),
@@ -1200,7 +1231,7 @@ mod serde_tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn TestChangeRecordSynthesisFinalizeRetryCase() {
+    fn TestChangeRecordSynthesisCohortVariants() {
         #[derive(Debug)]
         struct ExpectedRecord {
             item_id: Option<ItemId>,
@@ -1229,9 +1260,10 @@ mod serde_tests {
         let shard = shard();
         let position = CommandPosition::new(shard.clone(), 7, 11);
         let emitted_at = ts(99);
-        let cases: Vec<(&str, QueueCommand, Vec<ExpectedRecord>)> = vec![
+        let cases: Vec<(&str, Vec<ItemId>, QueueCommand, Vec<ExpectedRecord>)> = vec![
             (
                 "push",
+                vec![iid("a")],
                 QueueCommand::Push(PushCommand {
                     items: vec![
                         item(),
@@ -1260,6 +1292,7 @@ mod serde_tests {
             ),
             (
                 "claim",
+                vec![iid("a")],
                 QueueCommand::Claim(ClaimCommand {
                     item_ids: vec![iid("a"), iid("b")],
                     lease_token: LeaseToken::new("lease").unwrap(),
@@ -1284,6 +1317,7 @@ mod serde_tests {
             ),
             (
                 "cohort-claim",
+                vec![iid("a")],
                 QueueCommand::CohortClaim(CohortClaimCommand {
                     cohort_id: CohortId::new("cohort").unwrap(),
                     item_ids: vec![iid("a"), iid("b")],
@@ -1309,6 +1343,7 @@ mod serde_tests {
             ),
             (
                 "renew-lease",
+                vec![iid("a")],
                 QueueCommand::RenewLease(RenewLeaseCommand {
                     item_ids: vec![iid("a"), iid("b")],
                     lease_expires_at: ts(200),
@@ -1332,6 +1367,7 @@ mod serde_tests {
             ),
             (
                 "cohort-renew-lease",
+                vec![iid("a")],
                 QueueCommand::CohortRenewLease(CohortRenewLeaseCommand {
                     cohort_id: CohortId::new("cohort").unwrap(),
                     lease_expires_at: ts(200),
@@ -1346,6 +1382,7 @@ mod serde_tests {
             ),
             (
                 "reassign-lease",
+                vec![iid("a")],
                 QueueCommand::ReassignLease(ReassignLeaseCommand {
                     item_ids: vec![iid("a"), iid("b")],
                     lease_token: LeaseToken::new("lease").unwrap(),
@@ -1370,6 +1407,7 @@ mod serde_tests {
             ),
             (
                 "finalize",
+                vec![iid("a")],
                 QueueCommand::Finalize(FinalizeCommand {
                     outcomes: vec![
                         FinalizeOutcome {
@@ -1405,21 +1443,32 @@ mod serde_tests {
             ),
             (
                 "cohort-finalize",
+                vec![iid("a"), iid("b")],
                 QueueCommand::CohortFinalize(CohortFinalizeCommand {
                     cohort_id: CohortId::new("cohort").unwrap(),
                     kind: FinalizeKind::Fail,
                     not_before: Some(ts(500)),
                 }),
-                vec![ExpectedRecord {
-                    item_id: None,
-                    kind: ChangeRecordKind::CohortFinalize,
-                    new_state: None,
-                    item_version: None,
-                    terminal_at: None,
-                }],
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::CohortFinalize,
+                        new_state: Some(ChangeRecordState::Failed),
+                        item_version: None,
+                        terminal_at: Some(ts(1)),
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::CohortFinalize,
+                        new_state: Some(ChangeRecordState::Failed),
+                        item_version: None,
+                        terminal_at: Some(ts(1)),
+                    },
+                ],
             ),
             (
                 "replace-pending",
+                vec![iid("a")],
                 QueueCommand::ReplacePending(ReplacePendingCommand {
                     client_item_key: ClientItemKey::new("k").unwrap(),
                     superseded_item_id: iid("old"),
@@ -1447,6 +1496,7 @@ mod serde_tests {
             ),
             (
                 "update-fields",
+                vec![iid("a")],
                 QueueCommand::UpdateFields(UpdateFieldsCommand {
                     item_id: iid("a"),
                     field_ops: BTreeMap::from([
@@ -1468,6 +1518,7 @@ mod serde_tests {
             ),
             (
                 "lease-expired",
+                vec![iid("a")],
                 QueueCommand::LeaseExpired(LeaseExpiredCommand {
                     item_ids: vec![iid("a"), iid("b")],
                 }),
@@ -1490,19 +1541,30 @@ mod serde_tests {
             ),
             (
                 "cohort-expired",
+                vec![iid("a"), iid("b")],
                 QueueCommand::CohortExpired(CohortExpiredCommand {
                     group_key: GroupKey::new("g").unwrap(),
                 }),
-                vec![ExpectedRecord {
-                    item_id: None,
-                    kind: ChangeRecordKind::CohortExpired,
-                    new_state: None,
-                    item_version: None,
-                    terminal_at: None,
-                }],
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::CohortExpired,
+                        new_state: Some(ChangeRecordState::Failed),
+                        item_version: None,
+                        terminal_at: Some(ts(1)),
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::CohortExpired,
+                        new_state: Some(ChangeRecordState::Failed),
+                        item_version: None,
+                        terminal_at: Some(ts(1)),
+                    },
+                ],
             ),
             (
                 "fence-lease",
+                vec![iid("a")],
                 QueueCommand::FenceLease(FenceLeaseCommand {
                     item_ids: vec![iid("a"), iid("b")],
                 }),
@@ -1525,6 +1587,7 @@ mod serde_tests {
             ),
             (
                 "unfence-lease",
+                vec![iid("a")],
                 QueueCommand::UnfenceLease(UnfenceLeaseCommand {
                     item_ids: vec![iid("a"), iid("b")],
                 }),
@@ -1547,6 +1610,7 @@ mod serde_tests {
             ),
             (
                 "pause-queue",
+                vec![iid("a")],
                 QueueCommand::PauseQueue(PauseQueueCommand::default()),
                 vec![ExpectedRecord {
                     item_id: None,
@@ -1558,6 +1622,7 @@ mod serde_tests {
             ),
             (
                 "resume-queue",
+                vec![iid("a")],
                 QueueCommand::ResumeQueue,
                 vec![ExpectedRecord {
                     item_id: None,
@@ -1569,6 +1634,7 @@ mod serde_tests {
             ),
             (
                 "purge-items",
+                vec![iid("a")],
                 QueueCommand::PurgeItems(PurgeItemsCommand {
                     item_ids: vec![iid("a"), iid("b")],
                     force: true,
@@ -1592,6 +1658,7 @@ mod serde_tests {
             ),
             (
                 "set-gates",
+                vec![iid("a")],
                 QueueCommand::SetGates(SetGatesCommand {
                     gate_keys: vec!["hold".to_string()],
                     blocked: true,
@@ -1606,6 +1673,7 @@ mod serde_tests {
             ),
             (
                 "write-side-records",
+                vec![iid("a")],
                 QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
                     records: vec![SideRecord {
                         key: b"state/run-1".to_vec(),
@@ -1616,6 +1684,7 @@ mod serde_tests {
             ),
             (
                 "advance-instance-fence",
+                vec![iid("a")],
                 QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
                     instance_key: b"instance/run-1".to_vec(),
                     expected: 7,
@@ -1625,11 +1694,11 @@ mod serde_tests {
             ),
         ];
 
-        for (label, command, expected) in cases {
+        for (label, item_ids, command, expected) in cases {
             let records = command_envelope_change_records(
                 &shard,
                 &position,
-                &envelope(command),
+                &envelope_with_item_ids(command, item_ids),
                 emitted_at,
                 None,
             );
@@ -1673,6 +1742,58 @@ mod serde_tests {
         assert_eq!(record.new_state, Some(ChangeRecordState::Failed));
         assert_eq!(record.terminal_at, Some(ts(1)));
         assert_eq!(record.emitted_at, Some(emitted_at));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestCohortFinalizeSynthesizesPerMemberTerminalRecords() {
+        let shard = shard();
+        let position = CommandPosition::new(shard.clone(), 7, 11);
+        let emitted_at = ts(99);
+        let env = envelope_with_item_ids(
+            QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                cohort_id: CohortId::new("cohort").unwrap(),
+                kind: FinalizeKind::Fail,
+                not_before: Some(ts(500)),
+            }),
+            vec![iid("a"), iid("b")],
+        );
+
+        let records = command_envelope_change_records(&shard, &position, &env, emitted_at, None);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].item_id, Some(iid("a")));
+        assert_eq!(records[0].command_kind, ChangeRecordKind::CohortFinalize);
+        assert_eq!(records[0].new_state, Some(ChangeRecordState::Failed));
+        assert_eq!(records[0].terminal_at, Some(ts(1)));
+        assert_eq!(records[1].item_id, Some(iid("b")));
+        assert_eq!(records[1].command_kind, ChangeRecordKind::CohortFinalize);
+        assert_eq!(records[1].new_state, Some(ChangeRecordState::Failed));
+        assert_eq!(records[1].terminal_at, Some(ts(1)));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestCohortExpiredSynthesizesPerMemberTerminalRecords() {
+        let shard = shard();
+        let position = CommandPosition::new(shard.clone(), 7, 11);
+        let emitted_at = ts(99);
+        let env = envelope_with_item_ids(
+            QueueCommand::CohortExpired(CohortExpiredCommand {
+                group_key: GroupKey::new("g").unwrap(),
+            }),
+            vec![iid("a"), iid("b")],
+        );
+
+        let records = command_envelope_change_records(&shard, &position, &env, emitted_at, None);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].item_id, Some(iid("a")));
+        assert_eq!(records[0].command_kind, ChangeRecordKind::CohortExpired);
+        assert_eq!(records[0].new_state, Some(ChangeRecordState::Failed));
+        assert_eq!(records[0].terminal_at, Some(ts(1)));
+        assert_eq!(records[1].item_id, Some(iid("b")));
+        assert_eq!(records[1].command_kind, ChangeRecordKind::CohortExpired);
+        assert_eq!(records[1].new_state, Some(ChangeRecordState::Failed));
+        assert_eq!(records[1].terminal_at, Some(ts(1)));
     }
 
     #[test]
