@@ -1,0 +1,46 @@
+{
+  "attempt_id": "20260707T112844-42be8c6d",
+  "bead_id": "pqueue-b4992731",
+  "base_rev": "6cba9481ca7a831b1183216a9e2fb9b42f2377ed",
+  "created_at": "2026-07-07T11:28:44.790843111Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b4992731",
+    "title": "Harden command wire format and producer path: part 3",
+    "description": "PROBLEM\nParent bead pqueue-60f3bccc is too broad for one execution pass. This child owns part 3 of 3 of that parent scope.\n\nROOT CAUSE\nPROBLEM: the command-kind header is treated as a Rust `Debug` string, records are produced sequentially with blocking timeouts inside the tick path, and startup relies on a fixed sleep to hide readiness races. ROOT CAUSE: `crates/pqueue-server/src/wire.rs:29`, `crates/pqueue-server/src/producer.rs:88`, and `crates/pqueue-server/src/main.rs:101` serialize wire data with implicit formatting, call `block_in_place` on the hot path, and wait on `sleep(Duration::from_millis(400))` during startup. PROPOSED FIX: define explicit command-kind serialization/deserialization, batch or async-produce records outside the current-thread reactor, remove the fixed sleep, and make startup readiness event-driven.\nNON-SCOPE: tenant/topic canonicalization, listen/bootstrap split.\n\nPROPOSED FIX\nImplement only this child acceptance slice:\n- `go test ./...` passes for the wire/producer path and its callers.\n- `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.\n\nNON-SCOPE\nDo not implement parent acceptance criteria assigned to sibling child beads. Preserve every parent non-scope constraint unless this child explicitly narrows it.",
+    "acceptance": "1. `go test ./...` passes for the wire/producer path and its callers.\n2. `lefthook run pre-commit` passes with the new serialization, producer, and startup tests.",
+    "parent": "pqueue-60f3bccc",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:fjord",
+      "adr-014",
+      "review-rework",
+      "decomposed"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"decode result: json: cannot unmarshal array into Go struct field preClaimIntakePromptRewrite.rewrite.acceptance of type string\",\"fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"2546e30a4a17cfee21c293673837d6c127477919b08082c4805f29c602d97f78\"}",
+          "created_at": "2026-07-07T11:28:42.103616013Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T112844-42be8c6d",
+    "prompt": ".ddx/executions/20260707T112844-42be8c6d/prompt.md",
+    "manifest": ".ddx/executions/20260707T112844-42be8c6d/manifest.json",
+    "result": ".ddx/executions/20260707T112844-42be8c6d/result.json",
+    "checks": ".ddx/executions/20260707T112844-42be8c6d/checks.json",
+    "usage": ".ddx/executions/20260707T112844-42be8c6d/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b4992731-20260707T112844-42be8c6d"
+  },
+  "prompt_sha": "fd9f9a75b69858c95cae2875afaf8f0da97d81e8ba2bf7d63f97c837dca01956"
+}
