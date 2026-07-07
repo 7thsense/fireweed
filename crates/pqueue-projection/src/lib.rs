@@ -4213,6 +4213,7 @@ mod tests {
                 outcomes: vec![FinalizeOutcome {
                     item_id: iid("1"),
                     kind: FinalizeKind::Retry,
+                    applied_state: Some(ItemState::Pending),
                     not_before: Some(ts(10_000)),
                 }],
             })),

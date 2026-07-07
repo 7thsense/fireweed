@@ -34,15 +34,15 @@ use pqueue_core::{
     DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey, GroupedAggregateRequest,
     GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata, OrderingMode, PriorityValue,
     QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
-    TenantId, UtcTimestamp,
+    TenantId, UtcTimestamp, is_retry_exhausted,
 };
 
 use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
 use crate::command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
-    FinalizeCommand, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand,
-    PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
-    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, UpdateFieldsCommand,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate,
+    PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand,
+    RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, UpdateFieldsCommand,
     WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
     validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
@@ -2194,8 +2194,35 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
+            let definition = self.control.queue_definition(shard)?;
+            let max_attempts = definition.retry_policy.max_attempts;
             g.projection.finalize_validate(shard, &outcomes)?;
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
+            let claimed_items = g.projection.render_claimed(shard, &item_ids)?;
+            let attempt_counts = claimed_items
+                .into_iter()
+                .map(|item| (item.item_id, item.attempt_count))
+                .collect::<HashMap<_, _>>();
+            let outcomes = outcomes
+                .into_iter()
+                .map(|mut outcome| {
+                    outcome.applied_state = Some(match outcome.kind {
+                        FinalizeKind::Complete => ItemState::Complete,
+                        FinalizeKind::Fail => ItemState::Failed,
+                        FinalizeKind::Retry => {
+                            let attempts =
+                                attempt_counts.get(&outcome.item_id).copied().unwrap_or(0);
+                            if is_retry_exhausted(attempts, max_attempts) {
+                                ItemState::Failed
+                            } else {
+                                ItemState::Pending
+                            }
+                        }
+                        FinalizeKind::Release | FinalizeKind::Rearm => ItemState::Pending,
+                    });
+                    outcome
+                })
+                .collect::<Vec<_>>();
             let env = Self::make_envelope(
                 &mut g,
                 self.node_id,

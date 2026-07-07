@@ -2972,6 +2972,7 @@ pub async fn retry_with_backoff_defers_eligibility<B: ConformanceCore>(make: imp
         vec![FinalizeOutcome {
             item_id: ItemId::new("1").unwrap(),
             kind: FinalizeKind::Retry,
+            applied_state: Some(ItemState::Pending),
             not_before: Some(ts(100)),
         }],
         ts(20),

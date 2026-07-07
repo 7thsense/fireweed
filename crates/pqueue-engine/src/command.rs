@@ -294,6 +294,10 @@ pub struct CohortFinalizeCommand {
 pub struct FinalizeOutcome {
     pub item_id: ItemId,
     pub kind: FinalizeKind,
+    /// The item state produced by applying this finalize outcome. Filled by the commit path so the
+    /// durable command envelope can later synthesize the same history shape without re-reading state.
+    #[serde(default)]
+    pub applied_state: Option<ItemState>,
     /// Queue-native retry backoff: when `kind == Retry` and the item returns to Pending, it is ineligible
     /// until this timestamp. `None` = immediately re-eligible (the default). Ignored for non-Retry kinds.
     /// `#[serde(default)]` keeps logs written before retry backoff existed replay-compatible.
@@ -308,6 +312,7 @@ impl FinalizeOutcome {
         Self {
             item_id,
             kind,
+            applied_state: None,
             not_before: None,
         }
     }
@@ -643,17 +648,11 @@ fn item_change_record(
     }
 }
 
-fn finalize_state(kind: FinalizeKind, attempt_count: Option<u32>) -> Option<ItemState> {
+fn finalize_state(kind: FinalizeKind, applied_state: Option<ItemState>) -> Option<ItemState> {
     match kind {
         FinalizeKind::Complete => Some(ItemState::Complete),
         FinalizeKind::Fail => Some(ItemState::Failed),
-        FinalizeKind::Retry => attempt_count.map_or(Some(ItemState::Pending), |attempts| {
-            if attempts == u32::MAX {
-                Some(ItemState::Failed)
-            } else {
-                Some(ItemState::Pending)
-            }
-        }),
+        FinalizeKind::Retry => applied_state.or(Some(ItemState::Pending)),
         FinalizeKind::Release | FinalizeKind::Rearm => Some(ItemState::Pending),
     }
 }
@@ -783,15 +782,20 @@ pub fn command_envelope_change_records(
             .outcomes
             .iter()
             .map(|outcome| {
+                let new_state =
+                    finalize_state(outcome.kind, outcome.applied_state).map(change_record_state);
                 item_change_record(
                     shard,
                     outcome.item_id,
                     position,
                     ChangeRecordKind::Finalize,
-                    finalize_state(outcome.kind, None).map(change_record_state),
+                    new_state,
                     None,
-                    matches!(outcome.kind, FinalizeKind::Complete | FinalizeKind::Fail)
-                        .then_some(env.created_at),
+                    matches!(
+                        outcome.applied_state,
+                        Some(ItemState::Complete) | Some(ItemState::Failed)
+                    )
+                    .then_some(env.created_at),
                     emitted_at,
                     source_owner_id.clone(),
                     source_epoch,
@@ -1075,6 +1079,7 @@ mod serde_tests {
                 outcomes: vec![FinalizeOutcome {
                     item_id: iid("a"),
                     kind: FinalizeKind::Retry,
+                    applied_state: None,
                     not_before: Some(ts(500)),
                 }],
             }),
@@ -1194,7 +1199,8 @@ mod serde_tests {
     }
 
     #[test]
-    fn test_change_record_synthesis_covers_all_mutating_commands() {
+    #[allow(non_snake_case)]
+    fn TestChangeRecordSynthesisFinalizeRetryCase() {
         #[derive(Debug)]
         struct ExpectedRecord {
             item_id: Option<ItemId>,
@@ -1366,10 +1372,16 @@ mod serde_tests {
                 "finalize",
                 QueueCommand::Finalize(FinalizeCommand {
                     outcomes: vec![
-                        FinalizeOutcome::new(iid("a"), FinalizeKind::Complete),
+                        FinalizeOutcome {
+                            item_id: iid("a"),
+                            kind: FinalizeKind::Complete,
+                            applied_state: Some(ItemState::Complete),
+                            not_before: None,
+                        },
                         FinalizeOutcome {
                             item_id: iid("b"),
                             kind: FinalizeKind::Retry,
+                            applied_state: Some(ItemState::Failed),
                             not_before: Some(ts(500)),
                         },
                     ],
@@ -1385,9 +1397,9 @@ mod serde_tests {
                     ExpectedRecord {
                         item_id: Some(iid("b")),
                         kind: ChangeRecordKind::Finalize,
-                        new_state: Some(ChangeRecordState::Pending),
+                        new_state: Some(ChangeRecordState::Failed),
                         item_version: None,
-                        terminal_at: None,
+                        terminal_at: Some(ts(1)),
                     },
                 ],
             ),
@@ -1637,6 +1649,30 @@ mod serde_tests {
                 "unexpected shard identity in {label}"
             );
         }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestFinalizeRetryExhaustionSynthesizesTerminalFailedRecord() {
+        let shard = shard();
+        let position = CommandPosition::new(shard.clone(), 7, 11);
+        let emitted_at = ts(99);
+        let env = envelope(QueueCommand::Finalize(FinalizeCommand {
+            outcomes: vec![FinalizeOutcome {
+                item_id: iid("a"),
+                kind: FinalizeKind::Retry,
+                applied_state: Some(ItemState::Failed),
+                not_before: Some(ts(500)),
+            }],
+        }));
+
+        let records = command_envelope_change_records(&shard, &position, &env, emitted_at, None);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.command_kind, ChangeRecordKind::Finalize);
+        assert_eq!(record.new_state, Some(ChangeRecordState::Failed));
+        assert_eq!(record.terminal_at, Some(ts(1)));
+        assert_eq!(record.emitted_at, Some(emitted_at));
     }
 
     #[test]
