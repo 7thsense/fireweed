@@ -9,6 +9,18 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pq
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: pqueue
@@ -49,6 +61,11 @@ jobs:
           cargo install --locked cargo-deny --version 0.19.0
           cargo install --locked cargo-machete --version 0.9.1
           cargo install --locked cargo-llvm-cov --version 0.8.2
+
+      - name: Postgres conformance proof
+        env:
+          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+        run: cargo +1.92.0 test -p pqueue-postgres --test conformance push_then_select_eligible_in_priority_order -- --nocapture
 
       - name: PR gate (enforcing)
         run: bash scripts/ci/pr-gate.sh --mode enforcing

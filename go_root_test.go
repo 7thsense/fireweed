@@ -412,6 +412,55 @@ func TestActionsKindMatrixIsNotSkipped(t *testing.T) {
 	}
 }
 
+func TestCiProvidesLivePostgresUrl(t *testing.T) {
+	workflow := readFile(t, ".github/workflows/ci.yml")
+	for _, want := range []string{
+		"services:",
+		"postgres:",
+		"image: postgres:16",
+		"POSTGRES_PASSWORD: pq",
+		"ports:",
+		"- 5432:5432",
+		"--health-cmd \"pg_isready -U postgres -d postgres\"",
+		"name: Postgres conformance proof",
+		"PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres",
+		"cargo +1.92.0 test -p pqueue-postgres --test conformance push_then_select_eligible_in_priority_order -- --nocapture",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("ci workflow missing postgres proof wiring %q", want)
+		}
+	}
+}
+
+func TestPostgresConformanceNoLongerSilentlySkipsInCi(t *testing.T) {
+	evidencePath := filepath.Join(
+		".ddx",
+		"executions",
+		"20260707T064052-dc5f7dce",
+		"postgres-ci-proof.md",
+	)
+	content := readFile(t, evidencePath)
+
+	for _, want := range []string{
+		"cargo +1.92.0 test -p pqueue-postgres --test conformance push_then_select_eligible_in_priority_order -- --nocapture",
+		"PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres",
+		"push_then_select_eligible_in_priority_order",
+		"test push_then_select_eligible_in_priority_order ... ok",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("postgres conformance evidence missing %q:\n%s", want, content)
+		}
+	}
+	for _, forbidden := range []string{
+		"POSTGRES CONFORMANCE SKIPPED",
+		"set PQUEUE_PG_TEST_URL to a live DB",
+	} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("postgres conformance evidence must not rely on a skip message %q:\n%s", forbidden, content)
+		}
+	}
+}
+
 func TestActionsReleaseGateComposition(t *testing.T) {
 	workflow := readFile(t, ".github/workflows/release.yml")
 	assertWorkflowOrder(t, workflow,
