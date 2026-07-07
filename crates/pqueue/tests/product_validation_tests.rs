@@ -17,8 +17,8 @@
 //!   - AC-E2E-5 worker crash recovery (`worker_crash_recovery_e2e`).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -34,9 +34,11 @@ use pqueue_core::{
     UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
+use pqueue_memory::{composed_memory_backend, ComposedMemoryBackend, ManualClock};
 use pqueue_objectlog::ObjectLogBackend;
-use pqueue_sqlite::{composed_sqlite_backend, composed_sqlite_backend_in_memory};
+use pqueue_sqlite::{
+    composed_sqlite_backend, composed_sqlite_backend_in_memory, SqliteRelationalBackend,
+};
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -1600,7 +1602,7 @@ async fn marketo_group_batching_e2e() {
     // --- ASSERTED whole-group SELECTION on the gate/group-capable relational backend (BQ-14b) ---
     // The relational family implements atomic whole-group claim. Same lib facade (Pqueue), relational backend.
     let rel = Pqueue::new(
-        Arc::new(composed_sqlite_backend_in_memory().expect("relational backend")),
+        Arc::new(SqliteRelationalBackend::in_memory().expect("relational backend")),
         Arc::new(ManualClock::at(0)),
     );
     let rq = qk("marketo", "leads-rel");
@@ -1616,6 +1618,10 @@ async fn marketo_group_batching_e2e() {
     let group_item = |p: i64, g: &str| NewItem {
         priority: Some(PriorityValue::Int64(p)),
         group_key: Some(GroupKey::new(g).unwrap()),
+        fields: BTreeMap::from([(
+            "claim_marker".to_string(),
+            Bytes::from_static(b"whole-group"),
+        )]),
         ..Default::default()
     };
     rel.push_batch(
@@ -1641,6 +1647,11 @@ async fn marketo_group_batching_e2e() {
         wg1.iter().all(|i| i.group_key == g1),
         "a whole-group claim returns exactly ONE group's items (<= max_groups=1)"
     );
+    assert!(
+        wg1.iter()
+            .all(|i| i.fields.get("claim_marker").map(|b| b.as_ref()) == Some(&b"whole-group"[..])),
+        "a whole-group claim carries the explicit field through the claim path"
+    );
     let g1_size = if g1 == Some(GroupKey::new("gA").unwrap()) {
         2
     } else {
@@ -1661,6 +1672,11 @@ async fn marketo_group_batching_e2e() {
     assert_ne!(
         g1, g2,
         "the second whole-group claim returns a DIFFERENT group (no group duplicated across claims)"
+    );
+    assert!(
+        wg2.iter()
+            .all(|i| i.fields.get("claim_marker").map(|b| b.as_ref()) == Some(&b"whole-group"[..])),
+        "the explicit field also survives the second whole-group claim"
     );
     assert_eq!(
         wg1.len() + wg2.len(),
