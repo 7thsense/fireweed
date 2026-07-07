@@ -89,10 +89,10 @@ func TestKafkaOffsetNeverRegressesAcrossFailover(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestKafkaOffsetNeverRegressesAcrossFailover")
 }
 
-func TestTD008EvidenceBundleRecorded(t *testing.T) {
+func TestTD008ObservedEvidenceRowRecorded(t *testing.T) {
 	runCargoTestWithEnv(t, map[string]string{
 		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",
-	}, "-p", "pqueue-release", "--test", "td008_evidence", "td008_evidence_bundle_recorded")
+	}, "-p", "pqueue-release", "--test", "td008_evidence", "td008_observed_evidence_row_recorded")
 	path := filepath.Join("docs", "perf", "evidence", "td008-terminal-reap-frontier.jsonl")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected evidence bundle at %s: %v", path, err)
@@ -101,12 +101,20 @@ func TestTD008EvidenceBundleRecorded(t *testing.T) {
 	for _, needle := range []string{
 		"td008_terminal_reap_frontier",
 		"docs/perf/evidence/td008-terminal-reap-frontier.jsonl",
-		"TestTD008EvidenceBundleRecorded",
+		"observed_run_stdout",
+		"TD008_OBSERVED reap_waits_for_emission",
+		"TestTD008ObservedEvidenceRowRecorded",
 	} {
 		if !strings.Contains(content, needle) {
 			t.Fatalf("evidence bundle missing %q:\n%s", needle, content)
 		}
 	}
+}
+
+func TestTD008EvidenceLedgerRejectsStaticAttestation(t *testing.T) {
+	runCargoTestWithEnv(t, map[string]string{
+		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",
+	}, "-p", "pqueue-release", "--test", "td008_evidence", "td008_evidence_ledger_rejects_static_attestation")
 }
 
 func TestReleaseWorkflowPublishesContainerDigest(t *testing.T) {

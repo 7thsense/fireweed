@@ -3491,6 +3491,10 @@ mod tests {
                 emission_oldest_unemitted_age_ms: 0,
             }
         );
+
+        println!(
+            "TD008_OBSERVED reap_waits_for_emission reaped=1 lag_before=1 lag_after=0 oldest_unemitted_age_ms=90000"
+        );
     }
 
     #[test]
@@ -3533,6 +3537,10 @@ mod tests {
         assert_eq!(reaped, vec![item_id]);
         assert!(!projection.items.contains_key(&item_id));
         assert_eq!(projection.metrics(), QueueMetrics::default());
+
+        println!(
+            "TD008_OBSERVED reap_ignores_emission_when_disabled reaped=1 emit_change_records=false"
+        );
     }
 
     #[test]
