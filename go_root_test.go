@@ -53,6 +53,14 @@ func TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled")
 }
 
+func TestChangeRecordSinkConfigSelectsKafkaProducerPath(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestChangeRecordSinkConfigSelectsKafkaProducerPath")
+}
+
+func TestChangeRecordEmitterStartsChosenSinkOnly(t *testing.T) {
+	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestChangeRecordEmitterStartsChosenSinkOnly")
+}
+
 func TestEmitChangeRecordTickSkipsOptedOutQueues(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--lib", "TestEmitChangeRecordTickSkipsOptedOutQueues")
 }
