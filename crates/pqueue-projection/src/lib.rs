@@ -3204,6 +3204,10 @@ mod tests {
         ItemId::new(s).unwrap()
     }
     fn qdef() -> QueueDefinition {
+        qdef_with_emit_change_records(true)
+    }
+
+    fn qdef_with_emit_change_records(emit_change_records: bool) -> QueueDefinition {
         QueueDefinition {
             tenant_id: shard().tenant_id,
             queue_id: shard().queue_id,
@@ -3229,7 +3233,7 @@ mod tests {
             }],
             entity_schema: None,
             typed_indexes: Vec::new(),
-            emit_change_records: true,
+            emit_change_records,
         }
     }
     fn push_item(id: &str, key: &str, priority: i64) -> PushItem {
@@ -3286,8 +3290,11 @@ mod tests {
         )
     }
 
-    fn create_observed_queue(backend: &ObservedBackend) {
-        let mut create = backend.create_queue(qdef());
+    fn create_observed_queue_with_definition(
+        backend: &ObservedBackend,
+        definition: QueueDefinition,
+    ) {
+        let mut create = backend.create_queue(definition);
         assert!(matches!(poll_once(&mut create), Poll::Ready(Ok(_))));
     }
 
@@ -3295,7 +3302,15 @@ mod tests {
         backend: &ObservedBackend,
         claim_lease_expires_at: UtcTimestamp,
     ) -> (ItemId, CommandPosition) {
-        create_observed_queue(backend);
+        seed_terminal_item_via_commit_with_definition(backend, qdef(), claim_lease_expires_at)
+    }
+
+    fn seed_terminal_item_via_commit_with_definition(
+        backend: &ObservedBackend,
+        definition: QueueDefinition,
+        claim_lease_expires_at: UtcTimestamp,
+    ) -> (ItemId, CommandPosition) {
+        create_observed_queue_with_definition(backend, definition);
         let shard = shard();
         let mut push = backend.push(&shard, vec![PushSpec::default()], ts(0), None);
         let pushed = match poll_once(&mut push) {
@@ -3887,6 +3902,101 @@ mod tests {
         assert_eq!(
             backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
             Ok(None)
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestTD008ObservedRetentionOnlyReapRun() {
+        let backend = observed_backend();
+        let shard = shard();
+        let definition = qdef_with_emit_change_records(false);
+        let (item_id, terminal_position) =
+            seed_terminal_item_via_commit_with_definition(&backend, definition.clone(), ts(120));
+        let expired_now = ts(63);
+
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            None,
+            "opted-out queues should not require a durable emission cursor"
+        );
+
+        assert_eq!(
+            backend.reap_terminal_items(
+                &shard,
+                expired_now,
+                definition.terminal_retention_ms,
+                definition.emit_change_records,
+            ),
+            Ok(1),
+            "retention alone must be sufficient to reap opted-out terminal items"
+        );
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(None)
+        );
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            None,
+            "reaping an opted-out queue must not advance or require emission-cursor state"
+        );
+        assert!(
+            terminal_position.sequence > 0,
+            "the observed commit path should produce a terminal command position"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestTD008ObservedRetentionOnlyIgnoresEmissionCursor() {
+        let backend = observed_backend();
+        let shard = shard();
+        let definition = qdef_with_emit_change_records(false);
+        let (item_id, terminal_position) =
+            seed_terminal_item_via_commit_with_definition(&backend, definition.clone(), ts(120));
+        let sink = NullChangeRecordSink;
+        let expired_now = ts(63);
+        assert!(
+            terminal_position.sequence >= 2,
+            "the observed commit path should produce a terminal command position"
+        );
+        assert_eq!(
+            backend
+                .emit_change_record_tail(&shard, &sink, 1, ts(61), None)
+                .unwrap(),
+            1
+        );
+
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            Some(CommandPosition::new(
+                shard.clone(),
+                terminal_position.backend_epoch,
+                terminal_position.sequence - 2,
+            ))
+        );
+
+        assert_eq!(
+            backend.reap_terminal_items(
+                &shard,
+                expired_now,
+                definition.terminal_retention_ms,
+                definition.emit_change_records,
+            ),
+            Ok(1),
+            "retention-based reap must succeed even when emission-cursor state is behind"
+        );
+        assert_eq!(
+            backend.with_projection(|projection| projection.item_state(&shard, &item_id)),
+            Ok(None)
+        );
+        assert_eq!(
+            backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
+            Some(CommandPosition::new(
+                shard,
+                terminal_position.backend_epoch,
+                terminal_position.sequence - 2,
+            ))
         );
     }
 
