@@ -378,6 +378,7 @@ async fn truncate_then_recover_exact_state() {
             leased: 1,
             complete: 0,
             failed: 0,
+            resident_terminal_count: 0,
         },
         "the item lifecycle counts survive reopen"
     );

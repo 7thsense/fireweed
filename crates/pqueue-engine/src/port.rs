@@ -162,6 +162,8 @@ pub struct QueueMetrics {
     pub leased: u64,
     pub complete: u64,
     pub failed: u64,
+    #[serde(default)]
+    pub resident_terminal_count: u64,
 }
 
 pub trait ProjectionRead: Send + Sync {

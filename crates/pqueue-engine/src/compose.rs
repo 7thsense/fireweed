@@ -3793,6 +3793,7 @@ mod ordered_tests {
                 .len() as u64;
             Ok(QueueMetrics {
                 pending,
+                resident_terminal_count: 0,
                 ..Default::default()
             })
         }

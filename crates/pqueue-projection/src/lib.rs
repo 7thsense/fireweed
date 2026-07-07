@@ -1457,8 +1457,14 @@ impl ProjectionData {
         match state {
             ItemState::Pending => self.metrics.pending += 1,
             ItemState::Leased => self.metrics.leased += 1,
-            ItemState::Complete => self.metrics.complete += 1,
-            ItemState::Failed => self.metrics.failed += 1,
+            ItemState::Complete => {
+                self.metrics.complete += 1;
+                self.metrics.resident_terminal_count += 1;
+            }
+            ItemState::Failed => {
+                self.metrics.failed += 1;
+                self.metrics.resident_terminal_count += 1;
+            }
         }
     }
 
@@ -1466,8 +1472,16 @@ impl ProjectionData {
         match state {
             ItemState::Pending => self.metrics.pending = self.metrics.pending.saturating_sub(1),
             ItemState::Leased => self.metrics.leased = self.metrics.leased.saturating_sub(1),
-            ItemState::Complete => self.metrics.complete = self.metrics.complete.saturating_sub(1),
-            ItemState::Failed => self.metrics.failed = self.metrics.failed.saturating_sub(1),
+            ItemState::Complete => {
+                self.metrics.complete = self.metrics.complete.saturating_sub(1);
+                self.metrics.resident_terminal_count =
+                    self.metrics.resident_terminal_count.saturating_sub(1);
+            }
+            ItemState::Failed => {
+                self.metrics.failed = self.metrics.failed.saturating_sub(1);
+                self.metrics.resident_terminal_count =
+                    self.metrics.resident_terminal_count.saturating_sub(1);
+            }
         }
     }
 
@@ -3357,6 +3371,7 @@ mod tests {
             projection.metrics(),
             QueueMetrics {
                 pending: 2,
+                resident_terminal_count: 0,
                 ..QueueMetrics::default()
             }
         );
@@ -3373,6 +3388,7 @@ mod tests {
             QueueMetrics {
                 pending: 1,
                 leased: 1,
+                resident_terminal_count: 0,
                 ..QueueMetrics::default()
             }
         );
@@ -3387,6 +3403,7 @@ mod tests {
             QueueMetrics {
                 pending: 1,
                 complete: 1,
+                resident_terminal_count: 1,
                 ..QueueMetrics::default()
             }
         );
@@ -3418,6 +3435,7 @@ mod tests {
             terminal_record("1", terminal_at, terminal_position.clone()),
         );
         projection.metrics.complete = 1;
+        projection.metrics.resident_terminal_count = 1;
 
         let now_before_retention = ts(30);
         let cursor_passed = CommandPosition::new(shard(), 0, 3);
@@ -3500,6 +3518,7 @@ mod tests {
             terminal_record("1", terminal_at, terminal_position),
         );
         projection.metrics.complete = 1;
+        projection.metrics.resident_terminal_count = 1;
 
         let now = ts(90);
         let cursor_behind = CommandPosition::new(shard(), 0, 2);

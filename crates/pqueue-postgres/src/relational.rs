@@ -2686,6 +2686,7 @@ fn metrics_sql(client: &mut Client, shard: &QueueKey) -> EngineResult<QueueMetri
             ItemState::Failed => m.failed = count,
         }
     }
+    m.resident_terminal_count = m.complete + m.failed;
     Ok(m)
 }
 

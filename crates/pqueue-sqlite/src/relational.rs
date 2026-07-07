@@ -4050,6 +4050,7 @@ fn metrics_sql(conn: &Connection, shard: &QueueKey) -> EngineResult<QueueMetrics
             ItemState::Failed => m.failed = count,
         }
     }
+    m.resident_terminal_count = m.complete + m.failed;
     Ok(m)
 }
 
