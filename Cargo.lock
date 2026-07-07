@@ -1918,6 +1918,7 @@ dependencies = [
  "bytes",
  "pqueue-core",
  "pqueue-engine",
+ "pqueue-memory",
  "pqueue-objectlog",
  "pqueue-sqlite",
  "serde_json",

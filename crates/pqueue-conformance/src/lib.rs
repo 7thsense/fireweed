@@ -311,19 +311,14 @@ pub async fn claimed_item_shape_reflects_update_fields_after_reclaim_if_supporte
     B: ConformanceCore,
 >(
     make: impl Fn() -> B,
-) {
+) -> bool {
     let caps = make().commit_capabilities();
-    if !caps.atomic_transition_commit
-        || matches!(
-            caps.durability_class,
-            pqueue_engine::DurabilityClass::EventualApply
-        )
-        || caps.consistency.contains("composed")
-    {
-        return;
+    if !caps.is_atomic() {
+        return false;
     }
 
     scenarios::claimed_item_shape_reflects_update_fields_after_reclaim(&make).await;
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -596,5 +591,87 @@ mod storage_conformance {
         let bad = json!({"type": "not-a-valid-type"});
         let result = compile_entity_schema(&bad);
         assert!(result.is_err(), "invalid schema must fail compilation");
+    }
+}
+
+#[cfg(test)]
+mod capability_gate_tests {
+    use super::*;
+    use bytes::Bytes;
+    use pqueue_engine::{PayloadUpdate, PushPort, UpdateFieldsPort};
+
+    fn objectlog_root() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pqueue-conformance-capability-gate-{}",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_composed_atomic_update_fields_executes() {
+        let b = pqueue_memory::composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        let ids = b
+            .push(
+                &shard(),
+                vec![pqueue_engine::PushSpec {
+                    client_item_key: Some(
+                        pqueue_core::ClientItemKey::new("ka").expect("client item key"),
+                    ),
+                    priority: Some(pqueue_core::PriorityValue::Int64(5)),
+                    payload: Some(Bytes::from_static(b"opaque-payload")),
+                    fields: Default::default(),
+                    ..Default::default()
+                }],
+                ts(0),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        let item_id = claimed.items[0].item_id;
+        let version = claimed.items[0].item_version;
+
+        let updated_version = b
+            .update_fields(
+                &shard(),
+                item_id,
+                std::collections::BTreeMap::from([(
+                    "field-a".to_string(),
+                    Some(Bytes::from_static(b"value-a-2")),
+                )]),
+                PayloadUpdate::Set(Some(Bytes::from_static(b"opaque-payload-v2"))),
+                None,
+                Some(version),
+                ts(120),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(updated_version > version);
+
+        let live_claim = b.claimed_view(&shard(), &[item_id]).await.unwrap();
+        assert_eq!(live_claim.len(), 1);
+        assert_eq!(
+            live_claim[0].payload.as_deref(),
+            Some(&b"opaque-payload-v2"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_capability_gate_uses_atomic_probe() {
+        let composed = pqueue_memory::composed_memory_backend();
+        assert!(composed.commit_capabilities().is_atomic());
+
+        let _ = std::fs::remove_dir_all(objectlog_root());
+        let ran = claimed_item_shape_reflects_update_fields_after_reclaim_if_supported(|| {
+            pqueue_objectlog::composed_objectlog_backend(objectlog_root())
+                .expect("compose objectlog backend")
+        })
+        .await;
+        assert!(!ran, "eventual-apply backends must stay excluded");
     }
 }

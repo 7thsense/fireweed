@@ -726,6 +726,13 @@ impl Default for CommitCapabilities {
     }
 }
 
+impl CommitCapabilities {
+    /// Whether the backend advertises the atomic commit boundary required by atomic-only ports.
+    pub fn is_atomic(&self) -> bool {
+        self.atomic_transition_commit && self.durability_class == DurabilityClass::Atomic
+    }
+}
+
 /// Per-entry commit status surfaced by a recovery/explain read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitEntryStatus {
