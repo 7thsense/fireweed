@@ -89,26 +89,82 @@ func TestKafkaOffsetNeverRegressesAcrossFailover(t *testing.T) {
 	runCargoTest(t, "-p", "pqueue-server", "--test", "fjord_surface", "TestKafkaOffsetNeverRegressesAcrossFailover")
 }
 
-func TestTD008ObservedEvidenceRowRecorded(t *testing.T) {
+type td008ObservedLedgerRow struct {
+	Suite        string   `json:"suite"`
+	Command      string   `json:"command"`
+	ACIDs        []string `json:"ac_ids"`
+	PassBar      string   `json:"pass_bar"`
+	EvidenceTier string   `json:"evidence_tier"`
+	Measurements struct {
+		Tp002EvidenceIDs     []string `json:"tp002_evidence_ids"`
+		ArtifactPath         string   `json:"artifact_path"`
+		FrontierRule         bool     `json:"frontier_rule"`
+		ObservedRunStdout    string   `json:"observed_run_stdout"`
+		Reaped               int      `json:"reaped"`
+		LagBefore            int      `json:"lag_before"`
+		LagAfter             int      `json:"lag_after"`
+		OldestUnemittedAgeMs int      `json:"oldest_unemitted_age_ms"`
+		RetainOnlyOptOut     bool     `json:"retain_only_opt_out"`
+	} `json:"measurements"`
+}
+
+func assertTD008ObservedLedgerRow(t *testing.T, path string, content string) {
+	t.Helper()
+	row := td008ObservedLedgerRow{}
+	if err := json.Unmarshal([]byte(content), &row); err != nil {
+		t.Fatalf("td008 evidence bundle is not valid JSONL: %v\n%s", err, content)
+	}
+	if row.Suite != "td008_terminal_reap_frontier" {
+		t.Fatalf("unexpected suite %q", row.Suite)
+	}
+	if row.Command != "cargo test -p pqueue-projection reap_waits_for_emission -- --nocapture" {
+		t.Fatalf("unexpected command %q", row.Command)
+	}
+	if row.PassBar != "TD-008 terminal reap evidence bundle recorded from an observed run" {
+		t.Fatalf("unexpected pass bar %q", row.PassBar)
+	}
+	if row.EvidenceTier != "smoke" {
+		t.Fatalf("unexpected evidence tier %q", row.EvidenceTier)
+	}
+	if got := strings.Join(row.ACIDs, ","); got != "TestTD008EvidenceBundleRecorded,TestTD008ObservedEvidenceRowMatchesRun" {
+		t.Fatalf("unexpected ac_ids %v", row.ACIDs)
+	}
+	if row.Measurements.ArtifactPath != path {
+		t.Fatalf("artifact path drifted to %q", row.Measurements.ArtifactPath)
+	}
+	if !row.Measurements.FrontierRule || !row.Measurements.RetainOnlyOptOut {
+		t.Fatalf("expected frontier and opt-out flags to remain true: %+v", row.Measurements)
+	}
+	if row.Measurements.ObservedRunStdout != "TD008_OBSERVED reap_waits_for_emission reaped=1 lag_before=1 lag_after=0 oldest_unemitted_age_ms=90000" {
+		t.Fatalf("unexpected observed stdout %q", row.Measurements.ObservedRunStdout)
+	}
+	if row.Measurements.Reaped != 1 || row.Measurements.LagBefore != 1 || row.Measurements.LagAfter != 0 || row.Measurements.OldestUnemittedAgeMs != 90000 {
+		t.Fatalf("unexpected observed measurements: %+v", row.Measurements)
+	}
+	if len(row.Measurements.Tp002EvidenceIDs) != 0 {
+		t.Fatalf("expected no TP-002 evidence ids, got %v", row.Measurements.Tp002EvidenceIDs)
+	}
+}
+
+func TestTD008EvidenceBundleRecorded(t *testing.T) {
 	runCargoTestWithEnv(t, map[string]string{
 		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",
-	}, "-p", "pqueue-release", "--test", "td008_evidence", "td008_observed_evidence_row_recorded")
+	}, "-p", "pqueue-release", "--test", "td008_evidence", "td008_evidence_bundle_recorded")
 	path := filepath.Join("docs", "perf", "evidence", "td008-terminal-reap-frontier.jsonl")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected evidence bundle at %s: %v", path, err)
 	}
 	content := readFile(t, path)
-	for _, needle := range []string{
-		"td008_terminal_reap_frontier",
-		"docs/perf/evidence/td008-terminal-reap-frontier.jsonl",
-		"observed_run_stdout",
-		"TD008_OBSERVED reap_waits_for_emission",
-		"TestTD008ObservedEvidenceRowRecorded",
-	} {
-		if !strings.Contains(content, needle) {
-			t.Fatalf("evidence bundle missing %q:\n%s", needle, content)
-		}
-	}
+	assertTD008ObservedLedgerRow(t, path, content)
+}
+
+func TestTD008ObservedEvidenceRowMatchesRun(t *testing.T) {
+	runCargoTestWithEnv(t, map[string]string{
+		"PQUEUE_LEDGER_DIR": "docs/perf/evidence",
+	}, "-p", "pqueue-release", "--test", "td008_evidence", "td008_observed_evidence_row_matches_run")
+	path := filepath.Join("docs", "perf", "evidence", "td008-terminal-reap-frontier.jsonl")
+	content := readFile(t, path)
+	assertTD008ObservedLedgerRow(t, path, content)
 }
 
 func TestTD008EvidenceLedgerRejectsStaticAttestation(t *testing.T) {
