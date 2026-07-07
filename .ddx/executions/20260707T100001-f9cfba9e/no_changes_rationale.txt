@@ -1,0 +1,2 @@
+status: open
+reason: `cargo test -p pqueue-server --lib` still fails in `object_log_sqlite::recovery_tests::{file_clean_restart_resumes_at_high_water, segmented_clean_restart_recovers_from_snapshot_not_genesis, segmented_lagging_tail_replayed_exactly_once}` even when run with `RUST_TEST_THREADS=1`; this is a retryable blocker outside the config-split changes in this bead.

@@ -1,0 +1,33 @@
+{
+  "attempt_id": "20260707T100001-f9cfba9e",
+  "bead_id": "pqueue-2734d269",
+  "base_rev": "c2b569428e15d0082b01ea9d8c92265e44774bbd",
+  "created_at": "2026-07-07T10:00:01.759407965Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-2734d269",
+    "title": "Separate listener bind config from Kafka bootstrap config",
+    "description": "PROBLEM: the sink endpoint is doing two jobs, so the server cannot express a listener bind address and an external Kafka bootstrap address independently. ROOT CAUSE: `crates/pqueue-server/src/config.rs:41` conflates `fjord.listen` with producer bootstrap selection and accepts schemeless `host:port` values that are silently treated as Kafka. PROPOSED FIX: add distinct `fjord.listen` and `kafka.bootstrap` settings, require an explicit `kafka://` scheme for Kafka bootstrap, and keep listener parsing/binding separate from producer bootstrap selection. NON-SCOPE: topic encoding, wire-format serialization, batching changes, startup sleep cleanup.",
+    "acceptance": "1. `TestConfigSeparatesListenFromKafkaBootstrap` proves the listener bind address and Kafka bootstrap address can be configured independently.\n2. `TestConfigRejectsSchemalessKafkaBootstrap` rejects schemeless `host:port` bootstrap values and accepts explicit `kafka://` bootstrap values.\n3. `TestConfigKeepsListenerDefaultsWhenBootstrapChanges` confirms listener defaults remain unchanged when only Kafka bootstrap changes.\n4. `go test ./crates/pqueue-server/...` passes for config parsing and validation.\n5. `lefthook run pre-commit` passes with the config split and tests.",
+    "parent": "pqueue-0f9be25f",
+    "labels": [
+      "kind:build",
+      "area:pqueue-server",
+      "area:fjord",
+      "adr-014",
+      "review-rework"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T100001-f9cfba9e",
+    "prompt": ".ddx/executions/20260707T100001-f9cfba9e/prompt.md",
+    "manifest": ".ddx/executions/20260707T100001-f9cfba9e/manifest.json",
+    "result": ".ddx/executions/20260707T100001-f9cfba9e/result.json",
+    "checks": ".ddx/executions/20260707T100001-f9cfba9e/checks.json",
+    "usage": ".ddx/executions/20260707T100001-f9cfba9e/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-2734d269-20260707T100001-f9cfba9e"
+  },
+  "prompt_sha": "626e16ec74f02e025d1a742a738c9360b8beb9c4a8878407a75387243494eed5"
+}
