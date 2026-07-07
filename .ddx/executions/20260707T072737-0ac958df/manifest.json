@@ -1,0 +1,76 @@
+{
+  "attempt_id": "20260707T072737-0ac958df",
+  "bead_id": "pqueue-b3167f23",
+  "base_rev": "4b599b4050d8c21edbb1737c11f34a22efef6207",
+  "created_at": "2026-07-07T07:27:38.063345204Z",
+  "requested": {
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-b3167f23",
+    "title": "Make composed atomic update_fields conformance non-vacuous",
+    "description": "PROBLEM: the claimed-item update_fields scenario is skipped for composed atomic backends, so the non-relational family does not prove the update_fields path. ROOT CAUSE: `crates/pqueue-conformance/src/lib.rs:315-327` returns early when `caps.consistency.contains(`composed`)`, even though composed atomic backends still support `update_fields` (`crates/pqueue-engine/src/compose.rs:2379-2383`). PROPOSED FIX: replace the substring gate with a real capability check (`commit_capabilities().is_atomic()` or an `EngineError::Unavailable` probe) so composed atomic backends execute the scenario. NON-SCOPE: postgres provisioning, RESP wire assertions, reserved-name policy, and whole_group coverage. Parent bead pqueue-7bed1610; review basis dbf97f1/14d04ac on beads pqueue-46ea00f4 and pqueue-5c70706b.",
+    "acceptance": "1. `TestComposedAtomicUpdateFieldsExecutes` proves the claimed-item update_fields scenario runs on composed atomic backends and records at least one assertion.\n2. `TestCapabilityGateUsesAtomicProbe` proves the skip is capability-based and still excludes eventual-apply backends.\n3. `go test ./...` passes.\n4. `lefthook run pre-commit` passes.",
+    "parent": "pqueue-05005abb",
+    "labels": [
+      "kind:test",
+      "area:pqueue-conformance",
+      "review-rework",
+      "area:engine"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"resolved_model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"fallback_chain\":[]}",
+          "created_at": "2026-07-07T06:39:25.524182829Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex model=gpt-5.4-mini reason=explicit_pin_discovery_unavailable"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"attempt_id\":\"20260707T062431-4cac4872\",\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"explicit_pin_discovery_unavailable\",\"input_tokens\":6154430,\"output_tokens\":50568,\"total_tokens\":6204998,\"cost_usd\":0,\"duration_ms\":893181,\"exit_code\":0}",
+          "created_at": "2026-07-07T06:39:25.545047525Z",
+          "kind": "cost",
+          "source": "legacy agent execute-bead",
+          "summary": "tokens=6204998 model=gpt-5.4-mini"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"gpt-5.4-mini\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260707T062431-4cac4872\",\"bead_id\":\"pqueue-b3167f23\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"default\",\"routing_intent_degraded\":false,\"routing_intent_note\":\"\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-07T06:39:28.397088533Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli model=gpt-5.4-mini harness=codex"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"c11ac91564bf56873563ddcbf2cec654d05172d5\",\"classification\":\"tests_red\",\"detail\":\"mixed_commit_and_no_changes_rationale\",\"rationale\":\"The attempt produced an implementation revision, but verification failed: `cargo test --workspace` reported three `Unavailable` unwrap failures in `crates/pqueue/tests/product_validation_tests.rs`. Even if those failures appear outside the bead scope, this is still red verification after code changes rather than a no-change or transport outcome.\",\"recommended_action\":\"release_claim_retry\",\"result_rev\":\"663859df576796603c80d4e12c90dfea7477e548\",\"session_id\":\"eb-89a0b620\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[{\"title\":\"Fix product validation Unavailable unwrap failures\",\"description\":\"PROBLEM: workspace verification is red because `crates/pqueue/tests/product_validation_tests.rs` has three e2e tests that unwrap `Unavailable` results: `callback_cohort_e2e`, `marketo_group_batching_e2e`, and `noisy_neighbor_scale_e2e`. ROOT CAUSE: unknown from the attempt report; investigate why the product validation scenarios receive `EngineError::Unavailable` instead of an available backend path or an intentional skip. PROPOSED FIX: make these product validation tests either provision/use a supported backend path or skip/assert unavailability explicitly when the required capability is absent. NON-SCOPE: composed atomic update_fields conformance changes from `pqueue-b3167f23`.\",\"acceptance\":[\"1. A named regression test or updated product validation assertion proves `callback_cohort_e2e`, `marketo_group_batching_e2e`, and `noisy_neighbor_scale_e2e` no longer fail by unwrapping `Unavailable`.\",\"2. `cargo test --workspace` passes.\",\"3. `lefthook run pre-commit` passes.\"],\"labels\":[\"phase:fix\",\"area:tests\",\"kind:fix\"],\"parent\":\"pqueue-05005abb\"}]}",
+          "created_at": "2026-07-07T06:39:55.548571849Z",
+          "kind": "bead-quality.triage",
+          "source": "ddx work",
+          "summary": "tests_red: release_claim_retry"
+        },
+        {
+          "actor": "erik",
+          "body": "mixed_commit_and_no_changes_rationale\nrationale: status: open\nreason: `cargo test --workspace` fails in `crates/pqueue/tests/product_validation_tests.rs` with three `Unavailable` unwraps (`callback_cohort_e2e`, `marketo_group_batching_e2e`, `noisy_neighbor_scale_e2e`), which is outside the bead scope and still needs a separate fix.\ndecision_audit={\"failure_class\":\"tests_red\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"profile\":\"default\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"model\":\"gpt-5.4-mini\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=663859df576796603c80d4e12c90dfea7477e548\nbase_rev=c11ac91564bf56873563ddcbf2cec654d05172d5\noutcome_reason=tests_red",
+          "created_at": "2026-07-07T06:39:55.578612913Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        }
+      ]
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260707T072737-0ac958df",
+    "prompt": ".ddx/executions/20260707T072737-0ac958df/prompt.md",
+    "manifest": ".ddx/executions/20260707T072737-0ac958df/manifest.json",
+    "result": ".ddx/executions/20260707T072737-0ac958df/result.json",
+    "checks": ".ddx/executions/20260707T072737-0ac958df/checks.json",
+    "usage": ".ddx/executions/20260707T072737-0ac958df/usage.json",
+    "worktree": "Users/erik/Projects/.ddx-exec-wt/.execute-bead-wt-pqueue-b3167f23-20260707T072737-0ac958df"
+  },
+  "prompt_sha": "ed87b8b369952682d1ecd41fe8477aab5b063c6927efa8769223630a8ba3be97"
+}
