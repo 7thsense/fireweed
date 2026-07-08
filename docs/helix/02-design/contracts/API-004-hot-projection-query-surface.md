@@ -21,7 +21,12 @@ ddx:
 **Contract ID**: API-004
 **Type**: native query contract (transport-neutral)
 **Version**: v1 (draft)
-**Status**: draft
+**Status**: **Descoped (draft, not built).** The implementing work item
+(`pqueue-630dbeaa`, "Add hot indexed projection query surface for Snorri workflow visibility") was
+**cancelled**; this contract is retained as a design record but is **not part of the shipped
+surface**. The shipped read surface remains API-001 (`peek`, `claimed`, `live_items`, `metrics`, and
+exact typed-index lookup via `IndexQueryPort`). Re-scope or re-open via a new tracked bead before
+building against this contract.
 **Related**: PRD (FR-44..47 Seventh Sense validation), API-001 (native client interface, claimed-item
 shape, Eligibility Precedence), ADR-008 (queue as shard unit), ADR-011 (typed indexes via `axon-esf`),
 epic pqueue-45e13e4d (ship Snorri hot projection query substrate)

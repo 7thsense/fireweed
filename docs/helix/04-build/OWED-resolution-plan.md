@@ -1,5 +1,9 @@
 # Owed-Items Resolution Plan (post-migration)
 
+> **HISTORICAL (June 2026 hexagonal-migration era).** Resolves the owed items of the completed
+> hexagonal migration only. Superseded by the later ADR-008…014 cascade. **Not current status** — see
+> `DEPLOYMENT-READINESS.md`, `gap-closure-plan.md`, and the live `.ddx` tracker.
+
 Resolves the six owed items from `PHASE-7-reconciliation.md`. Each chunk: implement → review (fresh-eyes
 for production logic) → test (full default workspace green + clippy 0) → **commit**. Sequenced so each
 port/semantic change lands BEFORE the postgres adapter, so postgres is built once against the final port

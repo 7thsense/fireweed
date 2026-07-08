@@ -1,5 +1,12 @@
 # Phase 7 — Reconciliation Report (hexagonal migration v4)
 
+> **HISTORICAL (June 2026 hexagonal-migration era).** This report and its "zero owed items" verdict
+> are accurate **only** for the hexagonal migration that completed 2026-06. The project has since
+> cascaded through ADR-008 (queue = unit of sharding) → ADR-009…014 (Fjord change-log surface,
+> orthogonal composition, typed indexes) and beyond. **Do not read this as current status.** Current
+> status lives in `docs/helix/04-build/DEPLOYMENT-READINESS.md`, `gap-closure-plan.md`, and the live
+> `.ddx` tracker.
+
 Final gap review of the finished system against `hexagonal-migration-plan.md`, item by item. Status
 vocabulary: **DONE** = implemented + tested (cited); **OWED** = intentionally deferred with reason (not
 dropped); **N/A** = not applicable to launch scope.
