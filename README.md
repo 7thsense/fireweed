@@ -47,3 +47,29 @@ docker run --rm pqueue:dev --help
 See the
 [container runtime config contract](docs/deployment/container-runtime-contract.md)
 for the full environment, health-probe, and storage backend contract.
+
+## Building from source
+
+The workspace pins its toolchain in `rust-toolchain.toml` — **Rust 1.92.0**
+(with `clippy` and `rustfmt`). With `rustup` installed, the pinned toolchain is
+selected automatically; a clean build needs no extra system libraries:
+
+```sh
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Notes:
+
+- `cargo build --workspace` builds with the pinned 1.92.0 toolchain and requires
+  **no libcurl/librdkafka** — the change-log surface produces in-process to the
+  embedded fjord broker (ADR-014); the optional external-Kafka producer is a
+  pure-Rust (`rskafka`) path behind the default-off `external-kafka` feature.
+- Some transitive dependencies (via `heimq`) build native crypto through
+  `aws-lc-sys`, which needs a C toolchain and **cmake** available on `PATH`.
+- The workspace depends on the sibling projects `fjord`, `heimq`, and
+  `object-log`; CI checks them out alongside the repo (see
+  `.github/workflows/ci.yml`).
+- Postgres and S3/object-log integration tests are env-gated
+  (`PQUEUE_PG_TEST_URL`, `PQUEUE_S3_TEST_*`) and skip loudly when unset.
