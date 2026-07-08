@@ -5258,6 +5258,11 @@ impl ProjectionStore for PostgresRelational {
 impl AsOfProjectionStore for PostgresRelational {
     type AsOfProjection = PostgresRelational;
 
+    // No replayable command log: cannot serve historical reads. Decline as-of up-front.
+    fn supports_as_of(&self) -> bool {
+        false
+    }
+
     fn reconstruct_as_of(
         &self,
         _definition: &QueueDefinition,

@@ -1140,6 +1140,18 @@ pub trait SnapshotStore: Send + Sync {
 pub trait AsOfProjectionStore: ProjectionStore {
     type AsOfProjection: ProjectionStore + Send;
 
+    /// Whether this projection store can serve historical/as-of reads by log replay.
+    ///
+    /// Log-replayable projection families (the object-log / in-memory default) reconstruct an
+    /// ephemeral view from a snapshot plus the replayed command tail, so they return `true`.
+    /// Relational projection stores (`SqliteRelational`, `PostgresRelational`) keep no replayable
+    /// command log and cannot reconstruct historical state, so they override this to `false`. The
+    /// composed backend consults this up-front and declines as-of reads with `EngineError::Unavailable`
+    /// (matching the monolithic relational backends) before performing a queue-existence lookup.
+    fn supports_as_of(&self) -> bool {
+        true
+    }
+
     fn reconstruct_as_of(
         &self,
         definition: &QueueDefinition,

@@ -9059,6 +9059,11 @@ impl AsOfProjectionStore for SqliteRelational {
     // satisfy the bound (and the `LibBackend` wiring); it is never constructed.
     type AsOfProjection = InMemoryProjection;
 
+    // No replayable command log: cannot serve historical reads. Decline as-of up-front.
+    fn supports_as_of(&self) -> bool {
+        false
+    }
+
     fn reconstruct_as_of(
         &self,
         _definition: &QueueDefinition,

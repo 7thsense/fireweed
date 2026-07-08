@@ -2854,6 +2854,14 @@ where
     {
         let result = (|| {
             let g = self.inner.lock().expect("poisoned");
+            // Relational (no-replayable-log) projection stores cannot reconstruct historical state.
+            // Decline as-of reads with `Unavailable` up-front, before the queue-existence lookup, so the
+            // composed relational backend matches the monolithic relational backends (which return
+            // `Unavailable` regardless of whether the queue exists). Log-replay stores return `true` here
+            // and fall through to the normal existence check + replay path below.
+            if !g.projection.supports_as_of() {
+                return Err(EngineError::Unavailable);
+            }
             let definition = self.control.queue_definition(shard)?;
             let snapshot_ref = g.log.snapshot_at_or_before(shard, &position)?;
             let snapshot = match snapshot_ref.as_ref() {
