@@ -54,9 +54,9 @@ combinations:
 |-------------|--------------------|------|
 | `objectlog` | `inmemory` | Helm render/lint and live `kind` smoke. |
 | `objectlog` | `sqlite` | Helm render/lint only until the service wires the SQLite projection adapter. |
-| `postgres` | `inmemory` | Helm render/lint only until the service wires the Postgres log adapter. |
-| `postgres` | `sqlite` | Helm render/lint only until both adapters are wired. |
-| `postgres` | `postgres` | Helm render/lint only until both adapters are wired. |
+| `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke for postgres combos is owed (tracked by `pqueue-52e1a2ff`). |
+| `postgres` | `sqlite` | Adapters wired; live `kind` smoke owed (`pqueue-52e1a2ff`). |
+| `postgres` | `postgres` | Adapters wired; live `kind` smoke owed (`pqueue-52e1a2ff`). |
 
 Unsupported runtime combinations must fail loudly at process startup with the
 requested log/projection pair. They must not be silently mapped onto a synthetic
@@ -165,9 +165,11 @@ Databricks Lakebase when the runtime adapter is wired. Lakebase is
 Postgres-wire compatible. Connection setup belongs to
 `pqueue-postgres::connect`:
 
-- TLS is required for Lakebase. The current connector parses `sslmode` but
-  rejects `sslmode=require` before attempting a `NoTls` connection; the
-  TLS-capable connector/runtime work is tracked by `pqueue-13924b0e`.
+- TLS is required for Lakebase. The current connector is `NoTls`-only (parses
+  `sslmode` but rejects `sslmode=require`); the earlier tracking bead
+  `pqueue-13924b0e` is closed, and the remaining TLS-capable connector/runtime
+  work is now folded into the postgres production-hardening bead
+  `pqueue-52e1a2ff`.
 - Native password through a pooler and OAuth-generated database credentials are
   connection-layer concerns, not new storage combinations.
 - A credentialed live acceptance run against a real managed endpoint is required
@@ -180,13 +182,12 @@ runtime and `kind` gate prove the combination.
 ## Postgres Commit-Transition Parity Scope
 
 This section settles the scope for the Snorri authoritative vectorized claimed-work
-commit boundary (`CommitTransitionPort`, epic pqueue-2201fd37, C9) on the postgres
-storage axis. Both `pqueue-postgres` backend flavors currently no-op the port
-(inherit the `Unavailable` default): `PostgresBackend` (log-replay,
-`crates/pqueue-postgres/src/lib.rs`) and `PostgresRelationalBackend`
-(relational family, `crates/pqueue-postgres/src/relational.rs` — the code still
-carries its pre-ADR-013 "DB-authoritative" posture; the rebuildable-from-log
-migration is tracked as bead pqueue-3c5aa2e0).
+commit boundary (`CommitTransitionPort`, epic pqueue-2201fd37 — **CLOSED**) on the postgres
+storage axis. **Status (2026-07): `PostgresRelationalBackend` now IMPLEMENTS `CommitTransitionPort`**
+(`crates/pqueue-postgres/src/relational.rs:3800`, with `commit_transition_*` tests). The log-replay
+`PostgresBackend` (`crates/pqueue-postgres/src/lib.rs`) still inherits the `Unavailable` default
+(commit-transition is a relational-family capability). The rebuildable-from-log migration bead
+`pqueue-3c5aa2e0` is closed.
 
 **(a) Backend flavor in scope: `PostgresRelationalBackend` only.**
 
@@ -240,10 +241,10 @@ no new table.
   whichever later change wires `RecoveryReadPort`'s authoritative recovery reads
   for postgres, if that read needs more than `response_payload` provides.
 
-Out of scope for this note: the actual `commit_transition` implementation,
-`CommitCapabilities` advertisement, `RecoveryReadPort` wiring, and delayed/timer
-lifecycle-item support for `PostgresRelationalBackend` remain open follow-on
-work tracked under epic pqueue-2201fd37.
+Update (2026-07): the `commit_transition` implementation for `PostgresRelationalBackend` has
+LANDED (`relational.rs:3800`) and epic `pqueue-2201fd37` is closed. Any remaining
+`CommitCapabilities`/`RecoveryReadPort`/delayed-timer refinements are folded into the postgres
+production-hardening bead `pqueue-52e1a2ff`.
 
 ## Object-Log Boundary
 
