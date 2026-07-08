@@ -581,14 +581,15 @@ fn parse_delivery_endpoint(input: &str) -> EngineResult<ParsedDeliveryEndpoint> 
             without_scheme,
         )?));
     }
-    if trimmed.contains("://") {
-        return Err(EngineError::Invalid(
-            "change record sink endpoint must use http:// or kafka://",
-        ));
-    }
-    Ok(ParsedDeliveryEndpoint::Kafka(parse_kafka_endpoint(
-        trimmed,
-    )?))
+    // B2.1: the sink endpoint is the EXTERNAL-Kafka bootstrap axis, orthogonal to the embedded broker's
+    // listen bind (`EmbeddedFjordConfig.broker_listen`). Historically a schemeless `host:port` here silently
+    // selected external Kafka, which conflated the two axes: ADR-014 external-Kafka mode could not be named
+    // without also looking like a broker-endpoint bind. External Kafka must now be requested explicitly with
+    // `kafka://`; a schemeless `host:port` (or any other scheme) is rejected with a clear error.
+    Err(EngineError::Invalid(
+        "change record sink endpoint must use an explicit scheme: `kafka://host:port` for external Kafka \
+         or `http://host:port` for durable-ingest; a schemeless `host:port` is rejected",
+    ))
 }
 
 /// Whether the configured sink uses the in-process embedded fjord surface (the default). `start()` spawns
@@ -997,7 +998,7 @@ mod tests {
         let err = config.validate().expect_err("malformed endpoint must fail");
         assert!(
             err.to_string()
-                .contains("change record sink endpoint must include host:port"),
+                .contains("must use an explicit scheme"),
             "{}",
             err
         );
@@ -1047,6 +1048,111 @@ mod tests {
         assert!(
             !change_record_sink_is_embedded(&kafka),
             "kafka endpoint must select the external-kafka seam"
+        );
+    }
+
+    #[test]
+    fn reject_schemeless_bootstrap_endpoints() {
+        // B2.1: a schemeless `host:port` must NOT silently select external Kafka. It is rejected so the
+        // external-Kafka bootstrap axis can only be named explicitly with `kafka://`, keeping it distinct
+        // from the embedded broker's listen bind.
+        for endpoint in ["127.0.0.1:9092", "localhost:9092", "broker.internal:9092"] {
+            let config = ChangeRecordSinkConfig {
+                enabled: true,
+                endpoint: Some(endpoint.to_string()),
+                ..ChangeRecordSinkConfig::default()
+            };
+            let err = config
+                .validate()
+                .expect_err("schemeless bootstrap endpoint must be rejected");
+            assert!(
+                err.to_string().contains("must use an explicit scheme"),
+                "unexpected error for {endpoint}: {err}"
+            );
+        }
+        // An unknown scheme is likewise rejected (not silently downgraded).
+        let bad_scheme = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("tcp://127.0.0.1:9092".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        bad_scheme
+            .validate()
+            .expect_err("non-http/kafka scheme must be rejected");
+
+        // The explicit `kafka://` form is accepted and selects the external-Kafka mode.
+        let explicit = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        explicit.validate().expect("kafka:// bootstrap validates");
+        assert_eq!(explicit.mode(), ChangeRecordSinkMode::ExternalKafka);
+    }
+
+    #[test]
+    fn listen_and_bootstrap_are_independent() {
+        use crate::EmbeddedFjordConfig;
+
+        // B2.1: axis (a) is the embedded broker's external-consumer TCP bind
+        // (`EmbeddedFjordConfig.broker_listen`); axis (b) is the external-Kafka bootstrap for the
+        // change-record sink (`ChangeRecordSinkConfig.endpoint`). They are separate typed fields and
+        // neither derives from the other.
+        let broker = EmbeddedFjordConfig {
+            broker_listen: Some("127.0.0.1:19092".to_string()),
+            ..EmbeddedFjordConfig::default()
+        };
+
+        // An Embedded sink (no endpoint) alongside a broker_listen bind keeps mode Embedded; the bind
+        // address is untouched by the sink config.
+        let embedded_sink = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: None,
+            ..ChangeRecordSinkConfig::default()
+        };
+        assert_eq!(embedded_sink.mode(), ChangeRecordSinkMode::Embedded);
+        assert_eq!(broker.broker_listen.as_deref(), Some("127.0.0.1:19092"));
+
+        // An external-Kafka sink pointed at a DIFFERENT bootstrap than the broker bind selects
+        // ExternalKafka purely from its own `kafka://` endpoint; the broker bind neither changes nor is
+        // consulted.
+        let external_sink = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("kafka://10.0.0.5:9092".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        assert_eq!(external_sink.mode(), ChangeRecordSinkMode::ExternalKafka);
+        assert_eq!(broker.broker_listen.as_deref(), Some("127.0.0.1:19092"));
+        assert_ne!(
+            broker.broker_listen.as_deref(),
+            external_sink.endpoint.as_deref(),
+            "the two axes carry independent host:port values with no coupling"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_kafka_mode_configures_without_binding_broker_port() {
+        use crate::{build_embedded_fjord_surface, maybe_spawn_embedded_broker, EmbeddedFjordConfig};
+
+        // B2.1 / ADR-014: even with a broker_listen bind configured, an ExternalKafka sink must configure
+        // WITHOUT binding the embedded broker's TCP surface. The embedded surface is spawned only for the
+        // in-process Embedded mode; the external-Kafka producer connects out to its own bootstrap instead.
+        let surface = build_embedded_fjord_surface(0, &EmbeddedFjordConfig::default());
+        let external_sink = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        assert_eq!(external_sink.mode(), ChangeRecordSinkMode::ExternalKafka);
+
+        // Had the ExternalKafka path erroneously bound the embedded surface, this would spawn a listener on
+        // the loopback bind; instead it must return None and leave the port unbound.
+        let handle = maybe_spawn_embedded_broker(&surface, Some("127.0.0.1:0"), &external_sink, &[])
+            .await
+            .expect("external-kafka mode configures without error");
+        assert!(
+            handle.is_none(),
+            "external-kafka sink mode must NOT bind the embedded broker surface"
         );
     }
 
