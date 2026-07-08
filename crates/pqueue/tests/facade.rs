@@ -545,8 +545,7 @@ async fn update_fields_rejects_terminal_over_memory() {
 
 /// API-001: reserved write-field names are blocked before the library facade dispatches to the backend.
 #[tokio::test]
-#[allow(non_snake_case)]
-async fn TestApi001ReservationPolicyIsRecordedOrEnforced() {
+async fn api001_reservation_policy_is_recorded_or_enforced() {
     let pq = Pqueue::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),

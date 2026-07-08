@@ -3036,18 +3036,11 @@ mod tests {
     };
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::{Context, Poll, Waker};
 
     fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
         Pin::new(future).poll(&mut cx)
     }
 
@@ -3772,8 +3765,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestTD008ObservedTerminalReapFrontierRun() {
+    fn td008_observed_terminal_reap_frontier_run() {
         let backend = observed_backend();
         let shard = shard();
         let definition = qdef();
@@ -3855,8 +3847,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestTD008ObservedTerminalReapNoPrematureDeletion() {
+    fn td008_observed_terminal_reap_no_premature_deletion() {
         let backend = observed_backend();
         let shard = shard();
         let definition = qdef();
@@ -3906,8 +3897,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestTD008ObservedRetentionOnlyReapRun() {
+    fn td008_observed_retention_only_reap_run() {
         let backend = observed_backend();
         let shard = shard();
         let definition = qdef_with_emit_change_records(false);
@@ -3947,8 +3937,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestTD008ObservedRetentionOnlyIgnoresEmissionCursor() {
+    fn td008_observed_retention_only_ignores_emission_cursor() {
         let backend = observed_backend();
         let shard = shard();
         let definition = qdef_with_emit_change_records(false);

@@ -1230,8 +1230,7 @@ mod serde_tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestChangeRecordSynthesisCohortVariants() {
+    fn change_record_synthesis_cohort_variants() {
         #[derive(Debug)]
         struct ExpectedRecord {
             item_id: Option<ItemId>,
@@ -1721,8 +1720,7 @@ mod serde_tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestFinalizeRetryExhaustionSynthesizesTerminalFailedRecord() {
+    fn finalize_retry_exhaustion_synthesizes_terminal_failed_record() {
         let shard = shard();
         let position = CommandPosition::new(shard.clone(), 7, 11);
         let emitted_at = ts(99);
@@ -1745,8 +1743,7 @@ mod serde_tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestCohortFinalizeSynthesizesPerMemberTerminalRecords() {
+    fn cohort_finalize_synthesizes_per_member_terminal_records() {
         let shard = shard();
         let position = CommandPosition::new(shard.clone(), 7, 11);
         let emitted_at = ts(99);
@@ -1772,8 +1769,7 @@ mod serde_tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn TestCohortExpiredSynthesizesPerMemberTerminalRecords() {
+    fn cohort_expired_synthesizes_per_member_terminal_records() {
         let shard = shard();
         let position = CommandPosition::new(shard.clone(), 7, 11);
         let emitted_at = ts(99);

@@ -55,6 +55,8 @@ fn unique_path(tag: &str) -> String {
         .to_string()
 }
 
+type SinkBatch = Vec<(TenantId, QueueId, Option<ItemId>, u64, u64)>;
+
 #[derive(Default)]
 struct RecordingSink {
     state: Mutex<RecordingSinkState>,
@@ -62,11 +64,11 @@ struct RecordingSink {
 
 #[derive(Default)]
 struct RecordingSinkState {
-    batches: Vec<Vec<(TenantId, QueueId, Option<ItemId>, u64, u64)>>,
+    batches: Vec<SinkBatch>,
 }
 
 impl RecordingSink {
-    fn batches(&self) -> Vec<Vec<(TenantId, QueueId, Option<ItemId>, u64, u64)>> {
+    fn batches(&self) -> Vec<SinkBatch> {
         self.state.lock().expect("sink poisoned").batches.clone()
     }
 }
@@ -86,7 +88,7 @@ impl ChangeRecordSink for RecordingSink {
 }
 
 #[tokio::test]
-async fn TestEmissionCursorPersistsAcrossReopen_SqliteLog() {
+async fn emission_cursor_persists_across_reopen_sqlite_log() {
     let path = unique_path("emission-cursor");
     let _ = std::fs::remove_file(&path);
 
@@ -121,7 +123,7 @@ async fn TestEmissionCursorPersistsAcrossReopen_SqliteLog() {
         vec![vec![(
             shard().tenant_id.clone(),
             shard().queue_id.clone(),
-            Some(first[0].clone()),
+            Some(first[0]),
             0,
             0
         )]]
@@ -151,7 +153,7 @@ async fn TestEmissionCursorPersistsAcrossReopen_SqliteLog() {
         vec![vec![(
             shard().tenant_id.clone(),
             shard().queue_id.clone(),
-            Some(second[0].clone()),
+            Some(second[0]),
             0,
             1
         )]]

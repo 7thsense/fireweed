@@ -68,8 +68,7 @@ fn set_emission_cursor(url: &str, schema: &str, position: CommandPosition) {
 }
 
 #[test]
-#[allow(non_snake_case)]
-fn TestPostgresTerminalReapSweepsWithCursorConjunction() {
+fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
         eprintln!(
             "POSTGRES RELATIONAL SKIPPED (TestPostgresTerminalReapSweepsWithCursorConjunction) — set PQUEUE_PG_TEST_URL to a live DB"
@@ -116,8 +115,7 @@ fn TestPostgresTerminalReapSweepsWithCursorConjunction() {
 }
 
 #[test]
-#[allow(non_snake_case)]
-fn TestTerminalReapOptOutIgnoresCursor() {
+fn terminal_reap_opt_out_ignores_cursor() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
         eprintln!(
             "POSTGRES RELATIONAL SKIPPED (TestTerminalReapOptOutIgnoresCursor) — set PQUEUE_PG_TEST_URL to a live DB"

@@ -279,8 +279,7 @@ fn commit_transition_explain_commit_shared_scenario_runs_against_postgres_relati
 }
 
 #[test]
-#[allow(non_snake_case)]
-fn TestPostgresRelationalRecoveryHighWater() {
+fn postgres_relational_recovery_high_water() {
     match std::env::var("PQUEUE_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
@@ -339,8 +338,7 @@ fn TestPostgresRelationalRecoveryHighWater() {
 }
 
 #[test]
-#[allow(non_snake_case)]
-fn TestPostgresRelationalTruncateThenRecoverExactState() {
+fn postgres_relational_truncate_then_recover_exact_state() {
     match std::env::var("PQUEUE_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();

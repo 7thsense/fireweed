@@ -250,8 +250,7 @@ async fn xadd_on_client_item_key_upserts_not_appends() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(non_snake_case)]
-async fn TestRespWireCarriesUpdatedFieldAAndFieldC() {
+async fn resp_wire_carries_updated_field_a_and_field_c() {
     let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
     let (mut con, _) = serve_backend(backend.clone(), Arc::new(ManualClock::at(1_000))).await;
@@ -338,8 +337,7 @@ async fn TestRespWireCarriesUpdatedFieldAAndFieldC() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(non_snake_case)]
-async fn TestRespOracleDoesNotUseBackendEcho() {
+async fn resp_oracle_does_not_use_backend_echo() {
     let backend = Arc::new(LyingClaimedViewBackend::new(composed_memory_backend()));
     backend.create_queue(qdef()).await.unwrap();
     let (mut con, _) = serve_backend(backend.clone(), Arc::new(ManualClock::at(1_000))).await;
@@ -433,8 +431,7 @@ async fn TestRespOracleDoesNotUseBackendEcho() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(non_snake_case)]
-async fn TestReservedNamesRejectedOnWritePaths() {
+async fn reserved_names_rejected_on_write_paths() {
     let (mut con, backend) = setup().await;
     let result: redis::RedisResult<String> = redis::cmd("XADD")
         .arg("t1:q1")
@@ -1812,7 +1809,7 @@ async fn xlen_xdel_xinfo_over_offtheshelf_client() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestResidentTerminalCountPublishedInMetrics() {
+async fn resident_terminal_count_published_in_metrics() {
     let (mut con, _backend) = setup().await;
 
     let _: String = redis::cmd("XADD")

@@ -72,7 +72,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 #[test]
-fn TestComposedRelationalRecoverReplaysTail() {
+fn composed_relational_recover_replays_tail() {
     let path = unique_path("tail");
     let _ = std::fs::remove_file(&path);
 
@@ -104,7 +104,7 @@ fn TestComposedRelationalRecoverReplaysTail() {
 }
 
 #[test]
-fn TestComposedRelationalRecoverySeedsCounters() {
+fn composed_relational_recovery_seeds_counters() {
     let path = unique_path("counters");
     let _ = std::fs::remove_file(&path);
 
@@ -128,7 +128,7 @@ fn TestComposedRelationalRecoverySeedsCounters() {
 }
 
 #[tokio::test]
-async fn TestEmissionCursorPersistsAcrossReopen_SqliteRelational() {
+async fn emission_cursor_persists_across_reopen_sqlite_relational() {
     let path = unique_path("emission-cursor");
     let _ = std::fs::remove_file(&path);
 

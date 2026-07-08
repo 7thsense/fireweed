@@ -3525,7 +3525,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortRenewL
 }
 
 #[cfg(test)]
-#[allow(non_snake_case)]
 mod ordered_tests {
     use super::*;
     use crate::PauseQueueCommand;
@@ -4765,7 +4764,7 @@ mod ordered_tests {
     }
 
     #[test]
-    fn TestChangeRecordCursorAdvancesOnlyAfterSuccessfulEmit() {
+    fn change_record_cursor_advances_only_after_successful_emit() {
         let log = FakeGroupCommitLog::default();
         let shard = queue();
         seed_tail(&log, &shard, 7, 1);
@@ -4806,7 +4805,7 @@ mod ordered_tests {
     }
 
     #[test]
-    fn TestChangeRecordTailIsEmittedInCommandPositionOrder() {
+    fn change_record_tail_is_emitted_in_command_position_order() {
         let log = FakeGroupCommitLog::default();
         let shard = queue();
         seed_tail(&log, &shard, 7, 3);
@@ -5041,7 +5040,7 @@ mod ordered_tests {
     }
 
     #[test]
-    fn TestComposedTerminalReapOnReclaimLoop() {
+    fn composed_terminal_reap_on_reclaim_loop() {
         let backend = ComposedBackend::new(
             FakeGroupCommitLog::default(),
             FakeProjection::default(),
@@ -5096,7 +5095,7 @@ mod ordered_tests {
     }
 
     #[test]
-    fn TestComposedTerminalReapWaitsForDurableEmissionCursor() {
+    fn composed_terminal_reap_waits_for_durable_emission_cursor() {
         let backend = ComposedBackend::new(
             FakeGroupCommitLog::default(),
             FakeProjection::default(),

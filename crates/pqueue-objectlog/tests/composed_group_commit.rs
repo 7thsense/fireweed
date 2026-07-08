@@ -327,12 +327,8 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
 
     let mut buffered =
         Box::pin(backend.push(&shard, vec![PushSpec::default()], ts(0), Some(epoch)));
-    struct NoopWake;
-    impl std::task::Wake for NoopWake {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-    let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
-    let mut cx = std::task::Context::from_waker(&waker);
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
     assert!(
         matches!(buffered.as_mut().poll(&mut cx), std::task::Poll::Pending),
         "large-segment push buffers until the ordered barrier force-seals"

@@ -1,4 +1,3 @@
-#![allow(non_snake_case)]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -122,7 +121,7 @@ fn header_value<'a>(record: &'a EmbeddedChangeRecord, key: &str) -> Option<&'a [
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestStartupDoesNotDependOnFixedSleep() {
+async fn startup_does_not_depend_on_fixed_sleep() {
     // The embedded broker's external-consumer TCP surface still boots deterministically over the SHARED
     // surface log — no fixed sleep, and readiness is an in-process property (topics created in the shared
     // log/registry before serving), verified without any Kafka client.
@@ -152,7 +151,7 @@ async fn TestStartupDoesNotDependOnFixedSleep() {
 }
 
 #[test]
-fn TestFjordDependencyIsGitPinnedNoPathDeps() {
+fn fjord_dependency_is_git_pinned_no_path_deps() {
     let cargo_toml =
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
             .expect("read pqueue-server Cargo.toml");
@@ -172,7 +171,7 @@ fn TestFjordDependencyIsGitPinnedNoPathDeps() {
 }
 
 #[test]
-fn TestNoCKafkaClientDependency() {
+fn no_c_kafka_client_dependency() {
     // The C Kafka client is fully removed: no C build, no loopback socket on the write path. The pure-Rust
     // kafka-protocol codec encodes the in-process change-record batches instead.
     let cargo_toml =
@@ -190,7 +189,7 @@ fn TestNoCKafkaClientDependency() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestEmbeddedFjordSurfaceUsesDedicatedNamespaceRoot() {
+async fn embedded_fjord_surface_uses_dedicated_namespace_root() {
     let base = std::env::temp_dir().join(format!("pqueue-fjord-namespace-{}", std::process::id()));
     let config = EmbeddedFjordConfig {
         namespace_root: base.join("fjord-state"),
@@ -210,7 +209,7 @@ async fn TestEmbeddedFjordSurfaceUsesDedicatedNamespaceRoot() {
 }
 
 #[test]
-fn TestKafkaTenantAclRejectsCrossTenantRead() {
+fn kafka_tenant_acl_rejects_cross_tenant_read() {
     let allowed = queue_key("tenant-a", "queue-a");
     let denied = queue_key("tenant-b", "queue-b");
     let auth = AuthContext::new("fjord-reader", [allowed.tenant_id.as_str()]);
@@ -253,7 +252,7 @@ fn TestKafkaTenantAclRejectsCrossTenantRead() {
 }
 
 #[test]
-fn TestKafkaTenantAclRejectsCrossQueueRead() {
+fn kafka_tenant_acl_rejects_cross_queue_read() {
     let allowed = queue_key("tenant-a", "queue-a");
     let denied = queue_key("tenant-a", "queue-b");
     let auth = AuthContext::new("fjord-reader", [allowed.tenant_id.as_str()]);
@@ -272,7 +271,7 @@ fn TestKafkaTenantAclRejectsCrossQueueRead() {
 }
 
 #[test]
-fn TestRejectAmbiguousTenantQueueMappings() {
+fn reject_ambiguous_tenant_queue_mappings() {
     let left = queue_key("a.b", "c");
     let right = queue_key("a", "b.c");
 
@@ -301,7 +300,7 @@ fn TestRejectAmbiguousTenantQueueMappings() {
 }
 
 #[test]
-fn TestRejectKafkaIllegalTenantAndQueueIds() {
+fn reject_kafka_illegal_tenant_and_queue_ids() {
     let illegal = queue_key("tenant with space", "queue/1");
 
     assert!(fjord_topic_name(&illegal).is_err());
@@ -321,7 +320,7 @@ fn TestRejectKafkaIllegalTenantAndQueueIds() {
 }
 
 #[test]
-fn TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped() {
+fn kafka_surface_keeps_consumer_group_state_tenant_scoped() {
     let surface = build_embedded_fjord_surface(7, &test_fjord_config());
     let tenant_a = queue_definition("tenant-a", "queue-a");
     let tenant_b = queue_definition("tenant-b", "queue-b");
@@ -606,7 +605,7 @@ async fn fjord_surface_contract_verified_over_rskafka_consumer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestKafkaTopicMapsOneQueueToOnePartition() {
+async fn kafka_topic_maps_one_queue_to_one_partition() {
     let queue_a = queue_definition("tenant-a", "queue-a");
     let queue_b = queue_definition("tenant-b", "queue-b");
     let surface = build_embedded_fjord_surface(7, &test_fjord_config());
@@ -647,7 +646,7 @@ async fn TestKafkaTopicMapsOneQueueToOnePartition() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestKafkaOffsetNeverRegressesAcrossFailover() {
+async fn kafka_offset_never_regresses_across_failover() {
     let queue = queue_definition("tenant-a", "queue-a");
     let (surface, _sink) = surface_with_sink(&queue);
     let shard = queue_key("tenant-a", "queue-a");
@@ -675,7 +674,7 @@ async fn TestKafkaOffsetNeverRegressesAcrossFailover() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestKafkaIdempotencyKeyIsStableAcrossReemit() {
+async fn kafka_idempotency_key_is_stable_across_reemit() {
     let queue = queue_definition("tenant-a", "queue-a");
     let (surface, _sink) = surface_with_sink(&queue);
     let shard = queue_key("tenant-a", "queue-a");

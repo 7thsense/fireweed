@@ -76,7 +76,7 @@ fn open(url: &str, schema: &str) -> pqueue_postgres::ComposedPostgresRelationalB
 }
 
 #[test]
-fn TestComposedRelationalRecoverReplaysTail() {
+fn composed_relational_recover_replays_tail() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
         eprintln!(
             "POSTGRES UNIFIED COMPOSITION RECONNECT SKIPPED (TestComposedRelationalRecoverReplaysTail) — set PQUEUE_PG_TEST_URL to a live DB"
@@ -116,7 +116,7 @@ fn TestComposedRelationalRecoverReplaysTail() {
 }
 
 #[test]
-fn TestComposedRelationalRecoverySeedsCounters() {
+fn composed_relational_recovery_seeds_counters() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
         eprintln!(
             "POSTGRES UNIFIED COMPOSITION RECONNECT SKIPPED (TestComposedRelationalRecoverySeedsCounters) — set PQUEUE_PG_TEST_URL to a live DB"

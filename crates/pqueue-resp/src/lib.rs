@@ -1140,7 +1140,7 @@ async fn xautoclaim<B: RespBackend, H: RespHooks>(
         Ok(p) => p,
         Err(e) => return err_reply(&e),
     };
-    pel.sort_by(|a, b| a.item_id.as_u64().cmp(&b.item_id.as_u64()));
+    pel.sort_by_key(|a| a.item_id.as_u64());
     let start_key = id_order(&start);
     let from: Vec<&LeaseView> = pel
         .iter()

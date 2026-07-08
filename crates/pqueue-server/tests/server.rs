@@ -659,8 +659,7 @@ async fn start_provisions_queues_and_serves_end_to_end() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(non_snake_case)]
-async fn TestTerminalEmissionMetricsReachServerSurface() {
+async fn terminal_emission_metrics_reach_server_surface() {
     let server = start(Config::new(
         BackendSpec::memory(),
         0,
@@ -1443,12 +1442,8 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
         ts(0),
         Some(e0),
     ));
-    struct NoopWake;
-    impl std::task::Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = std::task::Waker::from(Arc::new(NoopWake));
-    let mut cx = std::task::Context::from_waker(&waker);
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
     assert!(
         matches!(push.as_mut().poll(&mut cx), std::task::Poll::Pending),
         "large-segment push must buffer until a seal"

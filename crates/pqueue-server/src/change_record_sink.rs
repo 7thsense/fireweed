@@ -921,7 +921,6 @@ where
 }
 
 #[cfg(test)]
-#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use pqueue_engine::ChangeRecordKind;
@@ -929,7 +928,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn TestChangeRecordSinkDefaultsDisabledUntilEndpointIsSet() {
+    fn change_record_sink_defaults_disabled_until_endpoint_is_set() {
         let config = ChangeRecordSinkConfig::default();
         assert!(!config.enabled);
         assert!(config.endpoint.is_none());
@@ -989,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn TestChangeRecordSinkRejectsInvalidEndpointAndKeepsDisabled() {
+    fn change_record_sink_rejects_invalid_endpoint_and_keeps_disabled() {
         let config = ChangeRecordSinkConfig {
             endpoint: Some("not-a-url".to_string()),
             ..ChangeRecordSinkConfig::default()
@@ -1006,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn TestChangeRecordSinkRecognizesKafkaEndpoints() {
+    fn change_record_sink_recognizes_kafka_endpoints() {
         let config = ChangeRecordSinkConfig {
             enabled: true,
             endpoint: Some("kafka://127.0.0.1:9092".to_string()),
@@ -1017,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn TestChangeRecordSinkConfigSelectsKafkaProducerPath() {
+    fn change_record_sink_config_selects_kafka_producer_path() {
         let embedded = ChangeRecordSinkConfig {
             enabled: true,
             endpoint: None,
@@ -1052,7 +1051,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn TestChangeRecordEmitterStartsChosenSinkOnly() {
+    async fn change_record_emitter_starts_chosen_sink_only() {
         #[derive(Default)]
         struct NoopBackend;
 
@@ -1173,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn TestResolveChangeRecordQueuesUsesControlPlaneDefinitions() {
+    fn resolve_change_record_queues_uses_control_plane_definitions() {
         let queue = queue_definition("tenant-a", "queue-a", false);
         let backend = MutableControlPlane::new(queue.clone());
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -1198,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn TestChangeRecordSinkWritesTenantQueueAndCustomHeaders() {
+    fn change_record_sink_writes_tenant_queue_and_custom_headers() {
         let endpoint = ParsedEndpoint {
             host: "127.0.0.1".to_string(),
             port: 8080,
@@ -1239,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn TestCommandKindWireSerializationIsStable() {
+    fn command_kind_wire_serialization_is_stable() {
         let shard = QueueKey::new(
             pqueue_core::TenantId::new("tenant-a").unwrap(),
             pqueue_core::QueueId::new("queue-a").unwrap(),
@@ -1277,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn TestRecordKeyIncludesPqItemId() {
+    fn record_key_includes_pq_item_id() {
         let shard = QueueKey::new(
             pqueue_core::TenantId::new("tenant-a").unwrap(),
             pqueue_core::QueueId::new("queue-a").unwrap(),
@@ -1620,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn TestEmitChangeRecordTickSkipsOptedOutQueues() {
+    fn emit_change_record_tick_skips_opted_out_queues() {
         let backend = RecordingEmissionBackend::default();
         let sink = RecordingSink::default();
         let enabled_def = queue_definition("tenant-a", "queue-a", true);
@@ -1654,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn TestEmitChangeRecordTickDoesNotAdvanceCursorForOptOut() {
+    fn emit_change_record_tick_does_not_advance_cursor_for_opt_out() {
         let backend = RecordingEmissionBackend::default();
         let sink = RecordingSink::default();
         let enabled_def = queue_definition("tenant-a", "queue-a", true);
@@ -1679,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn TestProducesBatchRecordsWithoutBlockInPlace() {
+    fn produces_batch_records_without_block_in_place() {
         let backend = BatchRecordingEmissionBackend::default();
         let sink = RecordingSink::default();
         let enabled_def = queue_definition("tenant-a", "queue-a", true);
@@ -1692,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn TestChangeRecordSinkBuildsDeliveryRequestWithTenantAndQueueMetadata() {
+    fn change_record_sink_builds_delivery_request_with_tenant_and_queue_metadata() {
         let endpoint = ParsedEndpoint {
             host: "127.0.0.1".to_string(),
             port: 8080,
