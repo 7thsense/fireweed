@@ -6,12 +6,12 @@ ddx:
     - adr-auth-tenancy-and-storage-isolation
     - adr-log-single-source-of-truth
   review:
-    self_hash: 1f3190f62b6dbccebd33dfd0f141e411e437bf041551f58e5ca61c0409a10e67
+    self_hash: 65104fc200ca12bac3cdc1d116c14da6e4c56839651102227134f7b530330185
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-kafka-producer-wire-adapter: b49b122239af43127faabd91747efc79cc3853555ffa9bfe4febb9d04f8bde32
       adr-log-single-source-of-truth: 59aa04e425cda6e2ba888b4fc58108be7727fa9fd168fa9e951909346427c601
-    reviewed_at: "2026-07-07T06:16:24Z"
+    reviewed_at: "2026-07-08T18:01:17Z"
 ---
 
 # Architecture Decision Record
