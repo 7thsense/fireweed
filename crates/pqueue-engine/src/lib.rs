@@ -32,7 +32,7 @@ pub use claim_validation::{
 };
 pub use compose::{
     ComposedBackend, ControlPlane, InProcessControlPlane, LogLineageIdentity, LogStore,
-    ProjectionStore, RecoveryStart, resolve_recovery_start,
+    ProjectionStore, RecoveryStart, RichClaimSelection, resolve_recovery_start,
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState, OwnerResolution,

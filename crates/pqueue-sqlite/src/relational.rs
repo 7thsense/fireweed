@@ -83,7 +83,7 @@ use pqueue_engine::{
 };
 use pqueue_engine::{
     CommandPage, ComposedBackend, InProcessControlPlane, LogStore, ProjectionSnapshot,
-    ProjectionStore, SnapshotRef,
+    ProjectionStore, RichClaimSelection, SnapshotRef,
 };
 use pqueue_projection::{InMemoryProjection, ProjectionImage, ProjectionImageItem};
 use rusqlite::types::Value;
@@ -5672,7 +5672,7 @@ fn apply_committed_sql(
         claim_scan_default_fifo,
         &mut token_ops,
         &position.queue,
-        &position,
+        position,
         position.sequence,
         envelope.created_at,
         &envelope.command,
@@ -6803,8 +6803,8 @@ impl UpsertPort for SqliteRelationalBackend {
 
 /// Snorri vectorized claimed-work commit on the rebuildable relational family (C9, epic pqueue-2201fd37)
 /// - "at least one durable backend" parity for the commit boundary. The WHOLE request body runs in ONE
-/// sqlite transaction so request-id check + per-entry validate + side-record/lifecycle/finalize writes +
-/// outcome record commit atomically (or roll back together on a storage fault).
+///   sqlite transaction so request-id check + per-entry validate + side-record/lifecycle/finalize writes +
+///   outcome record commit atomically (or roll back together on a storage fault).
 impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
     fn commit_transition(
         &self,
@@ -8679,6 +8679,76 @@ impl ProjectionStore for SqliteRelational {
         LogStore::high_water(self, shard)
     }
 
+    // -- rich (non-item) claim selection + relational-class capabilities (BQ-14). The unified relational
+    //    store materializes the per-group summary, cohort, and gate tables, so it implements what the
+    //    log-replay family refuses — the composition's `claim_rich` / `SetGates` / discovery ports delegate
+    //    here. Ported from the monolithic `SqliteRelationalBackend` (parity).
+
+    fn supports_gates(&self) -> bool {
+        true
+    }
+
+    fn select_rich_claim(
+        &self,
+        shard: &QueueKey,
+        unit: ClaimUnit,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> EngineResult<RichClaimSelection> {
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        // Group-aware units refresh the bounded set of groups made eligible by time alone before selecting
+        // (the summary is a mutation-time hint); the read-only discovery path deliberately does not.
+        if matches!(unit, ClaimUnit::WholeGroup | ClaimUnit::SameGroupKey) {
+            refresh_due_group_summaries(&tx, shard, now)?;
+        }
+        let mut cohort_id = None;
+        let item_ids = match unit {
+            // Item-level selection is the composition's own hot path; it never routes here.
+            ClaimUnit::Item => return Err(EngineError::Unavailable),
+            ClaimUnit::WholeGroup => {
+                let max_groups = compatibility
+                    .group_batching
+                    .as_ref()
+                    .map(|gb| gb.max_groups)
+                    .unwrap_or(0);
+                select_group_batching(&tx, shard, now, max_items, max_groups)?
+            }
+            ClaimUnit::SameGroupKey => select_same_group(&tx, shard, now, max_items)?,
+            ClaimUnit::WholeCohort => match select_whole_cohort(&tx, shard, now, max_items)? {
+                Some(selected) => {
+                    cohort_id = Some(selected.cohort_id);
+                    selected.item_ids
+                }
+                None => Vec::new(),
+            },
+        };
+        // ROLL BACK the selection transaction (drop without commit): this is a SELECT-only unit of work, and
+        // the `refresh_due_group_summaries` write above is a transient selection aid, NOT a durable mutation.
+        // The composition's `commit_locked` runs the epoch fence + append AFTER this returns; if the claim is
+        // fenced (stale epoch) or selects nothing (empty / paused), NOTHING is appended and there must be no
+        // durable side effect. Persisting the refresh here would durably mutate `pqueue_group_summary` for a
+        // no-op/fenced claim — violating that invariant. The durable summary update for the groups actually
+        // leased instead rides the `Claim` / `CohortClaim` apply arm (which re-refreshes their summaries),
+        // so a successful claim still leaves the summary current — faithful to the monolith, which commits
+        // the refresh ONLY inside a claim transaction that actually leases.
+        drop(tx);
+        Ok(RichClaimSelection {
+            item_ids,
+            cohort_id,
+        })
+    }
+
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        discover_active_scopes_sql(&self.lock().conn, shard, granularity, now)
+    }
+
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         let g = self.lock();
         let (t, q) = parts(shard);
@@ -8931,6 +9001,25 @@ impl ProjectionStore for SqliteRelational {
         _index: &str,
         _key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
+        Err(EngineError::Unavailable)
+    }
+}
+
+impl AsOfProjectionStore for SqliteRelational {
+    // TD-009: the unified relational store serves only "now". It keeps NO replayable command log
+    // (`LogStore::read_from` returns an empty page), so the composition's blanket `read_as_of`
+    // (which rebuilds by replaying `read_from`) would otherwise materialize a BOGUS EMPTY projection.
+    // Fail closed here with `Unavailable` so the composed relational backend refuses historical reads
+    // exactly like the monolithic `SqliteRelationalBackend` (`HistoricalProjectionRead::read_as_of`),
+    // rather than advertise an as-of read it cannot serve. The associated type is only a placeholder to
+    // satisfy the bound (and the `LibBackend` wiring); it is never constructed.
+    type AsOfProjection = InMemoryProjection;
+
+    fn reconstruct_as_of(
+        &self,
+        _definition: &QueueDefinition,
+        _snapshot: Option<ProjectionSnapshot>,
+    ) -> EngineResult<Self::AsOfProjection> {
         Err(EngineError::Unavailable)
     }
 }

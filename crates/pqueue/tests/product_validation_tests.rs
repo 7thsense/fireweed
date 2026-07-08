@@ -37,7 +37,7 @@ use pqueue_engine::QueueKey;
 use pqueue_memory::{composed_memory_backend, ComposedMemoryBackend, ManualClock};
 use pqueue_objectlog::ObjectLogBackend;
 use pqueue_sqlite::{
-    composed_sqlite_backend, composed_sqlite_backend_in_memory, SqliteRelationalBackend,
+    composed_sqlite_backend, composed_sqlite_relational_in_memory, SqliteRelationalBackend,
 };
 
 // ---------------------------------------------------------------------------
@@ -1868,7 +1868,7 @@ async fn callback_cohort_e2e() {
 
     // --- ASSERTED atomic whole-cohort SELECTION on the relational backend (BQ-14c, all-or-nothing) ---
     let rel = Pqueue::new(
-        Arc::new(composed_sqlite_backend_in_memory().expect("relational backend")),
+        Arc::new(composed_sqlite_relational_in_memory().expect("relational backend")),
         Arc::new(ManualClock::at(0)),
     );
     let crq = qk("cohort", "callbacks-rel");
@@ -2154,7 +2154,7 @@ async fn noisy_neighbor_scale_e2e() {
     // unauthorized-scope exclusion is the auth layer's concern per ADR-002).
     let disc_clock = Arc::new(ManualClock::at(0));
     let rel = Pqueue::new(
-        Arc::new(composed_sqlite_backend_in_memory().expect("relational backend")),
+        Arc::new(composed_sqlite_relational_in_memory().expect("relational backend")),
         disc_clock.clone(),
     );
     let dq = qk("nn", "discover");

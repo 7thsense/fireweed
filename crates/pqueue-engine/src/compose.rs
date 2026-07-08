@@ -31,19 +31,20 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use pqueue_core::{
     BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
-    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey, GroupedAggregateRequest,
-    GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata, OrderingMode, PriorityValue,
-    QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
-    TenantId, UtcTimestamp, is_retry_exhausted,
+    CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
+    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
+    OrderingMode, PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest,
+    RangeScanResponse, RequestId, TenantId, UtcTimestamp, is_retry_exhausted,
 };
 
-use crate::claim_validation::{ClaimCompatibility, require_item_level_claim};
+use crate::active_scope::{ActiveScope, DiscoveryGranularity};
+use crate::claim_validation::{ClaimCompatibility, ClaimUnit, validate_claim_compatibility};
 use crate::command::{
-    AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate,
+    AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum, CommandEnvelope,
+    CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate,
     PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand,
-    RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, UpdateFieldsCommand,
-    WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
+    RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand,
+    UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
     validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
 use crate::error::{EngineError, EngineResult};
@@ -446,6 +447,17 @@ pub fn resolve_recovery_start(
     Ok(RecoveryStart::FromHighWater(high_water))
 }
 
+/// The result of a NON-item claim selection ([`ProjectionStore::select_rich_claim`]): the candidate item
+/// ids to lease, plus the selected cohort id when the unit was `whole_cohort` (so the composition can emit a
+/// [`QueueCommand::CohortClaim`] that updates the leased cohort state, and stamp the cohort id on the reply).
+#[derive(Debug, Clone, Default)]
+pub struct RichClaimSelection {
+    /// The item ids to lease. Empty = nothing eligible for this unit (claim nothing).
+    pub item_ids: Vec<ItemId>,
+    /// `Some` only for a `whole_cohort` selection: the cohort generation being leased.
+    pub cohort_id: Option<CohortId>,
+}
+
 /// The projection axis: the materialized read model. Exposes the full `ProjectionRead` surface, the
 /// secondary-index queries, the pre-commit VALIDATION helpers the orchestration relies on (so the
 /// post-append `apply` is infallible — commit has no rollback), and the `apply` seam itself.
@@ -535,6 +547,51 @@ pub trait ProjectionStore: Send {
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>>;
     /// Every shard's expired leases at `now` (the global `tick` sweep). Shards with none are omitted.
     fn all_expired_leases(&self, now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)>;
+
+    // -- rich (non-item) claim selection + relational-class capabilities (BQ-14) ---------------------
+    //
+    // These back the composition's non-item claim path (whole-group / same-group-key / whole-cohort), the
+    // operator gate-state capability, and per-group active-scope discovery. They are RELATIONAL-class: the
+    // in-memory / log-replay projection family maintains no per-group summary or cohort/gate tables, so it
+    // inherits the `false` / `Unavailable` defaults and the composition refuses these units — exact
+    // capability parity with the monolithic `MemoryBackend`. The unified sqlite-relational projection store
+    // overrides them by porting its own `select_*` / `discover_active_scopes_sql` SQL.
+
+    /// Whether this projection stores gate membership + gate-state and enforces `SetGates` at claim
+    /// selection. `false` (the default) makes the composition refuse gate-bearing pushes and `SetGates`
+    /// (the log-replay family has no gate tables); the relational projection overrides it to `true`.
+    fn supports_gates(&self) -> bool {
+        false
+    }
+
+    /// Select the candidates (and, for whole-cohort, the selected cohort id) to lease for a NON-item claim
+    /// `unit` (BQ-14b/c). Called under the composition's unit-of-work lock BEFORE the lease command is
+    /// committed, so select+lease is one atomic unit (the composition serializes; the relational store
+    /// serializes on its own `Mutex<Inner>`). An empty selection means "nothing eligible" (claim nothing).
+    /// The default refuses with [`EngineError::Unavailable`] — the log-replay family has no group/cohort
+    /// projection to select from, so it rejects non-item units rather than silently downgrading them.
+    fn select_rich_claim(
+        &self,
+        _shard: &QueueKey,
+        _unit: ClaimUnit,
+        _compatibility: &ClaimCompatibility,
+        _now: UtcTimestamp,
+        _max_items: usize,
+    ) -> EngineResult<RichClaimSelection> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// Roll up the per-group active-scope summary into ranked [`ActiveScope`]s at `granularity` (BQ-14e).
+    /// The default refuses with [`EngineError::Unavailable`] (the log-replay family maintains no per-group
+    /// summary); the relational projection overrides it with the `pqueue_group_summary` rollup.
+    fn discover_active_scopes(
+        &self,
+        _shard: &QueueKey,
+        _granularity: DiscoveryGranularity,
+        _now: UtcTimestamp,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        Err(EngineError::Unavailable)
+    }
 
     // -- pre-commit validation ----------------------------------------------
 
@@ -1193,8 +1250,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         envs: Vec<CommandEnvelope>,
         expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
+        let supports_gates = inner.projection.supports_gates();
         for env in &envs {
-            validate_gate_command(false, &env.command)?;
+            validate_gate_command(supports_gates, &env.command)?;
             validate_request_replay_metadata(env)?;
         }
         if envs.is_empty() {
@@ -1511,8 +1569,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         envs: Vec<CommandEnvelope>,
         expected_epoch: Option<u64>,
     ) -> EngineResult<()> {
+        let supports_gates = inner.projection.supports_gates();
         for env in &envs {
-            validate_gate_command(false, &env.command)?;
+            validate_gate_command(supports_gates, &env.command)?;
         }
         if envs.is_empty() {
             return Ok(());
@@ -1525,6 +1584,59 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         }
         let positions = inner.log.append(shard, &envs, epoch)?;
         inner.projection.apply_live(&positions, &envs)
+    }
+
+    /// The NON-item claim path (whole-group / same-group-key / whole-cohort, BQ-14b/c). The projection axis
+    /// selects the candidates (and, for whole-cohort, the cohort id) under the composition's unit-of-work
+    /// lock; the composition then commits the lease as a plain `Claim` (group / same-group) or a
+    /// `CohortClaim` (whole-cohort — its apply arm also flips `pqueue_cohorts` to leased) through the atomic
+    /// write seam, and renders the reply. A projection without a group/cohort read model refuses the
+    /// selection with `Unavailable`, so the log-replay family rejects non-item units unchanged.
+    fn claim_rich(&self, req: &ClaimRequest, unit: ClaimUnit) -> EngineResult<Claimed> {
+        let mut g = self.inner.lock().expect("poisoned");
+        let selection =
+            g.projection
+                .select_rich_claim(&req.shard, unit, &req.compatibility, req.now, req.max_items)?;
+        if selection.item_ids.is_empty() {
+            return Ok(Claimed::default());
+        }
+        let candidates = selection.item_ids;
+        let command = if let Some(cohort_id) = selection.cohort_id.clone() {
+            QueueCommand::CohortClaim(CohortClaimCommand {
+                cohort_id,
+                item_ids: candidates.clone(),
+                lease_token: req.lease_token.clone(),
+                lease_expires_at: req.lease_expires_at,
+            })
+        } else {
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: candidates.clone(),
+                lease_token: req.lease_token.clone(),
+                lease_expires_at: req.lease_expires_at,
+            })
+        };
+        let env = Self::make_envelope(&mut g, self.node_id, command, candidates.clone(), req.now);
+        Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
+        let items = g.projection.render_claimed(&req.shard, &candidates)?;
+        debug_assert_eq!(
+            items.len(),
+            candidates.len(),
+            "every rich-claim candidate must render"
+        );
+        let mut claimed = Claimed {
+            items,
+            ..Default::default()
+        };
+        if matches!(unit, ClaimUnit::WholeCohort) {
+            // API-001 whole-cohort response shape: the shared lease token + cohort id ride at the top level;
+            // the per-item rows omit their lease token (the cohort holds the single lease).
+            claimed.cohort_lease_token = Some(req.lease_token.clone());
+            claimed.cohort_id = selection.cohort_id;
+            for item in &mut claimed.items {
+                item.lease_token = None;
+            }
+        }
+        Ok(claimed)
     }
 }
 
@@ -1651,6 +1763,9 @@ fn outcomes_from_recovery(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome>
 
 struct LogWriterView<'a, L> {
     log: &'a mut L,
+    /// The composition's gate capability (the projection axis' `supports_gates`), so the raw-write append
+    /// path refuses gate-bearing commands on a non-gate backend exactly like the port write paths.
+    supports_gates: bool,
 }
 
 impl<L: LogStore> LogWriter for LogWriterView<'_, L> {
@@ -1661,7 +1776,7 @@ impl<L: LogStore> LogWriter for LogWriterView<'_, L> {
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         for env in commands {
-            validate_gate_command(false, &env.command)?;
+            validate_gate_command(self.supports_gates, &env.command)?;
         }
         self.log.append(shard, commands, expected_epoch)
     }
@@ -1688,6 +1803,17 @@ impl<P: ProjectionStore> ProjectionWriter for ProjectionWriterView<'_, P> {
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBackend<L, P, C> {
     fn durability_class(&self) -> DurabilityClass {
         self.durability
+    }
+
+    /// Whether the composition stores gate membership + enforces `SetGates` at claim selection — it inherits
+    /// this from its projection axis (the relational projection has the gate tables; the log-replay family
+    /// does not), so a gate-bearing push / `SetGates` is admitted iff the projection can materialize it.
+    fn supports_gates(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("composed backend poisoned")
+            .projection
+            .supports_gates()
     }
 
     /// The authoritative-commit capabilities (Snorri StateStore boundary, epic pqueue-2201fd37). The
@@ -1728,7 +1854,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
             let Inner {
                 log, projection, ..
             } = &mut *g;
-            let mut lw = LogWriterView { log };
+            let supports_gates = projection.supports_gates();
+            let mut lw = LogWriterView {
+                log,
+                supports_gates,
+            };
             let mut pw = ProjectionWriterView { projection };
             f(&mut lw, &mut pw)
         };
@@ -1969,12 +2099,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
         }
 
         let result = (|| {
-            // Resolve the claim unit from the compatibility options. Item-level (the default) is unchanged;
-            // this log-replay composition refuses richer claim units with `Unavailable` rather than
-            // silently downgrading them (BQ-14a).
+            // Resolve the claim unit from the compatibility options. Item-level (the default) is the unchanged
+            // hot path; a non-item unit (whole-group / same-group-key / whole-cohort) is delegated to the
+            // projection axis' rich-claim selection (BQ-14b/c). A projection without a group/cohort read model
+            // (the log-replay family) refuses the non-item units with `Unavailable` via `select_rich_claim`.
             let def = self.control.queue_definition(&req.shard)?;
-            if req.compatibility != ClaimCompatibility::default() {
-                require_item_level_claim(&req.compatibility, req.max_items as u64, &def)?;
+            let unit = if req.compatibility != ClaimCompatibility::default() {
+                validate_claim_compatibility(&req.compatibility, req.max_items as u64, &def)?
+            } else {
+                ClaimUnit::Item
+            };
+            if !matches!(unit, ClaimUnit::Item) {
+                return self.claim_rich(&req, unit).map(ClaimStart::Ready);
             }
             let strict_candidate_cursor =
                 def.ordering_mode == OrderingMode::Strict || def.max_rank_error == 0;
@@ -3323,19 +3459,61 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RecoveryReadPort
 }
 
 // ---------------------------------------------------------------------------
-// Default-impl ports (relational-class features the log-replay composition refuses). These keep
-// ComposedBackend wirable into the LibBackend bound; each inherits the `Unavailable` default. Gate state
-// (SetGates) and per-group active-scope discovery are relational-only — the in-memory / log-replay family
-// stores neither, so it refuses them exactly as the monolithic `MemoryBackend` does (capability parity).
+// Capability-delegating ports (relational-class features). Gate state (`SetGates`) and per-group
+// active-scope discovery are projection-axis capabilities: the relational projection materializes the gate
+// tables + per-group summary and implements them, while the in-memory / log-replay family stores neither
+// and refuses them via the projection defaults — exact capability parity with the monolithic `MemoryBackend`
+// and `SqliteRelationalBackend`.
 // ---------------------------------------------------------------------------
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
     for ComposedBackend<L, P, C>
 {
+    /// Operator gate-state mutation. Committed through the atomic write seam as a `SetGates` command; its
+    /// apply arm sets/clears the projection's gate-state rows (exact-on-read: the next claim's eligibility
+    /// anti-join sees the change). A non-gate projection refuses it at `commit_locked`'s gate validation
+    /// (`Unavailable`), so the log-replay family rejects it unchanged.
+    fn set_gates(
+        &self,
+        shard: &QueueKey,
+        command: SetGatesCommand,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            let env = Self::make_envelope(
+                &mut g,
+                self.node_id,
+                QueueCommand::SetGates(command),
+                Vec::new(),
+                now,
+            );
+            Self::commit_locked(&mut g, shard, env, expected_epoch)
+        };
+        std::future::ready(result)
+    }
 }
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::DiscoveryPort
     for ComposedBackend<L, P, C>
 {
+    /// Per-group active-scope discovery (BQ-14e) — delegates to the projection axis' summary rollup. A
+    /// projection with no per-group summary refuses with `Unavailable` (log-replay family), preserving parity.
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: crate::active_scope::DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::active_scope::ActiveScope>>> + Send
+    {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .discover_active_scopes(shard, granularity, now);
+        std::future::ready(result)
+    }
 }
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortFinalizePort
     for ComposedBackend<L, P, C>
@@ -3359,7 +3537,7 @@ mod ordered_tests {
     };
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Mutex;
-    use std::task::{Poll, Wake};
+    use std::task::Poll;
 
     #[derive(Clone, Default)]
     struct FakeLogState {
@@ -4132,15 +4310,9 @@ mod ordered_tests {
         }
     }
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
-        let waker = std::task::Waker::from(Arc::new(NoopWake));
-        let mut cx = std::task::Context::from_waker(&waker);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
         Pin::new(future).poll(&mut cx)
     }
 
