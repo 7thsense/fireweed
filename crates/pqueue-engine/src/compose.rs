@@ -1403,14 +1403,22 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             // from genesis rather than trusting its lagging high-water as a safe skip point.
             let recovery_poison = projection.recovery_poison(&key);
             let hard_backpressure = projection.recovery_backpressured(&key);
-            if self.durability == DurabilityClass::EventualApply {
-                Self::rebuild_push_idempotency_from_log(
-                    log,
-                    idempotency,
-                    &key,
-                    def.request_id_retention_ms,
-                )?;
-            }
+            // Rebuild the in-memory `request_id -> result` push-idempotency map from the durable log for
+            // EVERY composed-log backend, not only the eventual-apply ones. `push_with_request_id`
+            // consults/records only this in-memory map (see the `check`/`record` calls), which starts
+            // empty on reopen. Atomic composed-log backends (sqlite/postgres, DurabilityClass::Atomic)
+            // durably record the request_id + request_outcome on the log at commit time but previously
+            // did NOT rebuild the map on recovery, so a post-restart retry of an already-committed
+            // request_id re-executed instead of replaying its one committed result — a violation of the
+            // unknown-outcome contract (INV-14). The rebuild is a pure log fold and is correct for both
+            // durability classes (the relational, DB-authoritative family is a separate backend type, not
+            // a ComposedBackend, and is unaffected).
+            Self::rebuild_push_idempotency_from_log(
+                log,
+                idempotency,
+                &key,
+                def.request_id_retention_ms,
+            )?;
             // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
             // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
             let recorded_high_water = projection.recovery_high_water(&key)?;

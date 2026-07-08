@@ -69,6 +69,7 @@ use pqueue_engine::{
     UpsertPort,
 };
 
+pub mod fault;
 pub mod scenarios;
 
 /// The **core** conformance bound: the engine ports the substrate-independent scenarios exercise. Every
