@@ -86,10 +86,33 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > ADR-008 (queue is the unit of sharding) the **E2 requirement is reframed to
 > cross-queue scale-out** (below); the E0/E1/E3 records keep their meaning. The
 > prior E2 measurement stands as a historical attestation of the retired
-> multi-shard mechanism; the reframed cross-queue E2 must be re-measured in the
-> later build phase before a horizontal-scale claim cites it. E0, E1, and E3 (the
-> per-queue floor, the single-deployment envelope, and the object-log
-> latency/cost/recovery profile) are unaffected by the reframe.
+> multi-shard mechanism. E0, E1, and E3 (the per-queue floor, the
+> single-deployment envelope, and the object-log latency/cost/recovery profile)
+> are unaffected by the reframe.
+>
+> **Re-measurement DONE (B3.3, 2026-07-08).** The horizontal-scale claim now cites
+> a fresh live multi-node run of the **reframed cross-queue (ADR-008 per-queue
+> owner)** mechanism, superseding the retired multi-shard attestation. Evidence:
+> [`docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl`](../../../perf/evidence/tp002-e2-cross-queue-remeasured.jsonl)
+> — one release-tier E2 ledger row from a live kind (Kubernetes-in-docker) cluster
+> of independent `object_log_sqlite_projection` owner pods (2/4/8 owners, one queue
+> per owner on disjoint bootstrap queues, CPU-limited server pods driven by a lean
+> in-cluster RESP load Job over Service ClusterIP; harness
+> `crates/pqueue-bench/tests/performance_cross_queue_scale_out_tests.rs` ::
+> `live_multi_node_object_log_sqlite_projection_e2` +
+> `scripts/perf/tp002-e2-kind.sh`). All four E2 bars passed on real measured data:
+> (1) ingest aggregate non-decreasing **8,206 → 15,726 → 30,088 items/s** across
+> 2 → 4 → 8 owners; (2) 8-owner / 2-owner ingest multiple **3.67× ≥ 3.5×** (≈73%
+> cross-node efficiency); (3) worst single-queue floor held — ingest **3,761/s**
+> and claim+finalize **34,234/s**, both ≥ the E0 floor (2,777.78/s); (4)
+> one-owner-per-queue proven live — **56 of 56** cross-node "no such queue"
+> confirmations at 8 owners. Host: 32 cores, node image `kindest/node:v1.36.1`,
+> kind v0.32.0. (Build-provenance note: in this sandbox the source `Dockerfile.e2`
+> cannot authenticate the private git dependencies inside the Docker builder, so
+> the harness image was assembled from host-built release binaries via the
+> prebuilt-image path — `SKIP_BUILD=1` + `PQUEUE_E2_IMAGE` — which is a packaging
+> detail only; the binaries, backend, cluster topology, and load are identical to
+> the source-build path.)
 
 `scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3` validates
 these source beads directly when invoked with the corresponding
