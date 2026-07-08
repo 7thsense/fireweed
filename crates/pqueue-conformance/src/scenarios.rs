@@ -1870,6 +1870,10 @@ pub async fn claimed_item_shape_reflects_update_fields_after_reclaim<B: Conforma
     make: impl Fn() -> B,
 ) {
     let b = make();
+    // Gate membership is a projection-axis capability (the relational family stores it; the log-replay
+    // family does not). The gate portions of this shape check are conditional on `supports_gates()` so a
+    // non-gate atomic backend SKIPS them (rather than failing the push that carries a gate key).
+    let gate_capable = b.supports_gates();
     let mut def = qdef();
     def.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
     def.eligibility_policy.max_gate_keys_per_item = Some(8);
@@ -1885,7 +1889,9 @@ pub async fn claimed_item_shape_reflects_update_fields_after_reclaim<B: Conforma
     ]);
     item.metadata
         .insert("tenant_segment", MetadataValue::String("vip".to_string()));
-    item.gate_keys = vec!["gate-a".to_string()];
+    if gate_capable {
+        item.gate_keys = vec!["gate-a".to_string()];
+    }
     commit(
         &b,
         envelope(
@@ -1909,7 +1915,11 @@ pub async fn claimed_item_shape_reflects_update_fields_after_reclaim<B: Conforma
         first.metadata.get("tenant_segment"),
         Some(&MetadataValue::String("vip".to_string()))
     );
-    assert_eq!(first.gate_keys, vec!["gate-a"]);
+    if gate_capable {
+        assert_eq!(first.gate_keys, vec!["gate-a"]);
+    } else {
+        assert!(first.gate_keys.is_empty());
+    }
     assert_eq!(
         first.fields.get("field-a").map(|bytes| bytes.as_ref()),
         Some(&b"value-a"[..])
@@ -1964,7 +1974,11 @@ pub async fn claimed_item_shape_reflects_update_fields_after_reclaim<B: Conforma
         live_claim.metadata.get("tenant_segment"),
         Some(&MetadataValue::String("vip".to_string()))
     );
-    assert_eq!(live_claim.gate_keys, vec!["gate-a"]);
+    if gate_capable {
+        assert_eq!(live_claim.gate_keys, vec!["gate-a"]);
+    } else {
+        assert!(live_claim.gate_keys.is_empty());
+    }
     assert_eq!(
         live_claim.fields.get("field-a").map(|bytes| bytes.as_ref()),
         Some(&b"value-a-2"[..])
@@ -2002,7 +2016,11 @@ pub async fn claimed_item_shape_reflects_update_fields_after_reclaim<B: Conforma
         got.metadata.get("tenant_segment"),
         Some(&MetadataValue::String("vip".to_string()))
     );
-    assert_eq!(got.gate_keys, vec!["gate-a"]);
+    if gate_capable {
+        assert_eq!(got.gate_keys, vec!["gate-a"]);
+    } else {
+        assert!(got.gate_keys.is_empty());
+    }
     assert_eq!(
         got.fields.get("field-a").map(|bytes| bytes.as_ref()),
         Some(&b"value-a-2"[..])
