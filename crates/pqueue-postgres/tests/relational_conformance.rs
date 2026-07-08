@@ -313,7 +313,10 @@ fn postgres_relational_recovery_high_water() {
                             .recovery_high_water(&pqueue_conformance::shard())
                             .unwrap()
                     }),
-                    Some(CommandPosition::new(pqueue_conformance::shard(), 0, 2))
+                    // push(2 items) is ONE command (seq 0); claim is seq 1. `create_queue` is
+                    // control-plane, not a sequenced command, so recovery_high_water (last-applied =
+                    // next_seq-1) is seq 1 here — not 2 (which miscounted create_queue as seq 0).
+                    Some(CommandPosition::new(pqueue_conformance::shard(), 0, 1))
                 );
             });
 
@@ -325,7 +328,7 @@ fn postgres_relational_recovery_high_water() {
                         .recovery_high_water(&pqueue_conformance::shard())
                         .unwrap()
                 }),
-                Some(CommandPosition::new(pqueue_conformance::shard(), 0, 2)),
+                Some(CommandPosition::new(pqueue_conformance::shard(), 0, 1)),
                 "the relational projection must reopen at the last applied position"
             );
         }
