@@ -8202,6 +8202,50 @@ impl ReclaimDriver for SqliteRelationalBackend {
                 )?;
                 report.cohorts_expired += 1;
             }
+            // TD-008 CL-6: reap terminal items whose retention has elapsed. For emit-enabled queues the reap
+            // is ALSO gated on the durable emission cursor having passed the item (retention AND cursor), so a
+            // terminal row is never dropped before its change record is durably emitted; opt-out queues
+            // (`emit_change_records=false`) reap on retention alone. Mirrors `PostgresRelationalBackend::tick`.
+            let terminal_sweeps: Vec<(QueueKey, u64, bool)> = g
+                .queues
+                .iter()
+                .map(|(shard, definition)| {
+                    (
+                        shard.clone(),
+                        definition.terminal_retention_ms,
+                        definition.emit_change_records,
+                    )
+                })
+                .collect();
+            for (shard, terminal_retention_ms, emit_change_records) in terminal_sweeps {
+                let emission_cursor = if emit_change_records {
+                    let (t, q) = parts(&shard);
+                    let row: Option<(i64, i64)> = st(g
+                        .conn
+                        .query_row(
+                            "SELECT epoch, seq FROM relational_emission_cursor \
+                             WHERE tenant=?1 AND queue=?2",
+                            params![t, q],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional())?;
+                    row.map(|(epoch, seq)| {
+                        CommandPosition::new(shard.clone(), epoch as u64, seq as u64)
+                    })
+                } else {
+                    None
+                };
+                let tx = st(g.conn.transaction())?;
+                let _ = reap_terminal_items_sql(
+                    &tx,
+                    &shard,
+                    now,
+                    terminal_retention_ms,
+                    emit_change_records,
+                    emission_cursor.as_ref(),
+                )?;
+                st(tx.commit())?;
+            }
             Ok(report)
         })();
         std::future::ready(result)
@@ -10216,6 +10260,131 @@ mod group_summary_tests {
         let (_, count, rep) = summary(&b, "g").unwrap();
         assert_eq!(count, 1, "reclaimed item is eligible again");
         assert_eq!(rep, Some(ids[0].to_string()));
+    }
+
+    /// Count of durable terminal (Complete) rows still resident in the item projection.
+    fn complete_count(b: &SqliteRelationalBackend) -> i64 {
+        let g = b.inner.lock().unwrap();
+        g.conn
+            .query_row(
+                "SELECT COUNT(*) FROM pqueue_items \
+                 WHERE tenant_id='t1' AND queue_id='q1' AND lifecycle_state='Complete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The terminal item's (`terminal_command_epoch`, `last_command_sequence`) — the position the emission
+    /// cursor must pass before a reap is permitted for an emit-enabled queue.
+    fn terminal_pos(b: &SqliteRelationalBackend) -> (i64, i64) {
+        let g = b.inner.lock().unwrap();
+        g.conn
+            .query_row(
+                "SELECT terminal_command_epoch, last_command_sequence FROM pqueue_items \
+                 WHERE tenant_id='t1' AND queue_id='q1' LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    /// Durably record the emission frontier (as the change-record sink would) so the reclaim tick can read it.
+    fn set_emission_cursor(b: &SqliteRelationalBackend, epoch: i64, seq: i64) {
+        let g = b.inner.lock().unwrap();
+        g.conn
+            .execute(
+                "INSERT INTO relational_emission_cursor(tenant,queue,epoch,seq) \
+                 VALUES('t1','q1',?1,?2) \
+                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
+                params![epoch, seq],
+            )
+            .unwrap();
+    }
+
+    // TD-008 CL-6: an emit-enabled queue reaps a terminal item only after BOTH its retention has elapsed AND
+    // the durable emission cursor has passed it. The tick applies the conjunction via the emission cursor.
+    #[tokio::test]
+    async fn sqlite_terminal_reap_sweeps_with_cursor_conjunction() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(QueueDefinition {
+            terminal_retention_ms: 1,
+            ..qdef()
+        })
+        .await
+        .unwrap();
+        let ids = b
+            .push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        b.claim(claim_req(1, 500, 10)).await.unwrap();
+        b.finalize(
+            &shard(),
+            vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (epoch, seq) = terminal_pos(&b);
+
+        // Retention has elapsed (ts(3), 1ms retention) but the emission cursor is strictly BEHIND the
+        // terminal command — the change record is not yet durably emitted, so the tick must NOT reap.
+        set_emission_cursor(&b, epoch, seq - 1);
+        b.tick(ts(3)).await.unwrap();
+        assert_eq!(
+            complete_count(&b),
+            1,
+            "retention-elapsed but cursor-behind must not reap"
+        );
+
+        // The cursor now reaches the terminal command: retention AND cursor conjunction holds -> reaped.
+        set_emission_cursor(&b, epoch, seq);
+        b.tick(ts(5)).await.unwrap();
+        assert_eq!(
+            complete_count(&b),
+            0,
+            "retention-elapsed and cursor-passed must reap"
+        );
+    }
+
+    // TD-008 CL-6: an opt-out queue (`emit_change_records=false`) emits no change records, so its terminal
+    // reap is gated on retention alone and ignores the (behind) emission cursor.
+    #[tokio::test]
+    async fn sqlite_terminal_reap_opt_out_ignores_cursor() {
+        let b = SqliteRelationalBackend::in_memory().unwrap();
+        b.create_queue(QueueDefinition {
+            terminal_retention_ms: 1,
+            emit_change_records: false,
+            ..qdef()
+        })
+        .await
+        .unwrap();
+        let ids = b
+            .push(&shard(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        b.claim(claim_req(1, 500, 10)).await.unwrap();
+        b.finalize(
+            &shard(),
+            vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Cursor left strictly behind the terminal command; the opt-out queue ignores it and reaps on
+        // retention alone.
+        let (epoch, seq) = terminal_pos(&b);
+        set_emission_cursor(&b, epoch, seq - 1);
+        b.tick(ts(3)).await.unwrap();
+        assert_eq!(
+            complete_count(&b),
+            0,
+            "opted-out queues reap on retention alone"
+        );
     }
 
     #[tokio::test]
