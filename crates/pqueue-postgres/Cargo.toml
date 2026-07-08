@@ -62,3 +62,9 @@ path = "tests/relational_conformance.rs"
 [[test]]
 name = "composed_relational_conformance"
 path = "tests/composed_relational_conformance.rs"
+
+# Live TLS round-trip proof (Lakebase / cloud-postgres transport): only compiled with `--features tls`,
+# and env-gated on PQUEUE_PG_TLS_TEST_URL (a sslmode=require DSN to a TLS-enabled postgres). LOUD-skips otherwise.
+[[test]]
+name = "tls_connection"
+path = "tests/tls_connection.rs"

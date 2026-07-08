@@ -81,6 +81,10 @@ fn postgres_native_backend_variant_is_selectable() {
 /// native password and `sslmode=require`) plus the Databricks service-principal credential-injection envs —
 /// and resolves them to `Backend::PostgresNative` with a TLS-requiring DSN and a credential provider. No
 /// live DB: it asserts over the resolved config only.
+///
+/// The Lakebase DSN uses `sslmode=require`, which only resolves on a `tls` build (a `postgres`-only build
+/// fails closed by contract — see `require_dsn_fails_closed_without_tls_feature`). Gate on `tls`.
+#[cfg(feature = "tls")]
 #[test]
 fn lakebase_env_resolves_to_postgres_native_with_tls_and_databricks_credentials() {
     // Exactly what the chart's deployment.yaml (PQUEUE_POSTGRES_LOG_DATABASE_URL Secret) + a Databricks
@@ -121,6 +125,9 @@ fn lakebase_env_resolves_to_postgres_native_with_tls_and_databricks_credentials(
 
 /// A libpq `key=value` DSN (no Databricks creds — native-password Secret only) is accepted too, and a bare
 /// `PQUEUE_PG_URL` is the local/dev fallback when the Lakebase Secret env is absent.
+///
+/// The key=value DSN carries `sslmode=require`, so this resolve only succeeds on a `tls` build; gate it.
+#[cfg(feature = "tls")]
 #[test]
 fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
     let keyvalue: BTreeMap<String, String> = [(

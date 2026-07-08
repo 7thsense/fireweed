@@ -692,7 +692,10 @@ mod tests {
         assert!(err.0.contains("PQUEUE_BOOTSTRAP_QUEUES"), "{}", err.0);
     }
 
-    #[cfg(feature = "postgres")]
+    // The Lakebase DSN carries `sslmode=require`, which only resolves on a `tls` build (a `postgres`-only
+    // build correctly fails closed — see `require_dsn_fails_closed_without_tls_feature`). Gate on `tls` so
+    // the `--features postgres` (no-tls) matrix leg stays green.
+    #[cfg(feature = "tls")]
     #[test]
     fn lakebase_postgres_env_resolves_with_tls_and_databricks_credentials() {
         let config = Config::from_env(&map(&[

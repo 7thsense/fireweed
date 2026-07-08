@@ -39,9 +39,16 @@ REQUIRED TOOLS FOR REAL RUNS:
   kubectl   apply helper manifests, wait for rollout, and run the smoke check
   helm      install/upgrade the charts/pqueue release
 
-STORAGE BACKENDS:
-  log:        objectlog
-  projection: inmemory
+STORAGE BACKENDS (runnable live smokes):
+  objectlog + inmemory   ephemeral projection over the durable object log
+  postgres  + inmemory   durable postgres command log + in-memory projection
+                         (the wired managed-postgres profile). The harness stands
+                         up a throwaway in-cluster postgres and injects its DSN as
+                         the pqueue-postgres-log Secret before installing the chart.
+
+  The postgres/sqlite and postgres/postgres CHART renders are design-ahead and are
+  validated statically by scripts/ci/helm-gate.sh (helm lint + template + kubeconform);
+  the running binary only wires postgres/inmemory, so they have no live smoke here.
 
 OPTIONS:
   --log-backend <backend>  Required log backend for this runtime smoke.
@@ -100,8 +107,35 @@ kubectl_cmd() {
 values_file_for() {
     case "$1:$2" in
         objectlog:inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
+        postgres:inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         *) die "no runtime CI values file for log=$1 projection=$2" ;;
     esac
+}
+
+# The Kubernetes Secret name + key the postgres-inmemory values file expects the log DSN under (must match
+# charts/pqueue/ci/postgres-inmemory-values.yaml: storage.log.postgres.existingSecret/databaseUrlKey).
+PG_SECRET_NAME="pqueue-postgres-log"
+PG_SECRET_KEY="database-url"
+# In-cluster throwaway postgres coordinates (Deployment/Service applied by deploy_in_cluster_postgres).
+PG_IN_CLUSTER_IMAGE="postgres:16"
+PG_IN_CLUSTER_HOST="pqueue-ci-postgres"
+PG_IN_CLUSTER_USER="pqueue"
+PG_IN_CLUSTER_PASSWORD="pqueue"
+PG_IN_CLUSTER_DB="pqueue"
+
+# True when this smoke needs a database (the postgres log axis).
+needs_in_cluster_postgres() {
+    [[ "${LOG_BACKEND}" == "postgres" || "${PROJECTION_BACKEND}" == "postgres" ]]
+}
+
+# The cargo features the pqueue image must be built with for the selected backend. The postgres log axis
+# needs the `postgres` feature (Backend::PostgresNative); everything else ships the default (no-feature) image.
+image_cargo_features() {
+    if needs_in_cluster_postgres; then
+        echo "postgres"
+    else
+        echo ""
+    fi
 }
 
 cleanup() {
@@ -196,7 +230,8 @@ validate_config() {
     [[ -n "${PROJECTION_BACKEND}" ]] || die "--projection-backend is required"
     case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
         objectlog:inmemory) ;;
-        *) die "runtime smoke currently supports only log=objectlog projection=inmemory; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
+        postgres:inmemory) ;;
+        *) die "runtime smoke supports log=objectlog projection=inmemory and log=postgres projection=inmemory; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND} (postgres/sqlite + postgres/postgres are static-only via helm-gate.sh)" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example pqueue:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"
@@ -245,17 +280,26 @@ dry_run_plan() {
     print_cmd kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" cluster-info
     echo "+ kubectl --context kind-${CLUSTER_NAME} create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl --context kind-${CLUSTER_NAME} apply -f -"
+    if needs_in_cluster_postgres; then
+        print_cmd docker pull "${PG_IN_CLUSTER_IMAGE}"
+        print_cmd kind load docker-image "${PG_IN_CLUSTER_IMAGE}" --name "${CLUSTER_NAME}"
+        echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} apply -f - (in-cluster postgres Deployment + Service ${PG_IN_CLUSTER_HOST})"
+        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${PG_IN_CLUSTER_HOST}" --timeout "${TIMEOUT}"
+        echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} create secret generic ${PG_SECRET_NAME} --from-literal=${PG_SECRET_KEY}=<in-cluster DSN>"
+    fi
     print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} port-forward pod/<ready-pqueue-pod> ${SMOKE_PORT}:8080"
     echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
     echo "+ RESP XADD/XREADGROUP 127.0.0.1:${SMOKE_PORT}"
-    if [[ "${LOG_BACKEND}" == "objectlog" ]]; then
-        echo "+ RESP XADD before restart"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
-        print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
-        echo "+ RESP XREADGROUP after restart"
-    fi
+    case "${LOG_BACKEND}" in
+        objectlog | postgres)
+            echo "+ RESP XADD before restart"
+            print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
+            print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
+            echo "+ RESP XREADGROUP after restart"
+            ;;
+    esac
     if [[ "${KEEP_CLUSTER}" == false ]]; then
         print_cmd kind delete cluster --name "${CLUSTER_NAME}"
     fi
@@ -429,17 +473,23 @@ smoke_resp() {
     echo "RESP smoke passed"
 }
 
-smoke_object_log_runtime() {
-    [[ "${LOG_BACKEND}" == "objectlog" ]] || return 0
+# Durable-backend restart recovery: push an item, restart the pqueue Deployment, and prove the item is
+# recovered after restart. Runs for the durable log axes (objectlog and postgres); the in-memory-only
+# combos have nothing durable to recover, so it is a no-op there.
+smoke_durable_restart_runtime() {
+    case "${LOG_BACKEND}" in
+        objectlog | postgres) ;;
+        *) return 0 ;;
+    esac
 
     local run_dir response_path
     run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
-    response_path="${run_dir}/object-log-recovery.response"
+    response_path="${run_dir}/durable-restart-recovery.response"
 
-    echo "+ RESP XADD before restart"
+    echo "+ RESP XADD before restart (durable backend: ${LOG_BACKEND})"
     resp_request "${response_path}" '*5\r\n$4\r\nXADD\r\n$5\r\nt1:q1\r\n$1\r\n*\r\n$8\r\npriority\r\n$1\r\n2\r\n'
     if ! grep -Eq '^\$[0-9]+' "${response_path}"; then
-        err "object-log pre-restart XADD did not return a bulk item id"
+        err "durable pre-restart XADD did not return a bulk item id"
         sed -n '1,80p' "${response_path}" >&2 || true
         return 1
     fi
@@ -455,16 +505,78 @@ smoke_object_log_runtime() {
     echo "+ RESP XREADGROUP after restart"
     resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$9\r\nrestarted\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
     if ! grep -Fq 't1:q1' "${response_path}"; then
-        err "object-log post-restart XREADGROUP did not recover queue data"
+        err "durable post-restart XREADGROUP did not recover queue data (${LOG_BACKEND})"
         sed -n '1,120p' "${response_path}" >&2 || true
         return 1
     fi
-    echo "object-log restart recovery smoke passed"
+    echo "durable (${LOG_BACKEND}) restart recovery smoke passed"
 }
 
 create_namespace() {
     echo "+ kubectl --context kind-${CLUSTER_NAME} create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl --context kind-${CLUSTER_NAME} apply -f -"
     kubectl_cmd create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl_cmd apply -f -
+}
+
+# Stand up a throwaway in-cluster postgres (Deployment + ClusterIP Service) and publish its DSN as the
+# Secret the postgres-inmemory values file references (${PG_SECRET_NAME}/${PG_SECRET_KEY}). Ephemeral
+# (emptyDir) — the smoke only needs a live database for the RESP round-trip, not cross-pod durability.
+deploy_in_cluster_postgres() {
+    needs_in_cluster_postgres || return 0
+
+    echo "=== deploying throwaway in-cluster postgres (${PG_IN_CLUSTER_IMAGE}) ==="
+    # Preload the postgres image into the kind node so the pod does not depend on a registry pull.
+    run docker pull "${PG_IN_CLUSTER_IMAGE}"
+    run kind load docker-image "${PG_IN_CLUSTER_IMAGE}" --name "${CLUSTER_NAME}"
+
+    kubectl_cmd -n "${NAMESPACE}" apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${PG_IN_CLUSTER_HOST}
+  labels: { app: ${PG_IN_CLUSTER_HOST} }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ${PG_IN_CLUSTER_HOST} } }
+  template:
+    metadata:
+      labels: { app: ${PG_IN_CLUSTER_HOST} }
+    spec:
+      containers:
+        - name: postgres
+          image: ${PG_IN_CLUSTER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: POSTGRES_USER, value: "${PG_IN_CLUSTER_USER}" }
+            - { name: POSTGRES_PASSWORD, value: "${PG_IN_CLUSTER_PASSWORD}" }
+            - { name: POSTGRES_DB, value: "${PG_IN_CLUSTER_DB}" }
+            - { name: PGDATA, value: "/var/lib/postgresql/data/pgdata" }
+          ports: [ { containerPort: 5432 } ]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "${PG_IN_CLUSTER_USER}", "-d", "${PG_IN_CLUSTER_DB}"] }
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      volumes:
+        - { name: data, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${PG_IN_CLUSTER_HOST}
+spec:
+  selector: { app: ${PG_IN_CLUSTER_HOST} }
+  ports: [ { port: 5432, targetPort: 5432 } ]
+EOF
+
+    print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${PG_IN_CLUSTER_HOST}" --timeout "${TIMEOUT}"
+    kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${PG_IN_CLUSTER_HOST}" --timeout "${TIMEOUT}"
+
+    local dsn="postgres://${PG_IN_CLUSTER_USER}:${PG_IN_CLUSTER_PASSWORD}@${PG_IN_CLUSTER_HOST}:5432/${PG_IN_CLUSTER_DB}?sslmode=disable"
+    echo "+ kubectl create secret generic ${PG_SECRET_NAME} (${PG_SECRET_KEY}=<in-cluster DSN>)"
+    kubectl_cmd -n "${NAMESPACE}" create secret generic "${PG_SECRET_NAME}" \
+        --from-literal="${PG_SECRET_KEY}=${dsn}" \
+        --dry-run=client -o yaml | kubectl_cmd apply -f -
 }
 
 main() {
@@ -496,10 +608,17 @@ main() {
         echo "dockerfile:${IMAGE_DOCKERFILE}"
     fi
 
+    local cargo_features build_args=()
+    cargo_features="$(image_cargo_features)"
+    if [[ -n "${cargo_features}" ]]; then
+        echo "features:  ${cargo_features}"
+        build_args=(--build-arg "CARGO_FEATURES=${cargo_features}")
+    fi
+
     if [[ -n "${IMAGE_DOCKERFILE}" ]]; then
-        run docker build -f "${IMAGE_DOCKERFILE}" -t "${IMAGE}" "${IMAGE_CONTEXT}"
+        run docker build "${build_args[@]}" -f "${IMAGE_DOCKERFILE}" -t "${IMAGE}" "${IMAGE_CONTEXT}"
     else
-        run docker build -t "${IMAGE}" "${IMAGE_CONTEXT}"
+        run docker build "${build_args[@]}" -t "${IMAGE}" "${IMAGE_CONTEXT}"
     fi
     if [[ -n "${KIND_NODE_IMAGE}" ]]; then
         run kind create cluster --name "${CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}"
@@ -510,6 +629,7 @@ main() {
     run kind load docker-image "${IMAGE}" --name "${CLUSTER_NAME}"
     wait_for_kubernetes_api
     create_namespace
+    deploy_in_cluster_postgres
     run helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
         --kube-context "kind-${CLUSTER_NAME}" \
         --namespace "${NAMESPACE}" \
@@ -523,7 +643,7 @@ main() {
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     kubectl_cmd -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     smoke_resp
-    smoke_object_log_runtime
+    smoke_durable_restart_runtime
 
     echo "=== kind Helm integration smoke PASSED ==="
 }

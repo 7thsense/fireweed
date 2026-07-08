@@ -97,6 +97,9 @@ jobs:
           - storage: objectlog-inmemory
             log_backend: objectlog
             projection_backend: inmemory
+          - storage: postgres-inmemory
+            log_backend: postgres
+            projection_backend: inmemory
     steps:
       - name: Checkout pqueue
         uses: actions/checkout@v4

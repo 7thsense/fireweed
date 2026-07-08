@@ -176,9 +176,7 @@ pub fn connect(config: PostgresConnectConfig) -> EngineResult<Client> {
         ConnectorChoice::NativeTls => {
             #[cfg(feature = "tls")]
             {
-                let connector = native_tls::TlsConnector::new().map_err(|e| {
-                    EngineError::Storage(format!("native-tls connector build failed: {e}"))
-                })?;
+                let connector = build_native_tls_connector(ssl_mode)?;
                 let connector = postgres_native_tls::MakeTlsConnector::new(connector);
                 st(pg_config.connect(connector))
             }
@@ -190,6 +188,34 @@ pub fn connect(config: PostgresConnectConfig) -> EngineResult<Client> {
             }
         }
     }
+}
+
+/// Build the native-tls connector for the `Prefer`/`Require` transport modes.
+///
+/// libpq `sslmode=require` means *encrypt the transport* but does NOT verify the server certificate
+/// chain or hostname — that is what `verify-ca` / `verify-full` are for (not modeled by
+/// [`PostgresSslMode`] yet). `prefer` is opportunistic: it uses TLS when the server offers it (same
+/// non-verifying connector) but may fall back to plaintext if the server rejects TLS. native-tls, however, verifies the chain by default, which would reject the
+/// self-signed / private-CA certificates that managed postgres (Lakebase) and local TLS deployments
+/// commonly present under `require`. So for the non-verifying modes we disable chain + hostname
+/// verification to match libpq's documented `require` semantics: connections are always encrypted, but
+/// trust is not asserted. (A future `verify-full` mode would build a verifying connector with a pinned
+/// root instead.)
+#[cfg(feature = "tls")]
+fn build_native_tls_connector(ssl_mode: PostgresSslMode) -> EngineResult<native_tls::TlsConnector> {
+    let mut builder = native_tls::TlsConnector::builder();
+    match ssl_mode {
+        // Encrypt-without-verify: the only TLS modes we model today.
+        PostgresSslMode::Prefer | PostgresSslMode::Require => {
+            builder.danger_accept_invalid_certs(true);
+            builder.danger_accept_invalid_hostnames(true);
+        }
+        // Never reached: `select_connector` only routes `Prefer`/`Require` to the native-tls path.
+        PostgresSslMode::Disable => {}
+    }
+    builder
+        .build()
+        .map_err(|e| EngineError::Storage(format!("native-tls connector build failed: {e}")))
 }
 
 fn parse_config(url: &str) -> EngineResult<Config> {

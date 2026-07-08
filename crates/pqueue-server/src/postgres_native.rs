@@ -434,12 +434,16 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
+        // `emission_cursor` is a borrow that cannot outlive this method, but the `spawn_blocking`
+        // closure is `'static`. Clone it into an owned value moved into the closure, then re-borrow
+        // inside so the delegated call still receives `Option<&CommandPosition>`.
+        let emission_cursor = emission_cursor.cloned();
         blocking(move || {
             futures::executor::block_on(inner.terminal_emission_metrics(
                 &shard,
                 now,
                 emit_change_records,
-                emission_cursor,
+                emission_cursor.as_ref(),
             ))
         })
     }

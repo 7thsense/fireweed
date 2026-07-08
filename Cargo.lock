@@ -1955,10 +1955,12 @@ name = "pqueue-conformance"
 version = "0.9.0"
 dependencies = [
  "bytes",
+ "futures",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-memory",
  "pqueue-objectlog",
+ "pqueue-postgres",
  "pqueue-sqlite",
  "serde_json",
  "tokio",
