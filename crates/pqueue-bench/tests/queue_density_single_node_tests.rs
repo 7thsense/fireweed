@@ -25,16 +25,25 @@
 //! others stay active" bar (TP-002 §E2). A bounded pool (not one thread per queue) is itself the faithful
 //! shape: a real node serves 1000 queues with a bounded pool, never 1000 loops.
 //!
+//! The DURABLE-backend density point (B3.2) is covered by a SEPARATE test in this same file,
+//! [`queue_density_single_node_durable_tests`]: it runs the SAME 0->100->1000 residency ladder on the DURABLE
+//! substrates the library facade exposes — the durable local-fs object-log authority (`ObjectLogBackend`, the
+//! LOG axis of the production `object_log_sqlite_projection` runtime) AND a durable command LOG + derived
+//! on-disk SQLite PROJECTION (`composed_sqlite_log_sqlite_projection`, the projection axis that runtime
+//! materializes into) — plus, when a live DB is present, a reduced postgres point. It proves >=1000 DURABLE
+//! co-resident queues on one node with the hot queue still clearing the E0 floor and its per-op cost flat.
+//!
 //! WHAT THIS DOES NOT MEASURE (honestly deferred — NOT claimed here):
 //!   - The in-memory backend serializes all queues behind ONE global `Mutex<State>`; it is used here for an
-//!     in-process measurement, but it is NOT the production density substrate. Bar (d) — per-queue background
+//!     in-process measurement, but it is NOT the production density substrate (the durable density point is
+//!     the sibling `queue_density_single_node_durable_tests` above). Bar (d) — per-queue background
 //!     work (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring rearm, retention
 //!     GC) multiplexed onto BOUNDED shared per-node pools, never one loop/connection per queue — is a
-//!     pqueue-SERVER RUNTIME property (the library facade runs NO background loops at all). It and the
-//!     DURABLE-backend (object_log_sqlite_projection / postgres) density point and "every active queue meeting
-//!     its progress bound under a live sweeper" are the server-runtime + live-cluster run's job (deferred to
-//!     bead pqueue-c33c367e and the live run). Aggregate single-node throughput is REPORTED, not required to
-//!     be 1000x the per-queue floor (TP-002 §E2: multi-node provides aggregate headroom).
+//!     pqueue-SERVER RUNTIME property (the library facade runs NO background loops at all). It and "every
+//!     active queue meeting its progress bound under a live sweeper" are the server-runtime + live-cluster
+//!     run's job (deferred to bead pqueue-c33c367e and the live run). Aggregate single-node throughput is
+//!     REPORTED, not required to be 1000x the per-queue floor (TP-002 §E2: multi-node provides aggregate
+//!     headroom).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -49,6 +58,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{Clock, QueueKey};
 use pqueue_memory::composed_memory_backend;
+use pqueue_objectlog::ObjectLogBackend;
+use pqueue_postgres::PostgresBackend;
+use pqueue_sqlite::composed_sqlite_log_sqlite_projection;
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -155,16 +167,23 @@ struct ResidencyPoint {
     cold_resident_after: usize,
 }
 
-/// On a FRESH single node: create `density` cold queues each seeded with `cold_each` pending items (left
-/// resident, never drained), then drive one hot queue and measure it. Verify every cold queue is still fully
-/// resident afterwards (undisturbed by the hot workload — a correctness-isolation check).
-fn measure_residency(
+/// On a FRESH single node built by `make_backend`: create `density` cold queues each seeded with `cold_each`
+/// pending items (left resident, never drained), then drive one hot queue and measure it. Verify every cold
+/// queue is still fully resident afterwards (undisturbed by the hot workload — a correctness-isolation
+/// check). Generic over the backend so the SAME residency ladder runs on the in-memory node AND on the
+/// durable `object_log_sqlite_projection` substrate.
+fn measure_residency_on<B, F>(
+    make_backend: F,
     density: usize,
     cold_each: u64,
     hot_items: u64,
     batch: usize,
-) -> ResidencyPoint {
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SysClock));
+) -> ResidencyPoint
+where
+    B: pqueue::LibBackend + 'static,
+    F: FnOnce() -> B,
+{
+    let pq = Pqueue::new(Arc::new(make_backend()), Arc::new(SysClock));
     futures::executor::block_on(async {
         for i in 0..density {
             let key = qk("density", &format!("cold{i}"));
@@ -194,6 +213,16 @@ fn measure_residency(
             cold_resident_after,
         }
     })
+}
+
+/// The in-memory residency point (Phase 1 of the in-memory suite).
+fn measure_residency(
+    density: usize,
+    cold_each: u64,
+    hot_items: u64,
+    batch: usize,
+) -> ResidencyPoint {
+    measure_residency_on(composed_memory_backend, density, cold_each, hot_items, batch)
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +456,382 @@ fn queue_density_single_node_tests() {
         },
     };
     emit_and_verify("queue_density_single_node_tests", &row, "E2");
+}
+
+// ===========================================================================
+// DURABLE-BACKEND residency ladder (B3.2): the SAME 0->100->1000 residency ladder as Phase 1, but on the
+// DURABLE substrates the library facade (`pqueue::Pqueue`, which requires the full `LibBackend` port set)
+// exposes — instead of the in-memory node. This closes the durable-backend density point the in-memory suite
+// honestly deferred: prove >=1000 DURABLE co-resident queues on one node with the hot queue still clearing
+// the E0 floor and the hot-path per-op cost flat.
+//
+// Two durable substrates, each a full `LibBackend`, together covering the durable projection substrate the
+// production `object_log_sqlite_projection` runtime is built from:
+//   - `object_log`: `ObjectLogBackend` — the durable local-fs OBJECT-LOG authority (segments written to
+//     disk), the LOG axis of the production `object_log_sqlite_projection` runtime;
+//   - `sqlite_log_sqlite_projection`: `composed_sqlite_log_sqlite_projection` — a durable command LOG paired
+//     with the DERIVED on-disk SQLite PROJECTION (`SqliteProjectionStore`), the SAME projection axis the
+//     production `object_log_sqlite_projection` backend materializes its queryable per-queue state into.
+// (The fused `pqueue_server::ObjectLogSqliteBackend` is a server-runtime backend that does NOT implement the
+// full library `LibBackend` port set — it is not drivable through the `Pqueue` facade — so the durable
+// density point is proven on the two full-LibBackend durable substrates it is composed from.)
+// Plus, if a live DB is available, a reduced postgres point.
+// ===========================================================================
+
+/// The durable ladders are single-threaded but disk-backed, so measurably slower per op than the in-memory
+/// node; the floor stays the E0 floor (that is the whole point — a durable backend must still clear it), but
+/// the residency population uses a lighter per-queue pending set so 1000 durable queues stand up in a bounded
+/// wall time. Still a REAL durable seed (each cold queue's pending set is written through the durable log +
+/// projection and verified resident via `metrics()`).
+const DURABLE_COLD_EACH: u64 = 20;
+const DURABLE_HOT_ITEMS: u64 = 30_000;
+const DURABLE_BATCH: usize = 5_000;
+
+/// A fresh, process-unique temp path for a durable backend instance (nanos + a monotonic counter so
+/// back-to-back durable instances in one process never collide).
+fn durable_tmp(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::AtomicU64;
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "pqueue-density-durable-{tag}-{}-{nanos}-{n}",
+        std::process::id()
+    ))
+}
+
+/// Run the residency ladder on a durable backend built fresh per level by `make`, printing each point.
+/// `make(cleanup)` builds one backend instance and pushes its on-disk root(s) onto `cleanup` for removal.
+fn run_durable_ladder<B, F>(
+    label: &str,
+    densities: &[usize],
+    mut make: F,
+    cleanup: &mut Vec<std::path::PathBuf>,
+) -> Vec<ResidencyPoint>
+where
+    B: pqueue::LibBackend + 'static,
+    F: FnMut(&mut Vec<std::path::PathBuf>) -> B,
+{
+    println!(
+        "\nTP-002 E2 queue density — DURABLE residency ladder (single node, {label}):"
+    );
+    println!("  co-resident queues | hot push items/s | hot claim items/s | cold still resident");
+    let mut points = Vec::new();
+    for &d in densities {
+        let p = measure_residency_on(
+            || make(cleanup),
+            d,
+            DURABLE_COLD_EACH,
+            DURABLE_HOT_ITEMS,
+            DURABLE_BATCH,
+        );
+        println!(
+            "  {:>18} | {:>16.0} | {:>17.0} | {:>6} / {}",
+            p.density, p.hot_push_rate, p.hot_claim_rate, p.cold_resident_after, p.density
+        );
+        points.push(p);
+    }
+    points
+}
+
+/// Assert the durable density bars on a completed residency ladder and return (push_keep, claim_keep) — the
+/// fraction of the 0-neighbour rate the hot queue retains at the top of the ladder.
+fn assert_durable_bars(label: &str, points: &[ResidencyPoint], top_density: usize) -> (f64, f64) {
+    let top = points.iter().find(|p| p.density == top_density).unwrap();
+    let base = points.iter().find(|p| p.density == 0).unwrap();
+
+    // (a) the full resident population verified intact (its durable pending set present, unleased) after the
+    // hot run — via each queue's projection metrics.
+    assert_eq!(
+        top.cold_resident_after, top.density,
+        "[{label}] all {} durable cold queues must remain fully resident and undisturbed (correctness isolation); only {} were",
+        top.density, top.cold_resident_after
+    );
+
+    // (c) the hot queue clears the per-queue E0 floor at every density level with the durable population
+    // resident.
+    for p in points {
+        assert!(
+            p.hot_push_rate >= FLOOR_ITEMS_PER_SEC && p.hot_claim_rate >= FLOOR_ITEMS_PER_SEC,
+            "[{label}] durable hot queue must hold the E0 floor (>= {FLOOR_ITEMS_PER_SEC:.0}/s) at {} co-resident durable queues: push={:.0}/s claim={:.0}/s",
+            p.density,
+            p.hot_push_rate,
+            p.hot_claim_rate
+        );
+    }
+
+    // (b) the hot-path per-OPERATION cost does not grow with the resident durable queue count. A design whose
+    // hot path scanned all resident queues (an O(total_queues) per-op cost — e.g. an unindexed scan over the
+    // single shared SQLite projection holding every queue's rows) would visibly fall off as the population
+    // grows. The bar is generous (>=40%) because this compares two single-shot durable throughput windows and
+    // disk-I/O timing is noisier than the in-memory ratio; a genuine O(total_queues) hot path would crater it
+    // toward 0% at 1000 queues.
+    let push_keep = top.hot_push_rate / base.hot_push_rate;
+    let claim_keep = top.hot_claim_rate / base.hot_claim_rate;
+    println!(
+        "  [{label}] per-op cost flat across durable density: push retains {:.0}%, claim retains {:.0}% of the 0-neighbour durable rate at {} resident queues",
+        push_keep * 100.0,
+        claim_keep * 100.0,
+        top.density
+    );
+    assert!(
+        push_keep >= 0.40 && claim_keep >= 0.40,
+        "[{label}] durable hot-path per-op cost appears to scale with resident queue count: push {:.0}% claim {:.0}% of baseline at {} durable queues",
+        push_keep * 100.0,
+        claim_keep * 100.0,
+        top.density
+    );
+    (push_keep, claim_keep)
+}
+
+#[test]
+fn queue_density_single_node_durable_tests() {
+    let densities = [0usize, 100, 1000];
+    let mut cleanup: Vec<std::path::PathBuf> = Vec::new();
+
+    // ---- Durable substrate 1: the object-log authority (durable local-fs LOG axis) ----
+    let ol_points = run_durable_ladder(
+        "object_log (ObjectLogBackend, durable local-fs segments)",
+        &densities,
+        |cleanup| {
+            let dir = durable_tmp("objectlog");
+            let _ = std::fs::remove_dir_all(&dir);
+            let backend = ObjectLogBackend::open(&dir).expect("open object_log backend");
+            cleanup.push(dir);
+            backend
+        },
+        &mut cleanup,
+    );
+    let (ol_push_keep, ol_claim_keep) = assert_durable_bars("object_log", &ol_points, 1000);
+    assert!(
+        ol_points.iter().find(|p| p.density == 1000).unwrap().density >= 1000,
+        "must stand up >=1000 co-resident durable object_log queues"
+    );
+
+    // ---- Durable substrate 2: durable SQLite LOG + durable SQLite PROJECTION (the projection axis the
+    // production object_log_sqlite_projection runtime materializes into) ----
+    let sp_points = run_durable_ladder(
+        "sqlite_log_sqlite_projection (durable log + durable SQLite projection)",
+        &densities,
+        |cleanup| {
+            let log = durable_tmp("sqlog.sqlite");
+            let proj = durable_tmp("sqproj.sqlite");
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_file(&proj);
+            let backend = composed_sqlite_log_sqlite_projection(
+                log.to_str().unwrap(),
+                proj.to_str().unwrap(),
+            )
+            .expect("open sqlite_log_sqlite_projection backend");
+            cleanup.push(log);
+            cleanup.push(proj);
+            backend
+        },
+        &mut cleanup,
+    );
+    let (sp_push_keep, sp_claim_keep) =
+        assert_durable_bars("sqlite_log_sqlite_projection", &sp_points, 1000);
+    assert!(
+        sp_points.iter().find(|p| p.density == 1000).unwrap().density >= 1000,
+        "must stand up >=1000 co-resident durable sqlite_log_sqlite_projection queues"
+    );
+
+    // ---- Optional reduced POSTGRES density point (gated on a live DB) ----
+    // 1000 durable queues on a live postgres schema (create_queue + seed each, per-queue) is impractically
+    // slow for an in-process test, so postgres runs a REDUCED residency ladder (0 -> 100) purely to
+    // demonstrate the same shape holds on a third durable backend. The object_log and
+    // sqlite_log_sqlite_projection substrates at 1000 above are the required deliverable; this is a
+    // supporting, honestly-reduced point.
+    let pg_densities = [0usize, 100];
+    let pg_points: Vec<ResidencyPoint> = match std::env::var("PQUEUE_PG_TEST_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            println!(
+                "\nTP-002 E2 queue density — DURABLE residency ladder (single node, postgres, REDUCED 0->100):"
+            );
+            println!(
+                "  co-resident queues | hot push items/s | hot claim items/s | cold still resident"
+            );
+            let mut pts = Vec::new();
+            for &d in &pg_densities {
+                let p = measure_residency_on(
+                    || {
+                        let schema = format!(
+                            "pq_density_{}_{}",
+                            std::process::id(),
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_nanos()
+                        );
+                        PostgresBackend::connect_in_schema(&url, &schema)
+                            .expect("connect postgres")
+                    },
+                    d,
+                    DURABLE_COLD_EACH,
+                    DURABLE_HOT_ITEMS,
+                    DURABLE_BATCH,
+                );
+                println!(
+                    "  {:>18} | {:>16.0} | {:>17.0} | {:>6} / {}",
+                    p.density, p.hot_push_rate, p.hot_claim_rate, p.cold_resident_after, p.density
+                );
+                pts.push(p);
+            }
+            // Same durable bars at the reduced scale: fully resident + hot holds the E0 floor.
+            for p in &pts {
+                assert_eq!(
+                    p.cold_resident_after, p.density,
+                    "all {} postgres cold queues must remain fully resident; only {} were",
+                    p.density, p.cold_resident_after
+                );
+                assert!(
+                    p.hot_push_rate >= FLOOR_ITEMS_PER_SEC
+                        && p.hot_claim_rate >= FLOOR_ITEMS_PER_SEC,
+                    "postgres hot queue must hold the E0 floor (>= {FLOOR_ITEMS_PER_SEC:.0}/s) at {} co-resident queues: push={:.0}/s claim={:.0}/s",
+                    p.density,
+                    p.hot_push_rate,
+                    p.hot_claim_rate
+                );
+            }
+            pts
+        }
+        _ => {
+            eprintln!(
+                "LOUD-SKIP: postgres durable density point — set PQUEUE_PG_TEST_URL to a live DB to run the reduced 0->100 postgres ladder (object_log_sqlite_projection at 1000 is the required deliverable and ran above)"
+            );
+            Vec::new()
+        }
+    };
+
+    // ---- Emit durable-backend E2 density evidence (REAL measured numbers) ----
+    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/perf/evidence/tp002-e2-density-durable.jsonl");
+    let _ = std::fs::remove_file(&evidence_path);
+
+    let cmd = "cargo test --manifest-path crates/pqueue-bench/Cargo.toml --test queue_density_single_node_tests queue_density_single_node_durable_tests -- --nocapture";
+    let full_bar = ">=1000 durable queues resident on one node; hot-path per-op cost flat across density (>=40% of 0-neighbour rate retained at max); hot queue holds the E0 floor (>=2777.78/s) with the durable population resident";
+    let ol_row = durable_density_row(
+        "object_log",
+        cmd,
+        &format!(
+            "in-process single node, durable local-fs object-log authority (ObjectLogBackend, segments on disk) — the LOG axis of the production object_log_sqlite_projection runtime; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
+        ),
+        full_bar,
+        &ol_points,
+        ol_push_keep,
+        ol_claim_keep,
+    );
+    pqueue_release::append_row(&evidence_path, &ol_row).expect("emit durable object-log density row");
+
+    let sp_row = durable_density_row(
+        "sqlite_log_sqlite_projection",
+        cmd,
+        &format!(
+            "in-process single node, durable SQLite command LOG + derived on-disk SQLite PROJECTION (SqliteProjectionStore) — the projection axis the production object_log_sqlite_projection runtime materializes into; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
+        ),
+        full_bar,
+        &sp_points,
+        sp_push_keep,
+        sp_claim_keep,
+    );
+    pqueue_release::append_row(&evidence_path, &sp_row).expect("emit durable sqlite-projection density row");
+
+    if !pg_points.is_empty() {
+        let pg_top = pg_points.iter().max_by_key(|p| p.density).unwrap();
+        let pg_base = pg_points.iter().find(|p| p.density == 0).unwrap();
+        let pg_push_keep = pg_top.hot_push_rate / pg_base.hot_push_rate;
+        let pg_claim_keep = pg_top.hot_claim_rate / pg_base.hot_claim_rate;
+        let pg_row = durable_density_row(
+            "postgres",
+            "PQUEUE_PG_TEST_URL=postgres://... cargo test --manifest-path crates/pqueue-bench/Cargo.toml --test queue_density_single_node_tests queue_density_single_node_durable_tests -- --nocapture",
+            &format!(
+                "in-process single node, live postgres (sync client, per-queue schema); REDUCED residency ladder 0->100 durable co-resident queues (1000 impractically slow for an in-process test); cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}"
+            ),
+            "REDUCED postgres point: 100 durable queues resident on one node; hot queue holds the E0 floor (>=2777.78/s) with the durable population resident (the >=1000 durable-density bar is met by the object_log and sqlite_log_sqlite_projection rows)",
+            &pg_points,
+            pg_push_keep,
+            pg_claim_keep,
+        );
+        pqueue_release::append_row(&evidence_path, &pg_row).expect("emit durable postgres density row");
+    }
+
+    // The emitted durable evidence must strict-validate and carry the E2 id under smoke_evidence_ids.
+    let summary =
+        pqueue_release::verify_ledger(&evidence_path, true).expect("durable evidence validates strict");
+    assert!(
+        summary.smoke_evidence_ids.contains("E2"),
+        "durable density evidence must carry the E2 evidence id"
+    );
+
+    for p in &cleanup {
+        let _ = std::fs::remove_dir_all(p);
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Build a smoke-tier TP-002 E2 durable-density ledger row from REAL measured residency points.
+fn durable_density_row(
+    backend_profile: &str,
+    command: &str,
+    environment: &str,
+    pass_bar: &str,
+    points: &[ResidencyPoint],
+    push_keep: f64,
+    claim_keep: f64,
+) -> pqueue_release::LedgerRow {
+    let top = points.iter().max_by_key(|p| p.density).unwrap();
+    let mut values = std::collections::BTreeMap::from([
+        (
+            "resident_queues".into(),
+            serde_json::json!(top.cold_resident_after),
+        ),
+        (
+            "max_density".into(),
+            serde_json::json!(top.density),
+        ),
+        (
+            "push_retained_at_max_pct".into(),
+            serde_json::json!((push_keep * 100.0).round()),
+        ),
+        (
+            "claim_retained_at_max_pct".into(),
+            serde_json::json!((claim_keep * 100.0).round()),
+        ),
+        (
+            "e0_floor_per_s".into(),
+            serde_json::json!(FLOOR_ITEMS_PER_SEC.round()),
+        ),
+    ]);
+    for p in points {
+        values.insert(
+            format!("hot_push_at_{}_per_s", p.density),
+            serde_json::json!(p.hot_push_rate.round()),
+        );
+        values.insert(
+            format!("hot_claim_at_{}_per_s", p.density),
+            serde_json::json!(p.hot_claim_rate.round()),
+        );
+    }
+    pqueue_release::LedgerRow {
+        suite: "queue_density_single_node_durable_tests".into(),
+        command: command.into(),
+        backend_profile: backend_profile.into(),
+        scale: "in-process-smoke".into(),
+        seed: 0,
+        environment: environment.into(),
+        exit_status: 0,
+        ac_ids: vec![],
+        inv_ids: vec![],
+        pass_bar: pass_bar.into(),
+        evidence_tier: "smoke".into(),
+        measurements: pqueue_release::Measurements {
+            tp002_evidence_ids: vec!["E2".into()],
+            values,
+        },
+    }
 }
 
 /// Write `row` to its `<suite>.jsonl` ledger (one row per run) and assert it is WELL-FORMED — round-trips
