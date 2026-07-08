@@ -200,22 +200,16 @@ impl ObjectLogSqliteBackend {
         // Seed the mint counter from the snapshot's materialized items (full-genesis observe replacement).
         self.projection
             .observe_item_counters(shard, &self.counters)?;
-        let high_water_seq = high_water
+        // `recovery_high_water` returns the LAST-applied position (`next_seq - 1`), so the true resume point
+        // (the first unapplied sequence) is `high_water.sequence + 1 == next_seq`. `read_from` is exclusive
+        // (starts at `from.sequence + 1`), so passing the last-applied position resumes at exactly the first
+        // unapplied entry. No snapshot → genesis.
+        let snapshot_used = high_water.is_some();
+        let start_seq = high_water
             .as_ref()
-            .map(|position| position.sequence)
+            .map(|position| position.sequence + 1)
             .unwrap_or(0);
-        let snapshot_used = high_water_seq > 0;
-        // `read_from` is exclusive (starts at `from.sequence + 1`), so resume at `high_water - 1` to make the
-        // first replayed entry exactly `high_water`. No snapshot → genesis.
-        let mut from = match high_water {
-            Some(position) if position.sequence > 0 => Some(CommandPosition::new(
-                shard.clone(),
-                position.backend_epoch,
-                position.sequence - 1,
-            )),
-            _ => None,
-        };
-        let start_seq = high_water_seq;
+        let mut from = high_water;
         let mut tail_replayed: u64 = 0;
         loop {
             let page = self.log.read_from(shard, from.clone(), 256).await?;
@@ -1103,11 +1097,14 @@ impl SegmentedObjectLogSqliteBackend {
         // Seed the mint counter from the snapshot's materialized items (full-genesis observe replacement).
         self.projection
             .observe_item_counters(shard, &self.counters)?;
+        // `recovery_high_water` returns the LAST-applied position (`next_seq - 1`); resume at the first
+        // unapplied sequence (`next_seq`). `read_from` is inclusive of `from_seq`, so it returns exactly the
+        // manifest-committed tail beyond the snapshot. No snapshot → genesis (`start_seq == 0`).
+        let snapshot_used = high_water.is_some();
         let start_seq = high_water
             .as_ref()
-            .map(|position| position.sequence)
+            .map(|position| position.sequence + 1)
             .unwrap_or(0);
-        let snapshot_used = start_seq > 0;
         let entries = self.log.read_from(shard, start_seq)?;
         let tail_replayed = entries.len() as u64;
         if !entries.is_empty() {
