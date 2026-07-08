@@ -6,12 +6,12 @@ ddx:
     - adr-queue-as-shard-unit-and-projection-families
     - td-storage-architecture-backend-contracts
   review:
-    self_hash: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
+    self_hash: 46327f801156492ee0a1ad0038b730dea7fcef4ebe00641e8f7d9d5f86f8b3f2
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-08T18:29:59Z"
 ---
 
 # Architecture Decision Record
@@ -294,3 +294,61 @@ ownership; epoch fencing) are unchanged.
   trait definition, not N duplicated impls.
 - **−** Until Phase 2/3/5 the monoliths and the compositions coexist; the compositions are the proving
   ground, the monoliths remain wired, so the gate stays green throughout.
+
+## Decision note (2026-07-08, DDx B3.6): retain `SqliteRelationalBackend` after composed parity
+
+**Decision.** `SqliteRelationalBackend` (the monolithic DB-authoritative sqlite relational backend,
+`crates/pqueue-sqlite/src/relational.rs:4165`) is **retained**, not retired, at this time. This closes DDx
+B3.6 ("retire or justify … after composed parity") on the **justify** branch.
+
+**Why the original keep-reason is gone but retirement is still not clean.** ADR-012 kept the sqlite
+relational monolith as the *sole owner* of the relational-class capabilities — non-item (cohort / whole-group
+/ same-group) claim selection, per-group active-scope discovery, and operator gate state. DDx B0.2–B0.4
+**ported those onto the composition** (`ComposedBackend<SqliteRelational, SqliteRelational,
+InProcessControlPlane>`, aliased `ComposedSqliteRelationalBackend`, built by
+`composed_sqlite_relational_in_memory()` / `composed_sqlite_relational(path)` at
+`crates/pqueue-sqlite/src/relational.rs:9809-9829`), delegating to the relational-capable `ProjectionStore`
+axis. So the *original* justification for the monolith no longer holds. Retirement is nonetheless declined
+because it is **broad and would drop live coverage**, not a clean drop-in:
+
+- **Only one production (non-test) construction site exists** — the benchmark harness
+  `crates/pqueue-bench/src/main.rs:295` (`run_sqlite_relational`), which deliberately measures the
+  DB-authoritative monolith as a *distinct backend family* from the composed sqlite-log path. Every other
+  construction site is `#[cfg(test)]` / a `tests/` target.
+- **Two conformance suites run against the monolith and are mirrored nowhere on the composed relational
+  path:** `adr011_typed_conformance_suite!` and `claimed_item_shape_conformance_tests!(@whole_cohort …)`
+  (`crates/pqueue-sqlite/tests/relational_conformance.rs:121-122`). The whole-cohort claim-*shape* arm is
+  explicitly monolith-only today (`relational_conformance.rs:129`). Retiring the monolith would silently
+  delete this coverage unless the suites are first re-homed onto `composed_sqlite_relational_in_memory()`.
+- **The monolith is the DB-authoritative reference oracle for BQ-13 head-to-head cross-family parity**
+  (`crates/pqueue-sqlite/tests/cross_family_parity.rs:20-22`, `scenarios::cross_family_core_parity`). It is
+  an *independent* relational implementation (no log/projection composition machinery), which is precisely
+  what makes it a trustworthy differential oracle against the in-memory family. Re-homing that role onto the
+  composed relational backend would cross-check the composition against itself, weakening the differential.
+- **Blast radius:** retirement means deleting the ~4,000-line struct plus its ~24 port impls
+  (`relational.rs:5871`–`8101`) and migrating/re-homing ~5,000 lines across six test targets
+  (`relational_conformance.rs`, `relational_commit.rs`, `relational_reconnect.rs`, `cross_family_parity.rs`,
+  the `commit_transition_scenario_tests` in `pqueue-conformance/src/scenarios.rs`, and the in-file unit-test
+  module `relational.rs:9931`+). That is a high-risk, broad change, not the low-risk deletion B3.6 targets.
+
+**What composed parity DOES now cover** (so the monolith carries no *unique feature*, only unique *coverage /
+oracle* duties): the full `core_suite!(@atomic)` at parity with the monolith
+(`relational_conformance.rs:130-134`); rich cohort / whole-group / same-group claim **selection**,
+active-scope **discovery**, and **gates** (`crates/pqueue-sqlite/tests/composed_relational_parity.rs`);
+durable recovery-on-open (`composed_relational_reconnect.rs`, `durable_reconnect_suite!`); terminal reap
+(`composed_relational_terminal_reap.rs`); and every orchestration port generically — including
+`CommitTransitionPort`, `RecoveryReadPort`, `HotProjectionQueryPort`, `IndexQueryPort`,
+`HistoricalProjectionRead`, and `ReclaimDriver` — implemented once on `ComposedBackend`
+(`crates/pqueue-engine/src/compose.rs:3217`, `3430`, `3067`, `2910`, `2824`, `2639`).
+
+**Tracked follow-up condition for eventual retirement (ADR-012 Phase 5, "remove the remaining monoliths").**
+Retire `SqliteRelationalBackend` once ALL of the following hold, so no coverage or oracle guarantee is lost:
+1. `adr011_typed_conformance_suite!` and `claimed_item_shape_conformance_tests!(@whole_cohort …)` pass
+   against `composed_sqlite_relational_in_memory()` (mirror the two monolith-only suites onto the composed
+   relational module in `relational_conformance.rs`).
+2. BQ-13 head-to-head `cross_family_core_parity` runs with a relational representative whose independence
+   from the composition is either preserved or explicitly accepted as no longer needed.
+3. The `pqueue-bench` `run_sqlite_relational` shape is repointed at (or dropped in favor of) the composed
+   relational constructor.
+Then delete the `SqliteRelationalBackend` struct and its port impls, keeping the reusable free-function SQL
+internals the composed `SqliteRelational` axis already depends on.
