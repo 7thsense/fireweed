@@ -6,15 +6,36 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::fjord_topic_name;
+use bytes::{Bytes, BytesMut};
+use heimq_broker::storage::LogBackend;
+use kafka_protocol::indexmap::IndexMap;
+use kafka_protocol::protocol::StrBytes;
+use kafka_protocol::records::{
+    Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+};
 use pqueue_core::{QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
     ChangeRecordSink, ComposedBackend, ControlPlane, ControlPlaneStore, EngineError, EngineResult,
     LogStore, ProjectionStore, QueueKey,
 };
-use rdkafka::ClientConfig;
-use rdkafka::message::{Header, OwnedHeaders};
-use rdkafka::producer::{FutureProducer, FutureRecord};
 use tokio::task::JoinHandle;
+
+/// Delivery mode for the background change-record emission task (ADR-014). The mode is derived from the
+/// legacy `enabled` + `endpoint` fields so existing config plumbing keeps working:
+///
+/// - [`ChangeRecordSinkMode::Disabled`] — emission off (`enabled = false`).
+/// - [`ChangeRecordSinkMode::Embedded`] — the DEFAULT: append change records directly, in-process, to the
+///   embedded fjord broker's Rust log (no endpoint, no loopback socket, no C Kafka client).
+/// - [`ChangeRecordSinkMode::ExternalKafka`] — opt-in: publish to an EXTERNAL Kafka via the pure-Rust
+///   `rskafka` producer (`kafka://host:port` endpoint, behind the `external-kafka` cargo feature).
+/// - [`ChangeRecordSinkMode::Http`] — the existing niflheim durable-ingest HTTP binding (`http://` endpoint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeRecordSinkMode {
+    Disabled,
+    Embedded,
+    ExternalKafka,
+    Http,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRecordSinkConfig {
@@ -38,17 +59,28 @@ impl Default for ChangeRecordSinkConfig {
 }
 
 impl ChangeRecordSinkConfig {
-    pub(crate) fn validate(&self) -> EngineResult<()> {
+    /// Resolve the explicit delivery mode from the `enabled` + `endpoint` fields. A disabled sink is
+    /// `Disabled`; an enabled sink with no endpoint selects the in-process `Embedded` default; an enabled
+    /// `kafka://` endpoint selects `ExternalKafka`; an enabled `http://` endpoint selects `Http`.
+    pub fn mode(&self) -> ChangeRecordSinkMode {
+        if !self.enabled {
+            return ChangeRecordSinkMode::Disabled;
+        }
         match self.endpoint.as_deref() {
-            Some(endpoint) => {
-                parse_delivery_endpoint(endpoint)?;
-            }
-            None if self.enabled => {
-                return Err(EngineError::Invalid(
-                    "change record sink endpoint is required",
-                ));
-            }
-            None => {}
+            None => ChangeRecordSinkMode::Embedded,
+            Some(endpoint) => match parse_delivery_endpoint(endpoint) {
+                Ok(ParsedDeliveryEndpoint::Http(_)) => ChangeRecordSinkMode::Http,
+                // A malformed endpoint is rejected by `validate`; treat parse failures as external-kafka so
+                // the error surfaces there rather than silently downgrading to the embedded default.
+                Ok(ParsedDeliveryEndpoint::Kafka(_)) | Err(_) => ChangeRecordSinkMode::ExternalKafka,
+            },
+        }
+    }
+
+    pub(crate) fn validate(&self) -> EngineResult<()> {
+        // The Embedded default needs no endpoint; only a *present* endpoint must be well-formed.
+        if let Some(endpoint) = self.endpoint.as_deref() {
+            parse_delivery_endpoint(endpoint)?;
         }
         Ok(())
     }
@@ -133,19 +165,17 @@ struct ParsedEndpoint {
 
 #[derive(Debug, Clone)]
 struct ParsedKafkaEndpoint {
+    // Only read by the `external-kafka` (rskafka) sink; the default build parses the endpoint solely to
+    // classify the delivery mode (`kafka://` → ExternalKafka), so the resolved bootstrap is unused there.
+    #[cfg_attr(not(feature = "external-kafka"), allow(dead_code))]
     bootstrap_servers: String,
 }
 
 #[derive(Debug, Clone)]
 enum ParsedDeliveryEndpoint {
     Http(ParsedEndpoint),
+    #[cfg_attr(not(feature = "external-kafka"), allow(dead_code))]
     Kafka(ParsedKafkaEndpoint),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChangeRecordSinkSelection {
-    Http,
-    Kafka,
 }
 
 #[derive(Debug, Clone)]
@@ -254,39 +284,86 @@ fn change_record_key(record: &pqueue_engine::ChangeRecord) -> String {
     )
 }
 
-fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> OwnedHeaders {
-    let backend_epoch = record.position.backend_epoch.to_string();
-    let sequence = record.position.sequence.to_string();
-    let command_kind = change_record_kind_wire_value(record.command_kind);
-    let item_id = record.item_id.map(|value| value.to_string());
-    let mut headers = OwnedHeaders::new()
-        .insert(Header {
-            key: "pq-tenant-id",
-            value: Some(record.tenant_id.as_str()),
-        })
-        .insert(Header {
-            key: "pq-queue-id",
-            value: Some(record.queue_id.as_str()),
-        })
-        .insert(Header {
-            key: "pq-backend-epoch",
-            value: Some(backend_epoch.as_str()),
-        })
-        .insert(Header {
-            key: "pq-sequence",
-            value: Some(sequence.as_str()),
-        })
-        .insert(Header {
-            key: "pq-command-kind",
-            value: Some(command_kind),
-        });
-    if let Some(item_id) = item_id.as_deref() {
-        headers = headers.insert(Header {
-            key: "pq-item-id",
-            value: Some(item_id),
+/// The ADR-014 "Normative consumer contract" change-record headers, in the PINNED wire order
+/// (ADR-014:116): `pq-tenant-id`, `pq-queue-id`, `pq-item-id`, `pq-backend-epoch`, `pq-sequence`,
+/// `pq-command-kind`. Kafka headers are an ordered list and the order is part of the consumer contract, so
+/// `pq-item-id` sits in its pinned position (third) when present and is omitted only for queue-scoped
+/// records. This is the SINGLE source of truth for header key/value/order shared by the in-process embedded
+/// encoder and the external-Kafka producer path.
+fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> Vec<(&'static str, Vec<u8>)> {
+    let mut headers = vec![
+        ("pq-tenant-id", record.tenant_id.as_str().as_bytes().to_vec()),
+        ("pq-queue-id", record.queue_id.as_str().as_bytes().to_vec()),
+    ];
+    if let Some(item_id) = record.item_id {
+        headers.push(("pq-item-id", item_id.to_string().into_bytes()));
+    }
+    headers.push((
+        "pq-backend-epoch",
+        record.position.backend_epoch.to_string().into_bytes(),
+    ));
+    headers.push((
+        "pq-sequence",
+        record.position.sequence.to_string().into_bytes(),
+    ));
+    headers.push((
+        "pq-command-kind",
+        change_record_kind_wire_value(record.command_kind)
+            .as_bytes()
+            .to_vec(),
+    ));
+    headers
+}
+
+/// Encode a batch of change records as a single Kafka v2 record batch (partition 0), the exact wire form
+/// `heimq_broker::storage::RecordBatchView::from_bytes` decodes and `FjordLog::append` stores. Each record
+/// carries the ADR-014 "Normative consumer contract" shape: key `"{item_id}:{backend_epoch}:{sequence}"`,
+/// the pinned `pq-*` headers, and the TD-008 `ChangeRecord` JSON as the payload.
+fn encode_change_record_batch(records: &[pqueue_engine::ChangeRecord]) -> EngineResult<Vec<u8>> {
+    let mut kafka_records = Vec::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        let key = change_record_key(record);
+        let payload = serde_json::to_vec(record)
+            .map_err(|e| EngineError::Storage(format!("serialize change record: {e}")))?;
+        let mut headers = IndexMap::new();
+        for (name, value) in change_record_headers(record) {
+            headers.insert(
+                StrBytes::from_string(name.to_string()),
+                Some(Bytes::from(value)),
+            );
+        }
+        let timestamp = record
+            .emitted_at
+            .map(|ts| ts.seconds * 1000 + i64::from(ts.nanoseconds) / 1_000_000)
+            .unwrap_or(-1);
+        kafka_records.push(Record {
+            transactional: false,
+            control: false,
+            partition_leader_epoch: 0,
+            // Non-idempotent producer sentinel: the embedded log assigns offsets; TD-008 idempotency is
+            // carried by the record key, not the Kafka producer id.
+            producer_id: -1,
+            producer_epoch: -1,
+            timestamp_type: TimestampType::Creation,
+            offset: index as i64,
+            sequence: index as i32,
+            timestamp,
+            key: Some(Bytes::from(key.into_bytes())),
+            value: Some(Bytes::from(payload)),
+            headers,
         });
     }
-    headers
+    let mut buf = BytesMut::new();
+    RecordBatchEncoder::encode(
+        &mut buf,
+        &kafka_records,
+        &RecordEncodeOptions {
+            version: 2,
+            compression: Compression::None,
+        },
+    )
+    .map_err(|e| EngineError::Storage(format!("encode change-record batch: {e}")))?;
+    Ok(buf.to_vec())
 }
 
 fn change_record_kind_wire_value(kind: pqueue_engine::ChangeRecordKind) -> &'static str {
@@ -347,39 +424,48 @@ impl ChangeRecordSink for FjordChangeRecordSink {
             return Ok(());
         }
         let topic = fjord_topic_name(shard)?;
-        let producer = self.producer.clone();
-        let records = records.to_vec();
-        block_on_sync(async move {
-            for record in &records {
-                let key = change_record_key(record);
-                let payload = serde_json::to_vec(record)
-                    .map_err(|e| EngineError::Storage(format!("serialize change record: {e}")))?;
-                let headers = change_record_headers(record);
-                producer
-                    .send(
-                        FutureRecord::to(&topic)
-                            .partition(0)
-                            .key(&key)
-                            .payload(&payload)
-                            .headers(headers),
-                        Duration::from_secs(10),
-                    )
-                    .await
-                    .map_err(|(e, _)| {
-                        EngineError::Storage(format!("produce change record to fjord: {e}"))
-                    })?;
-            }
-            Ok(())
-        })
+        // Ensure the queue topic exists before the first append: `FjordLog::append` returns
+        // `TopicNotFound` for an unknown topic. The shared embedded broker also pre-registers these
+        // topics; `get_or_create_topic` is idempotent, so a race with the broker is harmless.
+        self.log.get_or_create_topic(&topic, 1);
+        let batch = encode_change_record_batch(records)?;
+        // Direct, in-process append to the embedded broker's Rust log — no loopback socket, no Kafka
+        // client. Because this is the SAME `Arc<dyn LogBackend>` the embedded `HeimqServer` serves from,
+        // the appended records are immediately visible to external-consumer fetches over the Kafka surface.
+        self.log.append(&topic, 0, &batch).map_err(|e| {
+            EngineError::Storage(format!("append change record batch to embedded fjord log: {e}"))
+        })?;
+        Ok(())
     }
 }
 
+/// The DEFAULT change-record sink: appends change records directly, in-process, to the embedded fjord
+/// broker's Rust log. It holds the SAME `Arc<dyn LogBackend>` the embedded `HeimqServer` serves from, so
+/// there is no loopback TCP socket and no C Kafka client on the write path (ADR-014).
 #[derive(Clone)]
 pub struct FjordChangeRecordSink {
-    producer: FutureProducer,
+    log: Arc<dyn LogBackend>,
 }
 
 impl FjordChangeRecordSink {
+    /// Build an in-process sink over the shared embedded-broker log handle.
+    pub fn new(log: Arc<dyn LogBackend>) -> Self {
+        Self { log }
+    }
+}
+
+/// The opt-in EXTERNAL-Kafka change-record sink (ADR-014 invariant #4, the swappable seam). Publishes
+/// change records to an external Kafka cluster via the pure-Rust `rskafka` producer — no C Kafka client.
+/// Gated behind the `external-kafka` cargo feature.
+#[cfg(feature = "external-kafka")]
+#[derive(Clone)]
+pub struct ExternalKafkaChangeRecordSink {
+    client: Arc<rskafka::client::Client>,
+    partitions: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<rskafka::client::partition::PartitionClient>>>>,
+}
+
+#[cfg(feature = "external-kafka")]
+impl ExternalKafkaChangeRecordSink {
     pub fn new(config: &ChangeRecordSinkConfig) -> EngineResult<Self> {
         if !config.enabled {
             return Err(EngineError::Invalid(
@@ -388,26 +474,98 @@ impl FjordChangeRecordSink {
         }
         config.validate()?;
         let endpoint = match parse_delivery_endpoint(config.endpoint.as_deref().ok_or(
-            EngineError::Invalid("change record sink endpoint is required"),
+            EngineError::Invalid("external-kafka change record sink endpoint is required"),
         )?)? {
             ParsedDeliveryEndpoint::Kafka(endpoint) => endpoint,
             ParsedDeliveryEndpoint::Http(_) => {
                 return Err(EngineError::Invalid(
-                    "change record sink endpoint must use kafka:// for fjord delivery",
+                    "external-kafka change record sink endpoint must use kafka:// (host:port)",
                 ));
             }
         };
+        let bootstrap = endpoint.bootstrap_servers;
+        let client = block_on_sync(async move {
+            rskafka::client::ClientBuilder::new(vec![bootstrap])
+                .build()
+                .await
+                .map_err(|e| EngineError::Storage(format!("connect external kafka: {e}")))
+        })?;
+        Ok(Self {
+            client: Arc::new(client),
+            partitions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        })
+    }
 
-        let producer = ClientConfig::new()
-            .set("bootstrap.servers", endpoint.bootstrap_servers)
-            .set("acks", "all")
-            .set("enable.idempotence", "true")
-            .set("message.timeout.ms", "10000")
-            .set("retries", "2147483647")
-            .create()
-            .map_err(|e| EngineError::Storage(format!("create fjord producer: {e}")))?;
+    fn partition_client(
+        &self,
+        topic: &str,
+    ) -> EngineResult<Arc<rskafka::client::partition::PartitionClient>> {
+        if let Some(existing) = self.partitions.lock().expect("poisoned").get(topic).cloned() {
+            return Ok(existing);
+        }
+        let client = self.client.clone();
+        let topic_owned = topic.to_string();
+        let partition = block_on_sync(async move {
+            client
+                .partition_client(
+                    topic_owned,
+                    0,
+                    rskafka::client::partition::UnknownTopicHandling::Retry,
+                )
+                .await
+                .map_err(|e| EngineError::Storage(format!("open external kafka partition: {e}")))
+        })?;
+        let partition = Arc::new(partition);
+        self.partitions
+            .lock()
+            .expect("poisoned")
+            .insert(topic.to_string(), partition.clone());
+        Ok(partition)
+    }
+}
 
-        Ok(Self { producer })
+#[cfg(feature = "external-kafka")]
+impl ChangeRecordSink for ExternalKafkaChangeRecordSink {
+    fn emit(&self, shard: &QueueKey, records: &[pqueue_engine::ChangeRecord]) -> EngineResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let topic = fjord_topic_name(shard)?;
+        let partition = self.partition_client(&topic)?;
+        let mut kafka_records = Vec::with_capacity(records.len());
+        for record in records {
+            let key = change_record_key(record);
+            let payload = serde_json::to_vec(record)
+                .map_err(|e| EngineError::Storage(format!("serialize change record: {e}")))?;
+            // Build headers from the SAME single-source-of-truth `change_record_headers` the embedded
+            // encoder uses, so external and embedded consumers receive the identical header key/value set
+            // (and the identical key + JSON payload). NOTE: `rskafka::record::Record::headers` is a
+            // `BTreeMap`, so rskafka re-sorts header keys on the wire; the ADR-014 insertion order cannot be
+            // preserved byte-for-byte through rskafka's producer API. The embedded in-process path (the
+            // default) does preserve the pinned order via the Kafka v2 encoder.
+            let mut headers = std::collections::BTreeMap::new();
+            for (name, value) in change_record_headers(record) {
+                headers.insert(name.to_string(), value);
+            }
+            kafka_records.push(rskafka::record::Record {
+                key: Some(key.into_bytes()),
+                value: Some(payload),
+                headers,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+        block_on_sync(async move {
+            partition
+                .produce(
+                    kafka_records,
+                    rskafka::client::partition::Compression::NoCompression,
+                )
+                .await
+                .map_err(|e| {
+                    EngineError::Storage(format!("produce change record to external kafka: {e}"))
+                })?;
+            Ok(())
+        })
     }
 }
 
@@ -433,39 +591,50 @@ fn parse_delivery_endpoint(input: &str) -> EngineResult<ParsedDeliveryEndpoint> 
     )?))
 }
 
-pub(crate) fn change_record_sink_is_fjord(endpoint: Option<&str>) -> EngineResult<bool> {
-    Ok(matches!(
-        change_record_sink_selection(endpoint)?,
-        Some(ChangeRecordSinkSelection::Kafka)
-    ))
+/// Whether the configured sink uses the in-process embedded fjord surface (the default). `start()` spawns
+/// the embedded `HeimqServer` (the external-consumer Kafka surface over the shared log) only in this mode.
+pub(crate) fn change_record_sink_is_embedded(config: &ChangeRecordSinkConfig) -> bool {
+    matches!(config.mode(), ChangeRecordSinkMode::Embedded)
 }
 
-fn change_record_sink_selection(
-    endpoint: Option<&str>,
-) -> EngineResult<Option<ChangeRecordSinkSelection>> {
-    match endpoint {
-        Some(endpoint) => Ok(Some(match parse_delivery_endpoint(endpoint)? {
-            ParsedDeliveryEndpoint::Http(_) => ChangeRecordSinkSelection::Http,
-            ParsedDeliveryEndpoint::Kafka(_) => ChangeRecordSinkSelection::Kafka,
-        })),
-        None => Ok(None),
-    }
-}
-
+/// Build the runtime sink for the resolved mode. The `Embedded` mode is wired to the shared embedded-broker
+/// `log` handle; `Http` and `ExternalKafka` ignore it (they deliver out of process).
 fn build_change_record_sink(
     config: &ChangeRecordSinkConfig,
+    log: Arc<dyn LogBackend>,
 ) -> EngineResult<Arc<dyn ChangeRecordSink>> {
-    match change_record_sink_selection(config.endpoint.as_deref())? {
-        Some(ChangeRecordSinkSelection::Http) => {
+    match config.mode() {
+        ChangeRecordSinkMode::Embedded => {
+            Ok(Arc::new(FjordChangeRecordSink::new(log)) as Arc<dyn ChangeRecordSink>)
+        }
+        ChangeRecordSinkMode::Http => {
             Ok(Arc::new(NiflheimChangeRecordSink::new(config)?) as Arc<dyn ChangeRecordSink>)
         }
-        Some(ChangeRecordSinkSelection::Kafka) => {
-            Ok(Arc::new(FjordChangeRecordSink::new(config)?) as Arc<dyn ChangeRecordSink>)
-        }
-        None => Err(EngineError::Invalid(
-            "change record sink endpoint is required",
+        ChangeRecordSinkMode::ExternalKafka => build_external_kafka_sink(config),
+        ChangeRecordSinkMode::Disabled => Err(EngineError::Invalid(
+            "change record sink is disabled in config",
         )),
     }
+}
+
+/// Build the opt-in external-Kafka sink over the pure-Rust `rskafka` producer. Gated behind the
+/// `external-kafka` cargo feature (default-off); without it, selecting a `kafka://` endpoint is a config
+/// error that names the feature instead of silently falling back.
+#[cfg(feature = "external-kafka")]
+fn build_external_kafka_sink(
+    config: &ChangeRecordSinkConfig,
+) -> EngineResult<Arc<dyn ChangeRecordSink>> {
+    Ok(Arc::new(ExternalKafkaChangeRecordSink::new(config)?) as Arc<dyn ChangeRecordSink>)
+}
+
+#[cfg(not(feature = "external-kafka"))]
+fn build_external_kafka_sink(
+    _config: &ChangeRecordSinkConfig,
+) -> EngineResult<Arc<dyn ChangeRecordSink>> {
+    Err(EngineError::Invalid(
+        "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
+         the default in-process embedded surface needs no endpoint",
+    ))
 }
 
 fn parse_http_endpoint(without_scheme: &str) -> EngineResult<ParsedEndpoint> {
@@ -681,6 +850,7 @@ pub(crate) fn spawn_change_record_emitter_if_enabled<B>(
     backend: Arc<B>,
     queues: &[QueueDefinition],
     config: &ChangeRecordSinkConfig,
+    log: Arc<dyn LogBackend>,
 ) -> EngineResult<Option<JoinHandle<()>>>
 where
     B: ChangeRecordEmissionBackend + ControlPlaneStore + Send + Sync + 'static,
@@ -693,7 +863,7 @@ where
         return Ok(None);
     }
     change_record_sink_requires_durable_cursor(backend.as_ref())?;
-    let sink = build_change_record_sink(config)?;
+    let sink = build_change_record_sink(config, log)?;
     Ok(Some(spawn_change_record_emitter(
         backend,
         sink,
@@ -703,17 +873,19 @@ where
 }
 
 #[cfg(test)]
-fn spawn_change_record_emitter_if_enabled_with_builders<B, FHttp, FKafka>(
+fn spawn_change_record_emitter_if_enabled_with_builders<B, FEmbedded, FHttp, FExternal>(
     backend: Arc<B>,
     queues: &[QueueDefinition],
     config: &ChangeRecordSinkConfig,
+    build_embedded_sink: FEmbedded,
     build_http_sink: FHttp,
-    build_kafka_sink: FKafka,
+    build_external_sink: FExternal,
 ) -> EngineResult<Option<JoinHandle<()>>>
 where
     B: ChangeRecordEmissionBackend + Send + Sync + 'static,
+    FEmbedded: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
     FHttp: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
-    FKafka: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
+    FExternal: FnOnce(&ChangeRecordSinkConfig) -> EngineResult<Arc<dyn ChangeRecordSink>>,
 {
     if !config.enabled {
         return Ok(None);
@@ -722,12 +894,13 @@ where
     if queues.is_empty() {
         return Ok(None);
     }
-    let sink = match change_record_sink_selection(config.endpoint.as_deref())? {
-        Some(ChangeRecordSinkSelection::Http) => build_http_sink(config)?,
-        Some(ChangeRecordSinkSelection::Kafka) => build_kafka_sink(config)?,
-        None => {
+    let sink = match config.mode() {
+        ChangeRecordSinkMode::Embedded => build_embedded_sink(config)?,
+        ChangeRecordSinkMode::Http => build_http_sink(config)?,
+        ChangeRecordSinkMode::ExternalKafka => build_external_sink(config)?,
+        ChangeRecordSinkMode::Disabled => {
             return Err(EngineError::Invalid(
-                "change record sink endpoint is required",
+                "change record sink is disabled in config",
             ));
         }
     };
@@ -751,7 +924,7 @@ where
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use rdkafka::message::Headers;
+    use pqueue_engine::ChangeRecordKind;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -760,9 +933,59 @@ mod tests {
         let config = ChangeRecordSinkConfig::default();
         assert!(!config.enabled);
         assert!(config.endpoint.is_none());
+        assert_eq!(config.mode(), ChangeRecordSinkMode::Disabled);
         config
             .validate()
             .expect("disabled sink config remains valid");
+    }
+
+    #[test]
+    fn change_record_sink_selects_embedded_mode_without_endpoint() {
+        // The in-process embedded surface is the default: enabled + no endpoint is valid and needs no
+        // network endpoint.
+        let config = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: None,
+            ..ChangeRecordSinkConfig::default()
+        };
+        config
+            .validate()
+            .expect("embedded (endpoint-less) sink config is valid");
+        assert_eq!(config.mode(), ChangeRecordSinkMode::Embedded);
+        assert!(change_record_sink_is_embedded(&config));
+    }
+
+    #[test]
+    fn change_record_sink_external_kafka_mode_uses_rskafka() {
+        // A kafka:// endpoint selects the opt-in external-Kafka (rskafka) seam, distinct from the
+        // in-process embedded default.
+        let config = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        config.validate().expect("kafka endpoint validates");
+        assert_eq!(config.mode(), ChangeRecordSinkMode::ExternalKafka);
+        assert!(!change_record_sink_is_embedded(&config));
+
+        // Without the `external-kafka` feature, building the external sink is a config error that names
+        // the feature (no C Kafka client, no silent fallback to the embedded default).
+        #[cfg(not(feature = "external-kafka"))]
+        {
+            match build_external_kafka_sink(&config) {
+                Ok(_) => panic!("external-kafka sink must be feature-gated off"),
+                Err(err) => assert!(
+                    err.to_string().contains("external-kafka"),
+                    "error must name the external-kafka feature: {err}"
+                ),
+            }
+        }
+        // With the feature, the built sink is the rskafka-backed external sink (construction may fail to
+        // connect since no broker is running here — we only assert it selects the rskafka type/path).
+        #[cfg(feature = "external-kafka")]
+        {
+            let _ = ExternalKafkaChangeRecordSink::new(&config);
+        }
     }
 
     #[test]
@@ -790,11 +1013,16 @@ mod tests {
             ..ChangeRecordSinkConfig::default()
         };
         config.validate().expect("kafka endpoint should validate");
-        assert!(change_record_sink_is_fjord(config.endpoint.as_deref()).unwrap());
+        assert_eq!(config.mode(), ChangeRecordSinkMode::ExternalKafka);
     }
 
     #[test]
     fn TestChangeRecordSinkConfigSelectsKafkaProducerPath() {
+        let embedded = ChangeRecordSinkConfig {
+            enabled: true,
+            endpoint: None,
+            ..ChangeRecordSinkConfig::default()
+        };
         let http = ChangeRecordSinkConfig {
             enabled: true,
             endpoint: Some("http://127.0.0.1:8080/ingest".to_string()),
@@ -806,21 +1034,20 @@ mod tests {
             ..ChangeRecordSinkConfig::default()
         };
 
-        assert!(matches!(
-            change_record_sink_selection(http.endpoint.as_deref()).unwrap(),
-            Some(ChangeRecordSinkSelection::Http)
-        ));
-        assert!(matches!(
-            change_record_sink_selection(kafka.endpoint.as_deref()).unwrap(),
-            Some(ChangeRecordSinkSelection::Kafka)
-        ));
+        assert_eq!(embedded.mode(), ChangeRecordSinkMode::Embedded);
+        assert_eq!(http.mode(), ChangeRecordSinkMode::Http);
+        assert_eq!(kafka.mode(), ChangeRecordSinkMode::ExternalKafka);
         assert!(
-            !change_record_sink_is_fjord(http.endpoint.as_deref()).unwrap(),
-            "http endpoint must keep the default niflheim path"
+            change_record_sink_is_embedded(&embedded),
+            "endpoint-less enabled config must select the in-process embedded surface"
         );
         assert!(
-            change_record_sink_is_fjord(kafka.endpoint.as_deref()).unwrap(),
-            "kafka endpoint must select the producer path"
+            !change_record_sink_is_embedded(&http),
+            "http endpoint must keep the niflheim path"
+        );
+        assert!(
+            !change_record_sink_is_embedded(&kafka),
+            "kafka endpoint must select the external-kafka seam"
         );
     }
 
@@ -842,13 +1069,15 @@ mod tests {
             }
         }
 
-        let backend = Arc::new(NoopBackend::default());
+        let backend = Arc::new(NoopBackend);
         let queues = vec![queue_definition("tenant-a", "queue-a", true)];
+        let embedded_calls = Arc::new(AtomicUsize::new(0));
         let http_calls = Arc::new(AtomicUsize::new(0));
-        let kafka_calls = Arc::new(AtomicUsize::new(0));
+        let external_calls = Arc::new(AtomicUsize::new(0));
+        // Endpoint-less enabled config selects the in-process embedded surface.
         let config = ChangeRecordSinkConfig {
             enabled: true,
-            endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+            endpoint: None,
             tick_interval: Duration::from_millis(1),
             ..ChangeRecordSinkConfig::default()
         };
@@ -858,6 +1087,13 @@ mod tests {
             &queues,
             &config,
             {
+                let embedded_calls = Arc::clone(&embedded_calls);
+                move |_| {
+                    embedded_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Arc::new(RecordingSink::default()) as Arc<dyn ChangeRecordSink>)
+                }
+            },
+            {
                 let http_calls = Arc::clone(&http_calls);
                 move |_| {
                     http_calls.fetch_add(1, Ordering::SeqCst);
@@ -865,9 +1101,9 @@ mod tests {
                 }
             },
             {
-                let kafka_calls = Arc::clone(&kafka_calls);
+                let external_calls = Arc::clone(&external_calls);
                 move |_| {
-                    kafka_calls.fetch_add(1, Ordering::SeqCst);
+                    external_calls.fetch_add(1, Ordering::SeqCst);
                     Ok(Arc::new(RecordingSink::default()) as Arc<dyn ChangeRecordSink>)
                 }
             },
@@ -875,8 +1111,9 @@ mod tests {
         .expect("emitter should start")
         .expect("enabled config with emit-change-record queues should spawn");
 
+        assert_eq!(embedded_calls.load(Ordering::SeqCst), 1);
         assert_eq!(http_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(kafka_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(external_calls.load(Ordering::SeqCst), 0);
         handle.abort();
     }
 
@@ -1034,9 +1271,9 @@ mod tests {
         );
 
         let headers = change_record_headers(&record);
-        let command_kind = headers.get(4);
-        assert_eq!(command_kind.key, "pq-command-kind");
-        assert_eq!(command_kind.value, Some(b"pause-queue".as_ref()));
+        let command_kind = &headers[4];
+        assert_eq!(command_kind.0, "pq-command-kind");
+        assert_eq!(command_kind.1, b"pause-queue".to_vec());
     }
 
     #[test]
@@ -1069,15 +1306,157 @@ mod tests {
         assert_eq!(change_record_key(&with_item), "17:9:3");
         assert_eq!(change_record_key(&without_item), ":9:3");
 
+        // ADR-014:116 pinned order: tenant, queue, item-id, backend-epoch, sequence, command-kind.
         let headers_with_item = change_record_headers(&with_item);
-        assert_eq!(headers_with_item.count(), 6);
-        let pq_item_id = headers_with_item.get(5);
-        assert_eq!(pq_item_id.key, "pq-item-id");
-        assert_eq!(pq_item_id.value, Some(b"17".as_ref()));
+        let keys: Vec<&str> = headers_with_item.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "pq-tenant-id",
+                "pq-queue-id",
+                "pq-item-id",
+                "pq-backend-epoch",
+                "pq-sequence",
+                "pq-command-kind",
+            ]
+        );
+        let pq_item_id = &headers_with_item[2];
+        assert_eq!(pq_item_id.0, "pq-item-id");
+        assert_eq!(pq_item_id.1, b"17".to_vec());
 
+        // Queue-scoped record: pq-item-id omitted entirely, the rest keep their pinned order.
         let headers_without_item = change_record_headers(&without_item);
-        assert_eq!(headers_without_item.count(), 5);
-        assert_eq!(headers_without_item.get(4).key, "pq-command-kind");
+        let keys_without: Vec<&str> = headers_without_item.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            keys_without,
+            vec![
+                "pq-tenant-id",
+                "pq-queue-id",
+                "pq-backend-epoch",
+                "pq-sequence",
+                "pq-command-kind",
+            ]
+        );
+    }
+
+    fn sample_change_record(
+        tenant: &str,
+        queue: &str,
+        item_id: Option<u64>,
+        backend_epoch: u64,
+        sequence: u64,
+        kind: pqueue_engine::ChangeRecordKind,
+    ) -> pqueue_engine::ChangeRecord {
+        pqueue_engine::ChangeRecord {
+            tenant_id: pqueue_core::TenantId::new(tenant).unwrap(),
+            queue_id: pqueue_core::QueueId::new(queue).unwrap(),
+            item_id: item_id.map(pqueue_core::ItemId::from_u64),
+            position: pqueue_engine::ChangeRecordPosition {
+                backend_epoch,
+                sequence,
+            },
+            command_kind: kind,
+            new_state: Some(pqueue_engine::ChangeRecordState::Pending),
+            item_version: Some(1),
+            terminal_at: None,
+            emitted_at: Some(UtcTimestamp::new(1, 0).unwrap()),
+            source_owner_id: None,
+            source_epoch: backend_epoch,
+        }
+    }
+
+    #[test]
+    fn change_record_batch_round_trips_through_record_batch_view() {
+        use heimq_broker::storage::RecordBatchView;
+        let records = vec![
+            sample_change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push),
+            sample_change_record("tenant-a", "queue-a", Some(2), 7, 2, ChangeRecordKind::Claim),
+            sample_change_record(
+                "tenant-a",
+                "queue-a",
+                Some(3),
+                7,
+                3,
+                ChangeRecordKind::Finalize,
+            ),
+        ];
+        let batch = encode_change_record_batch(&records).expect("encode batch");
+        let view = RecordBatchView::from_bytes(&batch).expect("decode via heimq record-batch view");
+        assert_eq!(view.record_count(), 3);
+        assert_eq!(view.base_offset(), 0);
+        for (idx, record_view) in view.records().enumerate() {
+            assert_eq!(record_view.offset_delta, idx as i32);
+            let payload = record_view.value.expect("payload present");
+            let decoded: pqueue_engine::ChangeRecord =
+                serde_json::from_slice(payload).expect("payload is ChangeRecord json");
+            assert_eq!(decoded, records[idx]);
+        }
+    }
+
+    #[test]
+    fn change_record_batch_encodes_key_headers_payload_partition() {
+        use heimq_broker::storage::RecordBatchView;
+        let record =
+            sample_change_record("tenant-a", "queue-a", Some(17), 9, 3, ChangeRecordKind::Push);
+        let batch = encode_change_record_batch(std::slice::from_ref(&record)).expect("encode batch");
+        let view = RecordBatchView::from_bytes(&batch).expect("decode batch");
+        let record_view = view.records().next().expect("one record");
+
+        // Key: TD-008 idempotency identity "{item_id}:{backend_epoch}:{sequence}".
+        assert_eq!(
+            record_view.key.map(|b| b.as_ref().to_vec()),
+            Some(b"17:9:3".to_vec())
+        );
+        // Payload: the TD-008 ChangeRecord JSON.
+        let decoded: pqueue_engine::ChangeRecord =
+            serde_json::from_slice(record_view.value.expect("payload")).expect("json");
+        assert_eq!(decoded, record);
+        // Headers: the pinned pq-* order.
+        let headers: Vec<(String, Option<Vec<u8>>)> = record_view
+            .headers()
+            .map(|(k, v)| (k.to_string(), v.map(|b| b.to_vec())))
+            .collect();
+        // ADR-014:116 pinned wire order: pq-item-id sits third (before backend-epoch/sequence/command-kind).
+        assert_eq!(
+            headers,
+            vec![
+                ("pq-tenant-id".to_string(), Some(b"tenant-a".to_vec())),
+                ("pq-queue-id".to_string(), Some(b"queue-a".to_vec())),
+                ("pq-item-id".to_string(), Some(b"17".to_vec())),
+                ("pq-backend-epoch".to_string(), Some(b"9".to_vec())),
+                ("pq-sequence".to_string(), Some(b"3".to_vec())),
+                ("pq-command-kind".to_string(), Some(b"push".to_vec())),
+            ]
+        );
+    }
+
+    #[test]
+    fn append_creates_topic_when_absent() {
+        // A fresh embedded log has no topics; the sink must create the queue topic before appending
+        // (FjordLog::append returns TopicNotFound otherwise).
+        let log: Arc<dyn LogBackend> = Arc::new(fjord::FjordLog::new());
+        let sink = FjordChangeRecordSink::new(Arc::clone(&log));
+        let shard = QueueKey::new(
+            pqueue_core::TenantId::new("tenant-a").unwrap(),
+            pqueue_core::QueueId::new("queue-a").unwrap(),
+        );
+        assert!(
+            log.topic("tenant-a.queue-a").is_none(),
+            "topic must be absent before emit"
+        );
+        let record =
+            sample_change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push);
+        sink.emit(&shard, std::slice::from_ref(&record))
+            .expect("emit creates topic and appends");
+        assert!(
+            log.topic("tenant-a.queue-a").is_some(),
+            "topic must exist after emit"
+        );
+        assert_eq!(
+            log.high_watermark("tenant-a.queue-a", 0).expect("hwm"),
+            1,
+            "one record appended at partition 0"
+        );
     }
 
     #[derive(Default)]

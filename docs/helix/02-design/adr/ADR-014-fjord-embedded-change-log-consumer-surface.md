@@ -50,6 +50,17 @@ deployment is required for another system to consume the change log.
 ### Provider + shape
 
 - **Provider**: fjord, embedded as a component of `pqueue-server` behind an explicit seam.
+- **In-process produce (no loopback socket, no librdkafka).** pqueue produces change records to the
+  embedded fjord broker by appending directly, in-process, to the broker's Rust log
+  (`heimq_broker::storage::LogBackend::append`). One `EmbeddedFjordSurface` is constructed in
+  `pqueue_server::start()`; its shared `Arc<dyn LogBackend>` is handed BOTH to the `FjordChangeRecordSink`
+  (the write path) AND to the embedded `HeimqServer` (the external-consumer surface), so in-process
+  appends are immediately visible to broker fetches. Change records are encoded as Kafka v2 record
+  batches with the pure-Rust `kafka-protocol` codec — the exact bytes the broker's `RecordBatchView`
+  decodes. **librdkafka (the C Kafka client) is removed entirely**: there is no network client and no
+  loopback TCP socket on the change-log write path (the former design produced over a loopback Kafka
+  socket to the in-process broker, which needed libcurl/cmake to build and was a network round-trip to
+  talk to an in-process Rust broker).
 - **Shape**: **pqueue produces to fjord; fjord does Kafka things.** Canonically (product owner,
   2026-07-06): *if* fjord change logs are active, there is one topic per pqueue queue; as changes
   are persisted to the projection (i.e., as commands commit under ADR-013's log-durable →
@@ -77,7 +88,12 @@ deployment is required for another system to consume the change log.
    segments, manifests, or snapshots.
 4. **Swappable at the seam.** A deployment that must publish to an external Kafka instead attaches
    a producer sink at the same seam — and the embedded fjord simply sits idle. The external option
-   is a deployment choice, never the required shape.
+   is a deployment choice, never the required shape. Concretely, the `ChangeRecordSink` seam exposes
+   explicit modes: `Embedded` (the default — in-process append to the embedded fjord log, needs no
+   endpoint), `ExternalKafka` (opt-in — publish to an external Kafka cluster via the **pure-Rust
+   `rskafka` producer**, `kafka://host:port`, behind the default-off `external-kafka` cargo feature),
+   `Http`/`Niflheim` (the existing durable-ingest HTTP binding), and `Disabled`. The external seam is
+   pure Rust end to end: **no librdkafka, no C/cmake/libcurl** is reintroduced by the external option.
 
 ### Offset ↦ `CommandPosition` mapping
 

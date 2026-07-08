@@ -20,7 +20,7 @@ use fjord::{
 };
 use heimq::config::Config as HeimqConfig;
 use heimq::server::Server as HeimqServer;
-use heimq_broker::storage::{ClusterView, LogBackend, OffsetStore};
+use heimq_broker::storage::{ClusterView, LogBackend, OffsetStore, RecordBatchView};
 use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
     AcquireOutcome, AuthContext, Clock, ComposedBackend, EngineError, EngineResult,
@@ -34,8 +34,6 @@ use pqueue_resp::{
     serve_with_shutdown_and_hooks,
 };
 use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend};
-use rdkafka::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
 // Re-exported: it is the type of the public `Config::hybrid_async` field, so composition-root callers and
 // tests that construct a `Config` directly can name the async-apply threshold config.
 pub use pqueue_sqlite::HybridAsyncThresholds;
@@ -46,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 mod change_record_sink;
 mod object_log_sqlite;
 pub use change_record_sink::{
-    ChangeRecordSinkConfig, FjordChangeRecordSink, NiflheimChangeRecordSink,
+    ChangeRecordSinkConfig, ChangeRecordSinkMode, FjordChangeRecordSink, NiflheimChangeRecordSink,
     emit_change_record_tick, spawn_change_record_emitter,
 };
 pub use object_log_sqlite::{
@@ -158,6 +156,12 @@ fn change_record_sink_profile_is_wired(log: &LogSpec, projection: &ProjectionSpe
 pub struct EmbeddedFjordConfig {
     pub namespace_root: PathBuf,
     pub cluster_id: String,
+    /// Optional TCP listen address (`host:port` or `kafka://host:port`) for the embedded broker's
+    /// EXTERNAL-consumer Kafka surface. `None` (the default) keeps the change log purely in-process: pqueue
+    /// appends change records directly to the shared log and the write path binds no socket (ADR-014). Set
+    /// this only when a deployment wants external Kafka consumers to read the change log over TCP; the
+    /// surface then serves fetches from the SAME in-process log the sink appends to.
+    pub broker_listen: Option<String>,
 }
 
 impl Default for EmbeddedFjordConfig {
@@ -165,12 +169,14 @@ impl Default for EmbeddedFjordConfig {
         Self {
             namespace_root: PathBuf::from("/var/lib/pqueue/fjord"),
             cluster_id: "pqueue-fjord".to_string(),
+            broker_listen: None,
         }
     }
 }
 
 /// The in-process fjord surface materialized from [`EmbeddedFjordConfig`].
 pub struct EmbeddedFjordSurface {
+    node_id: i32,
     namespace_root: PathBuf,
     cluster_id: String,
     pub topic_registry: Arc<FjordTopicRegistry>,
@@ -187,6 +193,17 @@ impl EmbeddedFjordSurface {
 
     pub fn cluster_id(&self) -> &str {
         &self.cluster_id
+    }
+
+    pub fn node_id(&self) -> i32 {
+        self.node_id
+    }
+
+    /// The shared in-process log handle, typed as the broker's [`LogBackend`]. This is the SAME handle the
+    /// embedded `HeimqServer` serves external Kafka consumers from and the change-record sink appends to, so
+    /// in-process appends are immediately visible to broker fetches.
+    pub fn log_backend(&self) -> Arc<dyn LogBackend> {
+        Arc::clone(&self.log) as Arc<dyn LogBackend>
     }
 }
 
@@ -214,6 +231,7 @@ pub fn build_embedded_fjord_surface(
     ));
 
     EmbeddedFjordSurface {
+        node_id,
         namespace_root,
         cluster_id: config.cluster_id.clone(),
         topic_registry,
@@ -270,48 +288,27 @@ fn parse_fjord_topic_name(topic: &str) -> EngineResult<QueueKey> {
     ))
 }
 
-async fn embedded_fjord_topics_ready(bootstrap: &str, topics: &[String]) -> EngineResult<()> {
-    if topics.is_empty() {
-        return Ok(());
-    }
-
-    let bootstrap = bootstrap.to_string();
-    let topics = topics.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let consumer: BaseConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &bootstrap)
-            .set("group.id", format!("fjord-startup-{}", std::process::id()))
-            .set("auto.offset.reset", "earliest")
-            .set("enable.auto.commit", "false")
-            .create()
-            .map_err(|e| {
-                EngineError::Storage(format!("build embedded fjord metadata consumer: {e}"))
-            })?;
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let metadata = consumer
-                .fetch_metadata(None, Duration::from_millis(500))
-                .map_err(|e| EngineError::Storage(format!("fetch embedded fjord metadata: {e}")))?;
-            let ready = topics.iter().all(|topic| {
-                metadata.topics().iter().any(|topic_meta| {
-                    topic_meta.name() == topic && topic_meta.partitions().len() == 1
-                })
-            });
-            if ready {
-                return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(EngineError::Storage(format!(
-                    "embedded fjord broker did not publish metadata for {:?} within 10s",
-                    topics
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(50));
+/// In-process topic readiness for the shared embedded surface.
+///
+/// Because pqueue now owns the surface, topic existence is a synchronous in-process property: we create
+/// each queue topic in the shared `FjordLog` and register it in the shared `FjordTopicRegistry` before the
+/// broker starts serving. This replaces the former loopback metadata poll — no Kafka client, no
+/// socket round-trip — and it fails closed if any expected topic is missing after creation.
+fn embedded_fjord_topics_ready(
+    surface: &EmbeddedFjordSurface,
+    topics: &[String],
+) -> EngineResult<()> {
+    for topic in topics {
+        // Idempotent: create the single-partition topic in the shared log so external-consumer fetches
+        // (and in-process appends) find it, and register it for Metadata responses.
+        surface.log.get_or_create_topic(topic, 1);
+        if surface.log.topic(topic).is_none() {
+            return Err(EngineError::Storage(format!(
+                "embedded fjord broker could not create change-log topic {topic}"
+            )));
         }
-    })
-    .await
-    .map_err(|e| EngineError::Storage(format!("embedded fjord readiness task failed: {e}")))?
+    }
+    Ok(())
 }
 
 fn validate_fjord_topic_segment(value: &str) -> EngineResult<()> {
@@ -374,14 +371,20 @@ fn parse_kafka_bootstrap(input: &str) -> EngineResult<(String, u16)> {
     Ok((host.to_string(), port))
 }
 
+/// Spawn the embedded fjord broker (the external-consumer Kafka surface over the SHARED in-process log).
+///
+/// The broker is built over the caller's `surface` — the same `Arc<dyn LogBackend>` / offset store the
+/// change-record sink appends to — so change records written in-process are immediately fetchable by
+/// external Kafka consumers over this TCP surface. There is no loopback socket on the write path: pqueue
+/// appends directly to `surface.log`; only external consumers use this socket (ADR-014).
 pub async fn spawn_embedded_fjord_broker(
-    node_id: i32,
-    config: &EmbeddedFjordConfig,
+    surface: &EmbeddedFjordSurface,
     endpoint: &str,
     queues: &[QueueDefinition],
 ) -> EngineResult<JoinHandle<()>> {
     let (host, port) = parse_kafka_bootstrap(endpoint)?;
-    let surface = build_embedded_fjord_surface(node_id, config);
+    let node_id = surface.node_id();
+    let cluster_id = surface.cluster_id().to_string();
     let topics = queues
         .iter()
         .map(|queue| {
@@ -392,6 +395,9 @@ pub async fn spawn_embedded_fjord_broker(
         })
         .collect::<EngineResult<Vec<_>>>()?;
     register_embedded_fjord_topics(&surface.topic_registry, queues)?;
+    // Create the queue topics in the shared log synchronously so external fetches and in-process appends
+    // both find them before the broker starts serving.
+    embedded_fjord_topics_ready(surface, &topics)?;
     let namespace_root = surface.namespace_root().clone();
 
     let broker_config = HeimqConfig {
@@ -404,19 +410,10 @@ pub async fn spawn_embedded_fjord_broker(
         max_memory_bytes: 0,
         default_partitions: 1,
         broker_id: node_id,
-        cluster_id: config.cluster_id.clone(),
+        cluster_id: cluster_id.clone(),
         metrics: false,
         metrics_port: 9093,
-        create_topics: queues
-            .iter()
-            .map(|queue| {
-                fjord_topic_name(&QueueKey::new(
-                    queue.tenant_id.clone(),
-                    queue.queue_id.clone(),
-                ))
-                .map(|topic| format!("{topic}:1"))
-            })
-            .collect::<EngineResult<Vec<_>>>()?,
+        create_topics: topics.iter().map(|topic| format!("{topic}:1")).collect(),
         // The embedded change-log surface only serves the exact queue topics we pre-register.
         // Unknown topics must not be auto-created, otherwise Metadata can leak or mint
         // namespaces outside the configured tenant/queue set.
@@ -431,7 +428,7 @@ pub async fn spawn_embedded_fjord_broker(
         node_id,
         host.clone(),
         port,
-        config.cluster_id.clone(),
+        cluster_id,
         Arc::clone(&surface.topic_registry),
     ));
     let server = HeimqServer::with_backends_and_cluster_view(
@@ -464,9 +461,91 @@ pub async fn spawn_embedded_fjord_broker(
             }
         }
     }
-    embedded_fjord_topics_ready(&bootstrap, &topics).await?;
 
     Ok(handle)
+}
+
+/// A single change record decoded back out of the embedded fjord log (partition 0). The consumer-contract
+/// introspection type: it exposes the exact record shape an external Kafka consumer would observe — the
+/// broker-assigned `offset`, the TD-008 idempotency `key`, the `pq-*` `headers`, and the `ChangeRecord`
+/// JSON `value` — read through the same in-process log the embedded `HeimqServer` fetches from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedChangeRecord {
+    pub offset: i64,
+    pub partition: i32,
+    pub key: Option<Vec<u8>>,
+    pub value: Option<Vec<u8>>,
+    pub headers: Vec<(String, Option<Vec<u8>>)>,
+}
+
+/// Read and decode every change record on a queue topic's partition 0 from the shared embedded log, in
+/// offset order. This verifies the consumer contract in-process (no Kafka client, no socket): the bytes are
+/// the exact Kafka v2 record batches the embedded broker serves external consumers.
+pub fn read_embedded_change_records(
+    surface: &EmbeddedFjordSurface,
+    topic: &str,
+) -> EngineResult<Vec<EmbeddedChangeRecord>> {
+    let (bytes, _hwm) = surface
+        .log
+        .fetch(topic, 0, 0, i32::MAX)
+        .map_err(|e| EngineError::Storage(format!("fetch embedded change records: {e}")))?;
+    decode_change_record_batches(&bytes)
+}
+
+fn decode_change_record_batches(mut data: &[u8]) -> EngineResult<Vec<EmbeddedChangeRecord>> {
+    let mut out = Vec::new();
+    // The fetch payload is a concatenation of Kafka v2 record batches. Each batch's `batch_length` field
+    // (bytes 8..12) counts the bytes AFTER that field, so a batch occupies `12 + batch_length` bytes.
+    while data.len() >= 12 {
+        let batch_len = i32::from_be_bytes(
+            data[8..12]
+                .try_into()
+                .map_err(|_| EngineError::Storage("truncated record batch length".into()))?,
+        ) as usize;
+        let total = 12 + batch_len;
+        if data.len() < total {
+            break;
+        }
+        let (batch, rest) = data.split_at(total);
+        let view = RecordBatchView::from_bytes(batch)
+            .map_err(|e| EngineError::Storage(format!("decode change-record batch: {e}")))?;
+        let base = view.base_offset();
+        for record in view.records() {
+            out.push(EmbeddedChangeRecord {
+                offset: base + i64::from(record.offset_delta),
+                partition: 0,
+                key: record.key.map(|b| b.as_ref().to_vec()),
+                value: record.value.map(|b| b.as_ref().to_vec()),
+                headers: record
+                    .headers()
+                    .map(|(k, v)| (k.to_string(), v.map(|b| b.to_vec())))
+                    .collect(),
+            });
+        }
+        data = rest;
+    }
+    Ok(out)
+}
+
+/// Spawn the embedded broker's external-consumer TCP surface only for the in-process `Embedded` sink mode
+/// AND only when the deployment configured `embedded_fjord.broker_listen`. In-process appends happen
+/// regardless (the sink holds the shared log); this merely exposes the SAME log to external Kafka consumers
+/// over TCP. `Http`/`ExternalKafka`/`Disabled` modes never bind the embedded surface.
+async fn maybe_spawn_embedded_broker(
+    surface: &EmbeddedFjordSurface,
+    broker_listen: Option<&str>,
+    change_record_sink: &ChangeRecordSinkConfig,
+    queues: &[QueueDefinition],
+) -> EngineResult<Option<JoinHandle<()>>> {
+    if !change_record_sink::change_record_sink_is_embedded(change_record_sink) {
+        return Ok(None);
+    }
+    match broker_listen {
+        Some(listen) => Ok(Some(
+            spawn_embedded_fjord_broker(surface, listen, queues).await?,
+        )),
+        None => Ok(None),
+    }
 }
 
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
@@ -1217,8 +1296,14 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 pub async fn start(config: Config) -> EngineResult<Server> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
+    // B0.1b: construct the ONE embedded fjord surface here. Its shared `Arc<dyn LogBackend>` is handed BOTH
+    // to the change-record sink (in-process appends) AND — when a deployment opts into an external TCP
+    // surface via `embedded_fjord.broker_listen` — to the embedded `HeimqServer`, so in-process appends are
+    // immediately visible to broker fetches. No separate/discarded surface, no loopback socket for writes.
     let fjord_surface = build_embedded_fjord_surface(node_id as i32, &config.embedded_fjord);
     register_embedded_fjord_topics(&fjord_surface.topic_registry, &config.queues)?;
+    let fjord_log = fjord_surface.log_backend();
+    let fjord_broker_listen = config.embedded_fjord.broker_listen.clone();
     let listen = config.listen.clone();
     let interval = config.reclaim_interval;
     let queues = config.queues.clone();
@@ -1299,26 +1384,19 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
-            let fjord_task = if change_record_sink::change_record_sink_is_fjord(
-                change_record_sink.endpoint.as_deref(),
-            )? {
-                Some(
-                    spawn_embedded_fjord_broker(
-                        node_id as i32,
-                        &config.embedded_fjord,
-                        change_record_sink.endpoint.as_deref().unwrap(),
-                        &queues,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
+            let fjord_task = maybe_spawn_embedded_broker(
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                &change_record_sink,
+                &queues,
+            )
+            .await?;
             let _change_record_emitter =
                 change_record_sink::spawn_change_record_emitter_if_enabled(
                     backend.clone(),
                     &queues,
                     &change_record_sink,
+                    fjord_log.clone(),
                 )?;
             run_owned_with_fjord_task(
                 backend, node_id, clock, &listen, interval, &queues, fjord_task,
@@ -1349,26 +1427,19 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
-            let fjord_task = if change_record_sink::change_record_sink_is_fjord(
-                change_record_sink.endpoint.as_deref(),
-            )? {
-                Some(
-                    spawn_embedded_fjord_broker(
-                        node_id as i32,
-                        &config.embedded_fjord,
-                        change_record_sink.endpoint.as_deref().unwrap(),
-                        &queues,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
+            let fjord_task = maybe_spawn_embedded_broker(
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                &change_record_sink,
+                &queues,
+            )
+            .await?;
             let _change_record_emitter =
                 change_record_sink::spawn_change_record_emitter_if_enabled(
                     backend.clone(),
                     &queues,
                     &change_record_sink,
+                    fjord_log.clone(),
                 )?;
             run_owned_with_fjord_task(
                 backend, node_id, clock, &listen, interval, &queues, fjord_task,

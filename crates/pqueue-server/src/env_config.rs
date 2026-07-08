@@ -162,11 +162,8 @@ fn change_record_sink_config(
             config.headers.insert(header, value.clone());
         }
     }
-    if config.enabled && config.endpoint.is_none() {
-        return Err(ConfigError::new(
-            "PQUEUE_CHANGE_RECORD_SINK_ENABLED=true requires PQUEUE_CHANGE_RECORD_SINK_ENDPOINT",
-        ));
-    }
+    // An enabled sink with no endpoint selects the in-process Embedded mode (the default, ADR-014); no
+    // endpoint is required. A present endpoint still selects Http (`http://`) or ExternalKafka (`kafka://`).
     if config.enabled && config.batch_size == 0 {
         return Err(ConfigError::new(
             "PQUEUE_CHANGE_RECORD_SINK_BATCH_SIZE must be greater than 0",
@@ -369,6 +366,12 @@ fn embedded_fjord_config(env: &BTreeMap<String, String>) -> EmbeddedFjordConfig 
             "/var/lib/pqueue/fjord",
         )),
         cluster_id: env_or(env, "PQUEUE_FJORD_CLUSTER_ID", "pqueue-fjord"),
+        // Optional external-consumer TCP surface for the in-process embedded change log. Unset keeps the
+        // change log purely in-process (no socket on the write path).
+        broker_listen: env
+            .get("PQUEUE_FJORD_BROKER_LISTEN")
+            .cloned()
+            .filter(|v| !v.trim().is_empty()),
     }
 }
 

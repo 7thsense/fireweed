@@ -659,6 +659,7 @@ async fn start_provisions_queues_and_serves_end_to_end() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(non_snake_case)]
 async fn TestTerminalEmissionMetricsReachServerSurface() {
     let server = start(Config::new(
         BackendSpec::memory(),

@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use heimq_broker::consumer_group::{GroupCoordinatorBackend as _, JoinRequest};
 use heimq_broker::storage::OffsetStore as _;
@@ -14,14 +14,10 @@ use pqueue_engine::{
     ChangeRecordState, EngineError, QueueKey,
 };
 use pqueue_server::{
-    BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, EmbeddedFjordConfig,
-    FjordChangeRecordSink, LogSpec, ProjectionSpec, authorize_fjord_topic_read,
-    build_embedded_fjord_surface, fjord_topic_name, register_embedded_fjord_topics,
-    spawn_embedded_fjord_broker,
+    EmbeddedChangeRecord, EmbeddedFjordConfig, EmbeddedFjordSurface, FjordChangeRecordSink,
+    authorize_fjord_topic_read, build_embedded_fjord_surface, fjord_topic_name,
+    read_embedded_change_records, register_embedded_fjord_topics, spawn_embedded_fjord_broker,
 };
-use rdkafka::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::message::{Headers, Message as _};
 
 fn queue_definition(tenant: &str, queue: &str) -> QueueDefinition {
     QueueDefinition {
@@ -68,15 +64,27 @@ fn free_port() -> u16 {
         .port()
 }
 
-struct EmbeddedBroker {
-    handle: tokio::task::JoinHandle<()>,
-    bootstrap: String,
+fn test_fjord_config() -> EmbeddedFjordConfig {
+    EmbeddedFjordConfig {
+        namespace_root: std::env::temp_dir().join(format!(
+            "pqueue-fjord-test-{}-{}",
+            std::process::id(),
+            free_port()
+        )),
+        cluster_id: "fjord-test-cluster".to_string(),
+        broker_listen: None,
+    }
 }
 
-impl Drop for EmbeddedBroker {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
+/// Build a standalone embedded surface plus an in-process sink over the SAME shared log. The sink's
+/// appends land in `surface.log`, exactly as they would inside `start()`, so a fetch through the same log
+/// observes the records an external Kafka consumer would receive.
+fn surface_with_sink(queue: &QueueDefinition) -> (EmbeddedFjordSurface, FjordChangeRecordSink) {
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
+    register_embedded_fjord_topics(&surface.topic_registry, std::slice::from_ref(queue))
+        .expect("register embedded fjord topics");
+    let sink = FjordChangeRecordSink::new(surface.log_backend());
+    (surface, sink)
 }
 
 fn change_record(
@@ -105,141 +113,42 @@ fn change_record(
     }
 }
 
-async fn start_embedded_broker(queue: &QueueDefinition) -> EmbeddedBroker {
-    let port = free_port();
-    let bootstrap = format!("127.0.0.1:{port}");
-    let topic = fjord_topic_name(&queue_key(
-        queue.tenant_id.as_str(),
-        queue.queue_id.as_str(),
-    ))
-    .expect("valid fjord topic");
-    let handle = spawn_embedded_fjord_broker(
-        7,
-        &EmbeddedFjordConfig {
-            namespace_root: std::env::temp_dir()
-                .join(format!("pqueue-fjord-test-{}", std::process::id())),
-            cluster_id: "fjord-test-cluster".to_string(),
-        },
-        &format!("kafka://{bootstrap}"),
-        std::slice::from_ref(queue),
-    )
-    .await
-    .expect("spawn embedded fjord broker");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let ready = tokio::task::block_in_place(|| {
-            let consumer: BaseConsumer = ClientConfig::new()
-                .set("bootstrap.servers", &bootstrap)
-                .create()
-                .expect("metadata consumer");
-            consumer
-                .fetch_metadata(Some(&topic), Duration::from_millis(500))
-                .map(|metadata| {
-                    metadata.topics().iter().any(|topic_meta| {
-                        topic_meta.name() == topic && topic_meta.partitions().len() == 1
-                    })
-                })
-                .unwrap_or(false)
-        });
-        if ready {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "embedded fjord broker did not publish metadata for {topic} within 10s"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    EmbeddedBroker { handle, bootstrap }
+fn header_value<'a>(record: &'a EmbeddedChangeRecord, key: &str) -> Option<&'a [u8]> {
+    record
+        .headers
+        .iter()
+        .find(|(name, _)| name == key)
+        .and_then(|(_, value)| value.as_deref())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn TestStartupDoesNotDependOnFixedSleep() {
+    // The embedded broker's external-consumer TCP surface still boots deterministically over the SHARED
+    // surface log — no fixed sleep, and readiness is an in-process property (topics created in the shared
+    // log/registry before serving), verified without any Kafka client.
     let queue = queue_definition("tenant-a", "queue-a");
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
+    register_embedded_fjord_topics(&surface.topic_registry, std::slice::from_ref(&queue))
+        .expect("register topics");
     let port = free_port();
-    let bootstrap = format!("127.0.0.1:{port}");
     let broker = spawn_embedded_fjord_broker(
-        7,
-        &EmbeddedFjordConfig {
-            namespace_root: std::env::temp_dir()
-                .join(format!("pqueue-fjord-test-{}", std::process::id())),
-            cluster_id: "fjord-test-cluster".to_string(),
-        },
-        &format!("kafka://{bootstrap}"),
+        &surface,
+        &format!("kafka://127.0.0.1:{port}"),
         std::slice::from_ref(&queue),
     )
     .await
     .expect("spawn embedded fjord broker");
 
-    let topic = fjord_topic_name(&queue_key(
-        queue.tenant_id.as_str(),
-        queue.queue_id.as_str(),
-    ))
-    .expect("valid fjord topic");
+    let topic = fjord_topic_name(&queue_key("tenant-a", "queue-a")).expect("valid fjord topic");
+    let topics = surface.topic_registry.topic_list();
+    assert!(
+        topics
+            .iter()
+            .any(|(name, partitions)| name == &topic && *partitions == 1),
+        "shared surface must publish the change-log topic with one partition: {topics:?}"
+    );
 
-    tokio::task::block_in_place(|| {
-        let consumer: BaseConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &bootstrap)
-            .set("group.id", format!("fjord-startup-{}", std::process::id()))
-            .create()
-            .expect("metadata consumer");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Ok(metadata) = consumer.fetch_metadata(Some(&topic), Duration::from_millis(500))
-            {
-                if metadata.topics().iter().any(|topic_meta| {
-                    topic_meta.name() == topic && topic_meta.partitions().len() == 1
-                }) {
-                    break;
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "embedded fjord broker did not publish metadata for {topic} within 10s"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
-    });
-
-    drop(broker);
-}
-
-fn make_sink(bootstrap: &str) -> FjordChangeRecordSink {
-    let config = ChangeRecordSinkConfig {
-        enabled: true,
-        endpoint: Some(format!("kafka://{bootstrap}")),
-        ..Default::default()
-    };
-    FjordChangeRecordSink::new(&config).expect("fjord sink")
-}
-
-fn consume_records(
-    bootstrap: &str,
-    topic: &str,
-    expected: usize,
-) -> Vec<rdkafka::message::OwnedMessage> {
-    let bootstrap = bootstrap.to_string();
-    let topic = topic.to_string();
-    tokio::task::block_in_place(move || {
-        let consumer: BaseConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &bootstrap)
-            .set("group.id", format!("fjord-test-{}", std::process::id()))
-            .set("auto.offset.reset", "earliest")
-            .set("enable.auto.commit", "false")
-            .create()
-            .expect("consumer");
-        consumer.subscribe(&[&topic]).expect("subscribe");
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        let mut out = Vec::new();
-        while out.len() < expected && std::time::Instant::now() < deadline {
-            if let Some(Ok(message)) = consumer.poll(Duration::from_millis(200)) {
-                out.push(message.detach());
-            }
-        }
-        out
-    })
+    broker.abort();
 }
 
 #[test]
@@ -262,40 +171,39 @@ fn TestFjordDependencyIsGitPinnedNoPathDeps() {
     );
 }
 
+#[test]
+fn TestNoCKafkaClientDependency() {
+    // The C Kafka client is fully removed: no C build, no loopback socket on the write path. The pure-Rust
+    // kafka-protocol codec encodes the in-process change-record batches instead.
+    let cargo_toml =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("read pqueue-server Cargo.toml");
+    let banned = ["rd", "kafka"].concat(); // avoid the literal token in this source file
+    assert!(
+        !cargo_toml.contains(&banned),
+        "pqueue-server must not depend on the C Kafka client"
+    );
+    assert!(
+        cargo_toml.contains("kafka-protocol"),
+        "the pure-Rust kafka-protocol codec encodes the in-process change-record batches"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn TestEmbeddedFjordSurfaceUsesDedicatedNamespaceRoot() {
     let base = std::env::temp_dir().join(format!("pqueue-fjord-namespace-{}", std::process::id()));
-    let queue_storage_root = base.join("queue-storage");
-    let projection_path = base.join("queue-projection.db");
-    let mut config = Config::new(
-        BackendSpec {
-            log: LogSpec::ObjectLog {
-                root: queue_storage_root.clone(),
-            },
-            projection: ProjectionSpec::Hybrid {
-                path: projection_path.clone(),
-            },
-            control_plane: ControlPlaneSpec::InProcess,
-        },
-        7,
-        "127.0.0.1:0".to_string(),
-        Duration::from_millis(100),
-        vec![queue_definition("t1", "q1")],
-    );
-    config.embedded_fjord = EmbeddedFjordConfig {
+    let config = EmbeddedFjordConfig {
         namespace_root: base.join("fjord-state"),
         cluster_id: "fjord-test-cluster".to_string(),
+        broker_listen: None,
     };
+    let queue_storage_root = base.join("queue-storage");
 
-    let surface = build_embedded_fjord_surface(config.node_id as i32, &config.embedded_fjord);
-    let expected_root = config.embedded_fjord.namespace_root.join("node-7");
+    let surface = build_embedded_fjord_surface(7, &config);
+    let expected_root = config.namespace_root.join("node-7");
 
     assert_eq!(surface.namespace_root(), &expected_root);
-    assert!(
-        surface
-            .namespace_root()
-            .starts_with(&config.embedded_fjord.namespace_root)
-    );
+    assert!(surface.namespace_root().starts_with(&config.namespace_root));
     assert!(!surface.namespace_root().starts_with(&queue_storage_root));
     assert_ne!(surface.namespace_root(), &queue_storage_root.join("node-7"));
     assert_eq!(surface.cluster_id(), "fjord-test-cluster");
@@ -313,13 +221,7 @@ fn TestKafkaTenantAclRejectsCrossTenantRead() {
         "tenant-a.queue-a"
     );
 
-    let surface = build_embedded_fjord_surface(
-        7,
-        &EmbeddedFjordConfig {
-            namespace_root: PathBuf::from("/var/lib/pqueue/fjord-test"),
-            cluster_id: "fjord-test-cluster".to_string(),
-        },
-    );
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
     register_embedded_fjord_topics(
         &surface.topic_registry,
         &[
@@ -377,13 +279,7 @@ fn TestRejectAmbiguousTenantQueueMappings() {
     assert!(fjord_topic_name(&left).is_err());
     assert!(fjord_topic_name(&right).is_err());
 
-    let surface = build_embedded_fjord_surface(
-        7,
-        &EmbeddedFjordConfig {
-            namespace_root: PathBuf::from("/var/lib/pqueue/fjord-test"),
-            cluster_id: "fjord-test-cluster".to_string(),
-        },
-    );
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
 
     let result = register_embedded_fjord_topics(
         &surface.topic_registry,
@@ -410,13 +306,7 @@ fn TestRejectKafkaIllegalTenantAndQueueIds() {
 
     assert!(fjord_topic_name(&illegal).is_err());
 
-    let surface = build_embedded_fjord_surface(
-        7,
-        &EmbeddedFjordConfig {
-            namespace_root: PathBuf::from("/var/lib/pqueue/fjord-test"),
-            cluster_id: "fjord-test-cluster".to_string(),
-        },
-    );
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
 
     let result = register_embedded_fjord_topics(
         &surface.topic_registry,
@@ -432,14 +322,7 @@ fn TestRejectKafkaIllegalTenantAndQueueIds() {
 
 #[test]
 fn TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped() {
-    let surface = build_embedded_fjord_surface(
-        7,
-        &EmbeddedFjordConfig {
-            namespace_root: std::env::temp_dir()
-                .join(format!("pqueue-fjord-test-{}", std::process::id())),
-            cluster_id: "fjord-test-cluster".to_string(),
-        },
-    );
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
     let tenant_a = queue_definition("tenant-a", "queue-a");
     let tenant_b = queue_definition("tenant-b", "queue-b");
 
@@ -554,22 +437,19 @@ fn TestKafkaSurfaceKeepsConsumerGroupStateTenantScoped() {
     );
 }
 
+/// The ADR-014 "Normative consumer contract", verified WITHOUT any Kafka client: change records are appended
+/// in-process to the embedded broker's shared Rust log and read back through the same log's fetch path (the
+/// exact Kafka v2 record batches an external consumer would receive). Asserts partition 0, monotonic
+/// offsets, stable idempotency keys, the JSON payload, and the pinned `pq-*` headers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn TestKafkaChangeLogConsumesInCommandPositionOrder() {
+async fn fjord_surface_contract_verified_without_rdkafka() {
     let queue = queue_definition("tenant-a", "queue-a");
-    let broker = start_embedded_broker(&queue).await;
-    let sink = make_sink(&broker.bootstrap);
+    let (surface, sink) = surface_with_sink(&queue);
     let shard = queue_key("tenant-a", "queue-a");
+    let topic = fjord_topic_name(&shard).expect("valid fjord topic");
     let records = vec![
         change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push),
-        change_record(
-            "tenant-a",
-            "queue-a",
-            Some(2),
-            7,
-            2,
-            ChangeRecordKind::Claim,
-        ),
+        change_record("tenant-a", "queue-a", Some(2), 7, 2, ChangeRecordKind::Claim),
         change_record(
             "tenant-a",
             "queue-a",
@@ -582,41 +462,160 @@ async fn TestKafkaChangeLogConsumesInCommandPositionOrder() {
 
     sink.emit(&shard, &records).expect("emit records");
 
-    let consumed = consume_records(
-        &broker.bootstrap,
-        &fjord_topic_name(&shard).expect("valid fjord topic"),
-        3,
-    );
+    let consumed = read_embedded_change_records(&surface, &topic).expect("read change records");
     assert_eq!(consumed.len(), 3);
+    let mut last_offset: Option<i64> = None;
     for (idx, message) in consumed.iter().enumerate() {
-        let payload = message.payload().expect("payload");
+        // Payload: the TD-008 ChangeRecord JSON.
+        let payload = message.value.as_deref().expect("payload");
         let decoded: ChangeRecord = serde_json::from_slice(payload).expect("decode record");
         assert_eq!(decoded.position.sequence, (idx + 1) as u64);
-        let headers = message.headers().expect("headers");
-        assert_eq!(headers.get(0).key, "pq-tenant-id");
-        assert_eq!(headers.get(1).key, "pq-queue-id");
-        assert_eq!(headers.get(2).key, "pq-backend-epoch");
-        assert_eq!(headers.get(3).key, "pq-sequence");
-        assert_eq!(headers.get(4).key, "pq-command-kind");
-        assert_eq!(message.partition(), 0);
-        assert_eq!(message.offset(), idx as i64);
+        assert_eq!(decoded, records[idx]);
+
+        // Headers: the ADR-014:116 pinned wire order (item-scoped records carry pq-item-id third).
+        let header_keys: Vec<&str> = message.headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            header_keys,
+            vec![
+                "pq-tenant-id",
+                "pq-queue-id",
+                "pq-item-id",
+                "pq-backend-epoch",
+                "pq-sequence",
+                "pq-command-kind",
+            ]
+        );
+        assert_eq!(header_value(message, "pq-tenant-id"), Some(b"tenant-a".as_ref()));
+        assert_eq!(header_value(message, "pq-queue-id"), Some(b"queue-a".as_ref()));
+        assert_eq!(
+            header_value(message, "pq-item-id"),
+            Some(format!("{}", idx + 1).as_bytes())
+        );
+        assert_eq!(header_value(message, "pq-backend-epoch"), Some(b"7".as_ref()));
+        assert_eq!(
+            header_value(message, "pq-sequence"),
+            Some(format!("{}", idx + 1).as_bytes())
+        );
+
+        // Idempotency key: "{item_id}:{backend_epoch}:{sequence}".
+        assert_eq!(
+            message.key.as_deref(),
+            Some(format!("{}:7:{}", idx + 1, idx + 1).as_bytes())
+        );
+
+        // Single partition 0, monotonically increasing offsets.
+        assert_eq!(message.partition, 0);
+        assert_eq!(message.offset, idx as i64);
+        if let Some(previous) = last_offset {
+            assert!(message.offset > previous, "offsets must be monotonic");
+        }
+        last_offset = Some(message.offset);
     }
+}
+
+/// End-to-end verification of the REAL consumer surface: append a change record in-process to the shared
+/// embedded log, then consume it back over the embedded `HeimqServer`'s TCP Kafka fetch surface using the
+/// pure-Rust `rskafka` CONSUMER. This proves the broker actually serves the in-process appends over Kafka
+/// (not just that the bytes are stored), and asserts the same ADR-014 contract: partition 0, offset 0
+/// (monotonic), idempotency key `{item_id}:{backend_epoch}:{sequence}`, the pq-* headers with correct
+/// values, and the JSON payload. (The owner's "no socket on the write path" rule is upheld: the WRITE is the
+/// in-process append above; this TCP socket is a test CONSUMER only. rskafka returns headers as a `BTreeMap`,
+/// so header WIRE ORDER is verified by `fjord_surface_contract_verified_without_rdkafka`, not here.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fjord_surface_contract_verified_over_rskafka_consumer() {
+    let queue = queue_definition("tenant-a", "queue-a");
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
+    register_embedded_fjord_topics(&surface.topic_registry, std::slice::from_ref(&queue))
+        .expect("register topics");
+    let port = free_port();
+    let bootstrap = format!("127.0.0.1:{port}");
+    let broker = spawn_embedded_fjord_broker(
+        &surface,
+        &format!("kafka://{bootstrap}"),
+        std::slice::from_ref(&queue),
+    )
+    .await
+    .expect("spawn embedded fjord broker with TCP surface");
+
+    let shard = queue_key("tenant-a", "queue-a");
+    let topic = fjord_topic_name(&shard).expect("valid fjord topic");
+
+    // WRITE path: in-process append to the shared log (no socket).
+    let sink = FjordChangeRecordSink::new(surface.log_backend());
+    let record = change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push);
+    sink.emit(&shard, std::slice::from_ref(&record))
+        .expect("in-process emit");
+
+    // READ path: pure-Rust rskafka consumer over the broker's TCP Kafka surface.
+    let client = rskafka::client::ClientBuilder::new(vec![bootstrap.clone()])
+        .build()
+        .await
+        .expect("build rskafka client");
+    let partition_client = client
+        .partition_client(
+            topic.clone(),
+            0,
+            rskafka::client::partition::UnknownTopicHandling::Retry,
+        )
+        .await
+        .expect("open rskafka partition client");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let consumed = loop {
+        let (records, _hwm) = partition_client
+            .fetch_records(0, 1..10_000_000, 500)
+            .await
+            .expect("rskafka fetch_records");
+        if !records.is_empty() {
+            break records;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "rskafka consumer fetched no records over the broker TCP surface within 20s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    assert_eq!(consumed.len(), 1);
+    let record_and_offset = &consumed[0];
+    // Single partition 0 (we fetched partition 0), monotonic offset starting at 0.
+    assert_eq!(record_and_offset.offset, 0);
+    let consumed_record = &record_and_offset.record;
+
+    // Idempotency key.
+    assert_eq!(
+        consumed_record.key.as_deref(),
+        Some(b"1:7:1".as_ref()),
+        "idempotency key {{item_id}}:{{backend_epoch}}:{{sequence}}"
+    );
+    // JSON payload round-trips to the same ChangeRecord.
+    let payload = consumed_record.value.as_deref().expect("payload present");
+    let decoded: ChangeRecord = serde_json::from_slice(payload).expect("payload is ChangeRecord json");
+    assert_eq!(decoded, record);
+    // pq-* headers present with correct values (order not asserted here: rskafka returns a BTreeMap).
+    let header = |k: &str| consumed_record.headers.get(k).map(|v| v.as_slice());
+    assert_eq!(consumed_record.headers.len(), 6);
+    assert_eq!(header("pq-tenant-id"), Some(b"tenant-a".as_ref()));
+    assert_eq!(header("pq-queue-id"), Some(b"queue-a".as_ref()));
+    assert_eq!(header("pq-item-id"), Some(b"1".as_ref()));
+    assert_eq!(header("pq-backend-epoch"), Some(b"7".as_ref()));
+    assert_eq!(header("pq-sequence"), Some(b"1".as_ref()));
+    assert_eq!(header("pq-command-kind"), Some(b"push".as_ref()));
+
+    broker.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn TestKafkaTopicMapsOneQueueToOnePartition() {
     let queue_a = queue_definition("tenant-a", "queue-a");
     let queue_b = queue_definition("tenant-b", "queue-b");
+    let surface = build_embedded_fjord_surface(7, &test_fjord_config());
+    register_embedded_fjord_topics(&surface.topic_registry, &[queue_a.clone(), queue_b.clone()])
+        .expect("register topics");
     let port = free_port();
-    let bootstrap = format!("127.0.0.1:{port}");
     let broker = spawn_embedded_fjord_broker(
-        7,
-        &EmbeddedFjordConfig {
-            namespace_root: std::env::temp_dir()
-                .join(format!("pqueue-fjord-test-{}", std::process::id())),
-            cluster_id: "fjord-test-cluster".to_string(),
-        },
-        &format!("kafka://{bootstrap}"),
+        &surface,
+        &format!("kafka://127.0.0.1:{port}"),
         &[queue_a.clone(), queue_b.clone()],
     )
     .await
@@ -633,83 +632,68 @@ async fn TestKafkaTopicMapsOneQueueToOnePartition() {
     ))
     .expect("valid fjord topic");
 
-    tokio::task::block_in_place(|| {
-        let consumer: BaseConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &bootstrap)
-            .set("group.id", format!("fjord-test-{}", std::process::id()))
-            .create()
-            .expect("metadata consumer");
-        let metadata = consumer
-            .fetch_metadata(None, Duration::from_secs(5))
-            .expect("fetch metadata");
-        let partition_count = |topic_name: &str| {
-            metadata
-                .topics()
-                .iter()
-                .find(|topic| topic.name() == topic_name)
-                .map(|topic| topic.partitions().len())
-                .expect("topic metadata")
-        };
+    let topics = surface.topic_registry.topic_list();
+    let partition_count = |topic_name: &str| {
+        topics
+            .iter()
+            .find(|(name, _)| name == topic_name)
+            .map(|(_, partitions)| *partitions)
+            .expect("topic metadata")
+    };
+    assert_eq!(partition_count(&topic_a), 1);
+    assert_eq!(partition_count(&topic_b), 1);
 
-        assert_eq!(partition_count(&topic_a), 1);
-        assert_eq!(partition_count(&topic_b), 1);
-    });
-
-    drop(broker);
+    broker.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn TestKafkaOffsetNeverRegressesAcrossFailover() {
     let queue = queue_definition("tenant-a", "queue-a");
-    let broker = start_embedded_broker(&queue).await;
+    let (surface, _sink) = surface_with_sink(&queue);
     let shard = queue_key("tenant-a", "queue-a");
+    let topic = fjord_topic_name(&shard).expect("valid fjord topic");
     let logical_record =
         change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push);
 
-    let sink = make_sink(&broker.bootstrap);
+    // Two sink lifecycles (a failover re-emit) over the SAME shared log: offsets must move forward.
+    let sink = FjordChangeRecordSink::new(surface.log_backend());
     sink.emit(&shard, std::slice::from_ref(&logical_record))
         .expect("initial emit");
     drop(sink);
 
-    let sink = make_sink(&broker.bootstrap);
+    let sink = FjordChangeRecordSink::new(surface.log_backend());
     sink.emit(&shard, std::slice::from_ref(&logical_record))
         .expect("re-emit");
 
-    let consumed = consume_records(
-        &broker.bootstrap,
-        &fjord_topic_name(&shard).expect("valid fjord topic"),
-        2,
-    );
+    let consumed = read_embedded_change_records(&surface, &topic).expect("read change records");
     assert_eq!(consumed.len(), 2);
-    let first = consumed[0].offset();
-    let second = consumed[1].offset();
+    let first = consumed[0].offset;
+    let second = consumed[1].offset;
     assert!(second > first, "broker offsets must move forward");
-    assert_eq!(consumed[0].key(), consumed[1].key());
-    assert_eq!(consumed[0].partition(), consumed[1].partition());
+    assert_eq!(consumed[0].key, consumed[1].key);
+    assert_eq!(consumed[0].partition, consumed[1].partition);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn TestKafkaIdempotencyKeyIsStableAcrossReemit() {
     let queue = queue_definition("tenant-a", "queue-a");
-    let broker = start_embedded_broker(&queue).await;
+    let (surface, _sink) = surface_with_sink(&queue);
     let shard = queue_key("tenant-a", "queue-a");
+    let topic = fjord_topic_name(&shard).expect("valid fjord topic");
     let logical_record =
         change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push);
 
-    let sink = make_sink(&broker.bootstrap);
+    let sink = FjordChangeRecordSink::new(surface.log_backend());
     sink.emit(&shard, std::slice::from_ref(&logical_record))
         .expect("initial emit");
     drop(sink);
 
-    let sink = make_sink(&broker.bootstrap);
+    let sink = FjordChangeRecordSink::new(surface.log_backend());
     sink.emit(&shard, std::slice::from_ref(&logical_record))
         .expect("re-emit");
 
-    let consumed = consume_records(
-        &broker.bootstrap,
-        &fjord_topic_name(&shard).expect("valid fjord topic"),
-        2,
-    );
+    let consumed = read_embedded_change_records(&surface, &topic).expect("read change records");
     assert_eq!(consumed.len(), 2);
-    assert_eq!(consumed[0].key(), consumed[1].key());
+    assert_eq!(consumed[0].key, consumed[1].key);
+    assert_eq!(consumed[0].key.as_deref(), Some(b"1:7:1".as_ref()));
 }

@@ -27,7 +27,16 @@ pqueue-projection = { path = "../pqueue-projection" }
 fjord = { git = "https://github.com/telepathdata/fjord.git", rev = "db260f607004483770f822764d9b07b192320bc8", package = "fjord-broker" }
 heimq = { git = "https://github.com/easel/heimq", rev = "cd17c1869c55ddd94b678e19df9ad08b21259372" }
 heimq-broker = { git = "https://github.com/easel/heimq", rev = "cd17c1869c55ddd94b678e19df9ad08b21259372" }
-rdkafka = { version = "0.36", features = ["cmake-build", "tokio"] }
+# Pure-Rust Kafka v2 record-batch codec, matching the version the embedded fjord/heimq broker decodes
+# with (`RecordBatchView::from_bytes`). Used to encode change records for the in-process log append path.
+# No C/cmake/libcurl dependency (unlike the removed C Kafka client).
+kafka-protocol = { version = "0.15", default-features = false }
+# OPTIONAL external-Kafka deployment seam: a pure-Rust Kafka producer used only when the operator opts a
+# deployment into publishing change records to an EXTERNAL Kafka instead of the in-process embedded fjord
+# surface. Default-off; `default-features = false` keeps the C compression codecs (lz4/zstd) out.
+rskafka = { version = "0.6", default-features = false, optional = true }
+# rskafka records carry a chrono timestamp; only compiled behind `external-kafka`. Pure Rust.
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 # Optional: the SYNC postgres adapter, wired only behind the `postgres` feature and driven exclusively
 # through the blocking-safe `PostgresNativeBackend` wrapper (spawn_blocking) so no sync postgres client
 # call runs on a Tokio worker thread.
@@ -53,6 +62,10 @@ env-config = []
 postgres = ["dep:pqueue-postgres", "dep:futures"]
 # Connect the postgres adapter over native-tls (Lakebase / cloud postgres). Implies `postgres`.
 tls = ["postgres", "pqueue-postgres/tls"]
+# Opt-in external-Kafka change-record sink over the pure-Rust `rskafka` producer (ADR-014 invariant #4:
+# the swappable-at-the-seam external option). Default-off: the in-process embedded fjord surface is the
+# default. No C Kafka client: the external seam is pure Rust.
+external-kafka = ["dep:rskafka", "dep:chrono"]
 
 [dev-dependencies]
 pqueue-core = { path = "../pqueue-core" }
@@ -64,6 +77,10 @@ serde_json = "1"
 # The hybrid attribution harness frames command envelopes with the same wire codec the object-log write
 # path uses (segmented.rs), so the measured serialize phase reflects real cost.
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+# Pure-Rust Kafka CONSUMER for the end-to-end contract test: it consumes change records back over the
+# embedded broker's real TCP Kafka fetch surface (verifying HeimqServer serves the in-process appends, not
+# just the stored bytes). Dev-only so it always runs under default `cargo test`; no C dependency.
+rskafka = { version = "0.6", default-features = false }
 
 [[test]]
 name = "performance_object_log_e3_live_tests"
