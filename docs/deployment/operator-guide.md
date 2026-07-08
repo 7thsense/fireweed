@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 -->
 
-This guide covers the v0.2.5 release packaging. The Helm chart configures
+This guide covers the v0.9.0 release packaging. The Helm chart configures
 storage as separate log and projection axes.
 
 ## Release Artifacts

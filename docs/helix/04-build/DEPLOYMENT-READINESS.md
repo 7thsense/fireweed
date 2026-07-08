@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 008984c0248225f54c3469dce1200aba49acc47d8408f68ee27a1ca82eabd1b1
+    self_hash: fb51a8ddba64a4f72507de7a795efaa5d5f6d2f93eb8e6a15de942ecdcf0619a
     deps:
       build-implementation-plan: 05039d8518c9782554cf610ada22dc0eddec379c426e33f1389f9bc076683e16
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
       tp-verification-acceptance-criteria: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
-    reviewed_at: "2026-07-07T06:16:24Z"
+    reviewed_at: "2026-07-08T18:09:39Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -37,7 +37,12 @@ rendering, and CI evidence actually cover.
 
 ## Current Release Boundary
 
-The v0.2.x release packaging ships the `pqueue-service` RESP binary, container
+> **Version source of truth:** the workspace `Cargo.toml` `[workspace.package] version`
+> (currently **0.9.0**) is canonical for the current release line. Release tags follow it
+> (`v0.9.0`, `v0.9.1`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
+> historical snapshots of the version in their filename and are not statements about the current line.
+
+The v0.9.x release packaging ships the `pqueue-service` RESP binary, container
 image, Helm chart, binary archive, checksums, and release evidence. The service
 runtime currently wires these executable combinations:
 
