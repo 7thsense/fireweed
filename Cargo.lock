@@ -495,9 +495,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.19"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4279b0f31df31b4add8aeae57d40f3b5e53aad2b531e89b982bd75ed1898851d"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -700,8 +700,8 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fjord-broker"
-version = "0.1.0"
-source = "git+https://github.com/telepathdata/fjord.git?rev=db260f607004483770f822764d9b07b192320bc8#db260f607004483770f822764d9b07b192320bc8"
+version = "0.1.2"
+source = "git+https://github.com/telepathdata/fjord.git?tag=v0.1.2#43d70710de734b807e1c7f51f8e8295c6e93e848"
 dependencies = [
  "bytes",
  "heimq-broker",
