@@ -1,0 +1,115 @@
+{
+  "attempt_id": "20260709T004252-e9985143",
+  "bead_id": "pqueue-3b981b92",
+  "base_rev": "c32bbbeec33a87d8e2a7e6c6e8f19a5bdb0659c8",
+  "created_at": "2026-07-09T00:42:53.92463004Z",
+  "requested": {
+    "harness": "claude",
+    "model": "claude-sonnet-5",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-3b981b92",
+    "title": "Object-log internal fault seam + AC-TXN-4 crash-point matrix",
+    "description": "PROBLEM: AC-TXN-4 (TP-003 §3.10 row 209) requires injecting failures at object-log INTERNAL cut points — before segment write, after segment write before manifest, after manifest before projection apply, during projection apply, during snapshot write, during owner reassignment, and during manifest CAS/fallback commit — but the B3.1 fault harness only drives the PUBLIC Backend::write seam (append/apply), so AC-TXN-4 is currently recorded as partial (deeper cut points unreachable). ROOT CAUSE: the object-log segment/manifest/snapshot code has no test-injectable failure hook. PROPOSED FIX: add a test-only fault-injection seam (a cfg(test)/feature-gated failpoint hook or an injected FaultHook trait) at the named object-log cut points in crates/pqueue-objectlog (segment write, manifest commit/CAS, snapshot write, owner reassignment); extend external_transaction_contract_matrix_tests so AC-TXN-4 exercises each reachable cut point and asserts the TP-003 outcomes (0 lost accepted items, 0 duplicate active leases, committed commands replay exactly once, orphan segments ignored/reconciled, stale-epoch commits rejected); record any cut point still genuinely unreachable as an honest gap, not a fake pass. NON-SCOPE: hybrid-strict/async poison (AC-TXN-5/5A, separate bead); postgres wiring.",
+    "acceptance": "1. `fault_injection_harness_tests` exercises object-log internal cut points (segment/manifest/snapshot) and passes.\n2. `ac_txn_4_objectlog_crash_point_matrix` passes, asserting exactly-once replay + no lost items + stale-epoch reject across the reachable cut points.\n3. `rustup run 1.92.0 cargo test -p pqueue-conformance -p pqueue-objectlog` passes.\n4. `rg -n 'AC-TXN-4' docs/perf/evidence/tp003-ac-txn-matrix.jsonl` shows pass (not partial) for the covered cut points.",
+    "labels": [
+      "kind:test",
+      "area:pqueue-objectlog",
+      "area:pqueue-conformance",
+      "gap-closure",
+      "phase-5",
+      "tp-003"
+    ],
+    "metadata": {
+      "events": [
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"claude\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"1772ffd23f1870a32660c82342a43b908356cb1d6890f141cedb23cf1a0a668b\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"1772ffd23f1870a32660c82342a43b908356cb1d6890f141cedb23cf1a0a668b\"}",
+          "created_at": "2026-07-09T00:39:59.334531638Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"claude\",\"fallback_chain\":[],\"requested_harness\":\"claude\"}",
+          "created_at": "2026-07-09T00:40:10.868377597Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=claude"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"claude\",\"actual_model\":\"\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260709T004000-ca1e5ffd\",\"bead_id\":\"pqueue-3b981b92\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"\",\"routing_intent_degraded\":true,\"routing_intent_note\":\"actual route facts unavailable\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-09T00:40:11.600141963Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli harness=claude note=actual route facts unavailable"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"base_rev\":\"089879ca7c2ef024ae2f31fd8bf3958c8f1cf1b3\",\"classification\":\"\",\"decode_warnings\":[{\"field\":\"output\",\"warning\":\"empty output\"}],\"detail\":\"under-specified routing for harness=\\\"claude\\\": supply --model, --policy, or --min-power\",\"malformed\":true,\"rationale\":\"\",\"recommended_action\":\"\",\"result_rev\":\"089879ca7c2ef024ae2f31fd8bf3958c8f1cf1b3\",\"session_id\":\"eb-f5ca15a9\",\"status\":\"execution_failed\",\"suggested_amendments\":[],\"suggested_followup_beads\":[]}",
+          "created_at": "2026-07-09T00:40:21.156586398Z",
+          "kind": "bead-quality.triage-warning",
+          "source": "ddx work",
+          "summary": "empty output"
+        },
+        {
+          "actor": "erik",
+          "body": "under-specified routing for harness=\"claude\": supply --model, --policy, or --min-power\ndecision_audit={\"failure_class\":\"unknown\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"claude\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"claude\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=089879ca7c2ef024ae2f31fd8bf3958c8f1cf1b3\nbase_rev=089879ca7c2ef024ae2f31fd8bf3958c8f1cf1b3\nretry_after=2026-07-09T06:40:21Z\noutcome_reason=unknown",
+          "created_at": "2026-07-09T00:40:21.24296572Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        },
+        {
+          "actor": "erik",
+          "body": "{\"decision\":\"warn\",\"decision_source\":\"pre_claim_intake\",\"detail\":\"readiness route unavailable: runner error: under-specified routing for harness=\\\"codex\\\": supply --model, --policy, or --min-power\",\"fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\",\"policy_mode\":\"warn-only\",\"reason\":\"system_unready\",\"rule_id\":\"pre_claim_intake.system_unready\",\"suggested_action\":\"revise the rewrite so it preserves every explicit commitment\",\"warning_fingerprint\":\"305b9b3f070d4d3a78e7f3fa8f2d9d682ff6fc21873bf6899c42833b4d118b62\"}",
+          "created_at": "2026-07-09T00:40:36.436997443Z",
+          "kind": "intake.warn",
+          "source": "ddx work",
+          "summary": "system_unready"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"resolved_provider\":\"codex\",\"fallback_chain\":[],\"requested_harness\":\"codex\"}",
+          "created_at": "2026-07-09T00:41:00.259781278Z",
+          "kind": "routing",
+          "source": "legacy agent execute-bead",
+          "summary": "provider=codex"
+        },
+        {
+          "actor": "ddx",
+          "body": "{\"actual_harness\":\"codex\",\"actual_model\":\"\",\"actual_power\":0,\"actual_provider\":\"\",\"attempt_id\":\"20260709T004037-5eab2405\",\"bead_id\":\"pqueue-3b981b92\",\"estimated_difficulty\":\"\",\"rejected_route_pins\":null,\"requested_power_class\":\"\",\"requested_profile\":\"\",\"routing_intent_degraded\":true,\"routing_intent_note\":\"actual route facts unavailable\",\"routing_intent_source\":\"cli\"}",
+          "created_at": "2026-07-09T00:41:00.889601084Z",
+          "kind": "execution-routing-intent",
+          "source": "ddx work",
+          "summary": "source=cli harness=codex note=actual route facts unavailable"
+        },
+        {
+          "actor": "erik",
+          "body": "under-specified routing for harness=\"codex\": supply --model, --policy, or --min-power\ndecision_audit={\"failure_class\":\"unknown\",\"retry_action\":\"retry\",\"escalation_count\":0,\"requested_route\":{\"harness\":\"codex\",\"routing_intent_source\":\"cli\"},\"actual_route\":{\"harness\":\"codex\",\"route_reason\":\"cli\"},\"review_status\":\"skipped\",\"review_skip_reason\":\"review_not_configured\",\"review_classification\":\"review_skipped\",\"land_status\":\"not_landed\",\"reconcile_status\":\"not_applicable\"}\nresult_rev=e2d758eabcbfaf56dd04806513f76f51aed4e2c2\nbase_rev=e2d758eabcbfaf56dd04806513f76f51aed4e2c2\nretry_after=2026-07-09T06:41:13Z\noutcome_reason=unknown",
+          "created_at": "2026-07-09T00:41:13.6183168Z",
+          "kind": "execute-bead",
+          "source": "ddx work",
+          "summary": "execution_failed"
+        }
+      ],
+      "work-cooldown-base-rev": "e2d758eabcbfaf56dd04806513f76f51aed4e2c2",
+      "work-last-detail": "under-specified routing for harness=\"codex\": supply --model, --policy, or --min-power",
+      "work-last-status": "execution_failed",
+      "work-retry-after": "2026-07-09T06:41:13Z"
+    }
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260709T004252-e9985143",
+    "prompt": ".ddx/executions/20260709T004252-e9985143/prompt.md",
+    "manifest": ".ddx/executions/20260709T004252-e9985143/manifest.json",
+    "result": ".ddx/executions/20260709T004252-e9985143/result.json",
+    "checks": ".ddx/executions/20260709T004252-e9985143/checks.json",
+    "usage": ".ddx/executions/20260709T004252-e9985143/usage.json",
+    "worktree": "home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-3b981b92-20260709T004252-e9985143"
+  },
+  "prompt_sha": "0dd1041d1515a4e8d03a4f71311e3a4ea9bf6650255d120c50f3d11b7449fe8e"
+}
