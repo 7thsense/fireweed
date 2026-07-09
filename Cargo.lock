@@ -1374,8 +1374,7 @@ dependencies = [
 [[package]]
 name = "kafka-protocol"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6509e79955e012e08bce83c5f8ef2a40c69ed1c807ec7c4f7670f70a5feb1e5b"
+source = "git+https://github.com/easel/kafka-protocol-rs?branch=heimq-bound-array-capacity#b721c98f71b969ae991416a1642de110712bf318"
 dependencies = [
  "anyhow",
  "bytes",

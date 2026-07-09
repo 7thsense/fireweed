@@ -36,3 +36,14 @@ license = "MIT OR Apache-2.0"
 # ADR-011 AC path-dep check (rg for path=.*axon etc.) does not false-positive on the git URL.
 axon-esf = { git = """https://github.com/DocumentDrivenDX/\
 axon""", tag = "v0.3.2" }
+
+# SECURITY: kafka-protocol upstream (all versions 0.15-0.17) pre-allocates
+# `Vec::with_capacity(n)` from an attacker-controlled Array/CompactArray count
+# BEFORE reading any element — a remotely-triggerable OOM DoS reachable through
+# the embedded fjord broker's Kafka wire surface. heimq authored a bounded fix,
+# but `[patch]` only applies from the top-level workspace root, so heimq's patch
+# does NOT propagate to pqueue. Apply it here so pqueue's build is actually bounded.
+# TODO(release): rebase this bound onto kafka-protocol >=0.17 to also drop the
+# unmaintained `paste` dep (RUSTSEC-2024-0436), then bump heimq/fjord revs.
+[patch.crates-io]
+kafka-protocol = { git = "https://github.com/easel/kafka-protocol-rs", branch = "heimq-bound-array-capacity" }
