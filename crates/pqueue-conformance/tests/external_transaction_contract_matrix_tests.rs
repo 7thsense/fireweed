@@ -9,26 +9,37 @@
 //!
 //! # Honest coverage map (see per-row `assertions`/`detail` in the evidence JSONL)
 //!
-//! | AC | memory | sqlite-log | objectlog | objectlog+sqlite | postgres (env) |
-//! |----|--------|-----------|-----------|------------------|----------------|
-//! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | partial‡ | partial‡ | partial‡ | partial‡ |
-//! | AC-TXN-2 rejection no-effect | partial (in-proc) | partial‡ | partial‡ | partial‡ | partial‡ |
-//! | AC-TXN-3 unknown-outcome replay | partial (in-proc) | partial‡ | partial‡ | partial‡ | partial‡ |
-//! | AC-TXN-4 objectlog crash-point matrix | — | — | partial (5 internal cut points)* | — | — |
-//! | AC-TXN-5 hybrid poison + replay | — | — | | partial (projection cut points)† | — |
-//! | AC-TXN-5A hybrid-async success barrier | — | — | | partial (projection cut points)† | — |
-//! | AC-TXN-6 cross-combination parity | — | ✓ (sqlite-log vs objectlog+sqlite) | | | — |
-//! | AC-TXN-7 latency-bound invariance | — | — | partial (force-seal vs group-commit) | | — |
+//! | AC | memory | sqlite-log | sqlite-relational | objectlog | objectlog+sqlite | postgres (env) |
+//! |----|--------|-----------|-------------------|-----------|------------------|----------------|
+//! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | ✓‡ | ✓ (all 8 ops) | ✓‡ | ✓‡ | ✓‡ |
+//! | AC-TXN-2 rejection no-effect | partial (in-proc) | partial§ | partial§ | partial§ | partial§ | partial§ |
+//! | AC-TXN-3 unknown-outcome replay | partial (in-proc) | partial§ | n/a (unified store, no cut window) | partial§ | partial§ | partial§ |
+//! | AC-TXN-4 objectlog crash-point matrix | — | — | — | partial (5 internal cut points)* | — | — |
+//! | AC-TXN-5 hybrid poison + replay | — | — | — | | partial (projection cut points)† | — |
+//! | AC-TXN-5A hybrid-async success barrier | — | — | — | | partial (projection cut points)† | — |
+//! | AC-TXN-6 cross-combination parity | — | ✓ (sqlite-log vs objectlog+sqlite) | | | | — |
+//! | AC-TXN-7 latency-bound invariance | — | — | — | partial (force-seal vs group-commit) | | — |
 //!
 //! AC-TXN-3's request_id-replay-across-restart is a REAL assertion on EVERY durable profile (atomic AND
 //! eventual-apply): `ComposedBackend` recovery rebuilds the push-idempotency map from the durable log for
 //! both durability classes (this suite's B3.1 run closed the earlier atomic-composed-log gap in
 //! `crates/pqueue-engine/src/compose.rs`).
 //!
-//! `‡` AC-TXN-1/2/3 are `partial` (not `pass`) on every profile because each covers the CORE of its TP-003
-//! §3.10 row, not the full requirement, and records an explicit `GAP` assertion naming covered-vs-not: AC-TXN-1
-//! (row 206) asserts kill-after-success for BatchPush/Claim/RenewLeases/Finalize but not CreateQueue-alone/
-//! BatchUpdate/SetGates/PurgeItems; AC-TXN-2 (row 207) drives per-item-invalid/unknown-id/request-id-conflict
+//! Status semantics: a row is `pass` when every op the backend actually SUPPORTS has its checkpoint and only
+//! capability-N/A clauses remain (an op the backend genuinely cannot perform — a class/capability property);
+//! a row is `partial` only when a coverage-`GAP` remains (a SUPPORTED requirement the suite does not yet
+//! exercise). See `record` below. `pass` never covers an untested supported requirement.
+//!
+//! `‡` AC-TXN-1 (row 206) checkpoints kill-after-success for ALL eight named mutating ops — CreateQueue,
+//! BatchPush, BatchUpdate, SetGates, BatchClaim, BatchRenewLeases, BatchFinalize, PurgeItems. `sqlite_relational`
+//! (atomic AND gate-capable) exercises EVERY op for real, so it is an unqualified `pass`. The other durable
+//! profiles are also `pass`, with the ops they genuinely cannot perform recorded as capability-N/A (NOT a
+//! coverage gap): SetGates needs a gate-capable backend, so the non-gate log/hybrid profiles
+//! (`supports_gates()==false`, gate state being a relational-only feature) record it capability-N/A; and
+//! BatchUpdate is atomic-class only, so the eventual-apply objectlog / object_log_sqlite profiles (which
+//! return `Unavailable`) record it capability-N/A. `memory` is non-durable so kill/restart is `n/a` wholesale.
+//!
+//! `§` AC-TXN-2 (row 207) drives per-item-invalid/unknown-id/request-id-conflict
 //! rejections + sibling survival but not envelope-invalid batches, stale-lease, capacity/unavailable, or
 //! commit-timeout paths; AC-TXN-3 (row 208) proves request_id exactly-once replay for PUSH at BeforeAppend/
 //! AfterResponse/AfterApplyBeforeResponse (the AfterAppendBeforeApply mid-pipeline cut is item-level only —
@@ -109,6 +120,21 @@ fn sqlite_log_factory() -> impl Fn(&str) -> pqueue_sqlite::ComposedSqliteBackend
     }
 }
 
+/// The composed sqlite-RELATIONAL backend (unified sqlite log + relational projection): atomic durability
+/// class AND gate-capable (`supports_gates()==true`, `SqliteRelational` materializes the gate tables). It is
+/// the profile that genuinely exercises BOTH the atomic-only op (BatchUpdate) and the gate-only op (SetGates)
+/// under kill/reopen — the log-replay `sqlite_log` and the eventual-apply objectlog profiles can do neither.
+/// File-backed with reopen-same-path recovery, so the drop+reopen "process kill" simulation works.
+fn sqlite_relational_factory() -> impl Fn(&str) -> pqueue_sqlite::ComposedSqliteRelationalBackend {
+    let base = base_dir("sqlite-relational");
+    move |tag: &str| {
+        std::fs::create_dir_all(&base).ok();
+        let path = base.join(format!("{tag}.db"));
+        pqueue_sqlite::composed_sqlite_relational(path.to_str().unwrap())
+            .expect("open composed sqlite-relational")
+    }
+}
+
 fn objectlog_factory() -> impl Fn(&str) -> pqueue_objectlog::ComposedObjectLogBackend {
     let base = base_dir("objectlog");
     move |tag: &str| {
@@ -155,9 +181,21 @@ const NON_DURABLE: TxnCaps = TxnCaps {
     durable_reopen: false,
 };
 
-/// Record one AC-TXN outcome into the evidence buffer, tracking failures for the final assertion. A
-/// passing row whose assertions include an explicit "N/A" (a clause inapplicable to the profile) or a
-/// "GAP" note is recorded as `partial`, never `pass`, so status never overclaims coverage.
+/// Record one AC-TXN outcome into the evidence buffer, tracking failures for the final assertion.
+///
+/// Two distinct concepts are kept apart so status never overclaims coverage yet never penalises a backend
+/// for a capability it cannot have:
+/// * **coverage-GAP** — the backend SUPPORTS an op/cut-point but the suite does not exercise it. Any `GAP`
+///   assertion forces the row to `partial`. This is the honesty gate: a `pass` never covers an untested
+///   SUPPORTED requirement.
+/// * **capability-N/A** — the backend genuinely cannot perform the op (a class/capability property, e.g.
+///   BatchUpdate is atomic-class-only so eventual-apply profiles return `Unavailable`; SetGates needs a
+///   gate-capable backend; a non-durable profile cannot kill/restart). A `capability-N/A` assertion is a
+///   truthful declaration, NOT a coverage hole, so it does NOT force `partial`: a row is still `pass` when
+///   every op the backend actually supports is exercised.
+///
+/// So a row is `partial` iff it carries a coverage-`GAP`; capability-`N/A` clauses are recorded verbatim for
+/// audit but do not downgrade a row that otherwise fully exercises its supported surface.
 fn record(
     records: &mut Vec<AcEvidence>,
     failures: &mut Vec<String>,
@@ -167,9 +205,7 @@ fn record(
 ) {
     match outcome {
         Ok(assertions) => {
-            let partial = assertions
-                .iter()
-                .any(|a| a.contains("N/A") || a.contains("GAP"));
+            let partial = assertions.iter().any(|a| a.contains("GAP"));
             records.push(AcEvidence {
                 ac,
                 backend: backend.to_string(),
@@ -513,6 +549,131 @@ async fn ac_txn_4_objectlog_crash_point_matrix() {
         "AC-TXN-4 crash-point matrix failed: {:?}",
         outcome.err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// AC-TXN-1 per-op kill-after-success checkpoints (TP-003 §3.10 row 206), as standalone tests so each
+// named mutating op's kill-after-success step is independently satisfiable (bead pqueue-b943a44b),
+// independent of the aggregate `ac_txn_contract_matrix` evidence run. Each runs the durable in-process
+// profiles; the atomic profiles (sqlite_log) exercise the op for real, the eventual-apply profiles
+// (objectlog, object_log_sqlite) exercise the honest N/A path for BatchUpdate. SetGates is N/A on all of
+// these non-gate composed profiles (gate state is relational-only) and the test asserts that N/A holds.
+
+#[tokio::test]
+async fn ac_txn_1_kill_after_create_queue() {
+    let sr =
+        pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(sqlite_relational_factory())
+            .await;
+    assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
+    let sq = pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(sqlite_log_factory()).await;
+    assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
+    let ol = pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(objectlog_factory()).await;
+    assert!(ol.is_ok(), "objectlog: {:?}", ol.err());
+    let ols =
+        pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(objectlog_sqlite_factory())
+            .await;
+    assert!(ols.is_ok(), "object_log_sqlite: {:?}", ols.err());
+}
+
+#[tokio::test]
+async fn ac_txn_1_kill_after_batch_update() {
+    // sqlite_relational + sqlite_log are atomic: BatchUpdate is GENUINELY exercised (durable + visible after
+    // reopen), never capability-N/A.
+    for (name, outcome) in [
+        (
+            "sqlite_relational",
+            pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(sqlite_relational_factory())
+                .await,
+        ),
+        (
+            "sqlite_log",
+            pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(sqlite_log_factory()).await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        assert!(
+            outcome.as_ref().unwrap().iter().all(|a| !a.contains("N/A")),
+            "BatchUpdate must be genuinely exercised on the atomic {name} profile, not N/A: {outcome:?}"
+        );
+    }
+    // objectlog / object_log_sqlite are eventual-apply: BatchUpdate is atomic-only → capability-N/A.
+    for (name, outcome) in [
+        (
+            "objectlog",
+            pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(objectlog_factory()).await,
+        ),
+        (
+            "object_log_sqlite",
+            pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(objectlog_sqlite_factory())
+                .await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        assert!(
+            outcome
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|a| a.contains("capability-N/A")),
+            "BatchUpdate must be capability-N/A on the eventual-apply {name} profile: {outcome:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac_txn_1_kill_after_set_gates() {
+    // sqlite_relational is gate-capable + atomic: SetGates is GENUINELY exercised (the blocked gate survives
+    // kill/reopen and keeps the gated item unclaimable), never capability-N/A.
+    let sr = pqueue_conformance::fault::ac_txn_1_kill_after_set_gates(sqlite_relational_factory())
+        .await;
+    assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
+    assert!(
+        sr.as_ref().unwrap().iter().all(|a| !a.contains("N/A")),
+        "SetGates must be genuinely exercised on the gate-capable sqlite_relational profile, not N/A: {sr:?}"
+    );
+    // The remaining composed profiles are non-gate (gate state is relational-only), so SetGates is genuinely
+    // capability-N/A on each — assert the honest capability-N/A path (never a silent pass).
+    for (name, outcome) in [
+        (
+            "sqlite_log",
+            pqueue_conformance::fault::ac_txn_1_kill_after_set_gates(sqlite_log_factory()).await,
+        ),
+        (
+            "objectlog",
+            pqueue_conformance::fault::ac_txn_1_kill_after_set_gates(objectlog_factory()).await,
+        ),
+        (
+            "object_log_sqlite",
+            pqueue_conformance::fault::ac_txn_1_kill_after_set_gates(objectlog_sqlite_factory())
+                .await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        assert!(
+            outcome
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|a| a.contains("capability-N/A")),
+            "SetGates must be capability-N/A on the non-gate {name} profile: {outcome:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac_txn_1_kill_after_purge_items() {
+    let sr =
+        pqueue_conformance::fault::ac_txn_1_kill_after_purge_items(sqlite_relational_factory())
+            .await;
+    assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
+    let sq = pqueue_conformance::fault::ac_txn_1_kill_after_purge_items(sqlite_log_factory()).await;
+    assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
+    let ol = pqueue_conformance::fault::ac_txn_1_kill_after_purge_items(objectlog_factory()).await;
+    assert!(ol.is_ok(), "objectlog: {:?}", ol.err());
+    let ols =
+        pqueue_conformance::fault::ac_txn_1_kill_after_purge_items(objectlog_sqlite_factory())
+            .await;
+    assert!(ols.is_ok(), "object_log_sqlite: {:?}", ols.err());
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1161,36 @@ async fn ac_txn_contract_matrix() {
         "AC-TXN-3",
         "sqlite_log",
         ac_txn_3_unknown_outcome_replay(sqlite_log_factory(), DURABLE).await,
+    );
+
+    // --- sqlite_relational (unified sqlite log + relational projection, atomic, durable, GATE-CAPABLE) ---
+    // The only matrix profile that supports BOTH the atomic-only BatchUpdate AND the gate-only SetGates, so
+    // AC-TXN-1 here exercises EVERY row-206 mutating op for real under kill/reopen (no capability-N/A).
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-1",
+        "sqlite_relational",
+        ac_txn_1_success_durable_visible(sqlite_relational_factory()).await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-2",
+        "sqlite_relational",
+        ac_txn_2_rejection_no_effect(sqlite_relational_factory(), DURABLE).await,
+    );
+    // NB: AC-TXN-3 is intentionally NOT run on `sqlite_relational`. Its `AfterAppendBeforeApply` cut injects a
+    // durable-but-unapplied window via the raw `inject_commit` seam (append, skip apply, reopen, replay). The
+    // UNIFIED relational store has no such window: its log axis IS its projection axis (`SqliteRelational` on
+    // both), so `Backend::write`'s append+apply commit together in one relational transaction and there is no
+    // durable log entry that reopens as unapplied. The mid-pipeline cut is architecturally inapplicable here,
+    // not a coverage gap — the composed log+projection profiles (sqlite_log/objectlog/postgres) cover AC-TXN-3.
+    record_na(
+        &mut records,
+        "AC-TXN-3",
+        "sqlite_relational",
+        "capability-N/A: unified relational store couples log-append and projection-apply in one transaction, so AC-TXN-3's AfterAppendBeforeApply durable-but-unapplied cut point has no window here (log axis IS projection axis)",
     );
 
     // --- objectlog (composed ObjectLog + in-memory projection, eventual-apply, durable) ---

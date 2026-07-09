@@ -30,13 +30,15 @@
 //! [`pqueue_engine::PushPort::push_with_request_id`] idempotency path, so they prove `request_id` replay exactly-once.
 //! This split is recorded per row in the evidence JSONL rather than papered over.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, PriorityValue, RequestId};
 use pqueue_engine::{
-    Backend, CommandEnvelope, CommandPosition, ControlPlaneStore, EngineError, FinalizeKind,
-    FinalizeOutcome, LogRead, PushCommand, PushSpec, QueueCommand,
+    Backend, CommandEnvelope, CommandPosition, ControlPlaneStore, DurabilityClass, EngineError,
+    FinalizeKind, FinalizeOutcome, LogRead, PayloadUpdate, PushCommand, PushSpec, QueueCommand,
+    SetGatesCommand, SetGatesPort,
 };
 
 use crate::{ConformanceCore, claim_req, commit, envelope, item, qdef, qkey, shard, ts};
@@ -141,10 +143,16 @@ pub async fn durable_command_count<B: LogRead>(backend: &B) -> Result<usize, Str
 /// is asserted from recovered state before the next operation runs — so no later op can mask an earlier
 /// op's lost effect (in particular a lease renewal is verified before the finalize that would erase it).
 ///
-/// Coverage: `BatchPush` (via the acknowledged `request_id` path), `BatchClaim`, `BatchRenewLeases`, and
-/// `BatchFinalize`. It does NOT exercise `CreateQueue`-alone, `BatchUpdate`, `SetGates`, or `PurgeItems`;
-/// the recorded assertion names only the four operations actually covered.
-pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead>(
+/// Coverage: EVERY mutating operation TP-003 §3.10 row 206 names — `CreateQueue`, `BatchPush` (via the
+/// acknowledged `request_id` path), `BatchUpdate`, `SetGates`, `BatchClaim`, `BatchRenewLeases`,
+/// `BatchFinalize`, and `PurgeItems`. The four core lifecycle ops (Push/Claim/RenewLeases/Finalize) are
+/// checkpointed inline; the remaining four (`CreateQueue`-alone, `BatchUpdate`, `SetGates`, `PurgeItems`)
+/// each get their own kill-after-success checkpoint on an isolated tag via the `ac_txn_1_kill_after_*`
+/// helpers below, so no later op can mask an earlier op's assertion. Two ops are capability-gated and record
+/// an honest N/A (never a silent pass) where genuinely unreachable: `BatchUpdate` is atomic-class only (the
+/// eventual-apply object-log family refuses it `Unavailable`), and `SetGates` needs a gate-capable backend
+/// (`supports_gates()`); a non-gate backend records N/A and skips.
+pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead + SetGatesPort>(
     make: impl Fn(&str) -> B,
 ) -> AcOutcome {
     let mut asserts = Vec::new();
@@ -297,16 +305,245 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead>(
         "BatchFinalize terminal state durable after kill/reopen; sibling still claimable".into(),
     );
 
-    // Honest op-coverage note: TP-003 §3.10 row 206 requires kill-after-success for EVERY mutating op
-    // (CreateQueue, BatchPush, BatchUpdate, SetGates, BatchClaim, BatchRenewLeases, BatchFinalize,
-    // PurgeItems). This scenario exercises the durable+visible-after-reopen invariant for the four core
-    // lifecycle ops only; CreateQueue durability is implied (every reopen re-serves the same queue) but not
-    // asserted as its own kill-after-success step, and BatchUpdate/SetGates/PurgeItems are not driven here.
-    asserts.push(
-        "GAP (row 206 op coverage): kill-after-success asserted for BatchPush, BatchClaim, BatchRenewLeases, BatchFinalize; NOT exercised as their own kill-after-success steps: CreateQueue-alone, BatchUpdate, SetGates, PurgeItems".into(),
-    );
+    // TP-003 §3.10 row 206 requires kill-after-success for EVERY mutating op. The four core lifecycle ops
+    // above are checkpointed inline; the remaining named ops each get their OWN kill-after-success checkpoint
+    // here, on isolated tags so no op masks another. Each records a real durability assertion, or an honest
+    // N/A where the op is genuinely unavailable on this profile (BatchUpdate is atomic-class only; SetGates
+    // needs a gate-capable backend). No op is silently skipped.
+    asserts.extend(ac_txn_1_kill_after_create_queue(&make).await?);
+    asserts.extend(ac_txn_1_kill_after_batch_update(&make).await?);
+    asserts.extend(ac_txn_1_kill_after_set_gates(&make).await?);
+    asserts.extend(ac_txn_1_kill_after_purge_items(&make).await?);
 
     Ok(asserts)
+}
+
+/// **AC-TXN-1 / CreateQueue** kill-after-success (TP-003 §3.10 row 206). Create the queue, kill+reopen the
+/// durable store, and assert the queue definition survived: the recovered store re-serves the queue (metrics
+/// answered, empty) AND the queue is usable (accepts a push). No items are needed.
+pub async fn ac_txn_1_kill_after_create_queue<B: ConformanceCore + LogRead>(
+    make: impl Fn(&str) -> B,
+) -> AcOutcome {
+    {
+        let a = make("txn1-createq");
+        a.create_queue(qdef())
+            .await
+            .map_err(|e| format!("create_queue: {e:?}"))?;
+    }
+    // Kill + reopen: the CreateQueue command must be durable so recovery re-serves the queue.
+    let b = make("txn1-createq");
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics after reopen (queue not recovered?): {e:?}"))?;
+    ensure!(
+        (m.pending, m.leased, m.complete) == (0, 0, 0),
+        "CreateQueue reopen surfaced phantom items; got pending={} leased={} complete={}",
+        m.pending,
+        m.leased,
+        m.complete
+    );
+    // Usable: the recovered queue accepts a push (a push into an unknown queue would fail), proving the
+    // definition survived rather than merely an empty shard.
+    let ids = b
+        .push(&shard(), vec![spec("createq-a", 1)], ts(1), None)
+        .await
+        .map_err(|e| format!("push into recovered queue: {e:?}"))?;
+    ensure!(ids.len() == 1, "recovered queue did not accept a push");
+    Ok(vec![
+        "CreateQueue effect durable after kill/reopen: recovery re-serves the queue (metrics answered, empty) and it is usable (accepts a push)".into(),
+    ])
+}
+
+/// **AC-TXN-1 / BatchUpdate** kill-after-success (TP-003 §3.10 row 206). `update_fields` a pending item, then
+/// kill+reopen and assert the merged field survives and is visible on the recovered live-item view.
+/// `UpdateFields` is an atomic-class in-place merge; the eventual-apply object-log family refuses it
+/// (`EngineError::Unavailable`), so on those profiles this op is genuinely unreachable — record N/A and skip.
+pub async fn ac_txn_1_kill_after_batch_update<B: ConformanceCore + LogRead>(
+    make: impl Fn(&str) -> B,
+) -> AcOutcome {
+    if make("txn1-batchupd").durability_class() != DurabilityClass::Atomic {
+        return Ok(vec![
+            "capability-N/A: BatchUpdate (UpdateFields) is atomic-class only; this eventual-apply profile does not implement it (EngineError::Unavailable). This is a durability-class property, not a coverage gap — kill-after-BatchUpdate cannot exist on this backend".into(),
+        ]);
+    }
+    let key = ClientItemKey::new("batchupd-a").unwrap();
+    let item_id = {
+        let a = make("txn1-batchupd");
+        a.create_queue(qdef())
+            .await
+            .map_err(|e| format!("create_queue: {e:?}"))?;
+        let ids = a
+            .push(&shard(), vec![spec("batchupd-a", 5)], ts(1), None)
+            .await
+            .map_err(|e| format!("seed push: {e:?}"))?;
+        ensure!(ids.len() == 1, "seed push landed one item");
+        let mut field_ops: BTreeMap<String, Option<Bytes>> = BTreeMap::new();
+        field_ops.insert(
+            "worker_stage".to_string(),
+            Some(Bytes::from_static(b"ready-durable")),
+        );
+        a.update_fields(
+            &shard(),
+            ids[0],
+            field_ops,
+            PayloadUpdate::Keep,
+            None,
+            None,
+            ts(2),
+            None,
+        )
+        .await
+        .map_err(|e| format!("update_fields: {e:?}"))?;
+        ids[0]
+    };
+    // Kill + reopen: the merged field must survive and be visible on the recovered live-item view.
+    let b = make("txn1-batchupd");
+    let live = b
+        .live_items(&shard(), std::slice::from_ref(&key))
+        .await
+        .map_err(|e| format!("live_items: {e:?}"))?
+        .into_iter()
+        .next()
+        .flatten()
+        .ok_or_else(|| "updated item not visible by client_item_key after reopen".to_string())?;
+    ensure!(
+        live.item_id == item_id,
+        "updated item id mismatch after reopen"
+    );
+    ensure!(
+        live.fields.get("worker_stage").map(|v| v.as_ref()) == Some(&b"ready-durable"[..]),
+        "BatchUpdate field lost across kill/reopen; got fields={:?}",
+        live.fields
+    );
+    Ok(vec![
+        "BatchUpdate (UpdateFields) effect durable + visible after kill/reopen: the merged field survives on the recovered live-item view".into(),
+    ])
+}
+
+/// **AC-TXN-1 / SetGates** kill-after-success (TP-003 §3.10 row 206). On a gate-capable backend: block a gate
+/// key over a gate-bearing item, kill+reopen, and assert the durable gate state survives — the gated item
+/// stays hidden from claim (unclaimable) and pending on the recovered store. Gate state is a relational-only
+/// capability; the log-replay / hybrid composed family reports `supports_gates() == false` and refuses
+/// `SetGates` (`EngineError::Unavailable`), so on those profiles record N/A and skip.
+pub async fn ac_txn_1_kill_after_set_gates<B: ConformanceCore + LogRead + SetGatesPort>(
+    make: impl Fn(&str) -> B,
+) -> AcOutcome {
+    if !make("txn1-setgates").supports_gates() {
+        return Ok(vec![
+            "capability-N/A: SetGates requires a gate-capable backend; this profile reports supports_gates()=false (gate state is a relational-only feature) and does not implement SetGates (EngineError::Unavailable). This is a backend-capability property, not a coverage gap — kill-after-SetGates cannot exist on this backend".into(),
+        ]);
+    }
+    {
+        let a = make("txn1-setgates");
+        a.create_queue(qdef())
+            .await
+            .map_err(|e| format!("create_queue: {e:?}"))?;
+        let mut gated = spec("setgates-a", 10);
+        gated.gate_keys = vec!["region-eu".to_string()];
+        a.push(&shard(), vec![gated], ts(0), None)
+            .await
+            .map_err(|e| format!("gate-bearing push: {e:?}"))?;
+        a.set_gates(
+            &shard(),
+            SetGatesCommand {
+                gate_keys: vec!["region-eu".to_string()],
+                blocked: true,
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .map_err(|e| format!("set_gates: {e:?}"))?;
+    }
+    // Kill + reopen: the blocked-gate state must survive so the gated item stays unclaimable but pending.
+    let b = make("txn1-setgates");
+    let claimed = b
+        .claim(claim_req(10, 500, 100))
+        .await
+        .map_err(|e| format!("claim: {e:?}"))?;
+    ensure!(
+        claimed.items.is_empty(),
+        "blocked gate did not survive kill/reopen: the gated item was claimable"
+    );
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics: {e:?}"))?;
+    ensure!(
+        m.pending == 1,
+        "gated item not pending after reopen; got pending={}",
+        m.pending
+    );
+    Ok(vec![
+        "SetGates blocked-gate state durable after kill/reopen: the gated item stays hidden from claim (unclaimable) and pending on the recovered store".into(),
+    ])
+}
+
+/// **AC-TXN-1 / PurgeItems** kill-after-success (TP-003 §3.10 row 206). Purge one of two pending items via
+/// `PurgePort`, then kill+reopen and assert the purged item is GONE and does not resurrect on replay, while
+/// the un-purged sibling survives and is still claimable (0 read-after-success gaps for the survivor).
+pub async fn ac_txn_1_kill_after_purge_items<B: ConformanceCore + LogRead>(
+    make: impl Fn(&str) -> B,
+) -> AcOutcome {
+    let purged_key = ClientItemKey::new("purge-a").unwrap();
+    let survivor_id = {
+        let a = make("txn1-purge");
+        a.create_queue(qdef())
+            .await
+            .map_err(|e| format!("create_queue: {e:?}"))?;
+        let ids = a
+            .push(
+                &shard(),
+                vec![spec("purge-a", 5), spec("purge-b", 9)],
+                ts(1),
+                None,
+            )
+            .await
+            .map_err(|e| format!("seed push: {e:?}"))?;
+        ensure!(ids.len() == 2, "seed push landed two items");
+        // Purge the first (pending, non-leased) item; force=false suffices since it is not leased.
+        let removed = a
+            .purge(&shard(), vec![ids[0]], false, ts(2), None)
+            .await
+            .map_err(|e| format!("purge: {e:?}"))?;
+        ensure!(removed == 1, "purge removed exactly one item; got {removed}");
+        ids[1]
+    };
+    // Kill + reopen: the PurgeItems command must be durable so replay keeps the item gone (no resurrection).
+    let b = make("txn1-purge");
+    let live = b
+        .live_items(&shard(), std::slice::from_ref(&purged_key))
+        .await
+        .map_err(|e| format!("live_items: {e:?}"))?
+        .into_iter()
+        .next()
+        .flatten();
+    ensure!(
+        live.is_none(),
+        "purged item resurrected on kill/reopen replay (still visible by client_item_key)"
+    );
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics: {e:?}"))?;
+    ensure!(
+        m.pending == 1,
+        "purge not durable after reopen: expected exactly the 1 survivor pending; got pending={}",
+        m.pending
+    );
+    // The survivor is still claimable (0 read-after-success gaps for the un-purged item).
+    let claimed = b
+        .claim(claim_req(1, 500, 10))
+        .await
+        .map_err(|e| format!("claim: {e:?}"))?;
+    ensure!(
+        claimed.items.first().map(|i| i.item_id) == Some(survivor_id),
+        "survivor not claimable after purge+reopen"
+    );
+    Ok(vec![
+        "PurgeItems effect durable after kill/reopen: the purged item is gone and does not resurrect on replay; the un-purged sibling survives and is claimable".into(),
+    ])
 }
 
 /// **AC-TXN-2** rejection has no durable effect (INV-13). Structurally-rejected envelopes and per-item
