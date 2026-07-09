@@ -539,9 +539,16 @@ impl pqueue_engine::Backend for LyingClaimedViewBackend {
         self.inner.commit_capabilities()
     }
 
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = pqueue_engine::EngineResult<R>> + Send
+    fn write<R, F>(
+        &self,
+        f: F,
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<R>> + Send
     where
-        F: FnOnce(&mut dyn pqueue_engine::LogWriter, &mut dyn pqueue_engine::ProjectionWriter) -> pqueue_engine::EngineResult<R> + Send,
+        F: FnOnce(
+                &mut dyn pqueue_engine::LogWriter,
+                &mut dyn pqueue_engine::ProjectionWriter,
+            ) -> pqueue_engine::EngineResult<R>
+            + Send,
         R: Send,
     {
         self.inner.write(f)
@@ -596,8 +603,8 @@ impl pqueue_engine::UpsertPort for LyingClaimedViewBackend {
         entity: Option<serde_json::Value>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::UpsertOutcome>> + Send
-    {
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::UpsertOutcome>>
+    + Send {
         self.inner.replace_if_pending(
             shard,
             client_item_key,
@@ -695,7 +702,8 @@ impl pqueue_engine::PurgePort for LyingClaimedViewBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<u64>> + Send {
-        self.inner.purge(shard, item_ids, force, now, expected_epoch)
+        self.inner
+            .purge(shard, item_ids, force, now, expected_epoch)
     }
 }
 
@@ -703,7 +711,8 @@ impl pqueue_engine::ReclaimDriver for LyingClaimedViewBackend {
     fn tick(
         &self,
         now: UtcTimestamp,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::TickReport>> + Send {
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::TickReport>> + Send
+    {
         self.inner.tick(now)
     }
 }
@@ -712,21 +721,25 @@ impl pqueue_engine::ControlPlaneStore for LyingClaimedViewBackend {
     fn create_queue(
         &self,
         definition: pqueue_core::QueueDefinition,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::CreateQueueOutcome>> + Send {
+    ) -> impl std::future::Future<
+        Output = pqueue_engine::EngineResult<pqueue_engine::CreateQueueOutcome>,
+    > + Send {
         self.inner.create_queue(definition)
     }
 
     fn queue_definition(
         &self,
         key: &pqueue_engine::QueueKey,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_core::QueueDefinition>> + Send {
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_core::QueueDefinition>>
+    + Send {
         self.inner.queue_definition(key)
     }
 
     fn list_queues(
         &self,
         tenant: &pqueue_core::TenantId,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_core::QueueId>>> + Send {
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_core::QueueId>>> + Send
+    {
         self.inner.list_queues(tenant)
     }
 
@@ -759,14 +772,17 @@ impl pqueue_engine::ProjectionRead for LyingClaimedViewBackend {
         &self,
         shard: &pqueue_engine::QueueKey,
         limit: usize,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>>> + Send {
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>>>
+    + Send {
         self.inner.peek(shard, limit)
     }
 
     fn pending(
         &self,
         shard: &pqueue_engine::QueueKey,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<pqueue_engine::LeaseView>>> + Send {
+    ) -> impl std::future::Future<
+        Output = pqueue_engine::EngineResult<Vec<pqueue_engine::LeaseView>>,
+    > + Send {
         self.inner.pending(shard)
     }
 
@@ -774,7 +790,8 @@ impl pqueue_engine::ProjectionRead for LyingClaimedViewBackend {
         &self,
         shard: &pqueue_engine::QueueKey,
         ids: &[ItemId],
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<ClaimedItem>>> + Send {
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<ClaimedItem>>> + Send
+    {
         let inner = self.inner.clone();
         let shard = shard.clone();
         let ids = ids.to_vec();
@@ -793,14 +810,17 @@ impl pqueue_engine::ProjectionRead for LyingClaimedViewBackend {
         &self,
         shard: &pqueue_engine::QueueKey,
         keys: &[pqueue_core::ClientItemKey],
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<Option<pqueue_engine::LiveItemView>>>> + Send {
+    ) -> impl std::future::Future<
+        Output = pqueue_engine::EngineResult<Vec<Option<pqueue_engine::LiveItemView>>>,
+    > + Send {
         self.inner.live_items(shard, keys)
     }
 
     fn metrics(
         &self,
         queue: &pqueue_engine::QueueKey,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::QueueMetrics>> + Send {
+    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::QueueMetrics>> + Send
+    {
         self.inner.metrics(queue)
     }
 
@@ -810,7 +830,9 @@ impl pqueue_engine::ProjectionRead for LyingClaimedViewBackend {
         now: UtcTimestamp,
         emit_change_records: bool,
         emission_cursor: Option<&pqueue_engine::CommandPosition>,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<pqueue_engine::TerminalEmissionMetrics>> + Send {
+    ) -> impl std::future::Future<
+        Output = pqueue_engine::EngineResult<pqueue_engine::TerminalEmissionMetrics>,
+    > + Send {
         self.inner
             .terminal_emission_metrics(shard, now, emit_change_records, emission_cursor)
     }

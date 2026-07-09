@@ -77,8 +77,8 @@ use pqueue_conformance::fault::{
 use pqueue_core::RequestId;
 use pqueue_engine::{
     ClaimCommand, CommandPosition, ComposedBackend, ControlPlaneStore, EngineError,
-    InProcessControlPlane, LogStore, ProjectionSnapshot, ProjectionStore, PushPort, QueueCommand,
-    PushCommand,
+    InProcessControlPlane, LogStore, ProjectionSnapshot, ProjectionStore, PushCommand, PushPort,
+    QueueCommand,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{
@@ -93,7 +93,10 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 /// while different tags (independent AC-TXN cut-point phases) get isolated stores.
 fn base_dir(profile: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    std::env::temp_dir().join(format!("pqueue-ac-txn-{profile}-{}-{n}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "pqueue-ac-txn-{profile}-{}-{n}",
+        std::process::id()
+    ))
 }
 
 fn sqlite_log_factory() -> impl Fn(&str) -> pqueue_sqlite::ComposedSqliteBackend {
@@ -101,14 +104,16 @@ fn sqlite_log_factory() -> impl Fn(&str) -> pqueue_sqlite::ComposedSqliteBackend
     move |tag: &str| {
         let path = base.join(format!("{tag}.db"));
         std::fs::create_dir_all(&base).ok();
-        pqueue_sqlite::composed_sqlite_backend(path.to_str().unwrap()).expect("open composed sqlite-log")
+        pqueue_sqlite::composed_sqlite_backend(path.to_str().unwrap())
+            .expect("open composed sqlite-log")
     }
 }
 
 fn objectlog_factory() -> impl Fn(&str) -> pqueue_objectlog::ComposedObjectLogBackend {
     let base = base_dir("objectlog");
     move |tag: &str| {
-        pqueue_objectlog::composed_objectlog_backend(base.join(tag)).expect("open composed objectlog")
+        pqueue_objectlog::composed_objectlog_backend(base.join(tag))
+            .expect("open composed objectlog")
     }
 }
 
@@ -143,8 +148,12 @@ fn objectlog_sqlite_factory() -> impl Fn(&str) -> HybridBackend {
     }
 }
 
-const DURABLE: TxnCaps = TxnCaps { durable_reopen: true };
-const NON_DURABLE: TxnCaps = TxnCaps { durable_reopen: false };
+const DURABLE: TxnCaps = TxnCaps {
+    durable_reopen: true,
+};
+const NON_DURABLE: TxnCaps = TxnCaps {
+    durable_reopen: false,
+};
 
 /// Record one AC-TXN outcome into the evidence buffer, tracking failures for the final assertion. A
 /// passing row whose assertions include an explicit "N/A" (a clause inapplicable to the profile) or a
@@ -252,7 +261,8 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     // --- BeforeSegmentWrite: nothing durable — 0 lost accepted items (nothing was ever accepted). ---
     {
         let (_root, mut log) = objectlog_direct(&base, "before-seg");
-        log.ensure_shard(&shard).map_err(|e| format!("ensure_shard: {e:?}"))?;
+        log.ensure_shard(&shard)
+            .map_err(|e| format!("ensure_shard: {e:?}"))?;
         log.set_fault_hook(Some(Arc::new(CrashAt(FaultCutPoint::BeforeSegmentWrite))));
         let err = log.append(&shard, &[ac_txn_4_push_env("1", "kx")], 0);
         ensure!(err.is_err(), "BeforeSegmentWrite must abort the append");
@@ -272,7 +282,8 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     // retry afterward must not be confused by it (0 lost, 0 duplicated).
     {
         let (_root, mut log) = objectlog_direct(&base, "after-seg-before-manifest");
-        log.ensure_shard(&shard).map_err(|e| format!("ensure_shard: {e:?}"))?;
+        log.ensure_shard(&shard)
+            .map_err(|e| format!("ensure_shard: {e:?}"))?;
         let before = log.counters().objects_put;
         log.set_fault_hook(Some(Arc::new(CrashAt(
             FaultCutPoint::AfterSegmentWriteBeforeManifest,
@@ -317,7 +328,8 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     // way must not resurrect as two leases (0 duplicate active leases).
     {
         let (root, mut log) = objectlog_direct(&base, "after-manifest-before-ack");
-        log.ensure_shard(&shard).map_err(|e| format!("ensure_shard: {e:?}"))?;
+        log.ensure_shard(&shard)
+            .map_err(|e| format!("ensure_shard: {e:?}"))?;
         log.set_fault_hook(Some(Arc::new(CrashAt(
             FaultCutPoint::AfterManifestBeforeAck,
         ))));
@@ -401,12 +413,16 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     // --- DuringOwnerReassignment: the epoch-fence commit survives a lost ack; stale-epoch commits reject.
     {
         let (root, mut log) = objectlog_direct(&base, "owner-reassignment");
-        log.ensure_shard(&shard).map_err(|e| format!("ensure_shard: {e:?}"))?;
+        log.ensure_shard(&shard)
+            .map_err(|e| format!("ensure_shard: {e:?}"))?;
         log.set_fault_hook(Some(Arc::new(CrashAt(
             FaultCutPoint::DuringOwnerReassignment,
         ))));
         let err = log.acquire_epoch(&shard);
-        ensure!(err.is_err(), "DuringOwnerReassignment must abort acquire_epoch");
+        ensure!(
+            err.is_err(),
+            "DuringOwnerReassignment must abort acquire_epoch"
+        );
         drop(log);
 
         let mut log2 = ObjectLog::open(root.clone()).map_err(|e| format!("reopen: {e:?}"))?;
@@ -435,7 +451,8 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     // --- DuringSnapshotWrite: a lost snapshot write must not lose or corrupt the command log.
     {
         let (_root, mut log) = objectlog_direct(&base, "snapshot-write");
-        log.ensure_shard(&shard).map_err(|e| format!("ensure_shard: {e:?}"))?;
+        log.ensure_shard(&shard)
+            .map_err(|e| format!("ensure_shard: {e:?}"))?;
         let positions = log
             .append(&shard, &[ac_txn_4_push_env("1", "before-snapshot")], 0)
             .map_err(|e| format!("append: {e:?}"))?;
@@ -445,7 +462,10 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
             positions[0].clone(),
             ProjectionSnapshot { payload: vec![9] },
         );
-        ensure!(err.is_err(), "DuringSnapshotWrite must abort the snapshot write");
+        ensure!(
+            err.is_err(),
+            "DuringSnapshotWrite must abort the snapshot write"
+        );
         let latest = log
             .latest_snapshot(&shard)
             .map_err(|e| format!("latest_snapshot: {e:?}"))?;
@@ -528,11 +548,14 @@ impl HybridFaultHook for HybridCrashAt {
 
 /// Assemble a fresh `objectlog/hybrid` composed backend at `root` with `hook` installed on its
 /// `HybridProjectionStore` BEFORE the first command lands, so the fault strikes the very first apply.
-fn objectlog_hybrid_with_fault_hook(root: &std::path::Path, hook: Arc<dyn HybridFaultHook>) -> HybridBackend {
+fn objectlog_hybrid_with_fault_hook(
+    root: &std::path::Path,
+    hook: Arc<dyn HybridFaultHook>,
+) -> HybridBackend {
     std::fs::create_dir_all(root).ok();
     let sqlite_path = root.join("projection.sqlite");
-    let log =
-        ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap()).expect("open object log");
+    let log = ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap())
+        .expect("open object log");
     let hybrid =
         HybridProjectionStore::open(sqlite_path.to_str().unwrap()).expect("open hybrid projection");
     hybrid.set_fault_hook(Some(hook));
@@ -642,7 +665,13 @@ async fn ac_txn_5_hybrid_strict_poison_replay_scenario() -> AcOutcome {
         let rid = RequestId::new("ac-txn-5-rid").unwrap();
         let body = vec![pqueue_conformance::fault::spec("ac-txn-5-a", 1)];
         let first = backend
-            .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(1), None)
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                body.clone(),
+                pqueue_conformance::ts(1),
+                None,
+            )
             .await
             .map_err(|e| format!("first request-id push: {e:?}"))?;
         let replay = backend
@@ -768,7 +797,8 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
             "all 3 live-applied commands must be queued for deferred SQLite apply before any flush; got {}",
             hybrid.deferred_command_count()
         );
-        ProjectionStore::flush_deferred(&mut hybrid).map_err(|e| format!("flush_deferred: {e:?}"))?;
+        ProjectionStore::flush_deferred(&mut hybrid)
+            .map_err(|e| format!("flush_deferred: {e:?}"))?;
         ensure!(
             hybrid.deferred_command_count() == 0,
             "one flush must drain the whole ordered batch exactly once; {} left deferred",
@@ -781,7 +811,8 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
             "the SQLite logical high-water must advance through the whole ordered batch (0,1,2) exactly once; got {hw:?}"
         );
         // A second flush with nothing pending is a true no-op — no duplicate SQLite work, no re-advance.
-        ProjectionStore::flush_deferred(&mut hybrid).map_err(|e| format!("second flush_deferred: {e:?}"))?;
+        ProjectionStore::flush_deferred(&mut hybrid)
+            .map_err(|e| format!("second flush_deferred: {e:?}"))?;
         let hw2 = ProjectionStore::recovery_high_water(&hybrid, &shard)
             .map_err(|e| format!("recovery_high_water after no-op flush: {e:?}"))?;
         ensure!(hw2 == hw, "a no-op flush must not move the high-water");
@@ -865,7 +896,10 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
             },
             0,
         );
-        ensure!(monitor.admit_mutation().is_ok(), "clear debt must admit mutations");
+        ensure!(
+            monitor.admit_mutation().is_ok(),
+            "clear debt must admit mutations"
+        );
         monitor.observe(
             HybridAsyncDebt {
                 apply_lag_commands: 100,
@@ -927,39 +961,92 @@ async fn ac_txn_contract_matrix() {
         &mut failures,
         "AC-TXN-2",
         "memory",
-        ac_txn_2_rejection_no_effect(|_: &str| pqueue_memory::composed_memory_backend(), NON_DURABLE).await,
+        ac_txn_2_rejection_no_effect(
+            |_: &str| pqueue_memory::composed_memory_backend(),
+            NON_DURABLE,
+        )
+        .await,
     );
     record(
         &mut records,
         &mut failures,
         "AC-TXN-3",
         "memory",
-        ac_txn_3_unknown_outcome_replay(|_: &str| pqueue_memory::composed_memory_backend(), NON_DURABLE).await,
+        ac_txn_3_unknown_outcome_replay(
+            |_: &str| pqueue_memory::composed_memory_backend(),
+            NON_DURABLE,
+        )
+        .await,
     );
 
     // --- sqlite-log (composed SqliteLog + in-memory projection, atomic, durable) ---
-    record(&mut records, &mut failures, "AC-TXN-1", "sqlite_log",
-        ac_txn_1_success_durable_visible(sqlite_log_factory()).await);
-    record(&mut records, &mut failures, "AC-TXN-2", "sqlite_log",
-        ac_txn_2_rejection_no_effect(sqlite_log_factory(), DURABLE).await);
-    record(&mut records, &mut failures, "AC-TXN-3", "sqlite_log",
-        ac_txn_3_unknown_outcome_replay(sqlite_log_factory(), DURABLE).await);
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-1",
+        "sqlite_log",
+        ac_txn_1_success_durable_visible(sqlite_log_factory()).await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-2",
+        "sqlite_log",
+        ac_txn_2_rejection_no_effect(sqlite_log_factory(), DURABLE).await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-3",
+        "sqlite_log",
+        ac_txn_3_unknown_outcome_replay(sqlite_log_factory(), DURABLE).await,
+    );
 
     // --- objectlog (composed ObjectLog + in-memory projection, eventual-apply, durable) ---
-    record(&mut records, &mut failures, "AC-TXN-1", "objectlog",
-        ac_txn_1_success_durable_visible(objectlog_factory()).await);
-    record(&mut records, &mut failures, "AC-TXN-2", "objectlog",
-        ac_txn_2_rejection_no_effect(objectlog_factory(), DURABLE).await);
-    record(&mut records, &mut failures, "AC-TXN-3", "objectlog",
-        ac_txn_3_unknown_outcome_replay(objectlog_factory(), DURABLE).await);
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-1",
+        "objectlog",
+        ac_txn_1_success_durable_visible(objectlog_factory()).await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-2",
+        "objectlog",
+        ac_txn_2_rejection_no_effect(objectlog_factory(), DURABLE).await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-3",
+        "objectlog",
+        ac_txn_3_unknown_outcome_replay(objectlog_factory(), DURABLE).await,
+    );
 
     // --- object_log_sqlite (hybrid, eventual-apply, durable) — a COMMITTED profile ---
-    record(&mut records, &mut failures, "AC-TXN-1", "object_log_sqlite",
-        ac_txn_1_success_durable_visible(objectlog_sqlite_factory()).await);
-    record(&mut records, &mut failures, "AC-TXN-2", "object_log_sqlite",
-        ac_txn_2_rejection_no_effect(objectlog_sqlite_factory(), DURABLE).await);
-    record(&mut records, &mut failures, "AC-TXN-3", "object_log_sqlite",
-        ac_txn_3_unknown_outcome_replay(objectlog_sqlite_factory(), DURABLE).await);
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-1",
+        "object_log_sqlite",
+        ac_txn_1_success_durable_visible(objectlog_sqlite_factory()).await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-2",
+        "object_log_sqlite",
+        ac_txn_2_rejection_no_effect(objectlog_sqlite_factory(), DURABLE).await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-3",
+        "object_log_sqlite",
+        ac_txn_3_unknown_outcome_replay(objectlog_sqlite_factory(), DURABLE).await,
+    );
 
     // --- AC-TXN-4 object-log-internal crash-point matrix (5 reachable cut points; see module doc). ---
     record(
@@ -989,17 +1076,25 @@ async fn ac_txn_contract_matrix() {
     );
 
     // --- AC-TXN-6 cross-combination parity (sqlite-log[atomic] vs object_log_sqlite[eventual]) ---
-    record(&mut records, &mut failures, "AC-TXN-6", "sqlite_log|object_log_sqlite",
-        ac_txn_6_parity(sqlite_log_factory(), objectlog_sqlite_factory()).await);
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-6",
+        "sqlite_log|object_log_sqlite",
+        ac_txn_6_parity(sqlite_log_factory(), objectlog_sqlite_factory()).await,
+    );
 
     // --- AC-TXN-7 latency-bound is not a correctness knob (objectlog force-seal vs group-commit) ---
     // Repeat AC-TXN-3 under both commit-latency-bound settings; the invariants must be identical.
     let force_seal = ac_txn_3_unknown_outcome_replay(objectlog_factory(), DURABLE).await;
-    let group_commit = ac_txn_3_unknown_outcome_replay(objectlog_group_commit_factory(), DURABLE).await;
+    let group_commit =
+        ac_txn_3_unknown_outcome_replay(objectlog_group_commit_factory(), DURABLE).await;
     match (force_seal, group_commit) {
         (Ok(a), Ok(b)) => {
             let same = a == b;
-            let mut assertions = vec![format!("force-seal AC-TXN-3 assertions == group-commit AC-TXN-3 assertions: {same}")];
+            let mut assertions = vec![format!(
+                "force-seal AC-TXN-3 assertions == group-commit AC-TXN-3 assertions: {same}"
+            )];
             // Honest scope note: TP-003 §3.10 row 213 requires repeating AC-TXN-1..6 across the full TP-002 E3
             // commit-latency-bound sweep. This row repeats only AC-TXN-3 across only two objectlog latency
             // settings (force-seal vs group-commit) and asserts the invariants are identical.
@@ -1008,22 +1103,57 @@ async fn ac_txn_contract_matrix() {
             );
             assertions.extend(a);
             if !same {
-                failures.push("AC-TXN-7 [objectlog]: latency-bound setting changed AC-TXN-3 invariants".into());
+                failures.push(
+                    "AC-TXN-7 [objectlog]: latency-bound setting changed AC-TXN-3 invariants"
+                        .into(),
+                );
             }
-            records.push(AcEvidence { ac: "AC-TXN-7", backend: "objectlog(force-seal|group-commit)".into(), result: if same {"partial"} else {"fail"}, detail: "AC-TXN-3 invariance across commit-latency-bound settings".into(), assertions });
+            records.push(AcEvidence {
+                ac: "AC-TXN-7",
+                backend: "objectlog(force-seal|group-commit)".into(),
+                result: if same { "partial" } else { "fail" },
+                detail: "AC-TXN-3 invariance across commit-latency-bound settings".into(),
+                assertions,
+            });
         }
         (fs, gc) => {
-            if let Err(e) = fs { record(&mut records, &mut failures, "AC-TXN-7", "objectlog(force-seal)", Err(e)); }
-            if let Err(e) = gc { record(&mut records, &mut failures, "AC-TXN-7", "objectlog(group-commit)", Err(e)); }
+            if let Err(e) = fs {
+                record(
+                    &mut records,
+                    &mut failures,
+                    "AC-TXN-7",
+                    "objectlog(force-seal)",
+                    Err(e),
+                );
+            }
+            if let Err(e) = gc {
+                record(
+                    &mut records,
+                    &mut failures,
+                    "AC-TXN-7",
+                    "objectlog(group-commit)",
+                    Err(e),
+                );
+            }
         }
     }
 
     let path = write_evidence("tp003-ac-txn-matrix.jsonl", &records).expect("write evidence jsonl");
     eprintln!("AC-TXN evidence written to {}", path.display());
     for r in &records {
-        eprintln!("  [{}] {} => {} ({} assertions)", r.result, r.ac, r.backend, r.assertions.len());
+        eprintln!(
+            "  [{}] {} => {} ({} assertions)",
+            r.result,
+            r.ac,
+            r.backend,
+            r.assertions.len()
+        );
     }
-    assert!(failures.is_empty(), "AC-TXN matrix failures:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "AC-TXN matrix failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// Postgres rows run in a SEPARATE non-tokio test because the sync postgres client panics under a tokio
@@ -1050,24 +1180,60 @@ fn ac_txn_contract_matrix_postgres() {
                 std::process::id(),
                 tag.replace('-', "_")
             );
-            pqueue_postgres::composed_postgres_backend_in_schema(&url, &sch).expect("connect postgres")
+            pqueue_postgres::composed_postgres_backend_in_schema(&url, &sch)
+                .expect("connect postgres")
         }
     };
 
     let mut records: Vec<AcEvidence> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
-    record(&mut records, &mut failures, "AC-TXN-1", "postgres",
-        futures::executor::block_on(ac_txn_1_success_durable_visible(pg_factory("txn1".into(), url.clone()))));
-    record(&mut records, &mut failures, "AC-TXN-2", "postgres",
-        futures::executor::block_on(ac_txn_2_rejection_no_effect(pg_factory("txn2".into(), url.clone()), DURABLE)));
-    record(&mut records, &mut failures, "AC-TXN-3", "postgres",
-        futures::executor::block_on(ac_txn_3_unknown_outcome_replay(pg_factory("txn3".into(), url.clone()), DURABLE)));
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-1",
+        "postgres",
+        futures::executor::block_on(ac_txn_1_success_durable_visible(pg_factory(
+            "txn1".into(),
+            url.clone(),
+        ))),
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-2",
+        "postgres",
+        futures::executor::block_on(ac_txn_2_rejection_no_effect(
+            pg_factory("txn2".into(), url.clone()),
+            DURABLE,
+        )),
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-3",
+        "postgres",
+        futures::executor::block_on(ac_txn_3_unknown_outcome_replay(
+            pg_factory("txn3".into(), url.clone()),
+            DURABLE,
+        )),
+    );
 
-    let path = write_evidence("tp003-ac-txn-matrix-postgres.jsonl", &records).expect("write pg evidence");
+    let path =
+        write_evidence("tp003-ac-txn-matrix-postgres.jsonl", &records).expect("write pg evidence");
     eprintln!("AC-TXN postgres evidence written to {}", path.display());
     for r in &records {
-        eprintln!("  [{}] {} => {} ({} assertions)", r.result, r.ac, r.backend, r.assertions.len());
+        eprintln!(
+            "  [{}] {} => {} ({} assertions)",
+            r.result,
+            r.ac,
+            r.backend,
+            r.assertions.len()
+        );
     }
-    assert!(failures.is_empty(), "AC-TXN postgres failures:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "AC-TXN postgres failures:\n{}",
+        failures.join("\n")
+    );
 }

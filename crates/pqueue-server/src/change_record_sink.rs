@@ -72,7 +72,9 @@ impl ChangeRecordSinkConfig {
                 Ok(ParsedDeliveryEndpoint::Http(_)) => ChangeRecordSinkMode::Http,
                 // A malformed endpoint is rejected by `validate`; treat parse failures as external-kafka so
                 // the error surfaces there rather than silently downgrading to the embedded default.
-                Ok(ParsedDeliveryEndpoint::Kafka(_)) | Err(_) => ChangeRecordSinkMode::ExternalKafka,
+                Ok(ParsedDeliveryEndpoint::Kafka(_)) | Err(_) => {
+                    ChangeRecordSinkMode::ExternalKafka
+                }
             },
         }
     }
@@ -292,7 +294,10 @@ fn change_record_key(record: &pqueue_engine::ChangeRecord) -> String {
 /// encoder and the external-Kafka producer path.
 fn change_record_headers(record: &pqueue_engine::ChangeRecord) -> Vec<(&'static str, Vec<u8>)> {
     let mut headers = vec![
-        ("pq-tenant-id", record.tenant_id.as_str().as_bytes().to_vec()),
+        (
+            "pq-tenant-id",
+            record.tenant_id.as_str().as_bytes().to_vec(),
+        ),
         ("pq-queue-id", record.queue_id.as_str().as_bytes().to_vec()),
     ];
     if let Some(item_id) = record.item_id {
@@ -433,7 +438,9 @@ impl ChangeRecordSink for FjordChangeRecordSink {
         // client. Because this is the SAME `Arc<dyn LogBackend>` the embedded `HeimqServer` serves from,
         // the appended records are immediately visible to external-consumer fetches over the Kafka surface.
         self.log.append(&topic, 0, &batch).map_err(|e| {
-            EngineError::Storage(format!("append change record batch to embedded fjord log: {e}"))
+            EngineError::Storage(format!(
+                "append change record batch to embedded fjord log: {e}"
+            ))
         })?;
         Ok(())
     }
@@ -461,7 +468,11 @@ impl FjordChangeRecordSink {
 #[derive(Clone)]
 pub struct ExternalKafkaChangeRecordSink {
     client: Arc<rskafka::client::Client>,
-    partitions: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<rskafka::client::partition::PartitionClient>>>>,
+    partitions: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, Arc<rskafka::client::partition::PartitionClient>>,
+        >,
+    >,
 }
 
 #[cfg(feature = "external-kafka")]
@@ -500,7 +511,13 @@ impl ExternalKafkaChangeRecordSink {
         &self,
         topic: &str,
     ) -> EngineResult<Arc<rskafka::client::partition::PartitionClient>> {
-        if let Some(existing) = self.partitions.lock().expect("poisoned").get(topic).cloned() {
+        if let Some(existing) = self
+            .partitions
+            .lock()
+            .expect("poisoned")
+            .get(topic)
+            .cloned()
+        {
             return Ok(existing);
         }
         let client = self.client.clone();
@@ -997,8 +1014,7 @@ mod tests {
         assert!(!config.enabled);
         let err = config.validate().expect_err("malformed endpoint must fail");
         assert!(
-            err.to_string()
-                .contains("must use an explicit scheme"),
+            err.to_string().contains("must use an explicit scheme"),
             "{}",
             err
         );
@@ -1132,7 +1148,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn external_kafka_mode_configures_without_binding_broker_port() {
-        use crate::{build_embedded_fjord_surface, maybe_spawn_embedded_broker, EmbeddedFjordConfig};
+        use crate::{
+            EmbeddedFjordConfig, build_embedded_fjord_surface, maybe_spawn_embedded_broker,
+        };
 
         // B2.1 / ADR-014: even with a broker_listen bind configured, an ExternalKafka sink must configure
         // WITHOUT binding the embedded broker's TCP surface. The embedded surface is spawned only for the
@@ -1147,9 +1165,10 @@ mod tests {
 
         // Had the ExternalKafka path erroneously bound the embedded surface, this would spawn a listener on
         // the loopback bind; instead it must return None and leave the port unbound.
-        let handle = maybe_spawn_embedded_broker(&surface, Some("127.0.0.1:0"), &external_sink, &[])
-            .await
-            .expect("external-kafka mode configures without error");
+        let handle =
+            maybe_spawn_embedded_broker(&surface, Some("127.0.0.1:0"), &external_sink, &[])
+                .await
+                .expect("external-kafka mode configures without error");
         assert!(
             handle.is_none(),
             "external-kafka sink mode must NOT bind the embedded broker surface"
@@ -1475,7 +1494,14 @@ mod tests {
         use heimq_broker::storage::RecordBatchView;
         let records = vec![
             sample_change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push),
-            sample_change_record("tenant-a", "queue-a", Some(2), 7, 2, ChangeRecordKind::Claim),
+            sample_change_record(
+                "tenant-a",
+                "queue-a",
+                Some(2),
+                7,
+                2,
+                ChangeRecordKind::Claim,
+            ),
             sample_change_record(
                 "tenant-a",
                 "queue-a",
@@ -1501,9 +1527,16 @@ mod tests {
     #[test]
     fn change_record_batch_encodes_key_headers_payload_partition() {
         use heimq_broker::storage::RecordBatchView;
-        let record =
-            sample_change_record("tenant-a", "queue-a", Some(17), 9, 3, ChangeRecordKind::Push);
-        let batch = encode_change_record_batch(std::slice::from_ref(&record)).expect("encode batch");
+        let record = sample_change_record(
+            "tenant-a",
+            "queue-a",
+            Some(17),
+            9,
+            3,
+            ChangeRecordKind::Push,
+        );
+        let batch =
+            encode_change_record_batch(std::slice::from_ref(&record)).expect("encode batch");
         let view = RecordBatchView::from_bytes(&batch).expect("decode batch");
         let record_view = view.records().next().expect("one record");
 

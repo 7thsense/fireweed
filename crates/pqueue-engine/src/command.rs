@@ -11,9 +11,9 @@ use pqueue_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::QueueKey;
 use crate::error::{EngineError, EngineResult};
 use crate::types::CommandPosition;
-use crate::QueueKey;
 
 /// Unique id for a committed command record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

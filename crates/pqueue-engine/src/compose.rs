@@ -40,12 +40,13 @@ use pqueue_core::{
 use crate::active_scope::{ActiveScope, DiscoveryGranularity};
 use crate::claim_validation::{ClaimCompatibility, ClaimUnit, validate_claim_compatibility};
 use crate::command::{
-    AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum, CommandEnvelope,
-    CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand, PayloadUpdate,
-    PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand,
-    RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand,
-    UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
-    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
+    AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum,
+    CommandEnvelope, CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
+    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome,
+    ScheduleUpdate, SetGatesCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
+    build_push_items, command_envelope_change_records, validate_gate_command, validate_gate_push,
+    validate_request_replay_metadata,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
@@ -1602,9 +1603,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// selection with `Unavailable`, so the log-replay family rejects non-item units unchanged.
     fn claim_rich(&self, req: &ClaimRequest, unit: ClaimUnit) -> EngineResult<Claimed> {
         let mut g = self.inner.lock().expect("poisoned");
-        let selection =
-            g.projection
-                .select_rich_claim(&req.shard, unit, &req.compatibility, req.now, req.max_items)?;
+        let selection = g.projection.select_rich_claim(
+            &req.shard,
+            unit,
+            &req.compatibility,
+            req.now,
+            req.max_items,
+        )?;
         if selection.item_ids.is_empty() {
             return Ok(Claimed::default());
         }

@@ -167,40 +167,68 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead>(
         .await
         .map_err(|e| format!("push_with_request_id: {e:?}"))?
     };
-    ensure!(acked.len() == 2, "expected 2 acked push ids, got {}", acked.len());
+    ensure!(
+        acked.len() == 2,
+        "expected 2 acked push ids, got {}",
+        acked.len()
+    );
     {
         let b = make("txn1");
-        let m = b.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?;
+        let m = b
+            .metrics(&qkey())
+            .await
+            .map_err(|e| format!("metrics: {e:?}"))?;
         ensure!(
             (m.pending, m.leased, m.complete) == (2, 0, 0),
             "BatchPush not durable after kill/reopen; got pending={} leased={} complete={}",
-            m.pending, m.leased, m.complete
+            m.pending,
+            m.leased,
+            m.complete
         );
         let live = b
             .live_items(&shard(), std::slice::from_ref(&key_b))
             .await
             .map_err(|e| format!("live_items: {e:?}"))?
-            .into_iter().next().flatten()
+            .into_iter()
+            .next()
+            .flatten()
             .ok_or_else(|| "pushed item not visible by client_item_key after reopen".to_string())?;
-        ensure!(live.item_id == acked[1], "pushed item id mismatch after reopen");
-        ensure!(live.payload.as_deref() == Some(&b"txn1-b"[..]), "pushed payload lost across reopen");
+        ensure!(
+            live.item_id == acked[1],
+            "pushed item id mismatch after reopen"
+        );
+        ensure!(
+            live.payload.as_deref() == Some(&b"txn1-b"[..]),
+            "pushed payload lost across reopen"
+        );
     }
-    asserts.push("BatchPush effect durable + visible/claimable after kill/reopen (0 missing acked commands)".into());
+    asserts.push(
+        "BatchPush effect durable + visible/claimable after kill/reopen (0 missing acked commands)"
+            .into(),
+    );
 
     // --- BatchClaim then kill/reopen and assert the item is durably Leased.
     let leased_id = {
         let b = make("txn1");
-        let claimed = b.claim(claim_req(1, 500, 10)).await.map_err(|e| format!("claim: {e:?}"))?;
+        let claimed = b
+            .claim(claim_req(1, 500, 10))
+            .await
+            .map_err(|e| format!("claim: {e:?}"))?;
         ensure!(claimed.items.len() == 1, "claim leased one item");
         claimed.items[0].item_id
     };
     {
         let b = make("txn1");
-        let m = b.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?;
+        let m = b
+            .metrics(&qkey())
+            .await
+            .map_err(|e| format!("metrics: {e:?}"))?;
         ensure!(
             (m.pending, m.leased, m.complete) == (1, 1, 0),
             "BatchClaim lease not durable after kill/reopen; got pending={} leased={} complete={}",
-            m.pending, m.leased, m.complete
+            m.pending,
+            m.leased,
+            m.complete
         );
     }
     asserts.push("BatchClaim lease durable after kill/reopen".into());
@@ -217,11 +245,15 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead>(
     {
         let b = make("txn1");
         b.tick(ts(600)).await.map_err(|e| format!("tick: {e:?}"))?;
-        let m = b.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?;
+        let m = b
+            .metrics(&qkey())
+            .await
+            .map_err(|e| format!("metrics: {e:?}"))?;
         ensure!(
             (m.pending, m.leased) == (1, 1),
             "BatchRenewLeases deadline lost after kill/reopen: a tick at 600 reclaimed the lease that renew extended to 900; got pending={} leased={}",
-            m.pending, m.leased
+            m.pending,
+            m.leased
         );
     }
     asserts.push("BatchRenewLeases extended deadline durable after kill/reopen (tick before renewed deadline does not reclaim)".into());
@@ -240,20 +272,30 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead>(
     }
     {
         let b = make("txn1");
-        let m = b.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?;
+        let m = b
+            .metrics(&qkey())
+            .await
+            .map_err(|e| format!("metrics: {e:?}"))?;
         ensure!(
             (m.pending, m.leased, m.complete) == (1, 0, 1),
             "BatchFinalize terminal state not durable after kill/reopen; got pending={} leased={} complete={}",
-            m.pending, m.leased, m.complete
+            m.pending,
+            m.leased,
+            m.complete
         );
         // The surviving pending sibling is still claimable (0 read-after-success gaps).
-        let claimed = b.claim(claim_req(1, 1500, 700)).await.map_err(|e| format!("claim: {e:?}"))?;
+        let claimed = b
+            .claim(claim_req(1, 1500, 700))
+            .await
+            .map_err(|e| format!("claim: {e:?}"))?;
         ensure!(
             claimed.items.first().map(|i| i.item_id) == Some(acked[1]),
             "surviving pending item not claimable after finalize+reopen"
         );
     }
-    asserts.push("BatchFinalize terminal state durable after kill/reopen; sibling still claimable".into());
+    asserts.push(
+        "BatchFinalize terminal state durable after kill/reopen; sibling still claimable".into(),
+    );
 
     // Honest op-coverage note: TP-003 §3.10 row 206 requires kill-after-success for EVERY mutating op
     // (CreateQueue, BatchPush, BatchUpdate, SetGates, BatchClaim, BatchRenewLeases, BatchFinalize,
@@ -309,9 +351,15 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
     );
     // (b) unknown-id renew → NotFound, appends nothing.
     ensure!(
-        a.renew(&shard(), vec![pqueue_core::ItemId::new("404").unwrap()], ts(500), ts(10), None)
-            .await
-            .is_err(),
+        a.renew(
+            &shard(),
+            vec![pqueue_core::ItemId::new("404").unwrap()],
+            ts(500),
+            ts(10),
+            None
+        )
+        .await
+        .is_err(),
         "renew of an unknown id must be rejected"
     );
     // Immediately prove the two structural rejections above appended 0 durable commands and produced 0
@@ -321,22 +369,45 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
         after_rejects == before,
         "rejected finalize/renew appended durable commands ({before} -> {after_rejects})"
     );
-    let m_rejects = a.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?;
+    let m_rejects = a
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics: {e:?}"))?;
     ensure!(
-        (m_rejects.pending, m_rejects.leased, m_rejects.complete, m_rejects.failed) == (1, 0, 0, 0),
+        (
+            m_rejects.pending,
+            m_rejects.leased,
+            m_rejects.complete,
+            m_rejects.failed
+        ) == (1, 0, 0, 0),
         "rejected finalize/renew changed visible state; got pending={} leased={} complete={} failed={}",
-        m_rejects.pending, m_rejects.leased, m_rejects.complete, m_rejects.failed
+        m_rejects.pending,
+        m_rejects.leased,
+        m_rejects.complete,
+        m_rejects.failed
     );
     // (c) request-id conflict: reuse a request_id with a different body → RequestIdConflict.
     let rid = RequestId::new("ac-txn-2-rid").unwrap();
-    a.push_with_request_id(&shard(), rid.clone(), vec![spec("txn2-rid", 1)], ts(11), None)
-        .await
-        .map_err(|e| format!("first request-id push: {e:?}"))?;
+    a.push_with_request_id(
+        &shard(),
+        rid.clone(),
+        vec![spec("txn2-rid", 1)],
+        ts(11),
+        None,
+    )
+    .await
+    .map_err(|e| format!("first request-id push: {e:?}"))?;
     let after_rid = durable_command_count(&a).await?;
     ensure!(
         matches!(
-            a.push_with_request_id(&shard(), rid, vec![spec("txn2-rid-different", 2)], ts(12), None)
-                .await,
+            a.push_with_request_id(
+                &shard(),
+                rid,
+                vec![spec("txn2-rid-different", 2)],
+                ts(12),
+                None
+            )
+            .await,
             Err(EngineError::RequestIdConflict)
         ),
         "reused request_id with a different body must conflict"
@@ -347,11 +418,17 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
         "request-id conflict must not append (durable {before}->{after_rid}->{after})"
     );
     // In-process: only the two accepted commands are visible; the rejects had no effect.
-    let m = a.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?;
+    let m = a
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics: {e:?}"))?;
     ensure!(
         (m.pending, m.leased, m.complete, m.failed) == (2, 0, 0, 0),
         "rejected mutations must leave 0 visible effect; got pending={} leased={} complete={} failed={}",
-        m.pending, m.leased, m.complete, m.failed
+        m.pending,
+        m.leased,
+        m.complete,
+        m.failed
     );
     asserts.push(
         "rejected finalize/renew/request-id-conflict appended 0 durable commands and left 0 visible effect".into(),
@@ -379,7 +456,10 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
     ensure!(
         (m.pending, m.leased, m.complete, m.failed) == (2, 0, 0, 0),
         "only accepted siblings survive restart; got pending={} leased={} complete={} failed={}",
-        m.pending, m.leased, m.complete, m.failed
+        m.pending,
+        m.leased,
+        m.complete,
+        m.failed
     );
     let live = b
         .live_items(&shard(), std::slice::from_ref(&accepted_key))
@@ -447,7 +527,10 @@ pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
             .push_with_request_id(&shard(), rid, body, ts(2), None)
             .await
             .map_err(|e| format!("after-response replay: {e:?}"))?;
-        ensure!(replay == ids, "after-response retry must replay the same result");
+        ensure!(
+            replay == ids,
+            "after-response retry must replay the same result"
+        );
         ensure!(
             a.metrics(&qkey()).await.unwrap().pending == 1,
             "BeforeAppend + fresh + replay yields exactly one item"
@@ -503,11 +586,19 @@ pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
         // reopen: recovery replays the durable tail and applies it exactly once.
         let b = make("txn3-append");
         ensure!(
-            b.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?.pending == 1,
+            b.metrics(&qkey())
+                .await
+                .map_err(|e| format!("metrics: {e:?}"))?
+                .pending
+                == 1,
             "committed-but-unapplied command must replay exactly once on recovery"
         );
         ensure!(
-            b.select_eligible(&shard(), ts(100), 10).await.map_err(|e| format!("{e:?}"))?.len() == 1,
+            b.select_eligible(&shard(), ts(100), 10)
+                .await
+                .map_err(|e| format!("{e:?}"))?
+                .len()
+                == 1,
             "recovery applied the replayed command exactly once (0 duplicate state transitions)"
         );
     }
@@ -542,14 +633,21 @@ pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
             replay == committed_ids,
             "same request_id after a lost response must replay the ONE committed result (got {replay:?} vs {committed_ids:?})"
         );
-        let m = b.metrics(&qkey()).await.map_err(|e| format!("metrics: {e:?}"))?;
+        let m = b
+            .metrics(&qkey())
+            .await
+            .map_err(|e| format!("metrics: {e:?}"))?;
         ensure!(
             m.pending == 1,
             "lost-response replay created a duplicate committed result (pending={})",
             m.pending
         );
         ensure!(
-            b.select_eligible(&shard(), ts(100), 10).await.map_err(|e| format!("{e:?}"))?.len() == 1,
+            b.select_eligible(&shard(), ts(100), 10)
+                .await
+                .map_err(|e| format!("{e:?}"))?
+                .len()
+                == 1,
             "lost-response replay produced a duplicate state transition"
         );
     }
@@ -851,7 +949,9 @@ pub fn evidence_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/perf/evidence")
         .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/perf/evidence"))
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/perf/evidence")
+        })
 }
 
 /// Write the evidence file, overwriting any prior run so the JSONL reflects exactly THIS run.

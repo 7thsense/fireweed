@@ -1,4 +1,3 @@
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -448,7 +447,14 @@ async fn fjord_surface_contract_verified_without_rdkafka() {
     let topic = fjord_topic_name(&shard).expect("valid fjord topic");
     let records = vec![
         change_record("tenant-a", "queue-a", Some(1), 7, 1, ChangeRecordKind::Push),
-        change_record("tenant-a", "queue-a", Some(2), 7, 2, ChangeRecordKind::Claim),
+        change_record(
+            "tenant-a",
+            "queue-a",
+            Some(2),
+            7,
+            2,
+            ChangeRecordKind::Claim,
+        ),
         change_record(
             "tenant-a",
             "queue-a",
@@ -484,13 +490,22 @@ async fn fjord_surface_contract_verified_without_rdkafka() {
                 "pq-command-kind",
             ]
         );
-        assert_eq!(header_value(message, "pq-tenant-id"), Some(b"tenant-a".as_ref()));
-        assert_eq!(header_value(message, "pq-queue-id"), Some(b"queue-a".as_ref()));
+        assert_eq!(
+            header_value(message, "pq-tenant-id"),
+            Some(b"tenant-a".as_ref())
+        );
+        assert_eq!(
+            header_value(message, "pq-queue-id"),
+            Some(b"queue-a".as_ref())
+        );
         assert_eq!(
             header_value(message, "pq-item-id"),
             Some(format!("{}", idx + 1).as_bytes())
         );
-        assert_eq!(header_value(message, "pq-backend-epoch"), Some(b"7".as_ref()));
+        assert_eq!(
+            header_value(message, "pq-backend-epoch"),
+            Some(b"7".as_ref())
+        );
         assert_eq!(
             header_value(message, "pq-sequence"),
             Some(format!("{}", idx + 1).as_bytes())
@@ -589,7 +604,8 @@ async fn fjord_surface_contract_verified_over_rskafka_consumer() {
     );
     // JSON payload round-trips to the same ChangeRecord.
     let payload = consumed_record.value.as_deref().expect("payload present");
-    let decoded: ChangeRecord = serde_json::from_slice(payload).expect("payload is ChangeRecord json");
+    let decoded: ChangeRecord =
+        serde_json::from_slice(payload).expect("payload is ChangeRecord json");
     assert_eq!(decoded, record);
     // pq-* headers present with correct values (order not asserted here: rskafka returns a BTreeMap).
     let header = |k: &str| consumed_record.headers.get(k).map(|v| v.as_slice());

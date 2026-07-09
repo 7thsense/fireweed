@@ -43,7 +43,9 @@ fn sqlite_log_factory() -> impl Fn() -> pqueue_sqlite::ComposedSqliteBackend {
 
 fn objectlog_factory() -> impl Fn() -> pqueue_objectlog::ComposedObjectLogBackend {
     let root = unique_dir("objectlog");
-    move || pqueue_objectlog::composed_objectlog_backend(root.clone()).expect("open composed objectlog")
+    move || {
+        pqueue_objectlog::composed_objectlog_backend(root.clone()).expect("open composed objectlog")
+    }
 }
 
 type HybridBackend = ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
@@ -152,7 +154,10 @@ where
         "recovery replayed the durable-but-unapplied command exactly once"
     );
     assert_eq!(
-        b.select_eligible(&shard(), ts(100), 10).await.unwrap().len(),
+        b.select_eligible(&shard(), ts(100), 10)
+            .await
+            .unwrap()
+            .len(),
         1,
         "no duplicate state transition after recovery replay"
     );
@@ -229,7 +234,10 @@ where
         .push_with_request_id(&shard(), rid, body, ts(2), None)
         .await
         .unwrap();
-    assert_eq!(replay, committed, "lost-response retry replays the committed ids");
+    assert_eq!(
+        replay, committed,
+        "lost-response retry replays the committed ids"
+    );
     assert_eq!(
         b.metrics(&qkey()).await.unwrap().pending,
         1,

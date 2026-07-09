@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use pqueue_release::{append_row, ledger_path, verify_ledger, LedgerRow, Measurements};
+use pqueue_release::{LedgerRow, Measurements, append_row, ledger_path, verify_ledger};
 
 const ARTIFACT_PATH: &str = "docs/perf/evidence/td008-terminal-reap-frontier.jsonl";
 const OBSERVED_RUN_COMMAND: &str =

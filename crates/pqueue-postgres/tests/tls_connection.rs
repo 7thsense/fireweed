@@ -30,8 +30,8 @@ fn postgres_tls_connection_succeeds() {
         "PQUEUE_PG_TLS_TEST_URL must request TLS (sslmode=require|prefer), got {ssl_mode:?}"
     );
 
-    let mut client =
-        connect(PostgresConnectConfig::new(&url)).expect("TLS connect to the live database succeeds");
+    let mut client = connect(PostgresConnectConfig::new(&url))
+        .expect("TLS connect to the live database succeeds");
 
     // Round-trip 1: a trivial query proves the encrypted session carries real traffic.
     let answer: i32 = client

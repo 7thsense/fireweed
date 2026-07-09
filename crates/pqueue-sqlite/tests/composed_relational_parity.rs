@@ -66,7 +66,12 @@ fn gatespec(priority: i64, gate_keys: &[&str]) -> PushSpec {
 }
 
 /// A claim request carrying compatibility options.
-fn claim_req_compat(max: usize, exp: i64, now: i64, compatibility: ClaimCompatibility) -> ClaimRequest {
+fn claim_req_compat(
+    max: usize,
+    exp: i64,
+    now: i64,
+    compatibility: ClaimCompatibility,
+) -> ClaimRequest {
     ClaimRequest {
         shard: shard(),
         worker_id: WorkerId::new("w1").unwrap(),
@@ -103,7 +108,10 @@ async fn composed_relational_whole_cohort_claim_selects_and_leases() {
         whole_cohort: true,
         ..Default::default()
     };
-    let claimed = b.claim(claim_req_compat(10, 500, 100, compat)).await.unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, compat))
+        .await
+        .unwrap();
 
     assert_eq!(
         claimed.cohort_lease_token,
@@ -153,14 +161,24 @@ async fn composed_relational_whole_group_claim_selects() {
         group_batching: Some(GroupBatching { max_groups: 2 }),
         ..Default::default()
     };
-    let claimed = b.claim(claim_req_compat(10, 500, 100, compat)).await.unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, compat))
+        .await
+        .unwrap();
     let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
     let mut expect: Vec<ItemId> = vec![ids[0], ids[1], ids[2], ids[3]]; // g1 + g2 whole; g3 untouched
     expect.sort();
-    assert_eq!(leased, expect, "the two oldest groups lease whole; g3 stays pending");
+    assert_eq!(
+        leased, expect,
+        "the two oldest groups lease whole; g3 stays pending"
+    );
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 4);
-    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1, "g3 still pending");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "g3 still pending"
+    );
 }
 
 /// `same_group_key` on the composed relational backend leases ONLY the single oldest eligible group.
@@ -182,14 +200,21 @@ async fn composed_relational_same_group_key_claim_selects() {
         same_group_key: true,
         ..Default::default()
     };
-    let claimed = b.claim(claim_req_compat(10, 500, 100, compat)).await.unwrap();
+    let claimed = b
+        .claim(claim_req_compat(10, 500, 100, compat))
+        .await
+        .unwrap();
     let mut leased: Vec<ItemId> = claimed.items.iter().map(|i| i.item_id).collect();
     leased.sort();
     let mut expect = vec![ids[0], ids[1]]; // g1 only (the oldest group)
     expect.sort();
     assert_eq!(leased, expect, "only the oldest group g1 is leased");
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 2);
-    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1, "g2 still pending");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "g2 still pending"
+    );
 }
 
 /// The composed LOG-REPLAY backend has no group/cohort projection, so every VALID non-item claim unit is
@@ -230,7 +255,10 @@ async fn composed_log_replay_claim_stays_unavailable_for_non_item_units() {
         );
     }
     // The item-level (default) claim still works unchanged.
-    assert_eq!(b.claim(claim_req(10, 500, 100)).await.unwrap().items.len(), 2);
+    assert_eq!(
+        b.claim(claim_req(10, 500, 100)).await.unwrap().items.len(),
+        2
+    );
 }
 
 /// REGRESSION (fencing/rollback discipline): a rich claim that gets FENCED (stale epoch) must leave no
@@ -300,9 +328,14 @@ async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() 
 async fn composed_relational_discover_active_scopes_rolls_up() {
     let b = composed_sqlite_relational_in_memory().unwrap();
     b.create_queue(qdef_rich()).await.unwrap();
-    b.push(&shard(), vec![gspec(10, "g1"), gspec(11, "g1")], ts(10), None)
-        .await
-        .unwrap();
+    b.push(
+        &shard(),
+        vec![gspec(10, "g1"), gspec(11, "g1")],
+        ts(10),
+        None,
+    )
+    .await
+    .unwrap();
     b.push(&shard(), vec![gspec(20, "g2")], ts(20), None)
         .await
         .unwrap();
@@ -347,7 +380,10 @@ async fn composed_log_replay_discovery_stays_unavailable() {
 #[tokio::test]
 async fn composed_relational_set_gates_and_gate_bearing_push_accepted() {
     let b = composed_sqlite_relational_in_memory().unwrap();
-    assert!(b.supports_gates(), "the composed relational backend supports gates");
+    assert!(
+        b.supports_gates(),
+        "the composed relational backend supports gates"
+    );
     b.create_queue(qdef()).await.unwrap();
 
     // A gate-bearing push is ACCEPTED (rejected on a non-gate backend).
@@ -369,10 +405,18 @@ async fn composed_relational_set_gates_and_gate_bearing_push_accepted() {
     .await
     .unwrap();
     assert!(
-        b.claim(claim_req(10, 500, 100)).await.unwrap().items.is_empty(),
+        b.claim(claim_req(10, 500, 100))
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
         "a blocked gate hides its item"
     );
-    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1, "gated item still pending");
+    assert_eq!(
+        b.metrics(&qkey()).await.unwrap().pending,
+        1,
+        "gated item still pending"
+    );
 
     // Clear the gate → the SAME item is claimable again.
     b.set_gates(
@@ -387,6 +431,10 @@ async fn composed_relational_set_gates_and_gate_bearing_push_accepted() {
     .await
     .unwrap();
     let claimed = b.claim(claim_req(10, 500, 100)).await.unwrap();
-    assert_eq!(claimed.items.len(), 1, "clearing the gate restores the item");
+    assert_eq!(
+        claimed.items.len(),
+        1,
+        "clearing the gate restores the item"
+    );
     assert_eq!(claimed.items[0].item_id, ids[0]);
 }

@@ -17,8 +17,8 @@
 //!   - AC-E2E-5 worker crash recovery (`worker_crash_recovery_e2e`).
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -34,10 +34,10 @@ use pqueue_core::{
     UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
-use pqueue_memory::{composed_memory_backend, ComposedMemoryBackend, ManualClock};
+use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 use pqueue_objectlog::ObjectLogBackend;
 use pqueue_sqlite::{
-    composed_sqlite_backend, composed_sqlite_relational_in_memory, SqliteRelationalBackend,
+    SqliteRelationalBackend, composed_sqlite_backend, composed_sqlite_relational_in_memory,
 };
 
 // ---------------------------------------------------------------------------

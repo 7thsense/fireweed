@@ -11,7 +11,9 @@ workspace-default-features = "allow"
 
 [licenses]
 version = 2
-allow = ["MIT", "Apache-2.0"]
+# Permissive licenses only. ISC/BSD-3-Clause/MIT-0 enter via the rustls/aws-lc TLS stack
+# (hyper-rustls <- metrics-exporter-prometheus <- heimq). All are OSI permissive.
+allow = ["MIT", "Apache-2.0", "ISC", "BSD-3-Clause", "MIT-0", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.8
 
 [sources]
