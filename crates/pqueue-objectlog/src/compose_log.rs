@@ -78,6 +78,12 @@ impl ObjectLog {
     pub fn counters(&self) -> crate::segmented::SegmentCounters {
         self.log.counters()
     }
+
+    /// Install (or clear, with `None`) a test-only fault hook on the underlying segmented substrate
+    /// (TP-003 §3.10 AC-TXN-4). See [`crate::segmented::FaultHook`] / [`crate::segmented::FaultCutPoint`].
+    pub fn set_fault_hook(&self, hook: Option<std::sync::Arc<dyn crate::segmented::FaultHook>>) {
+        self.log.set_fault_hook(hook);
+    }
 }
 
 impl LogStore for ObjectLog {

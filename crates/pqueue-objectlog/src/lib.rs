@@ -23,7 +23,7 @@ pub use compose_log::{
     ComposedObjectLogBackend, ObjectLog, composed_objectlog_backend,
     composed_objectlog_backend_group_commit,
 };
-pub use segmented::SegmentConfig;
+pub use segmented::{FaultCutPoint, FaultHook, SegmentConfig};
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;

@@ -35,6 +35,7 @@ use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -637,6 +638,53 @@ fn branch_metadata_key(branch: &QueueKey) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Internal fault-injection seam (TP-003 §3.10 AC-TXN-4)
+// ---------------------------------------------------------------------------
+//
+// The only commit-pipeline seam the engine exposes to a driver is `Backend::write` (append/apply as one
+// unit), which cannot strike the instants INSIDE this substrate's own group-commit pipeline: durable
+// segment write, durable manifest CAS commit, durable epoch-fence commit (owner reassignment), and durable
+// snapshot write are all internal to `SegmentedObjectLog::seal` / `acquire_epoch` / `write_snapshot`. This
+// seam is a test-only hook (never driven in production — no caller outside a test sets one) that lets a
+// test strike a "process died right here" fault at each of those named instants and observe the durable
+// footprint the crash leaves behind, so recovery/replay correctness can be asserted for real instead of
+// documented as an unreachable gap.
+
+/// The object-log-internal commit-pipeline instants a test can strike (TP-003 §3.10 AC-TXN-4). Each
+/// variant names a point strictly INSIDE the durable pipeline that the public `Backend::write` seam cannot
+/// reach because it treats a whole `append` (or `acquire_epoch`/`write_snapshot`) as one opaque call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultCutPoint {
+    /// Kill before the sealed segment object is durably written. Nothing durable exists yet — equivalent
+    /// in spirit to the public-seam `BeforeAppend`, but internal to this substrate's own pipeline.
+    BeforeSegmentWrite,
+    /// Kill after the segment object is durably written but before the manifest CAS is attempted. The
+    /// segment is now an ORPHAN: durable on the store but named by no committed manifest entry, so replay
+    /// (which only trusts the manifest) must never surface it.
+    AfterSegmentWriteBeforeManifest,
+    /// Kill after the manifest CAS durably commits (the TD-004 ack boundary — the manifest entry names the
+    /// segment and is now the durable source of truth) but before the caller receives the acked positions.
+    /// This is strictly before the composed backend's projection apply, since `ComposedBackend` only
+    /// applies a batch after its `LogStore::append` call returns `Ok`; recovery must replay the
+    /// manifest-committed segment exactly once even though the ack (and therefore the apply) was lost.
+    AfterManifestBeforeAck,
+    /// Kill after an epoch-fence entry durably commits to the manifest (owner reassignment /
+    /// `acquire_epoch`) but before the acquirer's local bookkeeping observes the new epoch. A stale-epoch
+    /// writer's next commit must still be rejected from the durable manifest tail, not from in-memory state.
+    DuringOwnerReassignment,
+    /// Kill before a projection snapshot blob is durably written. The command log remains the sole source
+    /// of truth, so a lost snapshot write must not lose or corrupt any committed command.
+    DuringSnapshotWrite,
+}
+
+/// A test-only fault hook: called at each [`FaultCutPoint`] the pipeline passes through. Returning `Err`
+/// simulates a process death at that instant (the in-flight operation aborts there); returning `Ok(())`
+/// (the default no-op behavior of not installing a hook at all) lets the pipeline run normally.
+pub trait FaultHook: Send + Sync {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()>;
+}
+
+// ---------------------------------------------------------------------------
 // The segmented object log
 // ---------------------------------------------------------------------------
 
@@ -676,6 +724,8 @@ pub struct SegmentedObjectLog<S: BlobStore> {
     store: S,
     config: SegmentConfig,
     inner: Mutex<Inner>,
+    /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-4). `None` in every production path.
+    fault_hook: Mutex<Option<Arc<dyn FaultHook>>>,
 }
 
 impl<S: BlobStore> SegmentedObjectLog<S> {
@@ -689,6 +739,22 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 counters: SegmentCounters::default(),
                 object_sizes: BTreeMap::new(),
             }),
+            fault_hook: Mutex::new(None),
+        }
+    }
+
+    /// Install (or clear, with `None`) a test-only fault hook (TP-003 §3.10 AC-TXN-4). Never called from
+    /// production code paths.
+    pub fn set_fault_hook(&self, hook: Option<Arc<dyn FaultHook>>) {
+        *self.fault_hook.lock().expect("fault hook poisoned") = hook;
+    }
+
+    /// Invoke the installed fault hook (if any) at `cut`. `Ok(())` when no hook is installed.
+    fn fault(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        let hook = self.fault_hook.lock().expect("fault hook poisoned").clone();
+        match hook {
+            Some(h) => h.fault_point(cut),
+            None => Ok(()),
         }
     }
 
@@ -882,6 +948,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             };
             let key = format!("{prefix}manifest/{next_index:020}.json");
             if self.store_put_if_absent(&key, &to_json(&entry)?, true)? {
+                // The fence entry just won its CAS: the epoch handoff is now durably committed to the
+                // manifest, even though this acquirer's own in-memory bookkeeping has not yet observed it.
+                self.fault(FaultCutPoint::DuringOwnerReassignment)?;
                 let mut g = self.inner.lock().expect("segmented log poisoned");
                 if let Some(buf) = g.shards.get_mut(shard) {
                     buf.committed_epoch = new_epoch;
@@ -998,6 +1067,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             (buf.next_seq, buf.next_manifest_index, buf.committed_epoch)
         };
 
+        self.fault(FaultCutPoint::BeforeSegmentWrite)?;
+
         // 3. Write the immutable, checksummed segment object (idempotent at its first-seq key). The segment
         //    is the framed concatenation of the per-command bytes serialized once at buffer time — no
         //    re-serialize on seal (Fix A). The checksum covers the records-blob region.
@@ -1006,6 +1077,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let (seg_bytes, seg_checksum) = build_segment_object(cur_epoch, first_seq, &drained);
         let seg_key = format!("{prefix}seg/{first_seq:020}.seg");
         self.store_put_segment(&seg_key, &seg_bytes)?;
+
+        self.fault(FaultCutPoint::AfterSegmentWriteBeforeManifest)?;
 
         // 4. Commit the manifest entry via the create-only CAS at the next index.
         let entry = ManifestEntry {
@@ -1035,6 +1108,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             // retries. Surface as a conflict so it is not mistaken for an ack.
             return Err(EngineError::Conflict);
         }
+
+        // The manifest CAS just won: the segment is now named by a durably committed manifest entry (the
+        // TD-004 ack boundary). A fault struck here models a crash after that durable commit but before the
+        // ack (and therefore before any projection apply, which only ever runs after this call returns
+        // `Ok`) reaches the caller.
+        self.fault(FaultCutPoint::AfterManifestBeforeAck)?;
 
         // 5. Ack: the manifest entry is durable. Advance state + counters, then return positions.
         let mut positions = Vec::with_capacity(n);
@@ -1434,6 +1513,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             payload: payload.to_vec(),
         };
         let key = format!("{prefix}{ref_id}.json");
+        self.fault(FaultCutPoint::DuringSnapshotWrite)?;
         self.store_put(&key, &to_json(&blob)?, false)?;
         Ok(ref_id)
     }
