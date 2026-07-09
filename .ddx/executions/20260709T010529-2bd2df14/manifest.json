@@ -1,0 +1,36 @@
+{
+  "attempt_id": "20260709T010529-2bd2df14",
+  "bead_id": "pqueue-a352dbcc",
+  "base_rev": "da56fcdd359c8508afcb6c84732e0fc5cf45f764",
+  "created_at": "2026-07-09T01:05:30.830320631Z",
+  "requested": {
+    "harness": "claude",
+    "model": "claude-sonnet-5",
+    "prompt": "synthesized"
+  },
+  "bead": {
+    "id": "pqueue-a352dbcc",
+    "title": "Hybrid-strict/async fault seams + AC-TXN-5/5A poison matrix",
+    "description": "PROBLEM: AC-TXN-5 and AC-TXN-5A (TP-003 §3.10 rows 210-211) require injecting failures in the objectlog/hybrid-strict and hybrid-async projection paths — after manifest commit, after SQLite commit before memory apply, during memory apply, before response delivery (strict); and before manifest, after manifest before memory apply, during async SQLite apply, after SQLite lag recovery, while async apply debt exceeds budget, after backpressure admission trips (async) — none of which the public seam reaches, so AC-TXN-5/5A are unrecorded/deferred. ROOT CAUSE: the hybrid deferred-apply path (crates/pqueue-server object_log_sqlite hybrid + crates/pqueue-sqlite projection apply) has no test-injectable failure hook. PROPOSED FIX: add test-only fault hooks at the hybrid-strict and hybrid-async cut points; extend the matrix suite to cover AC-TXN-5 (SQLite-commit/memory-fail poisons the store fail-closed until restart; restart hydrates memory from SQLite ProjectionImage; same-body retry returns original, conflicting body -\u003e request-id-conflict) and AC-TXN-5A (success only after manifest+synchronous memory apply; ordered batching applies sealed batches in batch_sequence order exactly once; sqlite_high_water advances only after complete batch apply; crash-before-memory-apply resolves unknown-outcome by request_id; backpressure/debt fails closed). NON-SCOPE: object-log segment/manifest cut points (AC-TXN-4, separate bead).",
+    "acceptance": "1. `ac_txn_5_hybrid_strict_poison_replay` passes (fail-closed poison + restart hydration + request-id semantics).\n2. `ac_txn_5a_hybrid_async_success_barrier` passes (success barrier + ordered exactly-once batch apply + unknown-outcome-by-request-id + backpressure fail-closed).\n3. `rustup run 1.92.0 cargo test -p pqueue-conformance -p pqueue-sqlite -p pqueue-server` passes.\n4. `rg -n 'AC-TXN-5' docs/perf/evidence/tp003-ac-txn-matrix.jsonl` shows the hybrid rows as pass.",
+    "labels": [
+      "kind:test",
+      "area:pqueue-sqlite",
+      "area:pqueue-server",
+      "area:pqueue-conformance",
+      "gap-closure",
+      "phase-5",
+      "tp-003"
+    ]
+  },
+  "paths": {
+    "dir": ".ddx/executions/20260709T010529-2bd2df14",
+    "prompt": ".ddx/executions/20260709T010529-2bd2df14/prompt.md",
+    "manifest": ".ddx/executions/20260709T010529-2bd2df14/manifest.json",
+    "result": ".ddx/executions/20260709T010529-2bd2df14/result.json",
+    "checks": ".ddx/executions/20260709T010529-2bd2df14/checks.json",
+    "usage": ".ddx/executions/20260709T010529-2bd2df14/usage.json",
+    "worktree": "home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-a352dbcc-20260709T010529-2bd2df14"
+  },
+  "prompt_sha": "b10822021ea9f1ad657675e7701481369b9a08599b4a9e1a6aa59254e7e1af94"
+}

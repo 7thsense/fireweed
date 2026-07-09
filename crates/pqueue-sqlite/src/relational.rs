@@ -4215,6 +4215,38 @@ pub struct SqliteProjectionStore {
 /// this bead) — chunk size was ruled out, not confirmed, as the lever for that gate.
 pub const DEFAULT_DEFERRED_FLUSH_CHUNK: usize = 250;
 
+// ---------------------------------------------------------------------------
+// Internal fault-injection seam (TP-003 §3.10 AC-TXN-5/5A)
+// ---------------------------------------------------------------------------
+//
+// The public `ProjectionStore` seam (`apply`/`apply_live`/`flush_deferred`) does not let a caller strike a
+// fault strictly BETWEEN the durable SQLite commit and the in-memory apply, or strictly inside the deferred
+// async SQLite checkpoint apply — those instants are internal to [`HybridProjectionStore`]'s own commit
+// pipeline. This test-only hook lets a test strike a "process died right here" fault at each of those named
+// instants and observe the durable/poison contract, mirroring `pqueue_objectlog::segmented`'s `FaultHook`
+// (AC-TXN-4) for the projection-apply side of the hybrid substrate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HybridFaultCutPoint {
+    /// The SQLite checkpoint for this batch committed durably, but the in-memory apply that makes it
+    /// client-visible has not run yet (the "hybrid-strict" `apply` ordering: SQLite, then memory).
+    AfterSqliteCommitBeforeMemoryApply,
+    /// Struck at the top of the in-memory apply step, shared by every apply path (`apply`, `apply_live`,
+    /// `apply_live_owned`, `apply_recovery`) — the success barrier every hybrid profile applies before
+    /// returning to the caller.
+    DuringMemoryApply,
+    /// Struck immediately before the deferred queue's batched SQLite checkpoint transaction (the
+    /// "hybrid-async" background apply that catches SQLite up to the in-memory high-water).
+    DuringAsyncSqliteApply,
+}
+
+/// A test-only fault hook for [`HybridProjectionStore`] (TP-003 §3.10 AC-TXN-5/5A). Returning `Err` aborts
+/// the pipeline at that instant; `Ok(())` (the default no-op behavior of not installing a hook at all) lets
+/// the pipeline run normally. Never invoked from any production call site — only `set_fault_hook` installs
+/// one, and nothing in this crate calls it outside tests.
+pub trait HybridFaultHook: Send + Sync {
+    fn fault_point(&self, cut: HybridFaultCutPoint) -> EngineResult<()>;
+}
+
 pub struct HybridProjectionStore {
     sqlite: SqliteProjectionStore,
     memory: InMemoryProjection,
@@ -4224,6 +4256,8 @@ pub struct HybridProjectionStore {
     deferred_commands: usize,
     deferred_flush_chunk: usize,
     poisoned: Option<String>,
+    /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-5/5A). `None` in every production path.
+    fault_hook: Mutex<Option<Arc<dyn HybridFaultHook>>>,
 }
 
 impl HybridProjectionStore {
@@ -4245,6 +4279,7 @@ impl HybridProjectionStore {
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             poisoned: None,
+            fault_hook: Mutex::new(None),
         }
     }
 
@@ -4259,6 +4294,26 @@ impl HybridProjectionStore {
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             poisoned: None,
+            fault_hook: Mutex::new(None),
+        }
+    }
+
+    /// Install (or clear, with `None`) a test-only fault hook (TP-003 §3.10 AC-TXN-5/5A). Never called from
+    /// any production call site.
+    pub fn set_fault_hook(&self, hook: Option<Arc<dyn HybridFaultHook>>) {
+        *self.fault_hook.lock().expect("hybrid fault hook poisoned") = hook;
+    }
+
+    /// Invoke the installed fault hook (if any) at `cut`. `Ok(())` when no hook is installed.
+    fn fault(&self, cut: HybridFaultCutPoint) -> EngineResult<()> {
+        let hook = self
+            .fault_hook
+            .lock()
+            .expect("hybrid fault hook poisoned")
+            .clone();
+        match hook {
+            Some(h) => h.fault_point(cut),
+            None => Ok(()),
         }
     }
 
@@ -4364,6 +4419,7 @@ impl HybridProjectionStore {
     ) -> EngineResult<()> {
         let mut advanced: HashMap<QueueKey, u64> = HashMap::new();
         let apply_result: EngineResult<()> = (|| {
+            self.fault(HybridFaultCutPoint::DuringMemoryApply)?;
             for (pos, env) in positions.iter().zip(commands.iter()) {
                 let next_seq = self.memory_next_seq.get(&pos.queue).copied().unwrap_or(0);
                 if pos.sequence >= next_seq {
@@ -4396,6 +4452,14 @@ impl HybridProjectionStore {
     ) -> EngineResult<()> {
         self.check_healthy()?;
         self.sqlite.apply_committed_batch(positions, commands)?;
+        if let Err(e) = self.fault(HybridFaultCutPoint::AfterSqliteCommitBeforeMemoryApply) {
+            // The SQLite checkpoint already committed durably; a memory apply that never runs would leave
+            // memory silently behind the durable image. Poison so every subsequent read/write fails closed
+            // until a restart re-hydrates memory from the (already-consistent) SQLite ProjectionImage.
+            return self.poison(format!(
+                "memory apply skipped after durable SQLite commit (fault injected): {e}"
+            ));
+        }
         self.apply_memory(positions, commands)
     }
 
@@ -9191,6 +9255,12 @@ impl ProjectionStore for HybridProjectionStore {
             .take(take)
             .map(|(_, env)| env.clone())
             .collect();
+        if let Err(e) = self.fault(HybridFaultCutPoint::DuringAsyncSqliteApply) {
+            // The deferred batch is untouched (still queued for the next flush attempt) but the async
+            // apply pipeline is no longer trustworthy: poison so it fails closed instead of silently
+            // retrying forever against a possibly-corrupt SQLite image.
+            return self.poison(format!("async SQLite checkpoint apply faulted: {e}"));
+        }
         self.sqlite.apply_committed_batch(&positions, &commands)?;
         self.deferred.drain(..take);
         self.deferred_commands = self.deferred.len();

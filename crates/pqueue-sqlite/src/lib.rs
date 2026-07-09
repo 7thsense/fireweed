@@ -14,9 +14,9 @@ pub use compose_log::SqliteLog;
 pub use relational::{
     BackpressureLevel, CheckpointLineage, CheckpointProgress, ComposedSqliteRelationalBackend,
     DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncDebt, HybridAsyncMetrics, HybridAsyncMonitor,
-    HybridAsyncThresholds, HybridProjectionStore, SqliteCheckpointStore, SqliteProjectionStore,
-    SqliteRelational, SqliteRelationalBackend, WalCheckpointStats, composed_sqlite_relational,
-    composed_sqlite_relational_in_memory,
+    HybridAsyncThresholds, HybridFaultCutPoint, HybridFaultHook, HybridProjectionStore,
+    SqliteCheckpointStore, SqliteProjectionStore, SqliteRelational, SqliteRelationalBackend,
+    WalCheckpointStats, composed_sqlite_relational, composed_sqlite_relational_in_memory,
 };
 
 use pqueue_engine::{ComposedBackend, EngineResult, InProcessControlPlane};
