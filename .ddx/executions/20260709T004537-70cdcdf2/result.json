@@ -1,0 +1,72 @@
+{
+  "bead_id": "pqueue-3b981b92",
+  "attempt_id": "20260709T004537-70cdcdf2",
+  "base_rev": "3df72e781b080b840a50e560ac9cf4bd22caa3ac",
+  "result_rev": "d893a22238d2813b611590e5671c9357c2619290",
+  "implementation_rev": "d893a22238d2813b611590e5671c9357c2619290",
+  "landed_rev": "d893a22238d2813b611590e5671c9357c2619290",
+  "landed_branch": "main",
+  "outcome": "merged",
+  "status": "success",
+  "detail": "success",
+  "orchestrator_status": "success",
+  "candidate_ref": "refs/ddx/iterations/20260709T004537-70cdcdf2/0",
+  "cycle_trace": [
+    {
+      "cycle_index": 0,
+      "attempt_id": "20260709T004537-70cdcdf2",
+      "result_rev": "d893a22238d2813b611590e5671c9357c2619290",
+      "implementer_route": {
+        "harness": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "requested_route": {
+        "harness": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "actual_route": {
+        "harness": "claude",
+        "model": "claude-sonnet-5"
+      },
+      "review_group_id": "20260709T010406-ecda3934",
+      "reviewer_indices": [
+        0,
+        1
+      ],
+      "review_verdicts": [
+        "",
+        ""
+      ],
+      "reviewer_route": {
+        "model": "smart"
+      },
+      "review_result": {
+        "classification": "review_malfunction"
+      },
+      "final_decision": "review_malfunction",
+      "failure_class": "review_malfunction",
+      "retry_action": "retry",
+      "escalation_count": 0,
+      "review_status": "malformed",
+      "review_skip_reason": "",
+      "review_classification": "review_malfunction",
+      "land_status": "not_landed",
+      "reconcile_status": "not_applicable"
+    }
+  ],
+  "harness": "claude",
+  "model": "claude-sonnet-5",
+  "session_id": "eb-0e1f0ac4",
+  "duration_ms": 1106830,
+  "cost_usd": 9.368100400000001,
+  "exit_code": 0,
+  "project_root": "/home/erik/Projects/pqueue",
+  "execution_dir": ".ddx/executions/20260709T004537-70cdcdf2",
+  "prompt_file": ".ddx/executions/20260709T004537-70cdcdf2/prompt.md",
+  "manifest_file": ".ddx/executions/20260709T004537-70cdcdf2/manifest.json",
+  "result_file": ".ddx/executions/20260709T004537-70cdcdf2/result.json",
+  "usage_file": ".ddx/executions/20260709T004537-70cdcdf2/usage.json",
+  "rate_limit_budget": 300000000000,
+  "started_at": "2026-07-09T00:45:38.93849597Z",
+  "finished_at": "2026-07-09T01:04:05.769297002Z"
+}
