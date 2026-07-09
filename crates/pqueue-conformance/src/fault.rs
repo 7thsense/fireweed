@@ -34,11 +34,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, PriorityValue, RequestId};
+use pqueue_core::{ClientItemKey, GroupKey, Metadata, PriorityValue, RequestId};
 use pqueue_engine::{
-    Backend, CommandEnvelope, CommandPosition, ControlPlaneStore, DurabilityClass, EngineError,
-    FinalizeKind, FinalizeOutcome, LogRead, PayloadUpdate, PushCommand, PushSpec, QueueCommand,
-    SetGatesCommand, SetGatesPort,
+    Backend, ClaimCompatibility, CommandEnvelope, CommandPosition, ControlPlaneStore,
+    DurabilityClass, EngineError, FenceLeaseCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
+    LogRead, PayloadUpdate, PushCommand, PushSpec, QueueCommand, SetGatesCommand, SetGatesPort,
+    UnfenceLeaseCommand,
 };
 
 use crate::{ConformanceCore, claim_req, commit, envelope, item, qdef, qkey, shard, ts};
@@ -670,13 +671,19 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
     asserts.push(
         "rejected finalize/renew/request-id-conflict appended 0 durable commands and left 0 visible effect".into(),
     );
-    // Honest rejection-class note: TP-003 §3.10 row 207 requires envelope-invalid batches, per-item
-    // invalid/conflict/stale cases, capacity/unavailable paths, AND commit-timeout paths. This scenario
-    // drives three rejection classes (per-item-invalid finalize, unknown-id renew, request-id-conflict) plus
-    // accepted-sibling survival; the remaining classes are not exercised here.
-    asserts.push(
-        "GAP (row 207 rejection-class coverage): covers per-item-invalid finalize, unknown-id renew, request-id-conflict, and accepted-sibling survival; NOT exercised: envelope-invalid batches, per-item stale-lease/conflict (beyond request-id), capacity/unavailable paths, commit-timeout paths".into(),
-    );
+
+    // TP-003 §3.10 row 207 requires the FULL rejection-class surface: envelope-invalid batches, per-item
+    // invalid/conflict/stale cases, capacity/unavailable paths, AND commit-timeout paths — each leaving 0
+    // durable effect (re-verified after restart+replay on durable profiles) while an accepted sibling keeps
+    // normal success. The three classes above (per-item-invalid finalize, unknown-id renew,
+    // request-id-conflict) are joined here by the remaining classes, each driven against the SAME profile via
+    // its own isolated store tag so no scenario masks another. Capability-N/A is recorded (never a silent
+    // pass) where a class genuinely cannot occur on this backend (e.g. upsert->Unavailable on an atomic
+    // backend, where upsert is instead available).
+    asserts.extend(ac_txn_2_envelope_invalid_batch(&make, caps).await?);
+    asserts.extend(ac_txn_2_stale_lease_conflict(&make, caps).await?);
+    asserts.extend(ac_txn_2_capacity_unavailable_path(&make, caps).await?);
+    asserts.extend(ac_txn_2_commit_timeout_path(&make, caps).await?);
 
     if !caps.durable_reopen {
         asserts.push("restart-replay clause N/A (non-durable in-memory dev profile)".into());
@@ -711,6 +718,542 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
     );
     asserts.push("accepted siblings survive restart with 0 phantom commits from rejects".into());
 
+    Ok(asserts)
+}
+
+/// The post-rejection observable baseline: the accepted sibling is the ONLY visible item and a rejection
+/// appended nothing. Shared assertion used by the AC-TXN-2 rejection-class functions below.
+async fn assert_only_sibling_pending<B: ConformanceCore>(
+    b: &B,
+    where_: &str,
+) -> Result<(), String> {
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics ({where_}): {e:?}"))?;
+    ensure!(
+        (m.pending, m.leased, m.complete, m.failed) == (1, 0, 0, 0),
+        "{where_}: rejection changed visible state; got pending={} leased={} complete={} failed={}",
+        m.pending,
+        m.leased,
+        m.complete,
+        m.failed
+    );
+    Ok(())
+}
+
+/// **AC-TXN-2 / envelope-invalid batch** (TP-003 §3.10 row 207): a structurally-invalid command envelope
+/// the validators reject at the ENVELOPE level — a charset-invalid `group_key`, and a `group_batching` unit
+/// with no configured `max_eligible_group_size` — is rejected `Invalid` before any append. Asserts 0 durable
+/// commands, 0 visible effect (re-verified after restart+replay on a durable profile), while the accepted
+/// sibling push retains normal success (durable + visible).
+pub async fn ac_txn_2_envelope_invalid_batch<B: ConformanceCore + LogRead>(
+    make: impl Fn(&str) -> B,
+    caps: TxnCaps,
+) -> AcOutcome {
+    let mut asserts = Vec::new();
+    let accepted_key = ClientItemKey::new("txn2env-accepted").unwrap();
+    let a = make("txn2-env");
+    a.create_queue(qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+    let ids = a
+        .push(&shard(), vec![spec("txn2env-accepted", 5)], ts(0), None)
+        .await
+        .map_err(|e| format!("accepted push: {e:?}"))?;
+    ensure!(ids.len() == 1, "accepted push landed one item");
+
+    let before = durable_command_count(&a).await?;
+
+    // (a) charset-invalid group_key: an envelope-level field the claim validator rejects (`^[A-Za-z0-9._:-]$`).
+    let mut req = claim_req(10, 500, 10);
+    req.compatibility = ClaimCompatibility {
+        group_key: Some(GroupKey::new("bad key!").unwrap()),
+        ..Default::default()
+    };
+    ensure!(
+        matches!(a.claim(req).await, Err(EngineError::Invalid(_))),
+        "a charset-invalid group_key must be rejected Invalid at envelope validation"
+    );
+    // (b) structurally-invalid group_batching unit (no max_eligible_group_size configured) -> Invalid.
+    let mut req2 = claim_req(10, 500, 10);
+    req2.compatibility = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 1 }),
+        ..Default::default()
+    };
+    ensure!(
+        matches!(a.claim(req2).await, Err(EngineError::Invalid(_))),
+        "a structurally-invalid group_batching envelope must be rejected Invalid"
+    );
+
+    let after = durable_command_count(&a).await?;
+    ensure!(
+        after == before,
+        "envelope-invalid claims appended durable commands ({before} -> {after})"
+    );
+    assert_only_sibling_pending(&a, "envelope-invalid").await?;
+    // Accepted sibling retains normal success: durable + visible by client_item_key.
+    ensure!(
+        a.live_items(&shard(), std::slice::from_ref(&accepted_key))
+            .await
+            .map_err(|e| format!("live_items: {e:?}"))?
+            .into_iter()
+            .next()
+            .flatten()
+            .is_some(),
+        "accepted sibling must be visible (normal success) alongside the rejected envelopes"
+    );
+    asserts.push(
+        "envelope-invalid batch (charset-invalid group_key + structurally-invalid group_batching) rejected at envelope validation: 0 durable commands, 0 visible effect; accepted sibling remains visible".into(),
+    );
+
+    if !caps.durable_reopen {
+        asserts.push(
+            "envelope-invalid restart-replay clause N/A (non-durable in-memory dev profile)".into(),
+        );
+        return Ok(asserts);
+    }
+    drop(a);
+    let b = make("txn2-env");
+    assert_only_sibling_pending(&b, "envelope-invalid after restart").await?;
+    ensure!(
+        b.live_items(&shard(), std::slice::from_ref(&accepted_key))
+            .await
+            .map_err(|e| format!("live_items after restart: {e:?}"))?
+            .into_iter()
+            .next()
+            .flatten()
+            .is_some(),
+        "accepted sibling must retain normal success after restart"
+    );
+    asserts.push(
+        "envelope-invalid batch left 0 durable effect across restart+replay; accepted sibling survives".into(),
+    );
+    Ok(asserts)
+}
+
+/// **AC-TXN-2 / stale-lease / fenced conflict** (TP-003 §3.10 row 207): finalize/renew of an operator-fenced
+/// (stale-generation) lease is rejected `StaleLease` and appends nothing, while a validly-leased sibling in
+/// the same batch still finalizes normally. The 0-durable-effect of the rejection is re-verified after
+/// restart+replay on a durable profile (the fence survives, so the post-restart finalize is still StaleLease).
+pub async fn ac_txn_2_stale_lease_conflict<B: ConformanceCore + LogRead>(
+    make: impl Fn(&str) -> B,
+    caps: TxnCaps,
+) -> AcOutcome {
+    let mut asserts = Vec::new();
+    let a = make("txn2-stale");
+    a.create_queue(qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+    // Two items: a "victim" whose lease will be fenced, and a validly-leased "sibling".
+    let ids = a
+        .push(
+            &shard(),
+            vec![spec("txn2stale-victim", 5), spec("txn2stale-sibling", 9)],
+            ts(0),
+            None,
+        )
+        .await
+        .map_err(|e| format!("seed push: {e:?}"))?;
+    ensure!(ids.len() == 2, "seed push landed two items");
+    let victim = ids[0];
+    let sibling = ids[1];
+    // Lease both, then operator-fence the victim's lease (stale generation).
+    let claimed = a
+        .claim(claim_req(10, 500, 10))
+        .await
+        .map_err(|e| format!("claim: {e:?}"))?;
+    ensure!(claimed.items.len() == 2, "claim leased both items");
+    commit(
+        &a,
+        envelope(
+            QueueCommand::FenceLease(FenceLeaseCommand {
+                item_ids: vec![victim],
+            }),
+            vec![victim],
+        ),
+    )
+    .await;
+
+    let before = durable_command_count(&a).await?;
+    // Finalize the fenced lease -> StaleLease, appends nothing.
+    ensure!(
+        matches!(
+            a.finalize(
+                &shard(),
+                vec![FinalizeOutcome::new(victim, FinalizeKind::Complete)],
+                ts(20),
+                None,
+            )
+            .await,
+            Err(EngineError::StaleLease)
+        ),
+        "finalize of an operator-fenced lease must be StaleLease"
+    );
+    // Renew the fenced lease -> StaleLease, appends nothing.
+    ensure!(
+        matches!(
+            a.renew(&shard(), vec![victim], ts(3000), ts(21), None).await,
+            Err(EngineError::StaleLease)
+        ),
+        "renew of an operator-fenced lease must be StaleLease"
+    );
+    let after = durable_command_count(&a).await?;
+    ensure!(
+        after == before,
+        "stale-lease finalize/renew appended durable commands ({before} -> {after})"
+    );
+    // Both items still leased (the fence keeps the victim leased; nothing finalized yet).
+    let m = a
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics: {e:?}"))?;
+    ensure!(
+        (m.pending, m.leased, m.complete, m.failed) == (0, 2, 0, 0),
+        "stale-lease rejection changed visible state; got pending={} leased={} complete={} failed={}",
+        m.pending,
+        m.leased,
+        m.complete,
+        m.failed
+    );
+    // The validly-leased sibling still finalizes normally (accepted success in the same batch).
+    a.finalize(
+        &shard(),
+        vec![FinalizeOutcome::new(sibling, FinalizeKind::Complete)],
+        ts(22),
+        None,
+    )
+    .await
+    .map_err(|e| format!("sibling finalize: {e:?}"))?;
+    let m = a
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics after sibling finalize: {e:?}"))?;
+    ensure!(
+        (m.pending, m.leased, m.complete, m.failed) == (0, 1, 1, 0),
+        "validly-leased sibling did not finalize normally; got pending={} leased={} complete={} failed={}",
+        m.pending,
+        m.leased,
+        m.complete,
+        m.failed
+    );
+    asserts.push(
+        "stale-lease/fenced conflict: finalize+renew of an operator-fenced lease -> StaleLease, 0 durable commands, 0 visible effect; a validly-leased sibling finalizes normally".into(),
+    );
+
+    if !caps.durable_reopen {
+        asserts
+            .push("stale-lease restart-replay clause N/A (non-durable in-memory dev profile)".into());
+        return Ok(asserts);
+    }
+    drop(a);
+    let b = make("txn2-stale");
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics after restart: {e:?}"))?;
+    ensure!(
+        (m.pending, m.leased, m.complete, m.failed) == (0, 1, 1, 0),
+        "post-restart state diverged; got pending={} leased={} complete={} failed={}",
+        m.pending,
+        m.leased,
+        m.complete,
+        m.failed
+    );
+    // The fence survived replay: the victim's finalize is STILL StaleLease (rejection still leaves 0 effect).
+    ensure!(
+        matches!(
+            b.finalize(
+                &shard(),
+                vec![FinalizeOutcome::new(victim, FinalizeKind::Complete)],
+                ts(30),
+                None,
+            )
+            .await,
+            Err(EngineError::StaleLease)
+        ),
+        "the operator fence must survive restart so the finalize is still StaleLease (0 durable effect)"
+    );
+    asserts.push(
+        "stale-lease/fenced conflict left 0 durable effect across restart+replay (fence survives; finalize still StaleLease); accepted sibling's Complete survives".into(),
+    );
+    // Unfence + finalize the victim so no leaked fenced lease outlives the scenario is unnecessary for the
+    // assertion, but proves the fence was the sole reason: after unfence, finalize succeeds.
+    commit(
+        &b,
+        envelope(
+            QueueCommand::UnfenceLease(UnfenceLeaseCommand {
+                item_ids: vec![victim],
+            }),
+            vec![victim],
+        ),
+    )
+    .await;
+    b.finalize(
+        &shard(),
+        vec![FinalizeOutcome::new(victim, FinalizeKind::Complete)],
+        ts(31),
+        None,
+    )
+    .await
+    .map_err(|e| format!("post-unfence finalize: {e:?}"))?;
+    asserts.push(
+        "control: after operator UNfence the same finalize succeeds (StaleLease was the sole, fence-scoped rejection)".into(),
+    );
+    Ok(asserts)
+}
+
+/// **AC-TXN-2 / capacity / unavailable path** (TP-003 §3.10 row 207): a capacity/batch-limit rejection
+/// (`group_batching` whose group ceiling exceeds the requested `max_items` -> `BatchTooLarge`) leaves 0
+/// durable effect on EVERY backend; additionally, on an eventual-apply backend an upsert (`ReplacePending`)
+/// is `Unavailable` (0 durable effect). On an ATOMIC backend upsert is available, so the upsert->Unavailable
+/// class genuinely cannot occur there and is recorded capability-N/A (never a silent pass).
+pub async fn ac_txn_2_capacity_unavailable_path<B: ConformanceCore + LogRead>(
+    make: impl Fn(&str) -> B,
+    caps: TxnCaps,
+) -> AcOutcome {
+    let mut asserts = Vec::new();
+    let accepted_key = ClientItemKey::new("txn2cap-accepted").unwrap();
+    let a = make("txn2-cap");
+    // A queue with a bounded eligible group size so a whole-group claim exceeding `max_items` is a genuine
+    // capacity/batch-limit rejection at envelope validation.
+    let mut def = qdef();
+    def.max_eligible_group_size = Some(2);
+    a.create_queue(def)
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+    let ids = a
+        .push(&shard(), vec![spec("txn2cap-accepted", 5)], ts(0), None)
+        .await
+        .map_err(|e| format!("accepted push: {e:?}"))?;
+    ensure!(ids.len() == 1, "accepted push landed one item");
+
+    let before = durable_command_count(&a).await?;
+
+    // Capacity/batch-limit: group_batching whole-group (ceiling 2) with max_items=1 -> BatchTooLarge.
+    let mut req = claim_req(1, 500, 10);
+    req.compatibility = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 1 }),
+        ..Default::default()
+    };
+    ensure!(
+        matches!(a.claim(req).await, Err(EngineError::BatchTooLarge)),
+        "a whole-group claim whose group ceiling exceeds max_items must be BatchTooLarge"
+    );
+
+    // Unavailable path (backend-class dependent): upsert is atomic-only.
+    let is_atomic = a.durability_class() == DurabilityClass::Atomic;
+    if is_atomic {
+        asserts.push(
+            "capability-N/A: upsert (ReplacePending) is AVAILABLE on this atomic backend, so the upsert->Unavailable rejection class genuinely cannot occur here — a class/capability property, not a coverage gap; the BatchTooLarge capacity path above covers the capacity rejection".into(),
+        );
+    } else {
+        // Eventual-apply: upsert refuses with Unavailable before any append.
+        ensure!(
+            matches!(
+                a.replace_if_pending(
+                    &shard(),
+                    &ClientItemKey::new("txn2cap-upsert").unwrap(),
+                    Some(PriorityValue::Int64(1)),
+                    None,
+                    None,
+                    None,
+                    BTreeMap::new(),
+                    Metadata::default(),
+                    None,
+                    ts(11),
+                    None,
+                )
+                .await,
+                Err(EngineError::Unavailable)
+            ),
+            "upsert on an eventual-apply backend must be Unavailable"
+        );
+        asserts.push(
+            "unavailable path: upsert (ReplacePending) on this eventual-apply backend -> Unavailable, 0 durable effect".into(),
+        );
+    }
+
+    let after = durable_command_count(&a).await?;
+    ensure!(
+        after == before,
+        "capacity/unavailable rejections appended durable commands ({before} -> {after})"
+    );
+    assert_only_sibling_pending(&a, "capacity/unavailable").await?;
+    asserts.push(
+        "capacity/batch-limit: group_batching claim exceeding max_items -> BatchTooLarge, 0 durable commands, 0 visible effect; accepted sibling remains".into(),
+    );
+
+    if !caps.durable_reopen {
+        asserts.push(
+            "capacity/unavailable restart-replay clause N/A (non-durable in-memory dev profile)".into(),
+        );
+        return Ok(asserts);
+    }
+    drop(a);
+    let b = make("txn2-cap");
+    assert_only_sibling_pending(&b, "capacity/unavailable after restart").await?;
+    ensure!(
+        b.live_items(&shard(), std::slice::from_ref(&accepted_key))
+            .await
+            .map_err(|e| format!("live_items after restart: {e:?}"))?
+            .into_iter()
+            .next()
+            .flatten()
+            .is_some(),
+        "accepted sibling must retain normal success after restart"
+    );
+    asserts.push(
+        "capacity/unavailable path left 0 durable effect across restart+replay; accepted sibling survives".into(),
+    );
+    Ok(asserts)
+}
+
+/// **AC-TXN-2 / commit-timeout / abort path** (TP-003 §3.10 row 207): the DANGEROUS commit-timeout instant —
+/// a commit that fails AFTER the durable append has begun but before the projection apply / response
+/// completes ([`CutPoint::AfterAppendBeforeApply`], the [`inject_commit`] seam appends durably then skips
+/// apply). The correct contract (identical to AC-TXN-3's AfterAppendBeforeApply) is exactly-once, NOT
+/// no-effect-because-nothing-was-written: the call yields no client-visible success (the projection never
+/// applied it — an UNKNOWN outcome), and on drop+reopen recovery replays the durable tail EXACTLY ONCE, so
+/// the item ends committed once with 0 duplicate / 0 half-applied state transitions, while the accepted
+/// sibling committed just before is unaffected.
+///
+/// Capability-N/A on the UNIFIED rebuildable-cache store (`sqlite_relational`): its [`LogStore::append`] is
+/// stage-only (no durable log row) and `read_from` is empty — append+apply commit as ONE relational
+/// transaction, so a durable-but-unapplied append→apply window cannot exist for a commit-timeout to strike
+/// (the same reason AC-TXN-3 records that profile N/A). The abort is still shown to leave 0 durable effect.
+pub async fn ac_txn_2_commit_timeout_path<B: ConformanceCore + LogRead>(
+    make: impl Fn(&str) -> B,
+    caps: TxnCaps,
+) -> AcOutcome {
+    let mut asserts = Vec::new();
+    let accepted_key = ClientItemKey::new("txn2commit-accepted").unwrap();
+    let aborted_key = ClientItemKey::new("txn2commit-aborted").unwrap();
+    let aborted_env = || {
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("777", "txn2commit-aborted", 7)],
+            }),
+            vec![],
+        )
+    };
+    let a = make("txn2-commit");
+    a.create_queue(qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+    // Accepted sibling: a normal (append+apply) push that MUST retain normal success throughout.
+    let ids = a
+        .push(&shard(), vec![spec("txn2commit-accepted", 5)], ts(0), None)
+        .await
+        .map_err(|e| format!("accepted push: {e:?}"))?;
+    ensure!(ids.len() == 1, "accepted push landed one item");
+
+    // Does this backend expose a REPLAYABLE durable command log? The composed log+projection family does
+    // (the applied sibling push shows on the durable log); the unified rebuildable-cache store returns an
+    // empty page from `read_from` because its append is stage-only, so it has no append→apply window.
+    let has_replayable_log = durable_command_count(&a).await? > 0;
+
+    if !has_replayable_log {
+        // Unified rebuildable-cache store (sqlite_relational): drive the append→apply seam anyway and prove
+        // there is NO durable-but-unapplied tail — the staged append vanishes with the un-run apply, so the
+        // abort leaves 0 durable effect and the sibling is intact. This is capability-N/A (no such window),
+        // NOT a coverage gap: the store's append+apply are one atomic transaction.
+        let injected = inject_commit(&a, aborted_env(), CutPoint::AfterAppendBeforeApply).await;
+        ensure!(
+            injected.is_ok(),
+            "the append→apply seam should stage positions on the unified store; got {injected:?}"
+        );
+        ensure!(
+            durable_command_count(&a).await? == 0,
+            "the unified store must stage no durable log row (append is stage-only)"
+        );
+        assert_only_sibling_pending(&a, "commit-timeout (unified rebuildable-cache store)").await?;
+        if caps.durable_reopen {
+            drop(a);
+            let b = make("txn2-commit");
+            assert_only_sibling_pending(&b, "commit-timeout (unified store) after restart").await?;
+            ensure!(
+                b.live_items(&shard(), std::slice::from_ref(&aborted_key))
+                    .await
+                    .map_err(|e| format!("live_items after restart: {e:?}"))?
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .is_none(),
+                "the aborted, never-applied commit must not resurrect on the unified store's reopen"
+            );
+        }
+        asserts.push(
+            "capability-N/A: this backend's LogStore::append is stage-only (unified rebuildable-cache; log axis IS projection axis), so append+apply commit atomically in ONE transaction and there is no durable-but-unapplied append→apply window for a commit-timeout to strike (mirrors AC-TXN-3's sqlite_relational N/A). Verified: an apply aborted after the staged append leaves 0 durable effect and the accepted sibling is intact".into(),
+        );
+        return Ok(asserts);
+    }
+
+    // Composed log+projection family: strike the REAL commit-timeout window. The append lands durably on the
+    // command log, but the projection apply (and thus the client response) never runs — an unknown outcome.
+    let before = durable_command_count(&a).await?;
+    let pos = inject_commit(&a, aborted_env(), CutPoint::AfterAppendBeforeApply)
+        .await
+        .map_err(|e| format!("AfterAppendBeforeApply inject: {e:?}"))?;
+    ensure!(!pos.is_empty(), "the aborted commit staged a durable position");
+    ensure!(
+        durable_command_count(&a).await? == before + 1,
+        "the aborted commit-in-window must be durably logged exactly once (before={before})"
+    );
+    // No client-visible success: the projection never applied the aborted command, so ONLY the accepted
+    // sibling is visible in-process (0 half-applied projection state) — the outcome is unknown until recovery.
+    assert_only_sibling_pending(&a, "commit-timeout in-window (durable-but-unapplied)").await?;
+    asserts.push(
+        "commit-timeout/abort in the append→apply window: the command is durably logged but its projection apply never ran, so there is no client-visible success and no half-applied projection in-process (unknown outcome)".into(),
+    );
+
+    if !caps.durable_reopen {
+        asserts.push(
+            "commit-timeout recovery-replay clause N/A (non-durable in-memory dev profile cannot reopen durable state to prove exactly-once recovery)".into(),
+        );
+        return Ok(asserts);
+    }
+
+    // Drop + reopen: recovery replays the durable tail EXACTLY ONCE. The aborted-in-window item ends up
+    // committed exactly once (0 duplicate / 0 half-applied transitions); the accepted sibling is unaffected.
+    drop(a);
+    let b = make("txn2-commit");
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics after restart: {e:?}"))?;
+    ensure!(
+        (m.pending, m.leased, m.complete, m.failed) == (2, 0, 0, 0),
+        "recovery must replay the append→apply-window command EXACTLY ONCE (accepted sibling + recovered item = 2 pending, 0 duplicates/half-applies); got pending={} leased={} complete={} failed={}",
+        m.pending,
+        m.leased,
+        m.complete,
+        m.failed
+    );
+    ensure!(
+        b.select_eligible(&shard(), ts(100), 10)
+            .await
+            .map_err(|e| format!("select_eligible: {e:?}"))?
+            .len()
+            == 2,
+        "recovery applied the replayed commit exactly once (0 duplicate state transitions)"
+    );
+    // Both the recovered aborted item and the accepted sibling are visible exactly once by client_item_key.
+    for (label, key) in [("aborted-recovered", &aborted_key), ("sibling", &accepted_key)] {
+        ensure!(
+            b.live_items(&shard(), std::slice::from_ref(key))
+                .await
+                .map_err(|e| format!("live_items ({label}): {e:?}"))?
+                .into_iter()
+                .next()
+                .flatten()
+                .is_some(),
+            "{label} item must be visible exactly once after recovery"
+        );
+    }
+    asserts.push(
+        "commit-timeout/abort recovered EXACTLY ONCE on drop+reopen (the durable-but-unapplied tail replays to a single committed item — 0 partial, 0 duplicate state transitions); the accepted sibling is unaffected".into(),
+    );
     Ok(asserts)
 }
 

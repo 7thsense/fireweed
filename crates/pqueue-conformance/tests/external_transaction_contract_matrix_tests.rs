@@ -12,7 +12,7 @@
 //! | AC | memory | sqlite-log | sqlite-relational | objectlog | objectlog+sqlite | postgres (env) |
 //! |----|--------|-----------|-------------------|-----------|------------------|----------------|
 //! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | ✓‡ | ✓ (all 8 ops) | ✓‡ | ✓‡ | ✓‡ |
-//! | AC-TXN-2 rejection no-effect | partial (in-proc) | partial§ | partial§ | partial§ | partial§ | partial§ |
+//! | AC-TXN-2 rejection no-effect | ✓§ (in-proc; restart n/a) | ✓§ | ✓§ | ✓§ | ✓§ | ✓§ |
 //! | AC-TXN-3 unknown-outcome replay | partial (in-proc) | partial§ | n/a (unified store, no cut window) | partial§ | partial§ | partial§ |
 //! | AC-TXN-4 objectlog crash-point matrix | — | — | — | partial (5 internal cut points)* | — | — |
 //! | AC-TXN-5 hybrid poison + replay | — | — | — | | partial (projection cut points)† | — |
@@ -39,9 +39,24 @@
 //! BatchUpdate is atomic-class only, so the eventual-apply objectlog / object_log_sqlite profiles (which
 //! return `Unavailable`) record it capability-N/A. `memory` is non-durable so kill/restart is `n/a` wholesale.
 //!
-//! `§` AC-TXN-2 (row 207) drives per-item-invalid/unknown-id/request-id-conflict
-//! rejections + sibling survival but not envelope-invalid batches, stale-lease, capacity/unavailable, or
-//! commit-timeout paths; AC-TXN-3 (row 208) proves request_id exactly-once replay for PUSH at BeforeAppend/
+//! `§` AC-TXN-2 (row 207) now drives the FULL rejection-class surface — per-item-invalid finalize,
+//! unknown-id renew, request-id-conflict, envelope-invalid batches (charset-invalid group_key +
+//! structurally-invalid group_batching), stale-lease/operator-fenced conflict, capacity/batch-limit
+//! (`BatchTooLarge`) + unavailable (upsert on eventual-apply) paths, and the commit-timeout/abort path. The
+//! pure-reject classes each assert 0 durable commands + 0 visible effect (re-verified after restart+replay on
+//! the durable profiles) while an accepted sibling keeps normal success (a validly-leased sibling finalizes).
+//! The commit-timeout path is the DANGEROUS one and is modelled at the real append→apply window
+//! (`CutPoint::AfterAppendBeforeApply`): the command lands durably but its projection apply never runs
+//! (unknown outcome, 0 half-applied in-process), and on drop+reopen recovery replays the durable tail EXACTLY
+//! ONCE (item committed once, 0 duplicate/partial state transitions) — the same contract AC-TXN-3 proves.
+//! Two capability-N/A clauses (never a silent pass): upsert->Unavailable cannot occur on the ATOMIC profiles
+//! (upsert is available there — the `BatchTooLarge` capacity path covers capacity), and the append→apply
+//! commit-timeout window does not exist on the UNIFIED relational store (`sqlite_relational`: stage-only
+//! append, append+apply in one transaction — same N/A as AC-TXN-3); on `memory` the restart/recovery
+//! re-verifications are capability-N/A (non-durable). So every row is `pass` (no coverage-GAP). The standalone
+//! `ac_txn_2_*_has_no_durable_effect` tests exercise each class per-profile (the commit-timeout test asserts
+//! the composed-log profiles achieve real exactly-once recovery, not merely a no-effect abort).
+//! AC-TXN-3 (row 208) proves request_id exactly-once replay for PUSH at BeforeAppend/
 //! AfterResponse/AfterApplyBeforeResponse (the AfterAppendBeforeApply mid-pipeline cut is item-level only —
 //! the raw seam carries no request_id) but not request_id replay for claim/renew/finalize/update/purge at
 //! every cut. The specific assertions each row DOES make are genuine and pass; the label is honest about scope.
@@ -674,6 +689,187 @@ async fn ac_txn_1_kill_after_purge_items() {
         pqueue_conformance::fault::ac_txn_1_kill_after_purge_items(objectlog_sqlite_factory())
             .await;
     assert!(ols.is_ok(), "object_log_sqlite: {:?}", ols.err());
+}
+
+// ---------------------------------------------------------------------------
+// AC-TXN-2 rejection-class checkpoints (TP-003 §3.10 row 207), as standalone tests so each rejection class
+// named in the row is independently satisfiable (bead pqueue-9b799403), independent of the aggregate
+// `ac_txn_contract_matrix` evidence run. Each runs the durable composed profiles (sqlite_log, objectlog,
+// object_log_sqlite) AND composed_sqlite_relational (atomic + gate-capable). No class emits a coverage-GAP;
+// where a class genuinely cannot occur on a backend the scenario records capability-N/A (asserted below).
+
+#[tokio::test]
+async fn ac_txn_2_envelope_invalid_batch_has_no_durable_effect() {
+    let sr = pqueue_conformance::fault::ac_txn_2_envelope_invalid_batch(
+        sqlite_relational_factory(),
+        DURABLE,
+    )
+    .await;
+    assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
+    let sq =
+        pqueue_conformance::fault::ac_txn_2_envelope_invalid_batch(sqlite_log_factory(), DURABLE)
+            .await;
+    assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
+    let ol =
+        pqueue_conformance::fault::ac_txn_2_envelope_invalid_batch(objectlog_factory(), DURABLE)
+            .await;
+    assert!(ol.is_ok(), "objectlog: {:?}", ol.err());
+    let ols = pqueue_conformance::fault::ac_txn_2_envelope_invalid_batch(
+        objectlog_sqlite_factory(),
+        DURABLE,
+    )
+    .await;
+    assert!(ols.is_ok(), "object_log_sqlite: {:?}", ols.err());
+    for outcome in [&sr, &sq, &ol, &ols] {
+        assert!(
+            outcome.as_ref().unwrap().iter().all(|a| !a.contains("GAP")),
+            "envelope-invalid batch must not carry a coverage GAP: {outcome:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac_txn_2_stale_lease_conflict_has_no_durable_effect() {
+    let sr = pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(
+        sqlite_relational_factory(),
+        DURABLE,
+    )
+    .await;
+    assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
+    let sq =
+        pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(sqlite_log_factory(), DURABLE)
+            .await;
+    assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
+    let ol =
+        pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(objectlog_factory(), DURABLE).await;
+    assert!(ol.is_ok(), "objectlog: {:?}", ol.err());
+    let ols = pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(
+        objectlog_sqlite_factory(),
+        DURABLE,
+    )
+    .await;
+    assert!(ols.is_ok(), "object_log_sqlite: {:?}", ols.err());
+    for outcome in [&sr, &sq, &ol, &ols] {
+        assert!(
+            outcome.as_ref().unwrap().iter().all(|a| !a.contains("GAP")),
+            "stale-lease conflict must not carry a coverage GAP: {outcome:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac_txn_2_capacity_unavailable_path_has_no_durable_effect() {
+    // Atomic backends: upsert is available -> the upsert->Unavailable class is capability-N/A; the
+    // BatchTooLarge capacity path is exercised for real.
+    for (name, outcome) in [
+        (
+            "sqlite_relational",
+            pqueue_conformance::fault::ac_txn_2_capacity_unavailable_path(
+                sqlite_relational_factory(),
+                DURABLE,
+            )
+            .await,
+        ),
+        (
+            "sqlite_log",
+            pqueue_conformance::fault::ac_txn_2_capacity_unavailable_path(
+                sqlite_log_factory(),
+                DURABLE,
+            )
+            .await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        let asserts = outcome.as_ref().unwrap();
+        assert!(
+            asserts.iter().all(|a| !a.contains("GAP")),
+            "{name} capacity/unavailable must not carry a coverage GAP: {outcome:?}"
+        );
+        assert!(
+            asserts.iter().any(|a| a.contains("capability-N/A")),
+            "{name} (atomic) must record upsert->Unavailable as capability-N/A: {outcome:?}"
+        );
+    }
+    // Eventual-apply backends: upsert genuinely refuses with Unavailable (exercised, not N/A).
+    for (name, outcome) in [
+        (
+            "objectlog",
+            pqueue_conformance::fault::ac_txn_2_capacity_unavailable_path(
+                objectlog_factory(),
+                DURABLE,
+            )
+            .await,
+        ),
+        (
+            "object_log_sqlite",
+            pqueue_conformance::fault::ac_txn_2_capacity_unavailable_path(
+                objectlog_sqlite_factory(),
+                DURABLE,
+            )
+            .await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        let asserts = outcome.as_ref().unwrap();
+        assert!(
+            asserts.iter().all(|a| !a.contains("GAP")),
+            "{name} capacity/unavailable must not carry a coverage GAP: {outcome:?}"
+        );
+        assert!(
+            asserts
+                .iter()
+                .any(|a| a.contains("unavailable path: upsert")),
+            "{name} (eventual-apply) must exercise the upsert->Unavailable path: {outcome:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ac_txn_2_commit_timeout_path_has_no_durable_effect() {
+    let sr = pqueue_conformance::fault::ac_txn_2_commit_timeout_path(
+        sqlite_relational_factory(),
+        DURABLE,
+    )
+    .await;
+    assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
+    let sq =
+        pqueue_conformance::fault::ac_txn_2_commit_timeout_path(sqlite_log_factory(), DURABLE).await;
+    assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
+    let ol =
+        pqueue_conformance::fault::ac_txn_2_commit_timeout_path(objectlog_factory(), DURABLE).await;
+    assert!(ol.is_ok(), "objectlog: {:?}", ol.err());
+    let ols = pqueue_conformance::fault::ac_txn_2_commit_timeout_path(
+        objectlog_sqlite_factory(),
+        DURABLE,
+    )
+    .await;
+    assert!(ols.is_ok(), "object_log_sqlite: {:?}", ols.err());
+    for outcome in [&sr, &sq, &ol, &ols] {
+        assert!(
+            outcome.as_ref().unwrap().iter().all(|a| !a.contains("GAP")),
+            "commit-timeout path must not carry a coverage GAP: {outcome:?}"
+        );
+    }
+    // The composed log+projection profiles must strike the REAL append→apply window and prove exactly-once
+    // recovery — not merely a no-effect abort.
+    for (name, outcome) in [("sqlite_log", &sq), ("objectlog", &ol), ("object_log_sqlite", &ols)] {
+        assert!(
+            outcome
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|a| a.contains("recovered EXACTLY ONCE")),
+            "{name} must back its pass with the real AfterAppendBeforeApply exactly-once recovery: {outcome:?}"
+        );
+    }
+    // The unified rebuildable-cache store has no append→apply window — capability-N/A (honest, not a GAP).
+    assert!(
+        sr.as_ref()
+            .unwrap()
+            .iter()
+            .any(|a| a.contains("capability-N/A")),
+        "sqlite_relational (unified store) must record the append→apply window as capability-N/A: {sr:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
