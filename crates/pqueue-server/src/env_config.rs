@@ -265,19 +265,38 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
                 "/var/lib/pqueue/pqueue-projection.db",
             )),
         },
+        #[cfg(feature = "postgres")]
+        "postgres" => {
+            // Resolve the DSN from the env names the Helm chart's `storage.projection.postgres` axis
+            // renders (DSN secret `PQUEUE_POSTGRES_PROJECTION_DATABASE_URL`; `PQUEUE_PG_PROJECTION_URL` is
+            // the local/dev fallback). Fails closed if an sslmode=require DSN meets a non-tls build.
+            crate::resolve_postgres_projection(env)
+                .map_err(|reason| unsupported_storage(&log, &projection, &reason))?
+        }
+        #[cfg(not(feature = "postgres"))]
+        "postgres" => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "postgres projection adapter is wired through the blocking-safe PostgresRelational store, \
+                 but this binary was built without the `postgres` cargo feature; rebuild with `--features \
+                 postgres` (or `--features postgres,tls` for native-tls)",
+            ));
+        }
         other => {
             return Err(unsupported_storage(
                 &log,
                 &projection,
                 &format!(
-                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid|hybrid-async"
+                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid|hybrid-async|postgres"
                 ),
             ));
         }
     };
 
     // Only specific log×projection pairings are wired (preserve the prior behavior): memory/inmemory,
-    // sqlite/inmemory, objectlog/inmemory, objectlog/sqlite, and (with the feature) postgres/inmemory.
+    // sqlite/inmemory, objectlog/inmemory, objectlog/sqlite, and (with the feature) postgres/inmemory,
+    // postgres/sqlite, postgres/postgres.
     let wired = match (&log_spec, &projection_spec) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => true,
         (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
@@ -287,6 +306,10 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
         (LogSpec::ObjectLog { .. }, ProjectionSpec::HybridAsync { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
+        #[cfg(feature = "postgres")]
+        (LogSpec::Postgres { .. }, ProjectionSpec::Sqlite { .. }) => true,
+        #[cfg(feature = "postgres")]
+        (LogSpec::Postgres { .. }, ProjectionSpec::Postgres { .. }) => true,
         _ => false,
     };
     if !wired {

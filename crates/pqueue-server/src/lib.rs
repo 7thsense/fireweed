@@ -117,6 +117,12 @@ pub enum ProjectionSpec {
     /// barrier; the durable SQLite image is an asynchronous checkpoint that MAY lag and is caught up by
     /// object-log tail replay on recovery.
     HybridAsync { path: PathBuf },
+    /// SYNC postgres relational projection (`PostgresRelational`, atomic class) at `url`, composed against
+    /// the [`LogSpec::Postgres`] durable log. `url` is a libpq/postgres connection string; connect + recover
+    /// MUST run off the reactor (the composition root drives it through `spawn_blocking`, same as the log
+    /// axis). Requires the `postgres` cargo feature.
+    #[cfg(feature = "postgres")]
+    Postgres { url: String },
 }
 
 impl ProjectionSpec {
@@ -126,6 +132,8 @@ impl ProjectionSpec {
             ProjectionSpec::Sqlite { .. } => "sqlite",
             ProjectionSpec::Hybrid { .. } => "hybrid",
             ProjectionSpec::HybridAsync { .. } => "hybrid-async",
+            #[cfg(feature = "postgres")]
+            ProjectionSpec::Postgres { .. } => "postgres",
         }
     }
 }
@@ -625,6 +633,41 @@ pub fn resolve_postgres_log(
     };
 
     Ok(LogSpec::Postgres { url, credentials })
+}
+
+/// Resolve the postgres [`ProjectionSpec`] from the runtime environment, using the env name the Helm chart's
+/// `storage.projection.postgres` axis renders. The DSN secret is `PQUEUE_POSTGRES_PROJECTION_DATABASE_URL`;
+/// `PQUEUE_PG_PROJECTION_URL` is the local/dev fallback, and the documented default is the last resort.
+///
+/// No plaintext fallback: if the DSN demands `sslmode=require` but this binary was built WITHOUT the `tls`
+/// feature, this fails at config time rather than letting the runtime silently downgrade to `NoTls`.
+///
+/// This is a pure function over an env map (no live DB, no process env) so the composition-root config
+/// layer is unit-testable.
+#[cfg(feature = "postgres")]
+pub fn resolve_postgres_projection(
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<ProjectionSpec, String> {
+    let nonempty = |key: &str| env.get(key).filter(|s| !s.is_empty()).cloned();
+    let url = nonempty("PQUEUE_POSTGRES_PROJECTION_DATABASE_URL")
+        .or_else(|| nonempty("PQUEUE_PG_PROJECTION_URL"))
+        .unwrap_or_else(|| "postgres://postgres@127.0.0.1:5432/postgres".to_string());
+
+    // Fail closed before connecting if the DSN requires TLS but this build cannot provide it.
+    let ssl_mode = pqueue_postgres::PostgresConnectConfig::new(&url)
+        .parsed_ssl_mode()
+        .map_err(|e| format!("invalid postgres DSN: {e}"))?;
+    #[cfg(not(feature = "tls"))]
+    if matches!(ssl_mode, pqueue_postgres::PostgresSslMode::Require) {
+        return Err(
+            "DSN requests sslmode=require but this binary was built without the `tls` feature; rebuild \
+             `--features postgres,tls` (no plaintext downgrade)"
+                .to_string(),
+        );
+    }
+    let _ = ssl_mode;
+
+    Ok(ProjectionSpec::Postgres { url })
 }
 
 /// The single authoritative, fully-typed runtime configuration for a pqueue server. Every knob the server
@@ -1467,6 +1510,66 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .await
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
+            })??;
+            let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+        }
+        #[cfg(feature = "postgres")]
+        (LogSpec::Postgres { url, credentials }, ProjectionSpec::Sqlite { path }) => {
+            // The composed postgres-log + sqlite-projection backend (`ComposedBackend<PostgresLog,
+            // SqliteProjectionStore, InProcessControlPlane>`): the durable postgres command log paired with a
+            // derived SQLite relational projection, recovery-on-open. Same off-reactor discipline as
+            // postgres/inmemory above: connect BOTH axes and recover inside `spawn_blocking`, then drive the
+            // composition only through the blocking-safe `BlockingBackend` wrapper.
+            let p = path
+                .to_str()
+                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?
+                .to_string();
+            let backend = tokio::task::spawn_blocking(move || {
+                let mut connect_config = pqueue_postgres::PostgresConnectConfig::new(url);
+                if let Some(provider) = credentials {
+                    connect_config = connect_config.with_credential_provider(provider);
+                }
+                let log = pqueue_postgres::PostgresLog::connect_with_config(connect_config)?;
+                let projection = pqueue_sqlite::SqliteProjectionStore::open(&p)?;
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .map(|b| b.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("postgres/sqlite connect task join failed: {e}"))
+            })??;
+            let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
+            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+        }
+        #[cfg(feature = "postgres")]
+        (
+            LogSpec::Postgres { url, credentials },
+            ProjectionSpec::Postgres {
+                url: projection_url,
+            },
+        ) => {
+            // The composed postgres-log + postgres-projection backend (`ComposedBackend<PostgresLog,
+            // PostgresRelational, InProcessControlPlane>`): the durable postgres command log paired with a
+            // SEPARATE postgres connection driving the relational projection (distinct table sets, no
+            // collision — see `pqueue_postgres::compose_log`'s `log_entries`/`queue_defs` vs
+            // `pqueue_postgres::relational`'s `pqueue_items`/`queues`), recovery-on-open. Same off-reactor
+            // discipline: connect BOTH axes and recover inside `spawn_blocking`.
+            let backend = tokio::task::spawn_blocking(move || {
+                let mut connect_config = pqueue_postgres::PostgresConnectConfig::new(url);
+                if let Some(provider) = credentials {
+                    connect_config = connect_config.with_credential_provider(provider);
+                }
+                let log = pqueue_postgres::PostgresLog::connect_with_config(connect_config)?;
+                let projection = pqueue_postgres::PostgresRelational::connect(&projection_url)?;
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .map(|b| b.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("postgres/postgres connect task join failed: {e}"))
             })??;
             let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
             run_owned(backend, node_id, clock, &listen, interval, &queues).await
