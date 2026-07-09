@@ -100,6 +100,12 @@ jobs:
           - storage: postgres-inmemory
             log_backend: postgres
             projection_backend: inmemory
+          - storage: postgres-sqlite
+            log_backend: postgres
+            projection_backend: sqlite
+          - storage: postgres-postgres
+            log_backend: postgres
+            projection_backend: postgres
     steps:
       - name: Checkout pqueue
         uses: actions/checkout@v4

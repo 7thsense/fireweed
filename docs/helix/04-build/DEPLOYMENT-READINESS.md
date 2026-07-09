@@ -59,9 +59,9 @@ combinations:
 |-------------|--------------------|------|
 | `objectlog` | `inmemory` | Helm render/lint and live `kind` smoke. |
 | `objectlog` | `sqlite` | Helm render/lint only until the service wires the SQLite projection adapter. |
-| `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke for postgres combos is owed (tracked by `pqueue-52e1a2ff`). |
-| `postgres` | `sqlite` | Adapters wired; live `kind` smoke owed (`pqueue-52e1a2ff`). |
-| `postgres` | `postgres` | Adapters wired; live `kind` smoke owed (`pqueue-52e1a2ff`). |
+| `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke passes (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend inmemory`). |
+| `postgres` | `sqlite` | Adapters wired; live `kind` smoke passes (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite`). TP-003/TP-002 production-claim evidence still owed (`pqueue-52e1a2ff`). |
+| `postgres` | `postgres` | Adapters wired; live `kind` smoke passes (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres`). TP-003/TP-002 production-claim evidence still owed (`pqueue-52e1a2ff`). |
 
 Unsupported runtime combinations must fail loudly at process startup with the
 requested log/projection pair. They must not be silently mapped onto a synthetic

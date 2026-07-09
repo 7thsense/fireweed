@@ -45,10 +45,14 @@ STORAGE BACKENDS (runnable live smokes):
                          (the wired managed-postgres profile). The harness stands
                          up a throwaway in-cluster postgres and injects its DSN as
                          the pqueue-postgres-log Secret before installing the chart.
-
-  The postgres/sqlite and postgres/postgres CHART renders are design-ahead and are
-  validated statically by scripts/ci/helm-gate.sh (helm lint + template + kubeconform);
-  the running binary only wires postgres/inmemory, so they have no live smoke here.
+  postgres  + sqlite     durable postgres command log + a derived SQLite relational
+                         projection on the chart's storage volume. Same in-cluster
+                         postgres as above for the log axis; no projection Secret.
+  postgres  + postgres   durable postgres command log + a SEPARATE postgres-backed
+                         relational projection (distinct table sets, no collision).
+                         The harness reuses the one throwaway in-cluster postgres for
+                         both axes and injects its DSN as both the pqueue-postgres-log
+                         and pqueue-postgres-projection Secrets.
 
 OPTIONS:
   --log-backend <backend>  Required log backend for this runtime smoke.
@@ -108,14 +112,21 @@ values_file_for() {
     case "$1:$2" in
         objectlog:inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
         postgres:inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
+        postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
+        postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
         *) die "no runtime CI values file for log=$1 projection=$2" ;;
     esac
 }
 
-# The Kubernetes Secret name + key the postgres-inmemory values file expects the log DSN under (must match
-# charts/pqueue/ci/postgres-inmemory-values.yaml: storage.log.postgres.existingSecret/databaseUrlKey).
+# The Kubernetes Secret name + key the postgres-inmemory/postgres-sqlite values files expect the log DSN
+# under (must match charts/pqueue/ci/postgres-inmemory-values.yaml and postgres-sqlite-values.yaml:
+# storage.log.postgres.existingSecret/databaseUrlKey).
 PG_SECRET_NAME="pqueue-postgres-log"
 PG_SECRET_KEY="database-url"
+# The Kubernetes Secret name + key the postgres-postgres values file expects the projection DSN under (must
+# match charts/pqueue/ci/postgres-postgres-values.yaml: storage.projection.postgres.existingSecret/databaseUrlKey).
+PG_PROJECTION_SECRET_NAME="pqueue-postgres-projection"
+PG_PROJECTION_SECRET_KEY="database-url"
 # In-cluster throwaway postgres coordinates (Deployment/Service applied by deploy_in_cluster_postgres).
 PG_IN_CLUSTER_IMAGE="postgres:16"
 PG_IN_CLUSTER_HOST="pqueue-ci-postgres"
@@ -231,7 +242,9 @@ validate_config() {
     case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
         objectlog:inmemory) ;;
         postgres:inmemory) ;;
-        *) die "runtime smoke supports log=objectlog projection=inmemory and log=postgres projection=inmemory; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND} (postgres/sqlite + postgres/postgres are static-only via helm-gate.sh)" ;;
+        postgres:sqlite) ;;
+        postgres:postgres) ;;
+        *) die "runtime smoke supports log=objectlog projection=inmemory, and log=postgres projection={inmemory,sqlite,postgres}; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example pqueue:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"
@@ -286,6 +299,9 @@ dry_run_plan() {
         echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} apply -f - (in-cluster postgres Deployment + Service ${PG_IN_CLUSTER_HOST})"
         print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${PG_IN_CLUSTER_HOST}" --timeout "${TIMEOUT}"
         echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} create secret generic ${PG_SECRET_NAME} --from-literal=${PG_SECRET_KEY}=<in-cluster DSN>"
+        if [[ "${PROJECTION_BACKEND}" == "postgres" ]]; then
+            echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} create secret generic ${PG_PROJECTION_SECRET_NAME} --from-literal=${PG_PROJECTION_SECRET_KEY}=<in-cluster DSN>"
+        fi
     fi
     print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
@@ -577,6 +593,17 @@ EOF
     kubectl_cmd -n "${NAMESPACE}" create secret generic "${PG_SECRET_NAME}" \
         --from-literal="${PG_SECRET_KEY}=${dsn}" \
         --dry-run=client -o yaml | kubectl_cmd apply -f -
+
+    # The postgres/postgres combo drives its projection axis through a second postgres connection
+    # (distinct table sets from the log axis, no collision - see crates/pqueue-server/src/lib.rs's
+    # postgres/postgres composition). Reuse the same throwaway in-cluster postgres instance and DSN, under
+    # the projection Secret name the postgres-postgres values file expects.
+    if [[ "${PROJECTION_BACKEND}" == "postgres" ]]; then
+        echo "+ kubectl create secret generic ${PG_PROJECTION_SECRET_NAME} (${PG_PROJECTION_SECRET_KEY}=<in-cluster DSN>)"
+        kubectl_cmd -n "${NAMESPACE}" create secret generic "${PG_PROJECTION_SECRET_NAME}" \
+            --from-literal="${PG_PROJECTION_SECRET_KEY}=${dsn}" \
+            --dry-run=client -o yaml | kubectl_cmd apply -f -
+    fi
 }
 
 main() {
