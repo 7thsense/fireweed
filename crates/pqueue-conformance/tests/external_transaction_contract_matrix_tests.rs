@@ -11,12 +11,12 @@
 //!
 //! | AC | memory | sqlite-log | objectlog | objectlog+sqlite | postgres (env) |
 //! |----|--------|-----------|-----------|------------------|----------------|
-//! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | ✓ | ✓ | ✓ | ✓ |
-//! | AC-TXN-2 rejection no-effect | partial (in-proc) | ✓ | ✓ | ✓ | ✓ |
-//! | AC-TXN-3 unknown-outcome replay | partial (in-proc) | ✓ full | ✓ full | ✓ full | ✓ full |
-//! | AC-TXN-4 objectlog crash-point matrix | — | — | ✓ (5 internal cut points)* | — | — |
-//! | AC-TXN-5 hybrid-strict poison + replay | — | — | | ✓ (projection cut points)† | — |
-//! | AC-TXN-5A hybrid-async success barrier | — | — | | ✓ (projection cut points)† | — |
+//! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | partial‡ | partial‡ | partial‡ | partial‡ |
+//! | AC-TXN-2 rejection no-effect | partial (in-proc) | partial‡ | partial‡ | partial‡ | partial‡ |
+//! | AC-TXN-3 unknown-outcome replay | partial (in-proc) | partial‡ | partial‡ | partial‡ | partial‡ |
+//! | AC-TXN-4 objectlog crash-point matrix | — | — | partial (5 internal cut points)* | — | — |
+//! | AC-TXN-5 hybrid poison + replay | — | — | | partial (projection cut points)† | — |
+//! | AC-TXN-5A hybrid-async success barrier | — | — | | partial (projection cut points)† | — |
 //! | AC-TXN-6 cross-combination parity | — | ✓ (sqlite-log vs objectlog+sqlite) | | | — |
 //! | AC-TXN-7 latency-bound invariance | — | — | partial (force-seal vs group-commit) | | — |
 //!
@@ -25,26 +25,47 @@
 //! both durability classes (this suite's B3.1 run closed the earlier atomic-composed-log gap in
 //! `crates/pqueue-engine/src/compose.rs`).
 //!
-//! `*` AC-TXN-4 drives [`pqueue_objectlog::ObjectLog`]'s `LogStore` impl DIRECTLY (bypassing
+//! `‡` AC-TXN-1/2/3 are `partial` (not `pass`) on every profile because each covers the CORE of its TP-003
+//! §3.10 row, not the full requirement, and records an explicit `GAP` assertion naming covered-vs-not: AC-TXN-1
+//! (row 206) asserts kill-after-success for BatchPush/Claim/RenewLeases/Finalize but not CreateQueue-alone/
+//! BatchUpdate/SetGates/PurgeItems; AC-TXN-2 (row 207) drives per-item-invalid/unknown-id/request-id-conflict
+//! rejections + sibling survival but not envelope-invalid batches, stale-lease, capacity/unavailable, or
+//! commit-timeout paths; AC-TXN-3 (row 208) proves request_id exactly-once replay for PUSH at BeforeAppend/
+//! AfterResponse/AfterApplyBeforeResponse (the AfterAppendBeforeApply mid-pipeline cut is item-level only —
+//! the raw seam carries no request_id) but not request_id replay for claim/renew/finalize/update/purge at
+//! every cut. The specific assertions each row DOES make are genuine and pass; the label is honest about scope.
+//!
+//! `*` AC-TXN-4 (`partial`) drives [`pqueue_objectlog::ObjectLog`]'s `LogStore` impl DIRECTLY (bypassing
 //! `ComposedBackend`) with the [`pqueue_objectlog::FaultHook`] seam added for this row, striking 5 instants
 //! strictly INSIDE the segmented substrate's own commit pipeline that the public `Backend::write` seam
-//! cannot reach: `BeforeSegmentWrite`, `AfterSegmentWriteBeforeManifest`, `AfterManifestBeforeAck`,
-//! `DuringOwnerReassignment`, `DuringSnapshotWrite` (see `ac_txn_4_crash_point_matrix` below). One instant
-//! named in TP-003 §3.10 row 209 — a crash strictly DURING the composed backend's projection-apply step —
-//! lives in a distinct architectural layer (`pqueue-engine`'s `ComposedBackend`, which applies a batch only
-//! after `LogStore::append` already returned `Ok`) and is not internal to this crate; it stays a documented
-//! follow-up rather than a fake pass here.
+//! cannot reach: `BeforeSegmentWrite`, `AfterSegmentWriteBeforeManifest`, `AfterManifestBeforeAck` (whose
+//! "0 duplicate active leases" clause now replays the recovered log through a fresh projection and asserts
+//! exactly one ACTIVE lease in the projected serving image, not just one durable Claim log command),
+//! `DuringOwnerReassignment`, `DuringSnapshotWrite` (see `ac_txn_4_crash_point_matrix` below). It is `partial`
+//! (not `pass`) because TP-003 §3.10 row 209 also names two projection-apply instants — "during projection
+//! apply" and "after projection apply before response" — that live in a distinct architectural layer
+//! (`pqueue-engine`'s `ComposedBackend`, which applies a batch only after `LogStore::append` returned `Ok`)
+//! rather than inside the segmented substrate; those are exercised by AC-TXN-5/5A (`DuringMemoryApply`) and
+//! AC-TXN-3 (`AfterApplyBeforeResponse`). ("During manifest CAS" collapses into the atomic create-only PUT
+//! already bracketed by the two manifest cut points.) The row's `GAP` assertion states this explicitly.
 //!
-//! `†` AC-TXN-5/5A (see `ac_txn_5_hybrid_strict_poison_replay_scenario` /
+//! `†` AC-TXN-5/5A (both `partial`; see `ac_txn_5_hybrid_strict_poison_replay_scenario` /
 //! `ac_txn_5a_hybrid_async_success_barrier_scenario` below) add the analogous seam on the PROJECTION side —
 //! [`pqueue_sqlite::HybridFaultHook`] on `HybridProjectionStore` — for the instants the public seam cannot
-//! isolate (a fault strictly between the durable SQLite commit and the in-memory apply, and one strictly
-//! inside the deferred async SQLite checkpoint), driving `HybridProjectionStore` DIRECTLY via
-//! `ProjectionStore` for those clauses. Where a cut point genuinely IS reachable through the public seam (a
-//! memory-apply failure struck from inside `apply_live`, or a crash in the commit→apply window covered by
-//! AC-TXN-3), these scenarios drive it through the real `ComposedBackend<ObjectLog, HybridProjectionStore,
-//! InProcessControlPlane>` instead. Backpressure fail-closed (AC-TXN-5A) is proven directly against
-//! [`pqueue_sqlite::HybridAsyncMonitor`], the component that implements TD-004's admission-gating contract.
+//! isolate: a fault strictly between the durable SQLite commit and the in-memory apply
+//! (`AfterSqliteCommitBeforeMemoryApply`), a memory-apply failure (`DuringMemoryApply`), and one strictly
+//! inside the deferred async SQLite checkpoint (`DuringAsyncSqliteApply`, now actually installed + triggered
+//! via `flush_deferred` in AC-TXN-5A). Two honest caveats keep these `partial`, not `pass`: (1) real-server
+//! path — the `AfterSqliteCommitBeforeMemoryApply` poison instant is the SQLite-first `apply`
+//! (`apply_durable_then_memory`) ordering, which NO real server pipeline runs: both the `hybrid` and
+//! `hybrid-async` runtime profiles compose `with_group_commit(true)` and apply MEMORY-FIRST via
+//! `apply_live_owned` (deferring SQLite to `flush_deferred`), and pqueue-server wires no `hybrid-strict`
+//! profile — so that cut is verified at the ProjectionStore layer only; (2) backpressure — AC-TXN-5A's
+//! fail-closed clause is proven against the standalone [`pqueue_sqlite::HybridAsyncMonitor`], but pqueue-server
+//! opens `HybridProjectionStore` WITHOUT wiring that monitor/thresholds into the composed write path (the
+//! `hybrid-async` arm merely logs the resolved thresholds), so TD-004's hard-debt admission/high-water/
+//! retention gate is NOT yet enforced end-to-end on the server (tracked follow-up). Both caveats are recorded
+//! as explicit `GAP` assertions in the evidence rows.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -338,21 +359,42 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
         let mut log3 = ObjectLog::open(root.clone()).map_err(|e| format!("reopen: {e:?}"))?;
         log3.ensure_shard(&shard)
             .map_err(|e| format!("ensure_shard: {e:?}"))?;
-        let claim_entries = log3
+        let all_entries = log3
             .read_from(&shard, None, 100)
             .map_err(|e| format!("read_from: {e:?}"))?
-            .entries
-            .into_iter()
+            .entries;
+        let claim_entries = all_entries
+            .iter()
             .filter(|(_, env)| matches!(env.command, pqueue_engine::QueueCommand::Claim(_)))
             .count();
         ensure!(
             claim_entries == 1,
-            "0 duplicate active leases: expected exactly 1 committed claim command, got {}",
+            "expected exactly 1 committed claim command, got {}",
             claim_entries
+        );
+
+        // "0 duplicate active leases" is a PROJECTED-state invariant, not a log-count one: replay the
+        // recovered durable log through a fresh projection and assert the reconstructed serving image holds
+        // exactly ONE ACTIVE lease for the item (no duplicate lease state survives the lost-ack recovery),
+        // rather than merely counting durable Claim log commands.
+        let mut projection = HybridProjectionStore::in_memory()
+            .map_err(|e| format!("open reconstruction projection: {e:?}"))?;
+        ProjectionStore::ensure_shard(&mut projection, &pqueue_conformance::qdef())
+            .map_err(|e| format!("ensure_shard (reconstruction): {e:?}"))?;
+        let positions: Vec<CommandPosition> = all_entries.iter().map(|(p, _)| p.clone()).collect();
+        let commands: Vec<pqueue_engine::CommandEnvelope> =
+            all_entries.iter().map(|(_, e)| e.clone()).collect();
+        ProjectionStore::apply(&mut projection, &positions, &commands)
+            .map_err(|e| format!("replay-apply into reconstruction projection: {e:?}"))?;
+        let m = ProjectionStore::metrics(&projection, &shard)
+            .map_err(|e| format!("reconstruction metrics: {e:?}"))?;
+        ensure!(
+            m.leased == 1 && m.pending == 0 && m.complete == 0 && m.failed == 0,
+            "0 duplicate active leases: the replayed projection must show exactly ONE active lease for the item; got {m:?}"
         );
     }
     asserts.push(
-        "AfterManifestBeforeAck: committed push AND claim commands replay exactly once on recovery (0 duplicate active leases)"
+        "AfterManifestBeforeAck: committed push AND claim commands replay exactly once on recovery; the reconstructed projection holds exactly ONE active lease (0 duplicate active leases in projected state, not just a log-count)"
             .into(),
     );
 
@@ -423,6 +465,19 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     }
     asserts.push(
         "DuringSnapshotWrite: a lost snapshot write leaves the command log fully intact (0 lost items)".into(),
+    );
+
+    // Honest coverage note: TP-003 §3.10 row 209 also names "during projection apply", "after projection
+    // apply before response", and "during manifest CAS/fallback commit". "During manifest CAS" collapses to
+    // the ATOMIC create-only PUT already bracketed by AfterSegmentWriteBeforeManifest (lost -> orphan) and
+    // AfterManifestBeforeAck (won -> committed), so it needs no separate cut point. The two projection-apply
+    // instants are NOT internal to the segmented object-log substrate this row drives directly: they live in
+    // the `pqueue-engine` ComposedBackend projection-apply step (in-memory projection for this profile) and
+    // are exercised as the success barrier / poison instants by AC-TXN-5/5A (hybrid `DuringMemoryApply`) and
+    // as restart-replay by AC-TXN-3 (`AfterApplyBeforeResponse`). This row therefore honestly covers the 5
+    // substrate-internal cut points only, not the composed-layer projection-apply instants.
+    asserts.push(
+        "GAP (row 209 scope): covers the 5 object-log-substrate-internal cut points; the composed-layer 'during projection apply' + 'after projection apply before response' instants are covered by AC-TXN-5/5A (DuringMemoryApply) and AC-TXN-3 (AfterApplyBeforeResponse), and 'during manifest CAS' collapses into the two bracketing manifest cut points".into(),
     );
 
     Ok(asserts)
@@ -616,6 +671,17 @@ async fn ac_txn_5_hybrid_strict_poison_replay_scenario() -> AcOutcome {
         "request-id semantics on the objectlog/hybrid substrate: same-body retry replays the original result; conflicting body returns request-id-conflict".into(),
     );
 
+    // Honest real-server-path caveat: the AfterSqliteCommitBeforeMemoryApply poison instant above is struck
+    // on `HybridProjectionStore::apply` (`apply_durable_then_memory`, SQLite-first). NO real server pipeline
+    // runs that ordering: both the `hybrid` and `hybrid-async` runtime profiles compose the backend with
+    // `with_group_commit(true)` and apply MEMORY-FIRST via `apply_live_owned` (deferring SQLite to
+    // `flush_deferred`), and pqueue-server wires no `hybrid-strict` profile (env_config accepts only
+    // inmemory|sqlite|hybrid|hybrid-async|postgres). So this SQLite-first poison/fail-closed instant is
+    // verified at the ProjectionStore layer, not on a real server write pipeline.
+    asserts.push(
+        "GAP (real-server-path caveat): AfterSqliteCommitBeforeMemoryApply is the SQLite-first `apply` ordering, verified at the ProjectionStore layer only; the real `hybrid`/`hybrid-async` server profiles apply memory-first via apply_live_owned (with_group_commit) and no `hybrid-strict` profile is wired in pqueue-server, so this exact cut is not on a real server pipeline".into(),
+    );
+
     Ok(asserts)
 }
 
@@ -724,6 +790,58 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
         "ordered batching: 3 live-applied commands drain in one flush, the SQLite high-water advances through the whole batch exactly once, and a no-op flush does not re-advance it".into(),
     );
 
+    // --- (b2) async SQLite checkpoint fault (DuringAsyncSqliteApply): a fault struck strictly INSIDE the
+    // deferred async-apply — the real hybrid-async background checkpoint step, reached only via
+    // `flush_deferred` — must NOT silently drop the batch. The deferred commands stay queued, the store
+    // poisons fail-closed (so it never keeps retrying against a possibly-corrupt SQLite image), and every
+    // subsequent op errors until restart. This actually installs + triggers the DuringAsyncSqliteApply cut
+    // the profile declares, rather than only the AfterSqliteCommitBeforeMemoryApply / DuringMemoryApply
+    // instants. ---
+    {
+        let base = base_dir("hybrid-async-checkpoint-fault");
+        std::fs::create_dir_all(&base).ok();
+        let path = base.join("projection.sqlite");
+        let mut hybrid =
+            HybridProjectionStore::open(path.to_str().unwrap()).expect("open hybrid projection");
+        ProjectionStore::ensure_shard(&mut hybrid, &pqueue_conformance::qdef())
+            .map_err(|e| format!("ensure_shard: {e:?}"))?;
+        let pos = CommandPosition::new(shard.clone(), 0, 0);
+        let env = hybrid_push_env("1", "kx");
+        ProjectionStore::apply_live(
+            &mut hybrid,
+            std::slice::from_ref(&pos),
+            std::slice::from_ref(&env),
+        )
+        .map_err(|e| format!("apply_live: {e:?}"))?;
+        ensure!(
+            hybrid.deferred_command_count() == 1,
+            "the live-applied command must be queued for deferred async SQLite apply; got {}",
+            hybrid.deferred_command_count()
+        );
+        hybrid.set_fault_hook(Some(Arc::new(HybridCrashAt(
+            HybridFaultCutPoint::DuringAsyncSqliteApply,
+        ))));
+        let flush = ProjectionStore::flush_deferred(&mut hybrid);
+        ensure!(
+            flush.is_err(),
+            "a fault struck DURING the async SQLite checkpoint apply must not report flush success"
+        );
+        ensure!(
+            hybrid.deferred_command_count() == 1,
+            "the faulted async batch must stay queued (untouched), not silently drop; got {} deferred",
+            hybrid.deferred_command_count()
+        );
+        hybrid.set_fault_hook(None);
+        let after = ProjectionStore::metrics(&hybrid, &shard);
+        ensure!(
+            after.is_err(),
+            "the async-apply fault must poison the store fail-closed (reads included) until restart; got {after:?}"
+        );
+    }
+    asserts.push(
+        "async-apply fault (DuringAsyncSqliteApply): a fault inside the deferred SQLite checkpoint keeps the ordered batch queued (0 silently dropped) and poisons the store fail-closed until restart".into(),
+    );
+
     // --- (c) unknown-outcome-by-request_id: delegated to the generic AC-TXN-3 harness run against this
     // exact objectlog/hybrid substrate — a crash after the durable append but before the response is
     // observed resolves the request_id replay to the ONE committed result after restart. ---
@@ -765,7 +883,18 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
         );
     }
     asserts.push(
-        "backpressure fail-closed: async apply debt over the hard budget rejects new mutation admission and withholds the lagging high-water".into(),
+        "backpressure fail-closed (component-level): async apply debt over the hard budget rejects new mutation admission (Unavailable) and withholds the lagging high-water".into(),
+    );
+    // Honest server-wiring caveat: the assertion above proves the TD-004 admission/high-water/retention gate
+    // ONLY against the standalone `HybridAsyncMonitor` component. pqueue-server opens `HybridProjectionStore`
+    // WITHOUT threading a monitor/thresholds into the composed write path — `open_objectlog_hybrid_backend`
+    // constructs no monitor, and the `hybrid-async` arm merely LOGS the resolved thresholds (lib.rs:1455).
+    // No `admit_mutation` call gates a real push/claim, and no observed debt withholds `recovery_high_water`
+    // on the server pipeline. So TD-004:361's "hard debt fails mutating admission / high-water / retention"
+    // is NOT proven end-to-end on the server; it is a tracked follow-up (wire monitor+thresholds into the
+    // backend write path).
+    asserts.push(
+        "GAP (server not wired): the TD-004 hard-debt admission/high-water/retention gate is proven only against the standalone HybridAsyncMonitor; pqueue-server opens HybridProjectionStore without wiring the monitor/thresholds into the write path (lib.rs merely logs them), so debt does not yet gate real admission — tracked follow-up".into(),
     );
 
     Ok(asserts)
@@ -846,7 +975,7 @@ async fn ac_txn_contract_matrix() {
         &mut records,
         &mut failures,
         "AC-TXN-5",
-        "object_log_sqlite(hybrid-strict)",
+        "object_log_sqlite(hybrid, ProjectionStore-layer)",
         ac_txn_5_hybrid_strict_poison_replay_scenario().await,
     );
 
@@ -871,6 +1000,12 @@ async fn ac_txn_contract_matrix() {
         (Ok(a), Ok(b)) => {
             let same = a == b;
             let mut assertions = vec![format!("force-seal AC-TXN-3 assertions == group-commit AC-TXN-3 assertions: {same}")];
+            // Honest scope note: TP-003 §3.10 row 213 requires repeating AC-TXN-1..6 across the full TP-002 E3
+            // commit-latency-bound sweep. This row repeats only AC-TXN-3 across only two objectlog latency
+            // settings (force-seal vs group-commit) and asserts the invariants are identical.
+            assertions.push(
+                "GAP (row 213 sweep coverage): repeats AC-TXN-3 only (not the full AC-TXN-1..6) across two commit-latency-bound settings (objectlog force-seal vs group-commit), not the full TP-002 E3 sweep".into(),
+            );
             assertions.extend(a);
             if !same {
                 failures.push("AC-TXN-7 [objectlog]: latency-bound setting changed AC-TXN-3 invariants".into());

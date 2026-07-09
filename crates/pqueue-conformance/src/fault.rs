@@ -255,6 +255,15 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead>(
     }
     asserts.push("BatchFinalize terminal state durable after kill/reopen; sibling still claimable".into());
 
+    // Honest op-coverage note: TP-003 §3.10 row 206 requires kill-after-success for EVERY mutating op
+    // (CreateQueue, BatchPush, BatchUpdate, SetGates, BatchClaim, BatchRenewLeases, BatchFinalize,
+    // PurgeItems). This scenario exercises the durable+visible-after-reopen invariant for the four core
+    // lifecycle ops only; CreateQueue durability is implied (every reopen re-serves the same queue) but not
+    // asserted as its own kill-after-success step, and BatchUpdate/SetGates/PurgeItems are not driven here.
+    asserts.push(
+        "GAP (row 206 op coverage): kill-after-success asserted for BatchPush, BatchClaim, BatchRenewLeases, BatchFinalize; NOT exercised as their own kill-after-success steps: CreateQueue-alone, BatchUpdate, SetGates, PurgeItems".into(),
+    );
+
     Ok(asserts)
 }
 
@@ -346,6 +355,13 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
     );
     asserts.push(
         "rejected finalize/renew/request-id-conflict appended 0 durable commands and left 0 visible effect".into(),
+    );
+    // Honest rejection-class note: TP-003 §3.10 row 207 requires envelope-invalid batches, per-item
+    // invalid/conflict/stale cases, capacity/unavailable paths, AND commit-timeout paths. This scenario
+    // drives three rejection classes (per-item-invalid finalize, unknown-id renew, request-id-conflict) plus
+    // accepted-sibling survival; the remaining classes are not exercised here.
+    asserts.push(
+        "GAP (row 207 rejection-class coverage): covers per-item-invalid finalize, unknown-id renew, request-id-conflict, and accepted-sibling survival; NOT exercised: envelope-invalid batches, per-item stale-lease/conflict (beyond request-id), capacity/unavailable paths, commit-timeout paths".into(),
     );
 
     if !caps.durable_reopen {
@@ -440,6 +456,17 @@ pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
     asserts.push(
         "BeforeAppend: no original commit -> fresh execution; AfterResponse: request_id replays exactly once".into(),
     );
+    // Honest cut-point/op note: TP-003 §3.10 row 208 requires duplicate retry of EACH mutating request_id
+    // across before-append, after-append-before-commit, after-commit-before-apply, after-apply-before-response,
+    // and after-response. This scenario proves request_id exactly-once replay for PUSH at BeforeAppend +
+    // AfterResponse (in-process) and AfterApplyBeforeResponse (across restart, durable profiles); the
+    // mid-pipeline AfterAppendBeforeApply cut is driven with a raw envelope carrying NO request_id, so it
+    // proves item-level INV-14 there, not request_id dedup at that exact instant (the public seam cannot
+    // interrupt push_with_request_id between its internal append and apply). request_id replay for
+    // claim/renew/finalize/update/purge across every cut is not exercised.
+    asserts.push(
+        "GAP (row 208 request_id-across-all-cuts coverage): request_id replay proven for PUSH at BeforeAppend/AfterResponse (in-proc) + AfterApplyBeforeResponse (across restart); AfterAppendBeforeApply is item-level only (raw envelope, no request_id); NOT exercised: request_id replay for claim/renew/finalize/update/purge at every cut point".into(),
+    );
 
     if !caps.durable_reopen {
         asserts.push(
@@ -533,21 +560,66 @@ pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
     Ok(asserts)
 }
 
-/// **AC-TXN-6** cross-combination parity. Run the SAME operation history and the SAME failure schedule on
-/// two backend profiles, then compare — after a restart of both — the final visible `QueueMetrics`
-/// (including complete/failed terminal COUNTS), the `select_eligible` order, and the pending/active-lease
-/// set. Uses explicit item ids (server-minted ids differ per backend by construction) so the compared
-/// state is backend-independent. It does NOT compare per-`request_id` idempotency records or per-item
-/// terminal-outcome records; the recorded assertion names exactly what is compared.
+/// The backend-independent post-restart observable state compared across two AC-TXN-6 profile combinations.
+struct ParityState {
+    metrics: pqueue_engine::QueueMetrics,
+    eligible: Vec<String>,
+    pending: Vec<String>,
+    /// Per-item terminal-outcome records reconstructed from the DURABLE command log (explicit ids only, so
+    /// backend-independent): `["2:Complete", "3:Fail"]`. Proves both durable logs recorded the same terminal
+    /// disposition per item after the failure schedule + restart, not merely the same complete/failed counts.
+    terminal_outcomes: Vec<String>,
+    /// Per-`request_id` idempotency-record BEHAVIOR, probed through the real
+    /// [`PushPort::push_with_request_id`] replay/conflict path (server-minted ids differ per backend, so the
+    /// comparable facts are the behavior, not the id value): `(replay_returns_original, replay_item_count,
+    /// conflicting_body_rejected, no_phantom_commit_on_replay)`.
+    rid_idempotency: (bool, usize, bool, bool),
+}
+
+/// **AC-TXN-6** cross-combination parity (TP-003 §3.10 row 212). Run the SAME operation history and the SAME
+/// failure schedule on two backend profiles, then compare — after a restart of both — the final visible
+/// `QueueMetrics` (including complete/failed terminal COUNTS), the `select_eligible` order, the
+/// pending/active-lease set, the PER-ITEM terminal-outcome records (reconstructed from each backend's durable
+/// log), and the per-`request_id` idempotency-record behavior (replay returns the original result; a
+/// conflicting body under the same id is rejected; a same-body replay adds no phantom commit). Uses explicit
+/// item ids for the compared lifecycle state (server-minted ids differ per backend by construction) and
+/// compares the request_id records by their backend-independent BEHAVIOR rather than the minted id value.
 pub async fn ac_txn_6_parity<A: ConformanceCore + LogRead, B: ConformanceCore + LogRead>(
     make_a: impl Fn(&str) -> A,
     make_b: impl Fn(&str) -> B,
 ) -> AcOutcome {
+    // Reconstruct the per-item terminal-outcome records (Complete/Fail) from a backend's DURABLE command log,
+    // restricted to the explicit-id items so the result is backend-independent (server-minted ids differ).
+    async fn terminal_outcomes_from_log<X: LogRead>(x: &X) -> Result<Vec<String>, String> {
+        const EXPLICIT_IDS: &[&str] = &["1", "2", "3", "4"];
+        let entries = x
+            .read_from(&shard(), None, 100_000)
+            .await
+            .map_err(|e| format!("read_from (terminal-outcome reconstruction): {e:?}"))?
+            .entries;
+        let mut out: Vec<String> = Vec::new();
+        for (_, env) in &entries {
+            if let QueueCommand::Finalize(fc) = &env.command {
+                for o in &fc.outcomes {
+                    if matches!(o.kind, FinalizeKind::Complete | FinalizeKind::Fail) {
+                        let id = o.item_id.to_string();
+                        if EXPLICIT_IDS.contains(&id.as_str()) {
+                            out.push(format!("{id}:{:?}", o.kind));
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     // Drive the identical op history + failure schedule against one backend, returning its post-restart
-    // observable state as a comparable tuple.
+    // observable state as a backend-independent comparable value.
     async fn run<X: ConformanceCore + LogRead>(
         make: &impl Fn(&str) -> X,
-    ) -> Result<(pqueue_engine::QueueMetrics, Vec<String>, Vec<String>), String> {
+    ) -> Result<ParityState, String> {
         {
             let x = make("txn6");
             x.create_queue(qdef())
@@ -583,11 +655,11 @@ pub async fn ac_txn_6_parity<A: ConformanceCore + LogRead, B: ConformanceCore + 
             if killed.is_ok() {
                 return Err("BeforeAppend fault unexpectedly committed".into());
             }
-            // Op history: claim + finalize the highest-priority item (p2 @ prio 10) -> terminal.
+            // Op history: claim + finalize the highest-priority item (p2 @ prio 10) -> terminal Complete.
             let claimed = x
                 .claim(claim_req(1, 500, 10))
                 .await
-                .map_err(|e| format!("claim: {e:?}"))?;
+                .map_err(|e| format!("claim (complete): {e:?}"))?;
             let leased = claimed.items[0].item_id;
             x.finalize(
                 &shard(),
@@ -596,7 +668,22 @@ pub async fn ac_txn_6_parity<A: ConformanceCore + LogRead, B: ConformanceCore + 
                 None,
             )
             .await
-            .map_err(|e| format!("finalize: {e:?}"))?;
+            .map_err(|e| format!("finalize (complete): {e:?}"))?;
+            // Op history: claim + finalize the next item (p3 @ prio 20) -> terminal FAILED, so the per-item
+            // terminal-outcome comparison distinguishes complete-vs-failed, not just counts.
+            let claimed = x
+                .claim(claim_req(1, 500, 30))
+                .await
+                .map_err(|e| format!("claim (fail): {e:?}"))?;
+            let leased = claimed.items[0].item_id;
+            x.finalize(
+                &shard(),
+                vec![FinalizeOutcome::new(leased, FinalizeKind::Fail)],
+                ts(40),
+                None,
+            )
+            .await
+            .map_err(|e| format!("finalize (fail): {e:?}"))?;
             // Failure schedule step 2: AfterAppendBeforeApply — durable-but-unapplied push of "p4".
             inject_commit(
                 &x,
@@ -632,32 +719,95 @@ pub async fn ac_txn_6_parity<A: ConformanceCore + LogRead, B: ConformanceCore + 
             .map(|l| format!("{}:{}", l.item_id, l.attempt_count))
             .collect();
         pending.sort();
-        Ok((metrics, eligible, pending))
+        // PER-ITEM terminal-outcome records from the durable log (captured before the request_id probe below
+        // adds a fresh push, though a push would not affect a Finalize-only scan).
+        let terminal_outcomes = terminal_outcomes_from_log(&x).await?;
+
+        // PER-REQUEST_ID idempotency record, exercised through the REAL idempotency path so we compare the
+        // record's behavior (not the minted id, which differs per backend): a same-body retry under the same
+        // request_id must replay the ORIGINAL committed result and add NO second durable commit; a conflicting
+        // body under the same id must be rejected `RequestIdConflict`. Runs after the compared lifecycle state
+        // is captured, so the probe's pushed item never pollutes the metrics/eligible/pending/terminal tuple.
+        let rid = RequestId::new("ac-txn-6-parity-rid").unwrap();
+        let body = vec![spec("txn6-rid", 25)];
+        let durable_before = durable_command_count(&x).await?;
+        let original = x
+            .push_with_request_id(&shard(), rid.clone(), body.clone(), ts(50), None)
+            .await
+            .map_err(|e| format!("request_id push: {e:?}"))?;
+        let replay = x
+            .push_with_request_id(&shard(), rid.clone(), body, ts(51), None)
+            .await
+            .map_err(|e| format!("request_id same-body replay: {e:?}"))?;
+        let conflict = x
+            .push_with_request_id(
+                &shard(),
+                rid,
+                vec![spec("txn6-rid-different", 26)],
+                ts(52),
+                None,
+            )
+            .await;
+        let durable_after = durable_command_count(&x).await?;
+        let rid_idempotency = (
+            replay == original,
+            original.len(),
+            matches!(conflict, Err(EngineError::RequestIdConflict)),
+            // Two same-request_id same-body pushes + one conflicting push commit exactly ONE new command.
+            durable_after == durable_before + 1,
+        );
+
+        Ok(ParityState {
+            metrics,
+            eligible,
+            pending,
+            terminal_outcomes,
+            rid_idempotency,
+        })
     }
 
     let a = run(&make_a).await?;
     let b = run(&make_b).await?;
     ensure!(
-        a.0 == b.0,
+        a.metrics == b.metrics,
         "final visible metrics diverge across combinations: {:?} vs {:?}",
-        a.0,
-        b.0
+        a.metrics,
+        b.metrics
     );
     ensure!(
-        a.1 == b.1,
+        a.eligible == b.eligible,
         "final visible eligibility order diverges across combinations: {:?} vs {:?}",
-        a.1,
-        b.1
+        a.eligible,
+        b.eligible
     );
     ensure!(
-        a.2 == b.2,
+        a.pending == b.pending,
         "active-lease / pending set diverges across combinations: {:?} vs {:?}",
-        a.2,
-        b.2
+        a.pending,
+        b.pending
+    );
+    ensure!(
+        a.terminal_outcomes == b.terminal_outcomes,
+        "per-item terminal-outcome records diverge across combinations: {:?} vs {:?}",
+        a.terminal_outcomes,
+        b.terminal_outcomes
+    );
+    // The request_id idempotency record must both HOLD (replay=original, conflict rejected, no phantom
+    // commit) and be IDENTICAL across the two combinations.
+    ensure!(
+        a.rid_idempotency == b.rid_idempotency,
+        "per-request_id idempotency record behavior diverges across combinations: {:?} vs {:?}",
+        a.rid_idempotency,
+        b.rid_idempotency
+    );
+    let (replay_ok, rid_items, conflict_ok, no_phantom) = a.rid_idempotency;
+    ensure!(
+        replay_ok && conflict_ok && no_phantom,
+        "per-request_id idempotency record did not hold (replay_returns_original={replay_ok}, conflicting_body_rejected={conflict_ok}, no_phantom_commit={no_phantom})"
     );
     Ok(vec![format!(
-        "identical final visible QueueMetrics (incl. complete/failed terminal counts), select_eligible order, and pending/active-lease set (item_id:attempt) across combinations; NOT compared: per-request_id idempotency records or per-item terminal-outcome records (metrics={:?}, eligible={:?}, pending={:?})",
-        a.0, a.1, a.2
+        "identical across combinations: final visible QueueMetrics (incl. complete/failed terminal counts), select_eligible order, pending/active-lease set (item_id:attempt), PER-ITEM terminal-outcome records reconstructed from the durable log ({:?}), and per-request_id idempotency-record behavior (same-body replay returns the original {rid_items}-item result, conflicting body -> RequestIdConflict, no phantom commit) (metrics={:?}, eligible={:?}, pending={:?})",
+        a.terminal_outcomes, a.metrics, a.eligible, a.pending
     )])
 }
 
