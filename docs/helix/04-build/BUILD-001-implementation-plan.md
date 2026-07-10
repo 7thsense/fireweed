@@ -362,8 +362,9 @@ BUILD-001 is complete when:
 
 Completion evidence as of 2026-06-16:
 
-- `bash scripts/ci/verify-build-closure.sh --aggregate pqueue-fa406e7d`
-  reports live closure verified.
+- `bash scripts/ci/verify-build-closure.sh --aggregate pqueue-131eadfa`
+  reports live closure verified. (Originally the B-090 P0 aggregate pqueue-fa406e7d,
+  repointed to the release epic after that closed bead was pruned from the tracker.)
 - `bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 --tp002-e0e1-source pqueue-7e2b3132 --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4`
   passes from source-backed evidence and regenerates
   `target/pqueue-ledger/product_validation.jsonl`.

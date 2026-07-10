@@ -97,7 +97,7 @@ bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-engine.lcov" --crate pqueue-engine --min-lines 80
 
 echo "--- build-closure integrity ---"
-bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-fa406e7d
+bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
 
 echo "=== release gate (SMOKE lane) PASSED ==="
 echo "    Smoke evidence E2,E3 present + well-formed; coverage bars met."
