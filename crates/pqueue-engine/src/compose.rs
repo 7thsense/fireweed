@@ -913,11 +913,42 @@ struct Inner<L, P> {
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 const RECOVERY_READ_PAGE_LIMIT: usize = 8_192;
 
+/// The two composed-layer projection-apply crash instants (TP-003 §3.10 AC-TXN-4, row 209). These live in
+/// the [`ComposedBackend`] apply step — ABOVE the [`LogStore`] substrate, whose own internal cut points
+/// ([`crate`]-external `pqueue_objectlog::FaultCutPoint`) cannot reach them — so they need this seam.
+///
+/// A commit's durable append (via [`LogWriter::append`]) has already returned `Ok` by the time the
+/// projection apply runs; these instants strike that apply:
+///
+/// * [`ComposeFaultPoint::DuringProjectionApply`] — while applying the committed command to the projection,
+///   BEFORE the projection durably advances (for an eventual-apply log-replay projection the durable state is
+///   the log itself, so recovery rebuilds the projection from the durable tail).
+/// * [`ComposeFaultPoint::AfterApplyBeforeResponse`] — the projection has applied + durably advanced, but the
+///   caller has not yet received its success response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeFaultPoint {
+    /// Fault while applying the committed command to the projection, before it durably advances.
+    DuringProjectionApply,
+    /// Fault after the projection has applied + durably advanced, before the caller's response.
+    AfterApplyBeforeResponse,
+}
+
+/// A TEST-ONLY composed-layer fault hook (TP-003 §3.10 AC-TXN-4): called at each [`ComposeFaultPoint`] the
+/// [`ComposedBackend`] projection-apply step passes through. Returning `Err` simulates a process death at that
+/// instant (the in-flight unit of work aborts there); `Ok(())` (the default when no hook is installed) lets
+/// the apply run normally. The analogue of `pqueue_objectlog::FaultHook` on the composed-apply boundary.
+pub trait ComposeFaultHook: Send + Sync {
+    fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()>;
+}
+
 /// The one generic backend (ADR-012): `Backend = LogStore × ProjectionStore × ControlPlane`. Implements
 /// every engine port by delegating to the three axes.
 pub struct ComposedBackend<L, P, C> {
     inner: Mutex<Inner<L, P>>,
     control: C,
+    /// Test-only composed-layer projection-apply fault hook (TP-003 §3.10 AC-TXN-4). `None` in every
+    /// production path — installed only by the AC-TXN-4 conformance tests via [`Self::set_fault_hook`].
+    fault_hook: Mutex<Option<Arc<dyn ComposeFaultHook>>>,
     /// Packed into every minted [`ItemId`] (ADR-009) so concurrent writers never collide. `0` default.
     node_id: u8,
     counters: QueueCounters,
@@ -948,12 +979,22 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 coords: HashMap::new(),
             }),
             control,
+            fault_hook: Mutex::new(None),
             node_id: 0,
             counters: QueueCounters::default(),
             durability,
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             group_commit: false,
         }
+    }
+
+    /// Install (or clear, with `None`) a TEST-ONLY composed-layer fault hook that strikes the two
+    /// projection-apply instants (TP-003 §3.10 AC-TXN-4, [`ComposeFaultPoint`]). Never called from a
+    /// production code path — the hook field defaults to `None`, so the apply path is inert (a `None`-valued
+    /// hook clone + two `is_some` checks per write, no behavioral effect) unless a test installs a hook. The
+    /// analogue of `pqueue_objectlog::SegmentedObjectLog::set_fault_hook` on the composed-apply boundary.
+    pub fn set_fault_hook(&self, hook: Option<Arc<dyn ComposeFaultHook>>) {
+        *self.fault_hook.lock().expect("compose fault hook poisoned") = hook;
     }
 
     /// Override the recovery-window budget (max durable-log tail commands a reopen replays before a
@@ -1938,6 +1979,9 @@ impl<L: LogStore> LogWriter for LogWriterView<'_, L> {
 
 struct ProjectionWriterView<'a, P> {
     projection: &'a mut P,
+    /// Test-only composed-layer fault hook (TP-003 §3.10 AC-TXN-4), cloned once from the backend under the
+    /// unit-of-work lock. `None` in every production path.
+    fault_hook: Option<Arc<dyn ComposeFaultHook>>,
 }
 
 impl<P: ProjectionStore> ProjectionWriter for ProjectionWriterView<'_, P> {
@@ -1946,7 +1990,20 @@ impl<P: ProjectionStore> ProjectionWriter for ProjectionWriterView<'_, P> {
         positions: &[CommandPosition],
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
-        self.projection.apply_live(positions, commands)
+        // AC-TXN-4 composed cut point: strike WHILE applying the committed command to the projection, before
+        // it durably advances. The durable log append has already returned Ok, so a fault here leaves a
+        // durable-but-unapplied tail that recovery must replay exactly once.
+        if let Some(hook) = &self.fault_hook {
+            hook.fault_point(ComposeFaultPoint::DuringProjectionApply)?;
+        }
+        self.projection.apply_live(positions, commands)?;
+        // AC-TXN-4 composed cut point: the projection has applied + durably advanced; strike before the caller
+        // receives its success response. The in-process apply is discarded on drop; recovery replays the
+        // durable log to the same exactly-once projected state.
+        if let Some(hook) = &self.fault_hook {
+            hook.fault_point(ComposeFaultPoint::AfterApplyBeforeResponse)?;
+        }
+        Ok(())
     }
 }
 
@@ -2003,6 +2060,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
         F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
         R: Send,
     {
+        let fault_hook = self
+            .fault_hook
+            .lock()
+            .expect("compose fault hook poisoned")
+            .clone();
         let result = {
             let mut g = self.inner.lock().expect("composed backend poisoned");
             let Inner {
@@ -2013,7 +2075,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
                 log,
                 supports_gates,
             };
-            let mut pw = ProjectionWriterView { projection };
+            let mut pw = ProjectionWriterView {
+                projection,
+                fault_hook,
+            };
             f(&mut lw, &mut pw)
         };
         std::future::ready(result)

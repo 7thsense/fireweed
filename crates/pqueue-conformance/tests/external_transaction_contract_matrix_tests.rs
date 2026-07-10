@@ -14,7 +14,7 @@
 //! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | ✓‡ | ✓ (all 8 ops) | ✓‡ | ✓‡ | ✓‡ |
 //! | AC-TXN-2 rejection no-effect | ✓§ (in-proc; restart n/a) | ✓§ | ✓§ | ✓§ | ✓§ | ✓§ |
 //! | AC-TXN-3 unknown-outcome replay | ✓‖ | partial¶ | n/a (unified store, no cut window) | ✓‖ | ✓‖ | partial¶ |
-//! | AC-TXN-4 objectlog crash-point matrix | — | — | — | partial (5 internal cut points)* | — | — |
+//! | AC-TXN-4 objectlog crash-point matrix | — | — | — | ✓ (5 substrate + 2 composed cut points)* | — | — |
 //! | AC-TXN-5 hybrid poison + replay | — | — | — | | partial (projection cut points)† | — |
 //! | AC-TXN-5A hybrid-async success barrier | — | — | — | | partial (projection cut points)† | — |
 //! | AC-TXN-6 cross-combination parity | — | ✓ (sqlite-log vs objectlog+sqlite) | | | | — |
@@ -85,19 +85,23 @@
 //! rejection records, a deferred wire-format change). (`sqlite_relational` stays
 //! `n/a`: its unified store couples append+apply in one transaction, so there is no mid-pipeline cut window.)
 //!
-//! `*` AC-TXN-4 (`partial`) drives [`pqueue_objectlog::ObjectLog`]'s `LogStore` impl DIRECTLY (bypassing
-//! `ComposedBackend`) with the [`pqueue_objectlog::FaultHook`] seam added for this row, striking 5 instants
-//! strictly INSIDE the segmented substrate's own commit pipeline that the public `Backend::write` seam
-//! cannot reach: `BeforeSegmentWrite`, `AfterSegmentWriteBeforeManifest`, `AfterManifestBeforeAck` (whose
-//! "0 duplicate active leases" clause now replays the recovered log through a fresh projection and asserts
-//! exactly one ACTIVE lease in the projected serving image, not just one durable Claim log command),
-//! `DuringOwnerReassignment`, `DuringSnapshotWrite` (see `ac_txn_4_crash_point_matrix` below). It is `partial`
-//! (not `pass`) because TP-003 §3.10 row 209 also names two projection-apply instants — "during projection
-//! apply" and "after projection apply before response" — that live in a distinct architectural layer
-//! (`pqueue-engine`'s `ComposedBackend`, which applies a batch only after `LogStore::append` returned `Ok`)
-//! rather than inside the segmented substrate; those are exercised by AC-TXN-5/5A (`DuringMemoryApply`) and
-//! AC-TXN-3 (`AfterApplyBeforeResponse`). ("During manifest CAS" collapses into the atomic create-only PUT
-//! already bracketed by the two manifest cut points.) The row's `GAP` assertion states this explicitly.
+//! `*` AC-TXN-4 (`pass`) covers TP-003 §3.10 row 209 at BOTH architectural layers. The 5 substrate-internal
+//! instants drive [`pqueue_objectlog::ObjectLog`]'s `LogStore` impl DIRECTLY (bypassing `ComposedBackend`)
+//! with the [`pqueue_objectlog::FaultHook`] seam, striking cut points strictly INSIDE the segmented
+//! substrate's own commit pipeline that the public `Backend::write` seam cannot reach: `BeforeSegmentWrite`,
+//! `AfterSegmentWriteBeforeManifest`, `AfterManifestBeforeAck` (whose "0 duplicate active leases" clause
+//! replays the recovered log through a fresh projection and asserts exactly one ACTIVE lease in the projected
+//! serving image, not just one durable Claim log command), `DuringOwnerReassignment`, `DuringSnapshotWrite`.
+//! The two COMPOSED-LAYER projection-apply instants row 209 also names — "during projection apply" and "after
+//! projection apply before response" — live one layer up in `pqueue-engine`'s `ComposedBackend` (which applies
+//! a batch only after `LogStore::append` returned `Ok`), so they need the engine's [`pqueue_engine::ComposeFaultPoint`]
+//! seam (`DuringProjectionApply` / `AfterApplyBeforeResponse`): `ac_txn_4_composed_projection_apply_crash`
+//! strikes each against the composed OBJECTLOG backend through the `Backend::write` unit-of-work seam and, on
+//! drop+reopen recovery, asserts the row-209 outcomes on the RECONSTRUCTED PROJECTED STATE (3 accepted items
+//! preserved, the faulted Claim+Push replay EXACTLY ONCE → projected `leased`/`pending` counts not log-row
+//! counts, 0 duplicate active leases, stale-epoch commits EpochFenced). ("During manifest CAS" collapses into
+//! the atomic create-only PUT already bracketed by the two manifest cut points.) So all 7 named cut points are
+//! genuinely struck — no remaining coverage `GAP`.
 //!
 //! `†` AC-TXN-5/5A (both `partial`; see `ac_txn_5_hybrid_strict_poison_replay_scenario` /
 //! `ac_txn_5a_hybrid_async_success_barrier_scenario` below) add the analogous seam on the PROJECTION side —
@@ -127,9 +131,9 @@ use pqueue_conformance::fault::{
 };
 use pqueue_core::RequestId;
 use pqueue_engine::{
-    ClaimCommand, CommandPosition, ComposedBackend, ControlPlaneStore, EngineError,
-    InProcessControlPlane, LogStore, ProjectionSnapshot, ProjectionStore, PushCommand, PushPort,
-    QueueCommand,
+    Backend, ClaimCommand, ClaimPort, CommandPosition, ComposeFaultHook, ComposeFaultPoint,
+    ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane, LogStore,
+    ProjectionRead, ProjectionSnapshot, ProjectionStore, PushCommand, PushPort, QueueCommand,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{
@@ -303,6 +307,22 @@ impl FaultHook for CrashAt {
     }
 }
 
+/// The composed-layer analogue of [`CrashAt`] (AC-TXN-4 row 209): crashes (`Err`) when the
+/// [`ComposedBackend`] projection-apply step reaches `target`, a no-op at the other composed cut point.
+struct ComposeCrashAt(ComposeFaultPoint);
+
+impl ComposeFaultHook for ComposeCrashAt {
+    fn fault_point(&self, cut: ComposeFaultPoint) -> pqueue_engine::EngineResult<()> {
+        if cut == self.0 {
+            Err(EngineError::Storage(format!(
+                "fault-injection: composed projection-apply crash at {cut:?}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn objectlog_direct(base: &std::path::Path, tag: &str) -> (std::path::PathBuf, ObjectLog) {
     let root = base.join(tag);
     let log = ObjectLog::open(root.clone()).expect("open object log");
@@ -326,9 +346,10 @@ macro_rules! ensure {
     };
 }
 
-/// AC-TXN-4: strike 5 object-log-internal cut points and assert TP-003 §3.10's outcomes hold at each:
-/// 0 lost accepted items, 0 duplicate active leases, committed commands replay exactly once, orphan
-/// segments are ignored by replay, and stale-epoch commits are rejected.
+/// AC-TXN-4 (TP-003 §3.10 row 209): strike the 5 object-log-substrate-internal cut points here AND the 2
+/// composed-layer projection-apply cut points via [`ac_txn_4_composed_projection_apply_crash`], asserting the
+/// row's outcomes hold at each: 0 lost accepted items, 0 duplicate active leases, committed commands replay
+/// exactly once, orphan segments are ignored by replay, and stale-epoch commits are rejected.
 async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     let mut asserts = Vec::new();
     let shard = pqueue_conformance::shard();
@@ -563,17 +584,25 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
         "DuringSnapshotWrite: a lost snapshot write leaves the command log fully intact (0 lost items)".into(),
     );
 
-    // Honest coverage note: TP-003 §3.10 row 209 also names "during projection apply", "after projection
-    // apply before response", and "during manifest CAS/fallback commit". "During manifest CAS" collapses to
-    // the ATOMIC create-only PUT already bracketed by AfterSegmentWriteBeforeManifest (lost -> orphan) and
-    // AfterManifestBeforeAck (won -> committed), so it needs no separate cut point. The two projection-apply
-    // instants are NOT internal to the segmented object-log substrate this row drives directly: they live in
-    // the `pqueue-engine` ComposedBackend projection-apply step (in-memory projection for this profile) and
-    // are exercised as the success barrier / poison instants by AC-TXN-5/5A (hybrid `DuringMemoryApply`) and
-    // as restart-replay by AC-TXN-3 (`AfterApplyBeforeResponse`). This row therefore honestly covers the 5
-    // substrate-internal cut points only, not the composed-layer projection-apply instants.
+    // TP-003 §3.10 row 209 also names the two COMPOSED-LAYER projection-apply instants — "during projection
+    // apply" and "after projection apply before response". These are NOT internal to the segmented object-log
+    // substrate the 5 cuts above drive directly; they live one layer up, in the `pqueue-engine`
+    // ComposedBackend projection-apply step. They now have a REAL cut point via the engine's `ComposeFaultPoint`
+    // fault seam, struck against the composed OBJECTLOG backend through the `Backend::write` unit-of-work seam
+    // and asserted on the RECONSTRUCTED PROJECTED STATE after drop+reopen recovery (see
+    // `ac_txn_4_composed_projection_apply_crash`).
+    asserts.extend(
+        ac_txn_4_composed_projection_apply_crash(ComposeFaultPoint::DuringProjectionApply).await?,
+    );
+    asserts.extend(
+        ac_txn_4_composed_projection_apply_crash(ComposeFaultPoint::AfterApplyBeforeResponse)
+            .await?,
+    );
+    // "During manifest CAS" collapses to the ATOMIC create-only PUT already bracketed by
+    // AfterSegmentWriteBeforeManifest (lost -> orphan) and AfterManifestBeforeAck (won -> committed), so it
+    // needs no separate cut point.
     asserts.push(
-        "GAP (row 209 scope): covers the 5 object-log-substrate-internal cut points; the composed-layer 'during projection apply' + 'after projection apply before response' instants are covered by AC-TXN-5/5A (DuringMemoryApply) and AC-TXN-3 (AfterApplyBeforeResponse), and 'during manifest CAS' collapses into the two bracketing manifest cut points".into(),
+        "row 209 'during manifest CAS' collapses into the atomic create-only PUT bracketed by AfterSegmentWriteBeforeManifest (lost -> orphan) and AfterManifestBeforeAck (won -> committed); no separate cut point is needed".into(),
     );
 
     Ok(asserts)
@@ -587,6 +616,223 @@ async fn ac_txn_4_objectlog_crash_point_matrix() {
     assert!(
         outcome.is_ok(),
         "AC-TXN-4 crash-point matrix failed: {:?}",
+        outcome.err()
+    );
+}
+
+/// AC-TXN-4 composed-layer projection-apply cut points (TP-003 §3.10 row 209). The two projection-apply
+/// instants row 209 names live in the `pqueue-engine` [`ComposedBackend`] apply step, ABOVE the segmented
+/// object-log substrate (whose 5 internal cut points `ac_txn_4_crash_point_matrix` covers). This drives the
+/// composed OBJECTLOG backend through the real [`Backend::write`] unit-of-work seam and injects a crash at
+/// `cut` via the engine's [`ComposeFaultPoint`] fault hook:
+///
+/// * [`ComposeFaultPoint::DuringProjectionApply`] — the durable log append has returned Ok, then the fault
+///   fires WHILE applying the committed batch to the projection, before it durably advances (the in-memory
+///   log-replay projection never advances; recovery rebuilds it from the durable log tail).
+/// * [`ComposeFaultPoint::AfterApplyBeforeResponse`] — the projection has fully applied + durably advanced,
+///   then the fault fires before the caller's success response (the in-process apply is discarded on drop;
+///   recovery replays the durable log to the same exactly-once projected state).
+///
+/// After the crash the backend is dropped and REOPENED from durable state, and every row-209 outcome is
+/// asserted on the RECONSTRUCTED PROJECTED STATE (the recovered serving image), NOT on log-row counts:
+/// 0 lost accepted items, committed commands replay EXACTLY ONCE (projected `leased`/`pending`, not a
+/// durable Claim/Push log-row count), 0 duplicate active leases (the claimed item is not re-handed-out), and
+/// stale-epoch commits are rejected while current-epoch commits succeed.
+async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcOutcome {
+    let base = base_dir("objectlog-compose");
+    let root = base.join("txn4-compose");
+    // Reopen the SAME durable root each phase (the drop+reopen "process kill/restart" mechanism, identical to
+    // AC-TXN-1). Recovery-on-open rebuilds the in-memory projection by replaying the durable object log.
+    let open = || {
+        pqueue_objectlog::composed_objectlog_backend(root.clone())
+            .map_err(|e| format!("open composed objectlog: {e:?}"))
+    };
+    let shard = pqueue_conformance::shard();
+    let qkey = pqueue_conformance::qkey();
+    let rid = RequestId::new("ac-txn-4-compose").unwrap();
+
+    // --- Seed: 3 items durably ACCEPTED (acknowledged via request_id) and fully applied. These are the
+    // "accepted items" that recovery must never lose. Distinct priorities so claim selection is deterministic.
+    let acked = {
+        let a = open()?;
+        a.create_queue(pqueue_conformance::qdef())
+            .await
+            .map_err(|e| format!("create_queue: {e:?}"))?;
+        let acked = a
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![
+                    pqueue_conformance::fault::spec("txn4c-a1", 9),
+                    pqueue_conformance::fault::spec("txn4c-a2", 5),
+                    pqueue_conformance::fault::spec("txn4c-a3", 1),
+                ],
+                pqueue_conformance::ts(1),
+                None,
+            )
+            .await
+            .map_err(|e| format!("seed push_with_request_id: {e:?}"))?;
+        ensure!(acked.len() == 3, "seed accepted 3 items, got {}", acked.len());
+        acked
+    };
+    let a1 = acked[0];
+
+    // --- Faulted commit: reopen (recovering the accepted items), install the composed-layer fault hook, and
+    // drive ONE raw unit-of-work that appends a Claim(a1)+Push(a4) batch DURABLY and applies it. The hook
+    // aborts the apply at `cut`, so the caller sees NO success (write returns Err).
+    {
+        let b = open()?;
+        let m = b
+            .metrics(&qkey)
+            .await
+            .map_err(|e| format!("metrics after seed reopen: {e:?}"))?;
+        ensure!(
+            (m.pending, m.leased, m.complete, m.failed) == (3, 0, 0, 0),
+            "seed accepted items not recovered before the cut; got pending={} leased={} complete={} failed={}",
+            m.pending,
+            m.leased,
+            m.complete,
+            m.failed
+        );
+        b.set_fault_hook(Some(Arc::new(ComposeCrashAt(cut))));
+        let epoch = b
+            .current_epoch(&shard)
+            .await
+            .map_err(|e| format!("current_epoch: {e:?}"))?;
+        let batch = vec![
+            pqueue_conformance::envelope(
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: vec![a1],
+                    lease_token: pqueue_core::LeaseToken::new("compose-lease-1").unwrap(),
+                    lease_expires_at: pqueue_conformance::ts(500),
+                }),
+                vec![a1],
+            ),
+            ac_txn_4_push_env("900000004", "txn4c-a4"),
+        ];
+        let res = b
+            .write(move |lw, pw| {
+                let pos = lw.append(&pqueue_conformance::shard(), &batch, epoch)?;
+                pw.apply(&pos, &batch)?;
+                Ok(pos)
+            })
+            .await;
+        ensure!(
+            res.is_err(),
+            "{cut:?} must abort the composed commit (the apply is torn, so no client-visible success); got {res:?}"
+        );
+    }
+
+    // --- Recovery: reopen from durable state. The projection is rebuilt purely from the durable log, so any
+    // half-applied in-process state from the crash is discarded. Assert the row-209 outcomes on the
+    // RECONSTRUCTED PROJECTED STATE.
+    {
+        let c = open()?;
+        let m = c
+            .metrics(&qkey)
+            .await
+            .map_err(|e| format!("metrics after recovery: {e:?}"))?;
+        ensure!(
+            (m.pending, m.leased, m.complete, m.failed) == (3, 1, 0, 0),
+            "{cut:?} recovery projected state wrong: expected pending=3 leased=1 (3 accepted items preserved, the faulted Claim(a1)+Push(a4) replay EXACTLY ONCE), got pending={} leased={} complete={} failed={}",
+            m.pending,
+            m.leased,
+            m.complete,
+            m.failed
+        );
+        // 0 duplicate active leases as a PROJECTED-STATE invariant: `leased == 1` above already proves a1 is
+        // leased exactly once (a duplicate replay would show leased=2 or resurface a1 as pending); additionally
+        // a re-claim must NOT hand a1 out again (it is genuinely held, not a phantom lease).
+        let reclaim = c
+            .claim(pqueue_conformance::claim_req(10, 1500, 700))
+            .await
+            .map_err(|e| format!("reclaim: {e:?}"))?;
+        ensure!(
+            !reclaim.items.iter().any(|it| it.item_id == a1),
+            "0 duplicate active leases violated: the recovered claim's item a1 was handed out a second time"
+        );
+    }
+
+    // --- stale-epoch commits are rejected. Model it faithfully: a NEW owner fences the queue by acquiring a
+    // fresh epoch on the durable manifest (advance_epoch_object). A stale writer at the superseded epoch is
+    // then rejected EpochFenced from the durable manifest tail, while a commit at the current epoch succeeds.
+    let new_epoch = {
+        let mut owner2 = ObjectLog::open(root.clone()).map_err(|e| format!("open new owner: {e:?}"))?;
+        owner2
+            .ensure_shard(&shard)
+            .map_err(|e| format!("ensure_shard (new owner): {e:?}"))?;
+        owner2
+            .acquire_epoch(&shard)
+            .map_err(|e| format!("acquire_epoch (new owner fences the queue): {e:?}"))?
+    };
+    ensure!(
+        new_epoch >= 1,
+        "the new owner's acquire_epoch must supersede the genesis epoch; got {new_epoch}"
+    );
+    {
+        let d = open()?;
+        let cur_epoch = d
+            .current_epoch(&shard)
+            .await
+            .map_err(|e| format!("current_epoch after fence: {e:?}"))?;
+        ensure!(
+            cur_epoch == new_epoch,
+            "the recovered backend must observe the fenced epoch from the durable manifest; got {cur_epoch}, expected {new_epoch}"
+        );
+        let stale = ac_txn_4_push_env("900000005", "txn4c-stale");
+        let stale_res = d
+            .write(move |lw, pw| {
+                let pos = lw.append(&pqueue_conformance::shard(), std::slice::from_ref(&stale), 0)?;
+                pw.apply(&pos, std::slice::from_ref(&stale))?;
+                Ok(pos)
+            })
+            .await;
+        ensure!(
+            matches!(stale_res, Err(EngineError::EpochFenced)),
+            "a commit at the superseded epoch (0) must be EpochFenced; got {stale_res:?}"
+        );
+        let cur = ac_txn_4_push_env("900000006", "txn4c-cur");
+        d.write(move |lw, pw| {
+            let pos =
+                lw.append(&pqueue_conformance::shard(), std::slice::from_ref(&cur), cur_epoch)?;
+            pw.apply(&pos, std::slice::from_ref(&cur))?;
+            Ok(pos)
+        })
+        .await
+        .map_err(|e| format!("current-epoch commit after fence: {e:?}"))?;
+    }
+
+    let label = match cut {
+        ComposeFaultPoint::DuringProjectionApply => "DuringProjectionApply",
+        ComposeFaultPoint::AfterApplyBeforeResponse => "AfterApplyBeforeResponse",
+    };
+    Ok(vec![format!(
+        "{label} (composed projection-apply cut, ComposeFaultPoint on ComposedBackend): the durable append committed, the projection apply was torn at this instant, and no client-visible success was returned; drop+reopen recovery rebuilds the projection from the durable log to EXACTLY the right serving image — 3 accepted items preserved (0 lost accepted items), the faulted Claim(a1)+Push(a4) replay EXACTLY ONCE (projected leased==1, pending==3 — a PROJECTED-STATE count, not a durable log-row count), 0 duplicate active leases (a1 is not re-handed-out on reclaim), and stale-epoch commits are EpochFenced while current-epoch commits succeed"
+    )])
+}
+
+/// AC-TXN-4 composed cut point 1 (TP-003 §3.10 row 209) as a standalone test: a crash strictly DURING the
+/// composed projection apply, before the projection durably advances, recovers to exactly-once projected state.
+#[tokio::test]
+async fn ac_txn_4_during_projection_apply_crash() {
+    let outcome =
+        ac_txn_4_composed_projection_apply_crash(ComposeFaultPoint::DuringProjectionApply).await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-4 DuringProjectionApply composed cut failed: {:?}",
+        outcome.err()
+    );
+}
+
+/// AC-TXN-4 composed cut point 2 (TP-003 §3.10 row 209) as a standalone test: a crash AFTER the composed
+/// projection apply durably advanced but before the response, recovers to exactly-once projected state.
+#[tokio::test]
+async fn ac_txn_4_after_apply_before_response_crash() {
+    let outcome =
+        ac_txn_4_composed_projection_apply_crash(ComposeFaultPoint::AfterApplyBeforeResponse).await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-4 AfterApplyBeforeResponse composed cut failed: {:?}",
         outcome.err()
     );
 }

@@ -31,8 +31,9 @@ pub use claim_validation::{
     validate_claim_compatibility,
 };
 pub use compose::{
-    ComposedBackend, ControlPlane, InProcessControlPlane, LogLineageIdentity, LogStore,
-    ProjectionStore, RecoveryStart, RichClaimSelection, resolve_recovery_start,
+    ComposeFaultHook, ComposeFaultPoint, ComposedBackend, ControlPlane, InProcessControlPlane,
+    LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart, RichClaimSelection,
+    resolve_recovery_start,
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState, OwnerResolution,
