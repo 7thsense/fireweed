@@ -1559,10 +1559,14 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// envelopes carried one) is skipped — its cross-restart replay stays unavailable, exactly as before,
     /// rather than being reconstructed without a conflict-detection fingerprint.
     ///
-    /// LIMITATION (honest): a REJECTED entry mutates nothing and appends nothing durable, so a commit that
-    /// mixed committed and rejected entries reconstructs only its COMMITTED entries here. The all-committed
-    /// commit — the realistic unknown-outcome retry, and what AC-TXN-3 exercises — reconstructs exactly. This
-    /// never resurrects a duplicate transition (committed inputs are finalized exactly once regardless).
+    /// LIMITATION (honest, guarded): a REJECTED entry mutates nothing and appends nothing durable, so a commit
+    /// that mixed committed and rejected entries reconstructs only its COMMITTED entries here — a SHORTER vec
+    /// than the live record. This is NOT silently replayed: `commit_transition`'s replay path guards on
+    /// `recovery.len() == entries.len()` (the resubmitted body's entry count), so a short reconstructed record
+    /// falls through to safe 0-duplicate re-execution instead of returning a misleading short outcome vec. The
+    /// all-committed commit — the realistic unknown-outcome retry, and what AC-TXN-3 exercises — reconstructs
+    /// exactly (len matches) and replays faithfully. Faithful REPLAY of a mixed commit across restart needs
+    /// durable rejection records (a deferred wire-format change); until then a mixed commit safely re-executes.
     fn rebuild_commit_idempotency_from_log(
         log: &L,
         commit_idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
@@ -3524,7 +3528,22 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     .check(rid, fingerprint, now)
                 {
                     IdempotencyDecision::Replay(recovery) => {
-                        return Ok(outcomes_from_recovery(&recovery));
+                        // FAITHFULNESS GUARD (mixed committed+rejected commits across restart). An
+                        // in-process record holds ONE `EntryRecovery` per input entry (committed AND rejected;
+                        // see the `recovery.push` loop below), so its length always equals the resubmitted
+                        // body's entry count and this guard is a no-op. But `rebuild_commit_idempotency_from_log`
+                        // can only reconstruct the COMMITTED, `Finalize`-delimited entries: a rejected entry
+                        // mutates and appends NOTHING durable, so it leaves no trace to rebuild. A cached record
+                        // is therefore a faithful replay of the (same-body, fingerprint-matched) request ONLY
+                        // when it accounts for every entry in the body. If it is short, the original commit
+                        // mixed committed + rejected entries and this reconstructed record is NOT faithful — do
+                        // NOT return the misleading short outcome vec; fall through to safe re-execution
+                        // (the already-committed inputs stay finalized exactly once — commit_validate fences
+                        // them — so re-execution is 0-duplicate, and the end-of-call record overwrites the stale
+                        // short entry with the full re-executed vec).
+                        if recovery.len() == entries.len() {
+                            return Ok(outcomes_from_recovery(&recovery));
+                        }
                     }
                     IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                     IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}

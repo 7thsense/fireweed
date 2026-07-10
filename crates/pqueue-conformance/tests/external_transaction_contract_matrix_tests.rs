@@ -13,7 +13,7 @@
 //! |----|--------|-----------|-------------------|-----------|------------------|----------------|
 //! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | ✓‡ | ✓ (all 8 ops) | ✓‡ | ✓‡ | ✓‡ |
 //! | AC-TXN-2 rejection no-effect | ✓§ (in-proc; restart n/a) | ✓§ | ✓§ | ✓§ | ✓§ | ✓§ |
-//! | AC-TXN-3 unknown-outcome replay | ✓‖ | ✓¶ | n/a (unified store, no cut window) | ✓‖ | ✓‖ | ✓¶ |
+//! | AC-TXN-3 unknown-outcome replay | ✓‖ | partial¶ | n/a (unified store, no cut window) | ✓‖ | ✓‖ | partial¶ |
 //! | AC-TXN-4 objectlog crash-point matrix | — | — | — | partial (5 internal cut points)* | — | — |
 //! | AC-TXN-5 hybrid poison + replay | — | — | — | | partial (projection cut points)† | — |
 //! | AC-TXN-5A hybrid-async success barrier | — | — | — | | partial (projection cut points)† | — |
@@ -67,16 +67,22 @@
 //! parity. `‖` `memory`/`objectlog`/`object_log_sqlite` are `pass`: memory (non-durable) proves the in-proc
 //! PUSH + commit_transition replays with the restart cuts capability-N/A; the eventual-apply objectlog family
 //! covers PUSH at all four cuts and records commit_transition capability-N/A (`Unavailable` — no atomic
-//! transition boundary). `¶` `sqlite_log`/`postgres` are now `pass`: they are durable AND atomic, so
+//! transition boundary). `¶` `sqlite_log`/`postgres` are `partial`: they are durable AND atomic, so
 //! commit_transition IS a supported request_id-bearing op there, and recovery now rebuilds the
 //! commit-transition idempotency record from the durable log (`rebuild_commit_idempotency_from_log`, the
 //! symmetric twin of the push rebuild — the committed per-entry `EntryRecovery` is reconstructed from the
-//! durable commit envelopes and the whole-body fingerprint is the one stamped on them at commit time). So
-//! commit_transition's cross-restart request_id replay is PROVEN at BOTH restart cut points —
+//! durable commit envelopes and the whole-body fingerprint is the one stamped on them at commit time). So an
+//! ALL-COMMITTED commit_transition's cross-restart request_id replay is PROVEN at BOTH restart cut points —
 //! `AfterApplyBeforeResponse` (commit fully, kill, reopen) and `AfterAppendBeforeApply` (append the
 //! request_id-bearing commit envelope via `build_request_id_commit_envelope`, kill before apply, reopen): a
-//! same-body retry replays the ONE committed per-entry outcome, a different body → RequestIdConflict, and the
-//! input is finalized exactly once (0 duplicate transitions). No GAP remains. (`sqlite_relational` stays
+//! same-body retry replays the exact per-entry outcome, a different body → RequestIdConflict, and the input is
+//! finalized exactly once (0 duplicate). The residual `partial`: a MIXED committed+rejected commit is NOT
+//! faithfully replayed across restart — a rejected entry mutates/appends nothing durable, so recovery can only
+//! reconstruct the committed entries (a short vec). The engine does NOT silently replay it: the replay path
+//! guards on `recovery.len() == body.len()`, so a mixed retry safely RE-EXECUTES (committed input stays
+//! finalized exactly once, 0 duplicate) instead of returning a misleading short outcome. That honest residual
+//! is recorded as a `GAP` (→ `partial`), tracked in pqueue-db60657d (faithful mixed replay needs durable
+//! rejection records, a deferred wire-format change). (`sqlite_relational` stays
 //! `n/a`: its unified store couples append+apply in one transaction, so there is no mid-pipeline cut window.)
 //!
 //! `*` AC-TXN-4 (`partial`) drives [`pqueue_objectlog::ObjectLog`]'s `LogStore` impl DIRECTLY (bypassing
@@ -997,24 +1003,32 @@ async fn ac_txn_3_request_id_replay_all_ops_all_cut_points() {
             .any(|s| s.contains("IN-PROCESS request_id replay proven")),
         "sqlite_log (atomic) must prove in-process commit_transition request_id replay: {sqlite_ct:?}"
     );
-    // The commit_transition cross-restart GAP is now CLOSED: durable atomic backends rebuild
-    // commit_idempotency from the log on recovery, so BOTH restart cut points replay across restart and no
-    // GAP remains.
-    assert!(
-        sqlite_ct.iter().all(|s| !s.contains("GAP")),
-        "sqlite_log commit_transition coverage must carry no remaining GAP: {sqlite_ct:?}"
-    );
+    // ALL-COMMITTED commit_transition replays across restart at BOTH cut points — a real win we keep proving.
     assert!(
         sqlite_ct
             .iter()
             .any(|s| s.contains("AfterApplyBeforeResponse across-restart request_id replay PROVEN")),
-        "sqlite_log must prove commit_transition AfterApplyBeforeResponse across-restart replay: {sqlite_ct:?}"
+        "sqlite_log must prove all-committed commit_transition AfterApplyBeforeResponse across-restart replay: {sqlite_ct:?}"
     );
     assert!(
         sqlite_ct.iter().any(|s| s.contains(
             "AfterAppendBeforeApply (request_id-bearing) across-restart request_id replay PROVEN"
         )),
-        "sqlite_log must prove commit_transition AfterAppendBeforeApply across-restart replay: {sqlite_ct:?}"
+        "sqlite_log must prove all-committed commit_transition AfterAppendBeforeApply across-restart replay: {sqlite_ct:?}"
+    );
+    // But a MIXED committed+rejected commit is NOT faithfully replayed across restart (rejected entries append
+    // nothing durable): the retry safely re-executes (0 duplicate) instead. That residual is recorded as a
+    // GAP so `record()` classifies sqlite_log/postgres AC-TXN-3 as `partial`, not an overclaimed `pass`.
+    assert!(
+        sqlite_ct
+            .iter()
+            .any(|s| s.contains("mixed committed+rejected across-restart is SAFE")),
+        "sqlite_log must prove the mixed-commit across-restart safety invariant (0 duplicate, no false-complete): {sqlite_ct:?}"
+    );
+    assert!(
+        sqlite_ct.iter().any(|s| s
+            .contains("GAP (mixed committed+rejected commit_transition across-restart replay)")),
+        "sqlite_log must honestly record the mixed-commit faithful-replay residual as a GAP: {sqlite_ct:?}"
     );
 
     let ol_ct = ac_txn_3_commit_transition_request_id(objectlog_factory(), DURABLE).await;
