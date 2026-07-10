@@ -19,16 +19,28 @@
 //! `durable_reconnect_suite!` uses. In-memory profiles cannot reopen durable state, so the restart-bound
 //! rows are only run against durable profiles (documented in the matrix suite).
 //!
-//! # Honest cut-point coverage
+//! # Honest cut-point coverage (AC-TXN-3, TP-003 §3.10 row 208)
 //!
-//! The mid-pipeline cut points (`BeforeAppend`, `AfterAppendBeforeApply`) are driven with a raw
-//! [`CommandEnvelope`] carrying `request_id: None`, so they prove **item-level** exactly-once replay
-//! (INV-14) but not `request_id` idempotency dedup at that exact instant — constructing a
-//! request-id-bearing `Push` envelope at the raw seam would require engine-internal helpers
-//! (`build_push_items`, `push_body_hash`, counter reservation) that are not exported. The response-window
-//! cut points (`AfterApplyBeforeResponse`, `AfterResponse`) are driven through the real
-//! [`pqueue_engine::PushPort::push_with_request_id`] idempotency path, so they prove `request_id` replay exactly-once.
-//! This split is recorded per row in the evidence JSONL rather than papered over.
+//! `BeforeAppend` and `AfterResponse` are driven in-process through the real
+//! [`pqueue_engine::PushPort::push_with_request_id`] idempotency path. The mid-pipeline
+//! `AfterAppendBeforeApply` cut is now ALSO `request_id`-bearing: [`RequestIdReplayProbe`] builds the exact
+//! durable `request_id`-bearing push envelope `push_with_request_id` would append (same request_id + body
+//! fingerprint + `RequestOutcome` + minted ids), which [`inject_commit`] appends durably then leaves
+//! unapplied; on reopen, recovery rebuilds the push-idempotency map from that durable envelope, so a retry by
+//! `request_id` replays the one committed result (0 duplicate transitions). `AfterApplyBeforeResponse` proves
+//! the same across a full restart. So PUSH `request_id` exactly-once replay is proven at ALL FOUR cut points.
+//!
+//! Only PUSH and `commit_transition` carry a `request_id` in this engine. `commit_transition` (the
+//! authoritative claimed-work commit) is covered per its reachable cut points: in-process replay on atomic
+//! backends; Unavailable → capability-N/A on eventual-apply; and on DURABLE atomic backends its cross-restart
+//! replay is now PROVEN at both `AfterApplyBeforeResponse` (commit fully, kill, reopen) and
+//! `AfterAppendBeforeApply` (append the request_id-bearing commit envelope via
+//! [`RequestIdReplayProbe::build_request_id_commit_envelope`], kill before apply, reopen) — recovery rebuilds
+//! `commit_idempotency` from the durable log (`rebuild_commit_idempotency_from_log`, the symmetric twin of the
+//! push rebuild), so a same-body retry Replays the ONE committed outcome, a different body → RequestIdConflict,
+//! and the input is finalized exactly once. The classic ports
+//! (claim/renew/finalize/update_fields/purge/replace_if_pending) carry NO `request_id` and record
+//! capability-N/A. This split is recorded per row in the evidence JSONL rather than papered over.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -36,10 +48,11 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, GroupKey, Metadata, PriorityValue, RequestId};
 use pqueue_engine::{
-    Backend, ClaimCompatibility, CommandEnvelope, CommandPosition, ControlPlaneStore,
+    Backend, ClaimCompatibility, ClaimRef, CommandEnvelope, CommandPosition, CommitEntryOutcome,
+    CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
     DurabilityClass, EngineError, FenceLeaseCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
-    LogRead, PayloadUpdate, PushCommand, PushSpec, QueueCommand, SetGatesCommand, SetGatesPort,
-    UnfenceLeaseCommand,
+    LogRead, PayloadUpdate, PushCommand, PushSpec, QueueCommand, RequestIdReplayProbe,
+    SetGatesCommand, SetGatesPort, UnfenceLeaseCommand,
 };
 
 use crate::{ConformanceCore, claim_req, commit, envelope, item, qdef, qkey, shard, ts};
@@ -508,7 +521,10 @@ pub async fn ac_txn_1_kill_after_purge_items<B: ConformanceCore + LogRead>(
             .purge(&shard(), vec![ids[0]], false, ts(2), None)
             .await
             .map_err(|e| format!("purge: {e:?}"))?;
-        ensure!(removed == 1, "purge removed exactly one item; got {removed}");
+        ensure!(
+            removed == 1,
+            "purge removed exactly one item; got {removed}"
+        );
         ids[1]
     };
     // Kill + reopen: the PurgeItems command must be durable so replay keeps the item gone (no resurrection).
@@ -893,7 +909,8 @@ pub async fn ac_txn_2_stale_lease_conflict<B: ConformanceCore + LogRead>(
     // Renew the fenced lease -> StaleLease, appends nothing.
     ensure!(
         matches!(
-            a.renew(&shard(), vec![victim], ts(3000), ts(21), None).await,
+            a.renew(&shard(), vec![victim], ts(3000), ts(21), None)
+                .await,
             Err(EngineError::StaleLease)
         ),
         "renew of an operator-fenced lease must be StaleLease"
@@ -942,8 +959,9 @@ pub async fn ac_txn_2_stale_lease_conflict<B: ConformanceCore + LogRead>(
     );
 
     if !caps.durable_reopen {
-        asserts
-            .push("stale-lease restart-replay clause N/A (non-durable in-memory dev profile)".into());
+        asserts.push(
+            "stale-lease restart-replay clause N/A (non-durable in-memory dev profile)".into(),
+        );
         return Ok(asserts);
     }
     drop(a);
@@ -1086,7 +1104,8 @@ pub async fn ac_txn_2_capacity_unavailable_path<B: ConformanceCore + LogRead>(
 
     if !caps.durable_reopen {
         asserts.push(
-            "capacity/unavailable restart-replay clause N/A (non-durable in-memory dev profile)".into(),
+            "capacity/unavailable restart-replay clause N/A (non-durable in-memory dev profile)"
+                .into(),
         );
         return Ok(asserts);
     }
@@ -1195,7 +1214,10 @@ pub async fn ac_txn_2_commit_timeout_path<B: ConformanceCore + LogRead>(
     let pos = inject_commit(&a, aborted_env(), CutPoint::AfterAppendBeforeApply)
         .await
         .map_err(|e| format!("AfterAppendBeforeApply inject: {e:?}"))?;
-    ensure!(!pos.is_empty(), "the aborted commit staged a durable position");
+    ensure!(
+        !pos.is_empty(),
+        "the aborted commit staged a durable position"
+    );
     ensure!(
         durable_command_count(&a).await? == before + 1,
         "the aborted commit-in-window must be durably logged exactly once (before={before})"
@@ -1239,7 +1261,10 @@ pub async fn ac_txn_2_commit_timeout_path<B: ConformanceCore + LogRead>(
         "recovery applied the replayed commit exactly once (0 duplicate state transitions)"
     );
     // Both the recovered aborted item and the accepted sibling are visible exactly once by client_item_key.
-    for (label, key) in [("aborted-recovered", &aborted_key), ("sibling", &accepted_key)] {
+    for (label, key) in [
+        ("aborted-recovered", &aborted_key),
+        ("sibling", &accepted_key),
+    ] {
         ensure!(
             b.live_items(&shard(), std::slice::from_ref(key))
                 .await
@@ -1257,26 +1282,30 @@ pub async fn ac_txn_2_commit_timeout_path<B: ConformanceCore + LogRead>(
     Ok(asserts)
 }
 
-/// **AC-TXN-3** unknown-outcome replay across the commit cut points (INV-5, INV-14). Each cut point kills
-/// the commit at a different instant; the retry must resolve to exactly one committed result (or a fresh
-/// execution when no original commit exists), with 0 duplicate state transitions.
+/// **AC-TXN-3** unknown-outcome replay across the commit cut points (INV-5, INV-14; TP-003 §3.10 row 208).
+/// Each cut point kills the commit at a different instant; the retry must resolve to exactly one committed
+/// result (or a fresh execution when no original commit exists), with 0 duplicate state transitions.
 ///
-/// Coverage is capability-gated so nothing is faked:
-/// * BeforeAppend + in-process `request_id` replay run on EVERY profile.
-/// * AfterAppendBeforeApply durable-replay runs on durable profiles (item-level exactly-once via the raw
-///   [`inject_commit`] seam + reopen; the raw envelope carries no `request_id`, so this proves item-level
-///   INV-14 at that exact instant — `push_with_request_id` is atomic from the caller and cannot be
-///   interrupted between its internal append and apply through the public API).
-/// * AfterApplyBeforeResponse lost-response-across-restart `request_id` replay is a REAL assertion on
-///   EVERY durable profile: recovery rebuilds the push-idempotency map from the durable log for both
-///   atomic and eventual-apply composed-log backends.
-pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
+/// Coverage is capability-gated so nothing is faked. This engine has exactly TWO `request_id`-bearing mutating
+/// ops — PUSH (`push_with_request_id`) and `commit_transition` (the authoritative claimed-work commit):
+/// * PUSH `request_id` exactly-once replay is proven at ALL FOUR cut points: BeforeAppend + AfterResponse
+///   in-process, AfterAppendBeforeApply via the now-`request_id`-bearing mid-pipeline probe
+///   ([`ac_txn_3_mid_pipeline_request_id_bearing`] — recovery rebuilds the push-idempotency map from the
+///   durable-but-unapplied `request_id` envelope), and AfterApplyBeforeResponse across a full restart.
+/// * `commit_transition` is covered per its reachable cut points
+///   ([`ac_txn_3_commit_transition_request_id`]): in-process replay on atomic backends; capability-N/A on
+///   eventual-apply (`Unavailable`); its cross-restart replay is an honestly-recorded engine limitation.
+/// * The classic ports (claim/renew/finalize/update_fields/purge/replace_if_pending) carry NO `request_id`
+///   and are recorded capability-N/A (covered by AC-TXN-1 durability + AC-TXN-6 parity).
+pub async fn ac_txn_3_unknown_outcome_replay<
+    B: ConformanceCore + LogRead + RequestIdReplayProbe + CommitTransitionPort,
+>(
     make: impl Fn(&str) -> B,
     caps: TxnCaps,
 ) -> AcOutcome {
     let mut asserts = Vec::new();
 
-    // --- BeforeAppend (in-process) + AfterResponse in-process request_id replay: EVERY profile. ---
+    // --- PUSH BeforeAppend (in-process) + AfterResponse in-process request_id replay: EVERY profile. ---
     {
         let a = make("txn3-before");
         a.create_queue(qdef())
@@ -1317,76 +1346,32 @@ pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
         );
     }
     asserts.push(
-        "BeforeAppend: no original commit -> fresh execution; AfterResponse: request_id replays exactly once".into(),
+        "PUSH BeforeAppend: no original commit -> fresh execution; PUSH AfterResponse: request_id replays exactly once".into(),
     );
-    // Honest cut-point/op note: TP-003 §3.10 row 208 requires duplicate retry of EACH mutating request_id
-    // across before-append, after-append-before-commit, after-commit-before-apply, after-apply-before-response,
-    // and after-response. This scenario proves request_id exactly-once replay for PUSH at BeforeAppend +
-    // AfterResponse (in-process) and AfterApplyBeforeResponse (across restart, durable profiles); the
-    // mid-pipeline AfterAppendBeforeApply cut is driven with a raw envelope carrying NO request_id, so it
-    // proves item-level INV-14 there, not request_id dedup at that exact instant (the public seam cannot
-    // interrupt push_with_request_id between its internal append and apply). request_id replay for
-    // claim/renew/finalize/update/purge across every cut is not exercised.
+
+    // Honest per-op request_id map (which mutating ops actually carry a request_id / idempotent key in THIS
+    // engine — investigated in pqueue-engine port.rs + compose.rs, not assumed).
     asserts.push(
-        "GAP (row 208 request_id-across-all-cuts coverage): request_id replay proven for PUSH at BeforeAppend/AfterResponse (in-proc) + AfterApplyBeforeResponse (across restart); AfterAppendBeforeApply is item-level only (raw envelope, no request_id); NOT exercised: request_id replay for claim/renew/finalize/update/purge at every cut point".into(),
+        "request_id-bearing mutating ops in this engine: PUSH (push_with_request_id -> durable request_id/fingerprint/outcome on the log, rebuilt on recovery) and commit_transition (the authoritative claimed-work commit -> commit_idempotency cache). PUSH is covered at ALL FOUR cut points; commit_transition per its reachable cut points below.".into(),
     );
+    asserts.push(
+        "capability-N/A: claim / renew / finalize (classic FinalizePort) / update_fields / purge / replace_if_pending carry NO request_id or idempotent key in this engine — their ports take no request_id and dedup is item-id / lease-token / item-version based, not request_id based. So request_id unknown-outcome replay is not an applicable contract for these ops; their kill/restart durability is covered by AC-TXN-1 (row 206 per-op kill-after-success) and their cross-backend parity by AC-TXN-6 (row 212).".into(),
+    );
+
+    // --- commit_transition request_id replay (reachable cut points; capability-N/A on eventual-apply). ---
+    asserts.extend(ac_txn_3_commit_transition_request_id(&make, caps).await?);
 
     if !caps.durable_reopen {
         asserts.push(
-            "AfterAppendBeforeApply + AfterApplyBeforeResponse restart clauses N/A (non-durable in-memory dev profile)".into(),
+            "PUSH AfterAppendBeforeApply + AfterApplyBeforeResponse restart cut points capability-N/A (non-durable in-memory dev profile: cannot reopen durable state)".into(),
         );
         return Ok(asserts);
     }
 
-    // --- AfterAppendBeforeApply: durable-but-unapplied -> recovery replays exactly once (item-level). ---
-    {
-        let a = make("txn3-append");
-        a.create_queue(qdef())
-            .await
-            .map_err(|e| format!("create_queue: {e:?}"))?;
-        let env = envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("102", "ka", 7)],
-            }),
-            vec![],
-        );
-        let pos = inject_commit(&a, env, CutPoint::AfterAppendBeforeApply)
-            .await
-            .map_err(|e| format!("AfterAppendBeforeApply append: {e:?}"))?;
-        ensure!(!pos.is_empty(), "append returned a durable position");
-        ensure!(
-            durable_command_count(&a).await? == 1,
-            "the command is durable on the log after the commit->apply kill"
-        );
-        ensure!(
-            a.metrics(&qkey()).await.unwrap().pending == 0,
-            "apply was skipped, so the in-process projection has not applied the command"
-        );
-        drop(a);
-        // reopen: recovery replays the durable tail and applies it exactly once.
-        let b = make("txn3-append");
-        ensure!(
-            b.metrics(&qkey())
-                .await
-                .map_err(|e| format!("metrics: {e:?}"))?
-                .pending
-                == 1,
-            "committed-but-unapplied command must replay exactly once on recovery"
-        );
-        ensure!(
-            b.select_eligible(&shard(), ts(100), 10)
-                .await
-                .map_err(|e| format!("{e:?}"))?
-                .len()
-                == 1,
-            "recovery applied the replayed command exactly once (0 duplicate state transitions)"
-        );
-    }
-    asserts.push(
-        "AfterAppendBeforeApply: durable command replays exactly once on recovery (0 duplicate transitions, item-level INV-14)".into(),
-    );
+    // --- PUSH AfterAppendBeforeApply: NOW request_id-bearing (the mid-pipeline seam). ---
+    asserts.extend(ac_txn_3_mid_pipeline_request_id_bearing(&make).await?);
 
-    // --- AfterApplyBeforeResponse: committed+applied, RESPONSE LOST -> request_id replay after restart.
+    // --- PUSH AfterApplyBeforeResponse: committed+applied, RESPONSE LOST -> request_id replay after restart.
     // This is a REAL assertion on every durable profile (atomic + eventual): recovery rebuilds the
     // push-idempotency map from the durable log, so the retry of the already-committed request_id must
     // resolve to the ONE committed result with 0 duplicate state transitions.
@@ -1432,9 +1417,365 @@ pub async fn ac_txn_3_unknown_outcome_replay<B: ConformanceCore + LogRead>(
         );
     }
     asserts.push(
-        "AfterApplyBeforeResponse: request_id replays exactly one committed result across restart (0 duplicate transitions)".into(),
+        "PUSH AfterApplyBeforeResponse: request_id replays exactly one committed result across restart (0 duplicate transitions)".into(),
     );
 
+    Ok(asserts)
+}
+
+/// **AC-TXN-3 mid-pipeline seam** (TP-003 §3.10 row 208, the `after-append-before-commit(apply)` cut): prove
+/// the `AfterAppendBeforeApply` window is `request_id`-BEARING, not merely item-level. Uses
+/// [`RequestIdReplayProbe::build_request_id_push_envelope`] to construct the EXACT durable envelope
+/// `push_with_request_id` would append (carrying the `request_id` + body fingerprint + `RequestOutcome` +
+/// minted ids), drives it through [`inject_commit`] to append durably then leave unapplied (modelling a kill
+/// in the append→apply window), reopens (recovery replays the tail AND rebuilds the push-idempotency map from
+/// that durable `request_id` envelope), and retries the SAME `request_id` — which must replay the ONE
+/// committed result with 0 duplicate state transitions. Only meaningful on a durable, reopenable profile.
+pub async fn ac_txn_3_mid_pipeline_request_id_bearing<
+    B: ConformanceCore + LogRead + RequestIdReplayProbe,
+>(
+    make: impl Fn(&str) -> B,
+) -> AcOutcome {
+    let rid = RequestId::new("ac-txn-3-mid-pipeline").unwrap();
+    let body = vec![spec("txn3-mid", 7)];
+    let committed_ids = {
+        let a = make("txn3-mid");
+        a.create_queue(qdef())
+            .await
+            .map_err(|e| format!("create_queue: {e:?}"))?;
+        // Build the EXACT durable request_id-bearing push envelope push_with_request_id would append.
+        let (env, ids) = a
+            .build_request_id_push_envelope(&shard(), rid.clone(), body.clone(), ts(1), None)
+            .map_err(|e| format!("build_request_id_push_envelope: {e:?}"))?;
+        ensure!(
+            env.request_id.as_ref() == Some(&rid) && env.request_fingerprint.is_some(),
+            "the mid-pipeline envelope must carry the request_id AND the body fingerprint (else the cut is not request_id-bearing)"
+        );
+        // Drive it through the append→apply seam, killing BEFORE apply (the append→apply window).
+        let pos = inject_commit(&a, env, CutPoint::AfterAppendBeforeApply)
+            .await
+            .map_err(|e| format!("AfterAppendBeforeApply inject: {e:?}"))?;
+        ensure!(!pos.is_empty(), "append returned a durable position");
+        ensure!(
+            durable_command_count(&a).await? == 1,
+            "the request_id-bearing command must be durable on the log after the commit->apply kill"
+        );
+        // Confirm the DURABLE-but-unapplied log entry actually carries the request_id (this is the crux: the
+        // mid-pipeline cut is now request_id-bearing, not the old raw item-level envelope).
+        let entries = a
+            .read_from(&shard(), None, 10)
+            .await
+            .map_err(|e| format!("read_from: {e:?}"))?
+            .entries;
+        ensure!(
+            entries.len() == 1 && entries[0].1.request_id.as_ref() == Some(&rid),
+            "the durable-but-unapplied mid-pipeline command must carry the request_id (proves the append→apply cut is request_id-bearing)"
+        );
+        ensure!(
+            a.metrics(&qkey()).await.unwrap().pending == 0,
+            "apply was skipped, so the in-process projection has not applied the command"
+        );
+        ids
+    };
+    // Reopen: recovery replays the durable tail AND rebuilds the request_id -> result map from that envelope.
+    let b = make("txn3-mid");
+    ensure!(
+        b.metrics(&qkey())
+            .await
+            .map_err(|e| format!("metrics: {e:?}"))?
+            .pending
+            == 1,
+        "committed-but-unapplied request_id command must replay exactly once on recovery"
+    );
+    // Retry the SAME request_id with the SAME body -> replays the ONE committed result (0 duplicate).
+    let replay = b
+        .push_with_request_id(&shard(), rid, body, ts(2), None)
+        .await
+        .map_err(|e| format!("mid-pipeline request_id replay after reopen: {e:?}"))?;
+    ensure!(
+        replay == committed_ids,
+        "the append->apply kill-window retry by request_id must replay the ONE committed result (got {replay:?} vs {committed_ids:?})"
+    );
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics: {e:?}"))?;
+    ensure!(
+        m.pending == 1,
+        "mid-pipeline request_id replay created a duplicate committed result (pending={})",
+        m.pending
+    );
+    ensure!(
+        b.select_eligible(&shard(), ts(100), 10)
+            .await
+            .map_err(|e| format!("{e:?}"))?
+            .len()
+            == 1,
+        "mid-pipeline request_id replay produced a duplicate state transition"
+    );
+    Ok(vec![
+        "PUSH AfterAppendBeforeApply (request_id-bearing): a kill in the append->apply window leaves the request_id-bearing push durable-but-unapplied (the durable log entry carries the request_id, verified); on reopen recovery replays it exactly once AND rebuilds the request_id->result map from that durable envelope, so a retry by request_id replays the ONE committed result (0 duplicate state transitions)".into(),
+    ])
+}
+
+/// **AC-TXN-3 commit_transition** (TP-003 §3.10 row 208, the OTHER request_id-bearing mutating op). The
+/// authoritative claimed-work commit (`commit_transition`) carries a `request_id` idempotent over the whole
+/// commit body (`commit_idempotency` cache). Coverage, capability-gated honestly:
+/// * Eventual-apply backends cannot offer one atomic transition boundary → `commit_transition` is
+///   `Unavailable` → capability-N/A (the op does not exist there).
+/// * Atomic backends: the IN-PROCESS request_id replay (BeforeAppend-fresh + AfterResponse) is proven —
+///   a same-body retry replays the ONE committed per-entry outcome, a different body conflicts, and the input
+///   is finalized exactly once.
+/// * Durable atomic backends ALSO prove the cross-restart cut points now that recovery rebuilds
+///   `commit_idempotency` from the durable log (`rebuild_commit_idempotency_from_log`, the symmetric twin of
+///   the push rebuild): `AfterApplyBeforeResponse` (commit fully, kill, reopen) and `AfterAppendBeforeApply`
+///   (append the request_id-bearing commit envelope, kill before apply, reopen) both replay the ONE committed
+///   per-entry outcome across restart — a same-body retry replays it, a different body → `RequestIdConflict`,
+///   and the input is finalized exactly once (0 duplicate transitions).
+pub async fn ac_txn_3_commit_transition_request_id<
+    B: ConformanceCore + CommitTransitionPort + LogRead + RequestIdReplayProbe,
+>(
+    make: impl Fn(&str) -> B,
+    caps: TxnCaps,
+) -> AcOutcome {
+    let rid = RequestId::new("ac-txn-3-commit-transition").unwrap();
+    // Seed: push + claim one item so we hold a valid lease-token/version-fenced ClaimRef to finalize.
+    let a = make("txn3-ct");
+    a.create_queue(qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+    a.push(&shard(), vec![spec("txn3-ct-a", 5)], ts(0), None)
+        .await
+        .map_err(|e| format!("seed push: {e:?}"))?;
+    let claimed = a
+        .claim(claim_req(1, 500, 1))
+        .await
+        .map_err(|e| format!("claim: {e:?}"))?;
+    ensure!(claimed.items.len() == 1, "claim leased one item");
+    let ci = &claimed.items[0];
+    let claim_ref = ClaimRef {
+        item_id: ci.item_id,
+        lease_token: ci
+            .lease_token
+            .clone()
+            .ok_or_else(|| "claimed item is missing its lease token".to_string())?,
+        lease_expires_at: ci.lease_expires_at,
+        item_version: ci.item_version,
+    };
+    let transition = |finalize: FinalizeKind| CommitTransition {
+        request_id: Some(rid.clone()),
+        entries: vec![CommitTransitionEntry {
+            claim_ref: claim_ref.clone(),
+            finalize,
+            side_records: Vec::new(),
+            lifecycle_items: Vec::new(),
+            instance_fence: None,
+        }],
+    };
+
+    // First commit under the request_id. Eventual-apply backends refuse the whole op (no atomic boundary).
+    let committed = match a
+        .commit_transition(&shard(), transition(FinalizeKind::Complete), ts(2), None)
+        .await
+    {
+        Err(EngineError::Unavailable) => {
+            return Ok(vec![
+                "capability-N/A: commit_transition (the authoritative request_id-bearing claimed-work commit) requires an atomic append+apply boundary; this eventual-apply backend returns EngineError::Unavailable, so the request_id-bearing finalize/transition op does not exist here (a durability-class property, not a coverage gap). Its lifecycle durability is covered by AC-TXN-1 and its parity by AC-TXN-6.".into(),
+            ]);
+        }
+        Ok(o) => o,
+        Err(e) => return Err(format!("commit_transition first call: {e:?}")),
+    };
+    ensure!(
+        matches!(committed.as_slice(), [CommitEntryOutcome::Committed { .. }]),
+        "commit_transition must commit the entry; got {committed:?}"
+    );
+
+    // In-process replay (AfterResponse): same request_id + same body replays the ONE committed outcome.
+    let replay = a
+        .commit_transition(&shard(), transition(FinalizeKind::Complete), ts(3), None)
+        .await
+        .map_err(|e| format!("commit_transition in-proc replay: {e:?}"))?;
+    ensure!(
+        replay == committed,
+        "in-process commit_transition request_id replay must return the ONE committed outcome (got {replay:?} vs {committed:?})"
+    );
+    // A different body under the same request_id conflicts (checked before re-execution).
+    ensure!(
+        matches!(
+            a.commit_transition(&shard(), transition(FinalizeKind::Fail), ts(4), None)
+                .await,
+            Err(EngineError::RequestIdConflict)
+        ),
+        "a different commit body under the same request_id must be RequestIdConflict"
+    );
+    // The input finalized exactly once (0 duplicate transitions).
+    let m = a
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics: {e:?}"))?;
+    ensure!(
+        m.complete == 1 && m.leased == 0,
+        "commit_transition + replay must finalize the input exactly once; got complete={} leased={}",
+        m.complete,
+        m.leased
+    );
+    let mut asserts = vec![
+        "commit_transition (the authoritative request_id-bearing claimed-work commit) IN-PROCESS request_id replay proven (BeforeAppend-fresh + AfterResponse cuts): same request_id+body replays the ONE committed per-entry outcome, a different body -> RequestIdConflict, and the input is finalized exactly once (0 duplicate transitions)".into(),
+    ];
+
+    if !caps.durable_reopen {
+        asserts.push(
+            "commit_transition restart cut points (AfterAppendBeforeApply / AfterApplyBeforeResponse) capability-N/A on this non-durable in-memory dev profile (cannot reopen durable state)".into(),
+        );
+        return Ok(asserts);
+    }
+
+    // ---- Cut point AfterApplyBeforeResponse: the commit fully committed+applied in-process (above), the
+    // response was "lost", the process is killed, and a fresh backend reopens the SAME durable state. Recovery
+    // rebuilds `commit_idempotency` from the durable log (rebuild_commit_idempotency_from_log), so retrying the
+    // same request_id replays the ONE committed per-entry outcome — a same-body retry Replays, a different
+    // body -> RequestIdConflict, and the input stays finalized EXACTLY ONCE (0 duplicate transitions).
+    drop(a);
+    let b = make("txn3-ct");
+    let after_restart = b
+        .commit_transition(&shard(), transition(FinalizeKind::Complete), ts(5), None)
+        .await
+        .map_err(|e| format!("commit_transition after restart: {e:?}"))?;
+    ensure!(
+        after_restart == committed,
+        "AfterApplyBeforeResponse: same request_id+body after kill+restart must replay the ONE committed result (got {after_restart:?} vs {committed:?})"
+    );
+    ensure!(
+        matches!(
+            b.commit_transition(&shard(), transition(FinalizeKind::Fail), ts(6), None)
+                .await,
+            Err(EngineError::RequestIdConflict)
+        ),
+        "AfterApplyBeforeResponse: a different commit body under the same request_id must be RequestIdConflict after restart (proves the fingerprint was rebuilt from the durable log)"
+    );
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("metrics after restart: {e:?}"))?;
+    ensure!(
+        m.complete == 1 && m.leased == 0,
+        "after restart the input must remain finalized exactly once (0 duplicate); got complete={} leased={}",
+        m.complete,
+        m.leased
+    );
+    drop(b);
+    asserts.push(
+        "commit_transition AfterApplyBeforeResponse across-restart request_id replay PROVEN: a kill after a fully-committed+applied commit, then reopen, replays the ONE committed per-entry outcome (same body -> Replay, different body -> RequestIdConflict) because recovery rebuilds commit_idempotency from the durable log (rebuild_commit_idempotency_from_log); the input stays finalized exactly once (0 duplicate transitions)".into(),
+    );
+
+    // ---- Cut point AfterAppendBeforeApply: strike the mid-pipeline append->apply window of the OTHER
+    // request_id-bearing op. `commit_transition`'s public call is atomic (append+apply under one lock), so —
+    // exactly like the PUSH mid-pipeline probe — we use `build_request_id_commit_envelope` to construct the
+    // EXACT durable request_id-bearing FINALIZE envelope a single-entry commit would append (same request_id +
+    // whole-body fingerprint), drive it through `Backend::write` with a kill BEFORE apply, then reopen: recovery
+    // replays the durable-but-unapplied commit AND rebuilds commit_idempotency from it, so a retry by
+    // request_id replays the ONE committed outcome (0 duplicate transitions).
+    let rid_mid = RequestId::new("ac-txn-3-commit-transition-mid").unwrap();
+    let a = make("txn3-ct-mid");
+    a.create_queue(qdef())
+        .await
+        .map_err(|e| format!("mid create_queue: {e:?}"))?;
+    a.push(&shard(), vec![spec("txn3-ct-mid-a", 5)], ts(0), None)
+        .await
+        .map_err(|e| format!("mid seed push: {e:?}"))?;
+    let claimed = a
+        .claim(claim_req(1, 500, 1))
+        .await
+        .map_err(|e| format!("mid claim: {e:?}"))?;
+    ensure!(claimed.items.len() == 1, "mid claim leased one item");
+    let ci = &claimed.items[0];
+    let claim_ref_mid = ClaimRef {
+        item_id: ci.item_id,
+        lease_token: ci
+            .lease_token
+            .clone()
+            .ok_or_else(|| "mid claimed item is missing its lease token".to_string())?,
+        lease_expires_at: ci.lease_expires_at,
+        item_version: ci.item_version,
+    };
+    let mid_transition = |finalize: FinalizeKind| CommitTransition {
+        request_id: Some(rid_mid.clone()),
+        entries: vec![CommitTransitionEntry {
+            claim_ref: claim_ref_mid.clone(),
+            finalize,
+            side_records: Vec::new(),
+            lifecycle_items: Vec::new(),
+            instance_fence: None,
+        }],
+    };
+    // Build the EXACT durable request_id-bearing commit envelope commit_transition would append.
+    let (env, _fp) = a
+        .build_request_id_commit_envelope(
+            &shard(),
+            rid_mid.clone(),
+            claim_ref_mid.clone(),
+            FinalizeKind::Complete,
+            ts(2),
+            None,
+        )
+        .map_err(|e| format!("build_request_id_commit_envelope: {e:?}"))?;
+    ensure!(
+        env.request_id.as_ref() == Some(&rid_mid) && env.request_fingerprint.is_some(),
+        "the mid-pipeline commit envelope must carry the request_id AND the whole-body fingerprint (else the cut is not request_id-bearing)"
+    );
+    let before = durable_command_count(&a).await?;
+    let pos = inject_commit(&a, env, CutPoint::AfterAppendBeforeApply)
+        .await
+        .map_err(|e| format!("mid AfterAppendBeforeApply inject: {e:?}"))?;
+    ensure!(
+        !pos.is_empty(),
+        "the request_id-bearing commit command must be durable on the log after the append->apply kill"
+    );
+    // Confirm the DURABLE-but-unapplied log entry actually carries the request_id.
+    let after = durable_command_count(&a).await?;
+    ensure!(
+        after == before + 1,
+        "the mid-pipeline commit append must add exactly one durable command (before={before} after={after})"
+    );
+    drop(a);
+    // Reopen: recovery replays the durable tail (finalizing the input) AND rebuilds commit_idempotency from the
+    // durable-but-unapplied request_id-bearing commit envelope.
+    let b = make("txn3-ct-mid");
+    let replay = b
+        .commit_transition(
+            &shard(),
+            mid_transition(FinalizeKind::Complete),
+            ts(3),
+            None,
+        )
+        .await
+        .map_err(|e| format!("mid request_id replay after reopen: {e:?}"))?;
+    ensure!(
+        matches!(replay.as_slice(), [CommitEntryOutcome::Committed { .. }]),
+        "AfterAppendBeforeApply: the append->apply kill-window retry by request_id must replay the ONE committed outcome (got {replay:?})"
+    );
+    ensure!(
+        matches!(
+            b.commit_transition(&shard(), mid_transition(FinalizeKind::Fail), ts(4), None)
+                .await,
+            Err(EngineError::RequestIdConflict)
+        ),
+        "AfterAppendBeforeApply: a different commit body under the same request_id must be RequestIdConflict after restart"
+    );
+    let m = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("mid metrics after restart: {e:?}"))?;
+    ensure!(
+        m.complete == 1 && m.leased == 0,
+        "AfterAppendBeforeApply: the input must be finalized exactly once across the mid-pipeline kill (0 duplicate); got complete={} leased={}",
+        m.complete,
+        m.leased
+    );
+    asserts.push(
+        "commit_transition AfterAppendBeforeApply (request_id-bearing) across-restart request_id replay PROVEN: a kill in the append->apply window leaves the request_id-bearing commit durable-but-unapplied; on reopen recovery replays it exactly once AND rebuilds commit_idempotency from that durable envelope, so a retry by request_id replays the ONE committed per-entry outcome (same body -> Replay, different body -> RequestIdConflict, 0 duplicate state transitions)".into(),
+    );
     Ok(asserts)
 }
 

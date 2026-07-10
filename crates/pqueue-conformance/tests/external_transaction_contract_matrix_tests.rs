@@ -13,7 +13,7 @@
 //! |----|--------|-----------|-------------------|-----------|------------------|----------------|
 //! | AC-TXN-1 durable+visible (per-op reopen) | n/a (non-durable) | ✓‡ | ✓ (all 8 ops) | ✓‡ | ✓‡ | ✓‡ |
 //! | AC-TXN-2 rejection no-effect | ✓§ (in-proc; restart n/a) | ✓§ | ✓§ | ✓§ | ✓§ | ✓§ |
-//! | AC-TXN-3 unknown-outcome replay | partial (in-proc) | partial§ | n/a (unified store, no cut window) | partial§ | partial§ | partial§ |
+//! | AC-TXN-3 unknown-outcome replay | ✓‖ | ✓¶ | n/a (unified store, no cut window) | ✓‖ | ✓‖ | ✓¶ |
 //! | AC-TXN-4 objectlog crash-point matrix | — | — | — | partial (5 internal cut points)* | — | — |
 //! | AC-TXN-5 hybrid poison + replay | — | — | — | | partial (projection cut points)† | — |
 //! | AC-TXN-5A hybrid-async success barrier | — | — | — | | partial (projection cut points)† | — |
@@ -56,10 +56,28 @@
 //! re-verifications are capability-N/A (non-durable). So every row is `pass` (no coverage-GAP). The standalone
 //! `ac_txn_2_*_has_no_durable_effect` tests exercise each class per-profile (the commit-timeout test asserts
 //! the composed-log profiles achieve real exactly-once recovery, not merely a no-effect abort).
-//! AC-TXN-3 (row 208) proves request_id exactly-once replay for PUSH at BeforeAppend/
-//! AfterResponse/AfterApplyBeforeResponse (the AfterAppendBeforeApply mid-pipeline cut is item-level only —
-//! the raw seam carries no request_id) but not request_id replay for claim/renew/finalize/update/purge at
-//! every cut. The specific assertions each row DOES make are genuine and pass; the label is honest about scope.
+//! `‖`/`¶` AC-TXN-3 (row 208): this engine has exactly TWO request_id-bearing mutating ops — PUSH
+//! (`push_with_request_id`) and `commit_transition` (the authoritative claimed-work commit). PUSH request_id
+//! exactly-once replay is now proven at ALL FOUR cut points, including the previously-item-level mid-pipeline
+//! `AfterAppendBeforeApply` cut, which `RequestIdReplayProbe::build_request_id_push_envelope` makes
+//! request_id-bearing: the durable-but-unapplied envelope carries the request_id, and recovery rebuilds the
+//! push-idempotency map from it so a retry by request_id replays the one committed result (0 duplicate
+//! transitions). The classic ports (claim/renew/finalize/update_fields/purge/replace_if_pending) carry NO
+//! request_id (dedup is item/lease/version based) → capability-N/A, covered by AC-TXN-1 durability + AC-TXN-6
+//! parity. `‖` `memory`/`objectlog`/`object_log_sqlite` are `pass`: memory (non-durable) proves the in-proc
+//! PUSH + commit_transition replays with the restart cuts capability-N/A; the eventual-apply objectlog family
+//! covers PUSH at all four cuts and records commit_transition capability-N/A (`Unavailable` — no atomic
+//! transition boundary). `¶` `sqlite_log`/`postgres` are now `pass`: they are durable AND atomic, so
+//! commit_transition IS a supported request_id-bearing op there, and recovery now rebuilds the
+//! commit-transition idempotency record from the durable log (`rebuild_commit_idempotency_from_log`, the
+//! symmetric twin of the push rebuild — the committed per-entry `EntryRecovery` is reconstructed from the
+//! durable commit envelopes and the whole-body fingerprint is the one stamped on them at commit time). So
+//! commit_transition's cross-restart request_id replay is PROVEN at BOTH restart cut points —
+//! `AfterApplyBeforeResponse` (commit fully, kill, reopen) and `AfterAppendBeforeApply` (append the
+//! request_id-bearing commit envelope via `build_request_id_commit_envelope`, kill before apply, reopen): a
+//! same-body retry replays the ONE committed per-entry outcome, a different body → RequestIdConflict, and the
+//! input is finalized exactly once (0 duplicate transitions). No GAP remains. (`sqlite_relational` stays
+//! `n/a`: its unified store couples append+apply in one transaction, so there is no mid-pipeline cut window.)
 //!
 //! `*` AC-TXN-4 (`partial`) drives [`pqueue_objectlog::ObjectLog`]'s `LogStore` impl DIRECTLY (bypassing
 //! `ComposedBackend`) with the [`pqueue_objectlog::FaultHook`] seam added for this row, striking 5 instants
@@ -98,6 +116,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_conformance::fault::{
     AcEvidence, AcOutcome, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
+    ac_txn_3_commit_transition_request_id, ac_txn_3_mid_pipeline_request_id_bearing,
     ac_txn_3_unknown_outcome_replay, ac_txn_6_parity, durable_command_count, write_evidence,
 };
 use pqueue_core::RequestId;
@@ -580,7 +599,8 @@ async fn ac_txn_1_kill_after_create_queue() {
         pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(sqlite_relational_factory())
             .await;
     assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
-    let sq = pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(sqlite_log_factory()).await;
+    let sq =
+        pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(sqlite_log_factory()).await;
     assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
     let ol = pqueue_conformance::fault::ac_txn_1_kill_after_create_queue(objectlog_factory()).await;
     assert!(ol.is_ok(), "objectlog: {:?}", ol.err());
@@ -594,17 +614,22 @@ async fn ac_txn_1_kill_after_create_queue() {
 async fn ac_txn_1_kill_after_batch_update() {
     // sqlite_relational + sqlite_log are atomic: BatchUpdate is GENUINELY exercised (durable + visible after
     // reopen), never capability-N/A.
-    for (name, outcome) in [
-        (
-            "sqlite_relational",
-            pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(sqlite_relational_factory())
+    for (name, outcome) in
+        [
+            (
+                "sqlite_relational",
+                pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(
+                    sqlite_relational_factory(),
+                )
                 .await,
-        ),
-        (
-            "sqlite_log",
-            pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(sqlite_log_factory()).await,
-        ),
-    ] {
+            ),
+            (
+                "sqlite_log",
+                pqueue_conformance::fault::ac_txn_1_kill_after_batch_update(sqlite_log_factory())
+                    .await,
+            ),
+        ]
+    {
         assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
         assert!(
             outcome.as_ref().unwrap().iter().all(|a| !a.contains("N/A")),
@@ -639,8 +664,8 @@ async fn ac_txn_1_kill_after_batch_update() {
 async fn ac_txn_1_kill_after_set_gates() {
     // sqlite_relational is gate-capable + atomic: SetGates is GENUINELY exercised (the blocked gate survives
     // kill/reopen and keeps the gated item unclaimable), never capability-N/A.
-    let sr = pqueue_conformance::fault::ac_txn_1_kill_after_set_gates(sqlite_relational_factory())
-        .await;
+    let sr =
+        pqueue_conformance::fault::ac_txn_1_kill_after_set_gates(sqlite_relational_factory()).await;
     assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
     assert!(
         sr.as_ref().unwrap().iter().all(|a| !a.contains("N/A")),
@@ -740,8 +765,8 @@ async fn ac_txn_2_stale_lease_conflict_has_no_durable_effect() {
         pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(sqlite_log_factory(), DURABLE)
             .await;
     assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
-    let ol =
-        pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(objectlog_factory(), DURABLE).await;
+    let ol = pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(objectlog_factory(), DURABLE)
+        .await;
     assert!(ol.is_ok(), "objectlog: {:?}", ol.err());
     let ols = pqueue_conformance::fault::ac_txn_2_stale_lease_conflict(
         objectlog_sqlite_factory(),
@@ -832,8 +857,8 @@ async fn ac_txn_2_commit_timeout_path_has_no_durable_effect() {
     )
     .await;
     assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
-    let sq =
-        pqueue_conformance::fault::ac_txn_2_commit_timeout_path(sqlite_log_factory(), DURABLE).await;
+    let sq = pqueue_conformance::fault::ac_txn_2_commit_timeout_path(sqlite_log_factory(), DURABLE)
+        .await;
     assert!(sq.is_ok(), "sqlite_log: {:?}", sq.err());
     let ol =
         pqueue_conformance::fault::ac_txn_2_commit_timeout_path(objectlog_factory(), DURABLE).await;
@@ -852,7 +877,11 @@ async fn ac_txn_2_commit_timeout_path_has_no_durable_effect() {
     }
     // The composed log+projection profiles must strike the REAL append→apply window and prove exactly-once
     // recovery — not merely a no-effect abort.
-    for (name, outcome) in [("sqlite_log", &sq), ("objectlog", &ol), ("object_log_sqlite", &ols)] {
+    for (name, outcome) in [
+        ("sqlite_log", &sq),
+        ("objectlog", &ol),
+        ("object_log_sqlite", &ols),
+    ] {
         assert!(
             outcome
                 .as_ref()
@@ -869,6 +898,149 @@ async fn ac_txn_2_commit_timeout_path_has_no_durable_effect() {
             .iter()
             .any(|a| a.contains("capability-N/A")),
         "sqlite_relational (unified store) must record the append→apply window as capability-N/A: {sr:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-TXN-3 request_id unknown-outcome replay across every op + cut point (TP-003 §3.10 row 208), as
+// standalone tests (bead pqueue-48a4af85), independent of the aggregate `ac_txn_contract_matrix` evidence
+// run. Part 1 (mid-pipeline cut is now request_id-bearing) and Part 2 (per-op coverage: push all cuts;
+// commit_transition per reachable cut; classic ops capability-N/A).
+// ---------------------------------------------------------------------------
+
+/// Part 1: the mid-pipeline `AfterAppendBeforeApply` cut is now `request_id`-BEARING (not item-level). On
+/// every durable composed-log profile, a kill in the append→apply window leaves the request_id-bearing push
+/// durable-but-unapplied, and a retry by `request_id` after reopen replays the ONE committed result. Also
+/// proven on the eventual-apply objectlog / object_log_sqlite substrates (recovery rebuilds the push
+/// idempotency map from the durable log on BOTH durability classes).
+#[tokio::test]
+async fn ac_txn_3_mid_pipeline_cut_is_request_id_bearing() {
+    for (name, outcome) in [
+        (
+            "sqlite_log",
+            ac_txn_3_mid_pipeline_request_id_bearing(sqlite_log_factory()).await,
+        ),
+        (
+            "objectlog",
+            ac_txn_3_mid_pipeline_request_id_bearing(objectlog_factory()).await,
+        ),
+        (
+            "object_log_sqlite",
+            ac_txn_3_mid_pipeline_request_id_bearing(objectlog_sqlite_factory()).await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        let asserts = outcome.unwrap();
+        assert!(
+            asserts
+                .iter()
+                .any(|a| a.contains("request_id-bearing") && a.contains("AfterAppendBeforeApply")),
+            "{name} must prove the mid-pipeline cut is request_id-bearing: {asserts:?}"
+        );
+        assert!(
+            asserts.iter().all(|a| !a.contains("GAP")),
+            "{name} mid-pipeline request_id-bearing proof must carry no GAP: {asserts:?}"
+        );
+    }
+}
+
+/// Part 2: request_id replay across every op + cut point, per the honest engine capability map. PUSH is the
+/// only op fully covered at all four cuts; `commit_transition` is covered per its reachable cuts (in-process
+/// on atomic; capability-N/A on eventual-apply; cross-restart is a recorded engine limitation); the classic
+/// ports carry no request_id (capability-N/A).
+#[tokio::test]
+async fn ac_txn_3_request_id_replay_all_ops_all_cut_points() {
+    // Durable composed-log profiles: PUSH covered at ALL FOUR cut points (incl. the request_id-bearing
+    // mid-pipeline cut), and the classic-ops capability-N/A note is present.
+    for (name, outcome) in [
+        (
+            "sqlite_log",
+            ac_txn_3_unknown_outcome_replay(sqlite_log_factory(), DURABLE).await,
+        ),
+        (
+            "objectlog",
+            ac_txn_3_unknown_outcome_replay(objectlog_factory(), DURABLE).await,
+        ),
+        (
+            "object_log_sqlite",
+            ac_txn_3_unknown_outcome_replay(objectlog_sqlite_factory(), DURABLE).await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        let a = outcome.unwrap();
+        // PUSH: all four cut points present.
+        assert!(
+            a.iter().any(|s| s.contains("PUSH BeforeAppend"))
+                && a.iter()
+                    .any(|s| s.contains("PUSH AfterAppendBeforeApply (request_id-bearing)"))
+                && a.iter()
+                    .any(|s| s.contains("PUSH AfterApplyBeforeResponse")),
+            "{name} must cover PUSH request_id replay at all four cut points: {a:?}"
+        );
+        // Classic ops carry no request_id -> capability-N/A (never a silent pass, never a fake request_id).
+        assert!(
+            a.iter().any(|s| s.contains("capability-N/A")
+                && s.contains("claim / renew / finalize")
+                && s.contains("carry NO request_id")),
+            "{name} must record the classic ops as capability-N/A for request_id replay: {a:?}"
+        );
+    }
+
+    // commit_transition per-backend: atomic backends prove in-process replay (and honestly record the
+    // cross-restart limitation as a GAP); eventual-apply backends record it capability-N/A (Unavailable).
+    let sqlite_ct = ac_txn_3_commit_transition_request_id(sqlite_log_factory(), DURABLE).await;
+    assert!(sqlite_ct.is_ok(), "sqlite_log ct: {:?}", sqlite_ct.err());
+    let sqlite_ct = sqlite_ct.unwrap();
+    assert!(
+        sqlite_ct
+            .iter()
+            .any(|s| s.contains("IN-PROCESS request_id replay proven")),
+        "sqlite_log (atomic) must prove in-process commit_transition request_id replay: {sqlite_ct:?}"
+    );
+    // The commit_transition cross-restart GAP is now CLOSED: durable atomic backends rebuild
+    // commit_idempotency from the log on recovery, so BOTH restart cut points replay across restart and no
+    // GAP remains.
+    assert!(
+        sqlite_ct.iter().all(|s| !s.contains("GAP")),
+        "sqlite_log commit_transition coverage must carry no remaining GAP: {sqlite_ct:?}"
+    );
+    assert!(
+        sqlite_ct
+            .iter()
+            .any(|s| s.contains("AfterApplyBeforeResponse across-restart request_id replay PROVEN")),
+        "sqlite_log must prove commit_transition AfterApplyBeforeResponse across-restart replay: {sqlite_ct:?}"
+    );
+    assert!(
+        sqlite_ct.iter().any(|s| s.contains(
+            "AfterAppendBeforeApply (request_id-bearing) across-restart request_id replay PROVEN"
+        )),
+        "sqlite_log must prove commit_transition AfterAppendBeforeApply across-restart replay: {sqlite_ct:?}"
+    );
+
+    let ol_ct = ac_txn_3_commit_transition_request_id(objectlog_factory(), DURABLE).await;
+    assert!(ol_ct.is_ok(), "objectlog ct: {:?}", ol_ct.err());
+    assert!(
+        ol_ct
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("capability-N/A") && s.contains("commit_transition")),
+        "objectlog (eventual-apply) must record commit_transition as capability-N/A (Unavailable)"
+    );
+
+    // memory (non-durable, atomic): in-process commit_transition replay covered; restart cuts capability-N/A.
+    let mem_ct = ac_txn_3_commit_transition_request_id(
+        |_: &str| pqueue_memory::composed_memory_backend(),
+        NON_DURABLE,
+    )
+    .await;
+    assert!(mem_ct.is_ok(), "memory ct: {:?}", mem_ct.err());
+    let mem_ct = mem_ct.unwrap();
+    assert!(
+        mem_ct
+            .iter()
+            .any(|s| s.contains("IN-PROCESS request_id replay proven"))
+            && mem_ct.iter().all(|s| !s.contains("GAP")),
+        "memory must prove in-process commit_transition replay with no GAP (restart is capability-N/A): {mem_ct:?}"
     );
 }
 

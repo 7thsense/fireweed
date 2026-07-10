@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use pqueue_core::{
-    BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey, CohortId,
-    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey, GroupedAggregateRequest,
-    GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
-    QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
-    TenantId, UtcTimestamp, WorkerId,
+    BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
+    CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
+    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
+    PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest,
+    RangeScanResponse, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 
 use crate::ProjectionStore;
@@ -460,6 +460,57 @@ pub trait PushPort: Send + Sync {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+}
+
+/// AC-TXN-3 fault-injection seam (TP-003 §3.10 row 208, `request_id` unknown-outcome replay). Build the
+/// EXACT durable `request_id`-bearing push envelope [`PushPort::push_with_request_id`] would append — the
+/// same `request_id`, body fingerprint, [`crate::RequestOutcome`], and server-minted item ids (reserving the
+/// counter/command-id identically) — WITHOUT committing it or recording the in-memory idempotency entry.
+///
+/// A fault-injection harness drives the returned envelope through the `append→apply` unit-of-work seam
+/// ([`Backend::write`]) and injects a kill *before* apply; on reopen, recovery rebuilds the push-idempotency
+/// map from this durable envelope (the same log fold `push_with_request_id` recovery uses), so a retry by
+/// `request_id` replays the one committed result. This is what makes the mid-pipeline
+/// (`AfterAppendBeforeApply`) cut point `request_id`-bearing rather than item-level: the public
+/// `push_with_request_id` call is atomic and cannot be interrupted between its internal append and apply, so
+/// the harness needs the durable envelope it *would* have appended in order to strike that exact instant.
+///
+/// This is NOT a commit path — it appends nothing and records nothing; it only reserves ids and builds the
+/// envelope. Implemented by the composed log+projection backend; other backends need not provide it.
+#[doc(hidden)]
+pub trait RequestIdReplayProbe: Send + Sync {
+    /// Build (but do not commit) the durable `request_id`-bearing push envelope and return it alongside the
+    /// server-minted item ids it will carry. Validates gate/entity/index constraints exactly like
+    /// `push_with_request_id` so a rejection here matches the real path; on success the caller drives the
+    /// envelope through [`Backend::write`] with a mid-pipeline fault to exercise the append→apply kill window.
+    fn build_request_id_push_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, Vec<ItemId>)>;
+
+    /// The `commit_transition` twin of [`Self::build_request_id_push_envelope`], for the OTHER
+    /// request_id-bearing mutating op. Build (but do not commit) the durable `request_id`-bearing FINALIZE
+    /// envelope of a SINGLE-entry `commit_transition` (finalize one claimed input, no side records / lifecycle
+    /// items / instance fence — so the commit is exactly one envelope), stamped with the SAME whole-body
+    /// fingerprint `commit_transition` computes over that body, and return it alongside that fingerprint.
+    /// Validates the `claim_ref` exactly like the real path (so a rejection here matches it). The caller drives
+    /// the envelope through [`Backend::write`] with a mid-pipeline (`AfterAppendBeforeApply`) fault so the
+    /// append→apply kill window is `request_id`-bearing for `commit_transition`; on reopen, recovery rebuilds
+    /// the commit-idempotency cache from this durable envelope so a retry by `request_id` replays the one
+    /// committed per-entry outcome. Not a commit path — appends nothing and records nothing.
+    fn build_request_id_commit_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        claim_ref: ClaimRef,
+        finalize: FinalizeKind,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, BodyHash)>;
 }
 
 /// Operator gate-state mutation. Gate support is backend-capability-specific: relational backends

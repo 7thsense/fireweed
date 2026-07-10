@@ -1382,6 +1382,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 log,
                 projection,
                 idempotency,
+                commit_idempotency,
                 ..
             } = &mut *g;
             log.ensure_shard(&key)?;
@@ -1417,6 +1418,21 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             Self::rebuild_push_idempotency_from_log(
                 log,
                 idempotency,
+                &key,
+                def.request_id_retention_ms,
+            )?;
+            // Symmetric rebuild for the OTHER request_id-bearing mutating op: `commit_transition` (the
+            // authoritative vectorized claimed-work commit). Its in-memory `commit_idempotency` cache is
+            // likewise empty on reopen; without this rebuild a post-restart retry of an already-committed
+            // request_id would NOT replay the one committed per-entry outcome — it would be lease-fenced
+            // (input already finalized) and reject (0-duplicate, but not an unknown-outcome cached replay,
+            // violating INV-14 for commit_transition). The rebuild is a pure durable-state reconstruction:
+            // the committed per-entry `EntryRecovery` is rebuilt from the durable commit envelopes on the
+            // log (Finalize/WriteSideRecords/AdvanceInstanceFence/Push), and the body fingerprint is the one
+            // stamped onto those envelopes at commit time. See `rebuild_commit_idempotency_from_log`.
+            Self::rebuild_commit_idempotency_from_log(
+                log,
+                commit_idempotency,
                 &key,
                 def.request_id_retention_ms,
             )?;
@@ -1518,6 +1534,127 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 Some(next) => from = Some(next),
                 None => break,
             }
+        }
+        Ok(())
+    }
+
+    /// Recovery twin of `commit_transition`'s in-memory `commit_idempotency` record (mirrors
+    /// [`Self::rebuild_push_idempotency_from_log`] for the OTHER request_id-bearing op). Rebuilds the
+    /// `request_id -> (fingerprint, Vec<EntryRecovery>)` cache from the durable log so a post-restart retry of
+    /// an already-committed `commit_transition` `request_id` replays the one committed per-entry outcome
+    /// (INV-14 unknown-outcome replay) instead of re-executing / being lease-fenced.
+    ///
+    /// A `commit_transition` appends, per COMMITTED entry, an ordered run of envelopes all carrying the
+    /// caller's `request_id` and the whole-body `request_fingerprint` (stamped at commit time) with NO
+    /// `request_outcome`: `[WriteSideRecords?] [AdvanceInstanceFence?] [Push(lifecycle)?] Finalize`. The
+    /// terminating `Finalize` (always emitted for a committed entry) delimits the entry. This fold groups the
+    /// log by `request_id`, splits each group into entries at its `Finalize` boundaries, and reconstructs each
+    /// committed [`EntryRecovery`] purely from durable state:
+    /// `consumed_input_id` from the `Finalize` outcome, `side_record_keys` from `WriteSideRecords`, `instance`
+    /// from `AdvanceInstanceFence`, `lifecycle_item_ids` from the lifecycle `Push`'s server-minted ids.
+    ///
+    /// `request_outcome.is_some()` envelopes are `push_with_request_id` writes (handled by the push rebuild)
+    /// and are skipped; a `commit_transition`'s own lifecycle `Push` carries `request_outcome = None` and so
+    /// stays in the fold. A `request_id` with no stamped `request_fingerprint` (logs written before commit
+    /// envelopes carried one) is skipped — its cross-restart replay stays unavailable, exactly as before,
+    /// rather than being reconstructed without a conflict-detection fingerprint.
+    ///
+    /// LIMITATION (honest): a REJECTED entry mutates nothing and appends nothing durable, so a commit that
+    /// mixed committed and rejected entries reconstructs only its COMMITTED entries here. The all-committed
+    /// commit — the realistic unknown-outcome retry, and what AC-TXN-3 exercises — reconstructs exactly. This
+    /// never resurrects a duplicate transition (committed inputs are finalized exactly once regardless).
+    fn rebuild_commit_idempotency_from_log(
+        log: &L,
+        commit_idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
+        shard: &QueueKey,
+        retention_ms: u64,
+    ) -> EngineResult<()> {
+        /// Per-`request_id` reconstruction state: the completed entries plus the parts of the entry currently
+        /// being assembled (until its `Finalize` closes it).
+        struct CommitAccum {
+            fingerprint: u64,
+            created_at: UtcTimestamp,
+            pending_side_keys: Vec<Vec<u8>>,
+            pending_instance: Option<(Vec<u8>, u64)>,
+            pending_lifecycle_ids: Vec<ItemId>,
+            entries: Vec<EntryRecovery>,
+        }
+        let mut accums: HashMap<RequestId, CommitAccum> = HashMap::new();
+        let mut from = None;
+        loop {
+            let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
+            for (_, env) in &page.entries {
+                let Some(request_id) = &env.request_id else {
+                    continue;
+                };
+                // `push_with_request_id` envelopes carry `request_outcome = Some(_)`; the push rebuild owns
+                // them. Only `commit_transition` envelopes (request_outcome == None) belong to this fold.
+                if env.request_outcome.is_some() {
+                    continue;
+                }
+                let Some(fingerprint) = env.request_fingerprint else {
+                    continue;
+                };
+                let accum = accums
+                    .entry(request_id.clone())
+                    .or_insert_with(|| CommitAccum {
+                        fingerprint,
+                        created_at: env.created_at,
+                        pending_side_keys: Vec::new(),
+                        pending_instance: None,
+                        pending_lifecycle_ids: Vec::new(),
+                        entries: Vec::new(),
+                    });
+                match &env.command {
+                    QueueCommand::WriteSideRecords(cmd) => {
+                        accum.pending_side_keys =
+                            cmd.records.iter().map(|r| r.key.clone()).collect();
+                    }
+                    QueueCommand::AdvanceInstanceFence(cmd) => {
+                        accum.pending_instance = Some((cmd.instance_key.clone(), cmd.next));
+                    }
+                    QueueCommand::Push(_) => {
+                        accum.pending_lifecycle_ids = env.item_ids.clone();
+                    }
+                    QueueCommand::Finalize(cmd) => {
+                        let Some(consumed_input_id) = cmd
+                            .outcomes
+                            .first()
+                            .map(|o| o.item_id)
+                            .or_else(|| env.item_ids.first().copied())
+                        else {
+                            continue;
+                        };
+                        let side_record_keys = std::mem::take(&mut accum.pending_side_keys);
+                        let instance = accum.pending_instance.take();
+                        let lifecycle_item_ids = std::mem::take(&mut accum.pending_lifecycle_ids);
+                        accum.entries.push(EntryRecovery {
+                            consumed_input_id,
+                            instance,
+                            side_record_keys,
+                            lifecycle_item_ids,
+                            status: CommitEntryStatus::Committed,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            match page.next {
+                Some(next) => from = Some(next),
+                None => break,
+            }
+        }
+        for (request_id, accum) in accums {
+            if accum.entries.is_empty() {
+                continue;
+            }
+            let expires_at = request_expires_at(accum.created_at, retention_ms);
+            commit_idempotency.entry(shard.clone()).or_default().record(
+                request_id,
+                BodyHash(accum.fingerprint),
+                accum.entries,
+                expires_at,
+            );
         }
         Ok(())
     }
@@ -2089,6 +2226,115 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             Ok(ids)
         })();
         AckFuture::ready(result)
+    }
+}
+
+impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayProbe
+    for ComposedBackend<L, P, C>
+{
+    /// Build the exact durable envelope [`Self::push_with_request_id`] would append — same
+    /// `request_id` + `push_body_hash` fingerprint + [`RequestOutcome::Push`] + server-minted ids (reserving
+    /// the counter/command-id identically) — WITHOUT committing it or recording the in-memory idempotency
+    /// entry. Mirrors the non-group-commit body of `push_with_request_id` (validate gate/entity, reserve,
+    /// `build_push_items`, `index_validate_push`) up to (but not including) the commit + record. The caller
+    /// drives the returned envelope through [`crate::Backend::write`] with a mid-pipeline fault so the
+    /// `AfterAppendBeforeApply` cut point carries a real `request_id` (recovery rebuilds the push-idempotency
+    /// map from this durable envelope on reopen — see `rebuild_push_idempotency_from_log`).
+    fn build_request_id_push_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, Vec<ItemId>)> {
+        validate_gate_push(self.supports_gates(), &items)?;
+        let fingerprint = push_body_hash(&items)?;
+        let def = self.control.queue_definition(shard)?;
+        let schema = def
+            .entity_schema
+            .as_ref()
+            .and_then(|esd| esd.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?;
+        for item in &items {
+            validate_entity(schema.as_ref(), item.entity.as_ref())?;
+        }
+        let max_attempts = def.retry_policy.max_attempts;
+        let mut g = self.inner.lock().expect("poisoned");
+        let epoch = expected_epoch.unwrap_or(0);
+        let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+        let (push_items, ids) =
+            build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+        g.projection.index_validate_push(shard, &push_items)?;
+        let command_id = Self::next_command_id(&mut g, self.node_id);
+        let env = CommandEnvelope {
+            command_id,
+            request_id: Some(request_id),
+            request_fingerprint: Some(fingerprint.0),
+            request_outcome: Some(RequestOutcome::Push {
+                item_ids: ids.clone(),
+            }),
+            item_ids: ids.clone(),
+            command: QueueCommand::Push(PushCommand { items: push_items }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        Ok((env, ids))
+    }
+
+    /// Build the exact durable FINALIZE envelope a SINGLE-entry [`Self::commit_transition`] would append —
+    /// same `request_id` + whole-body `commit_body_hash` fingerprint (stamped in the SAME envelope field the
+    /// real commit path now stamps) + the `Finalize` command over the consumed input — WITHOUT committing it
+    /// or recording the in-memory `commit_idempotency` entry. Validates the `claim_ref` exactly like the real
+    /// path (a `commit_validate` rejection here matches it). The caller drives the returned envelope through
+    /// [`crate::Backend::write`] with a mid-pipeline fault so the `AfterAppendBeforeApply` cut point is
+    /// `request_id`-bearing for `commit_transition`; recovery rebuilds the commit-idempotency cache from this
+    /// durable envelope on reopen (see `rebuild_commit_idempotency_from_log`).
+    fn build_request_id_commit_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        claim_ref: ClaimRef,
+        finalize: FinalizeKind,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, BodyHash)> {
+        if !self.is_atomic() {
+            return Err(EngineError::Unavailable);
+        }
+        // Fingerprint over the EXACT single-entry commit body `commit_transition(same body)` will hash, so a
+        // post-reopen retry computes the identical fingerprint → Replay (not Conflict).
+        let entry = crate::port::CommitTransitionEntry {
+            claim_ref: claim_ref.clone(),
+            finalize,
+            side_records: Vec::new(),
+            lifecycle_items: Vec::new(),
+            instance_fence: None,
+        };
+        let fingerprint = commit_body_hash(std::slice::from_ref(&entry))?;
+        let item_id = claim_ref.item_id;
+        let mut g = self.inner.lock().expect("poisoned");
+        if !g.projection.supports_commit_transition() {
+            return Err(EngineError::Unavailable);
+        }
+        let _ = expected_epoch;
+        g.projection
+            .commit_validate(shard, std::slice::from_ref(&claim_ref), now)?;
+        let command_id = Self::next_command_id(&mut g, self.node_id);
+        let env = CommandEnvelope {
+            command_id,
+            request_id: Some(request_id),
+            request_fingerprint: Some(fingerprint.0),
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(item_id, finalize)],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        Ok((env, fingerprint))
     }
 }
 
@@ -3330,14 +3576,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
 
                 // Build the entry's envelopes WITHOUT committing yet, so a build-time rejection (e.g. a
                 // unique-index conflict on a lifecycle item) leaves nothing mutated. The caller's request_id
-                // propagates into every envelope.
+                // AND the whole-body fingerprint propagate into every envelope: the request_id is the
+                // idempotency key and the fingerprint is what `check` compares for replay-vs-conflict, so
+                // stamping both durably (in the SAME pre-existing envelope fields the push path uses — no
+                // wire-format change, no new serialization) is exactly what lets recovery rebuild the
+                // `commit_idempotency` cache from the log (`rebuild_commit_idempotency_from_log`) so a
+                // post-restart request_id retry replays the one committed result instead of re-executing.
+                let commit_fingerprint = fingerprint.0;
                 let mut envelopes: Vec<CommandEnvelope> = Vec::new();
                 let mk_env = |g: &mut Inner<L, P>, command: QueueCommand, item_ids: Vec<ItemId>| {
                     let command_id = Self::next_command_id(g, self.node_id);
                     CommandEnvelope {
                         command_id,
                         request_id: request_id.clone(),
-                        request_fingerprint: None,
+                        request_fingerprint: Some(commit_fingerprint),
                         request_outcome: None,
                         item_ids,
                         command,
