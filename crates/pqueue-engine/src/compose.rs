@@ -41,14 +41,14 @@ use crate::active_scope::{ActiveScope, DiscoveryGranularity};
 use crate::claim_validation::{ClaimCompatibility, ClaimUnit, validate_claim_compatibility};
 use crate::command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum,
-    CommandEnvelope, CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    CommandEnvelope, CommandId, CommitOutcomeEntry, FinalizeCommand, FinalizeKind, FinalizeOutcome,
     LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
     QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome,
     ScheduleUpdate, SetGatesCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
     build_push_items, command_envelope_change_records, validate_gate_command, validate_gate_push,
     validate_request_replay_metadata,
 };
-use crate::error::{EngineError, EngineResult};
+use crate::error::{CommitRejection, EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
 use crate::idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 use crate::port::{
@@ -1603,7 +1603,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     fingerprint,
                     match &env.request_outcome {
                         Some(RequestOutcome::Push { item_ids }) => item_ids.clone(),
-                        None => env.item_ids.clone(),
+                        // A `Push` command never carries a `CommitTransition` outcome; fall back to the
+                        // envelope's minted ids (same as the `None` legacy-push path).
+                        Some(RequestOutcome::CommitTransition { .. }) | None => {
+                            env.item_ids.clone()
+                        }
                     },
                     expires_at,
                 );
@@ -1631,20 +1635,26 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// `consumed_input_id` from the `Finalize` outcome, `side_record_keys` from `WriteSideRecords`, `instance`
     /// from `AdvanceInstanceFence`, `lifecycle_item_ids` from the lifecycle `Push`'s server-minted ids.
     ///
-    /// `request_outcome.is_some()` envelopes are `push_with_request_id` writes (handled by the push rebuild)
-    /// and are skipped; a `commit_transition`'s own lifecycle `Push` carries `request_outcome = None` and so
-    /// stays in the fold. A `request_id` with no stamped `request_fingerprint` (logs written before commit
-    /// envelopes carried one) is skipped — its cross-restart replay stays unavailable, exactly as before,
-    /// rather than being reconstructed without a conflict-detection fingerprint.
+    /// `push_with_request_id` envelopes carry `request_outcome = Some(RequestOutcome::Push)` (handled by the
+    /// push rebuild) and are skipped; a `commit_transition`'s own lifecycle `Push` carries
+    /// `request_outcome = None` and so stays in the fold. A `request_id` with no stamped `request_fingerprint`
+    /// (logs written before commit envelopes carried one) is skipped — its cross-restart replay stays
+    /// unavailable, exactly as before, rather than being reconstructed without a conflict-detection fingerprint.
     ///
-    /// LIMITATION (honest, guarded): a REJECTED entry mutates nothing and appends nothing durable, so a commit
-    /// that mixed committed and rejected entries reconstructs only its COMMITTED entries here — a SHORTER vec
-    /// than the live record. This is NOT silently replayed: `commit_transition`'s replay path guards on
-    /// `recovery.len() == entries.len()` (the resubmitted body's entry count), so a short reconstructed record
-    /// falls through to safe 0-duplicate re-execution instead of returning a misleading short outcome vec. The
-    /// all-committed commit — the realistic unknown-outcome retry, and what AC-TXN-3 exercises — reconstructs
-    /// exactly (len matches) and replays faithfully. Faithful REPLAY of a mixed commit across restart needs
-    /// durable rejection records (a deferred wire-format change); until then a mixed commit safely re-executes.
+    /// MIXED committed+rejected commits (bead pqueue-db60657d): a REJECTED entry mutates nothing and appends
+    /// nothing durable of its own, so the piecemeal `Finalize`-delimited fold alone reconstructs only the
+    /// COMMITTED entries — a SHORTER vec than the live record. To replay a mixed commit faithfully,
+    /// `commit_transition` stamps the WHOLE per-entry vec (committed AND rejected, each rejection's structured
+    /// error projected via [`CommitRejection`]) onto a terminal marker envelope carrying
+    /// [`RequestOutcome::CommitTransition`]. This fold treats that marker as AUTHORITATIVE (`durable_full`),
+    /// superseding the piecemeal reconstruction, so the rebuilt record equals the live one and the
+    /// `recovery.len() == entries.len()` replay guard passes — a mixed retry replays byte-identically.
+    ///
+    /// BACK-COMPAT: a log written before the marker existed simply has no `CommitTransition` envelope, so
+    /// `durable_full` stays `None` and the fold falls back to the committed-only piecemeal `entries`. An
+    /// all-committed commit reconstructs exactly from its `Finalize` runs (no marker is written for it); a
+    /// mixed commit in a pre-change log stays short and safely re-executes under the length guard, exactly as
+    /// before — old logs are never corrupted or rejected.
     fn rebuild_commit_idempotency_from_log(
         log: &L,
         commit_idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
@@ -1660,6 +1670,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             pending_instance: Option<(Vec<u8>, u64)>,
             pending_lifecycle_ids: Vec<ItemId>,
             entries: Vec<EntryRecovery>,
+            /// The AUTHORITATIVE full per-entry vec (committed AND rejected) decoded from a
+            /// [`RequestOutcome::CommitTransition`] marker, when one was durably recorded (a MIXED commit; bead
+            /// pqueue-db60657d). When present it supersedes the piecemeal `entries` reconstruction so the
+            /// rejected entries — which appended nothing themselves — are replayed with their structured error.
+            /// `None` for all-committed commits and for logs written before the marker existed (back-compat:
+            /// those fall back to `entries`).
+            durable_full: Option<Vec<EntryRecovery>>,
         }
         let mut accums: HashMap<RequestId, CommitAccum> = HashMap::new();
         let mut from = None;
@@ -1669,14 +1686,39 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 let Some(request_id) = &env.request_id else {
                     continue;
                 };
-                // `push_with_request_id` envelopes carry `request_outcome = Some(_)`; the push rebuild owns
-                // them. Only `commit_transition` envelopes (request_outcome == None) belong to this fold.
-                if env.request_outcome.is_some() {
-                    continue;
-                }
                 let Some(fingerprint) = env.request_fingerprint else {
                     continue;
                 };
+                // A `commit_transition`'s terminal marker carries the FULL per-entry outcome for a mixed commit.
+                // Capture it as authoritative; it delimits nothing (no `Finalize`) so it stays out of the
+                // piecemeal fold below.
+                if let Some(RequestOutcome::CommitTransition { entries }) = &env.request_outcome {
+                    let accum = accums
+                        .entry(request_id.clone())
+                        .or_insert_with(|| CommitAccum {
+                            fingerprint,
+                            created_at: env.created_at,
+                            pending_side_keys: Vec::new(),
+                            pending_instance: None,
+                            pending_lifecycle_ids: Vec::new(),
+                            entries: Vec::new(),
+                            durable_full: None,
+                        });
+                    accum.durable_full = Some(
+                        entries
+                            .iter()
+                            .cloned()
+                            .map(recovery_from_outcome_entry)
+                            .collect(),
+                    );
+                    continue;
+                }
+                // `push_with_request_id` envelopes carry `request_outcome = Some(RequestOutcome::Push)`; the push
+                // rebuild owns them. Only `commit_transition` envelopes (request_outcome == None) belong to the
+                // piecemeal fold.
+                if env.request_outcome.is_some() {
+                    continue;
+                }
                 let accum = accums
                     .entry(request_id.clone())
                     .or_insert_with(|| CommitAccum {
@@ -1686,6 +1728,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                         pending_instance: None,
                         pending_lifecycle_ids: Vec::new(),
                         entries: Vec::new(),
+                        durable_full: None,
                     });
                 match &env.command {
                     QueueCommand::WriteSideRecords(cmd) => {
@@ -1727,14 +1770,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             }
         }
         for (request_id, accum) in accums {
-            if accum.entries.is_empty() {
+            // A durable `CommitTransition` marker (mixed commit) is authoritative — it holds the whole vec
+            // including the rejected entries; otherwise fall back to the committed-only piecemeal `entries`.
+            let entries = accum.durable_full.unwrap_or(accum.entries);
+            if entries.is_empty() {
                 continue;
             }
             let expires_at = request_expires_at(accum.created_at, retention_ms);
             commit_idempotency.entry(shard.clone()).or_default().record(
                 request_id,
                 BodyHash(accum.fingerprint),
-                accum.entries,
+                entries,
                 expires_at,
             );
         }
@@ -1987,6 +2033,38 @@ fn outcomes_from_recovery(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome>
             CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
         })
         .collect()
+}
+
+/// Project one [`EntryRecovery`] to its durable serializable form for [`RequestOutcome::CommitTransition`].
+/// The inverse is [`recovery_from_outcome_entry`]; together they let a mixed commit's whole per-entry vec
+/// (committed AND rejected, with the rejection's structured error) round-trip through the durable log.
+fn outcome_entry_from_recovery(r: &EntryRecovery) -> CommitOutcomeEntry {
+    CommitOutcomeEntry {
+        consumed_input_id: r.consumed_input_id,
+        instance: r.instance.clone(),
+        side_record_keys: r.side_record_keys.clone(),
+        lifecycle_item_ids: r.lifecycle_item_ids.clone(),
+        rejection: match &r.status {
+            CommitEntryStatus::Committed => None,
+            CommitEntryStatus::Rejected(e) => Some(CommitRejection::from_error(e)),
+        },
+    }
+}
+
+/// Reconstruct an [`EntryRecovery`] from its durable serializable form (inverse of
+/// [`outcome_entry_from_recovery`]).
+fn recovery_from_outcome_entry(e: CommitOutcomeEntry) -> EntryRecovery {
+    let status = match e.rejection {
+        None => CommitEntryStatus::Committed,
+        Some(rej) => CommitEntryStatus::Rejected(rej.into_error()),
+    };
+    EntryRecovery {
+        consumed_input_id: e.consumed_input_id,
+        instance: e.instance,
+        side_record_keys: e.side_record_keys,
+        lifecycle_item_ids: e.lifecycle_item_ids,
+        status,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2451,6 +2529,107 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
             created_at: now,
         };
         Ok((env, fingerprint))
+    }
+
+    fn build_request_id_commit_envelopes(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        entries: Vec<crate::port::CommitTransitionEntry>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(Vec<CommandEnvelope>, BodyHash)> {
+        if !self.is_atomic() {
+            return Err(EngineError::Unavailable);
+        }
+        // The whole-body fingerprint `commit_transition` stamps on EVERY envelope of this commit, so a
+        // post-reopen retry of the same body computes the identical fingerprint → Replay (not Conflict).
+        let fingerprint = commit_body_hash(&entries)?;
+        let mut g = self.inner.lock().expect("poisoned");
+        if !g.projection.supports_commit_transition() {
+            return Err(EngineError::Unavailable);
+        }
+        let _ = expected_epoch;
+        let commit_fingerprint = fingerprint.0;
+        let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+        let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            // Finalize-only restriction (mirrors `build_request_id_commit_envelope`'s single-entry scope): a
+            // side-record / lifecycle / instance-fence entry would need the full commit machinery (counter
+            // reservation, index validation) this probe deliberately does not replicate.
+            if !entry.side_records.is_empty()
+                || !entry.lifecycle_items.is_empty()
+                || entry.instance_fence.is_some()
+            {
+                return Err(EngineError::Invalid(
+                    "build_request_id_commit_envelopes: finalize-only entries",
+                ));
+            }
+            let claim_ref = entry.claim_ref;
+            let consumed_input_id = claim_ref.item_id;
+            match g
+                .projection
+                .commit_validate(shard, std::slice::from_ref(&claim_ref), now)
+            {
+                Ok(()) => {
+                    let command_id = Self::next_command_id(&mut g, self.node_id);
+                    envelopes.push(CommandEnvelope {
+                        command_id,
+                        request_id: Some(request_id.clone()),
+                        request_fingerprint: Some(commit_fingerprint),
+                        request_outcome: None,
+                        item_ids: vec![consumed_input_id],
+                        command: QueueCommand::Finalize(FinalizeCommand {
+                            outcomes: vec![FinalizeOutcome::new(consumed_input_id, entry.finalize)],
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    });
+                    recovery.push(EntryRecovery {
+                        consumed_input_id,
+                        instance: None,
+                        side_record_keys: Vec::new(),
+                        lifecycle_item_ids: Vec::new(),
+                        status: CommitEntryStatus::Committed,
+                    });
+                }
+                Err(e) => recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(e),
+                }),
+            }
+        }
+        // Emit the terminal marker for a MIXED result, byte-for-byte as `commit_transition` does, so recovery
+        // rebuilds the FULL per-entry vec (committed + rejected) from this durable envelope.
+        let has_committed = recovery
+            .iter()
+            .any(|r| matches!(r.status, CommitEntryStatus::Committed));
+        let has_rejected = recovery
+            .iter()
+            .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
+        if has_committed && has_rejected {
+            let outcome_entries: Vec<CommitOutcomeEntry> =
+                recovery.iter().map(outcome_entry_from_recovery).collect();
+            let command_id = Self::next_command_id(&mut g, self.node_id);
+            envelopes.push(CommandEnvelope {
+                command_id,
+                request_id: Some(request_id.clone()),
+                request_fingerprint: Some(commit_fingerprint),
+                request_outcome: Some(RequestOutcome::CommitTransition {
+                    entries: outcome_entries,
+                }),
+                item_ids: Vec::new(),
+                command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                    records: Vec::new(),
+                }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            });
+        }
+        Ok((envelopes, fingerprint))
     }
 }
 
@@ -3646,19 +3825,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     .check(rid, fingerprint, now)
                 {
                     IdempotencyDecision::Replay(recovery) => {
-                        // FAITHFULNESS GUARD (mixed committed+rejected commits across restart). An
-                        // in-process record holds ONE `EntryRecovery` per input entry (committed AND rejected;
-                        // see the `recovery.push` loop below), so its length always equals the resubmitted
-                        // body's entry count and this guard is a no-op. But `rebuild_commit_idempotency_from_log`
-                        // can only reconstruct the COMMITTED, `Finalize`-delimited entries: a rejected entry
-                        // mutates and appends NOTHING durable, so it leaves no trace to rebuild. A cached record
-                        // is therefore a faithful replay of the (same-body, fingerprint-matched) request ONLY
-                        // when it accounts for every entry in the body. If it is short, the original commit
-                        // mixed committed + rejected entries and this reconstructed record is NOT faithful — do
-                        // NOT return the misleading short outcome vec; fall through to safe re-execution
-                        // (the already-committed inputs stay finalized exactly once — commit_validate fences
-                        // them — so re-execution is 0-duplicate, and the end-of-call record overwrites the stale
-                        // short entry with the full re-executed vec).
+                        // FAITHFULNESS GUARD (safety net for pre-marker logs). An in-process record, and a
+                        // record rebuilt across restart from the durable `CommitTransition` marker, both hold
+                        // ONE `EntryRecovery` per input entry (committed AND rejected), so their length equals
+                        // the resubmitted body's entry count and the replay is faithful — including for a MIXED
+                        // commit (bead pqueue-db60657d). This guard only bites on a log written BEFORE the
+                        // marker existed: there a mixed commit rebuilds to just its COMMITTED,
+                        // `Finalize`-delimited entries (a rejected entry appended nothing to reconstruct), a
+                        // SHORTER vec. Do NOT return that misleading short outcome vec; fall through to safe
+                        // re-execution (the already-committed inputs stay finalized exactly once — commit_validate
+                        // fences them — so re-execution is 0-duplicate, and the end-of-call record overwrites the
+                        // stale short entry with the full re-executed vec).
                         if recovery.len() == entries.len() {
                             return Ok(outcomes_from_recovery(&recovery));
                         }
@@ -3809,7 +3986,46 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 });
             }
 
-            // (3) Record the whole-body recovery only AFTER success, so a later replay/explain returns it
+            // (3) Durably record the FULL per-entry outcome (committed AND rejected) for a MIXED commit, so a
+            //     cross-restart replay reconstructs the whole vec — not just its committed, `Finalize`-delimited
+            //     subset (bead pqueue-db60657d). A rejected entry mutates and appends nothing itself, so a mixed
+            //     commit's rebuilt record would otherwise be SHORTER than the live one and fall through the
+            //     `recovery.len() == entries.len()` replay guard to re-execution. We stamp the whole vec on ONE
+            //     terminal marker envelope (a no-op empty `WriteSideRecords`) carrying the caller's request_id +
+            //     whole-body fingerprint + `RequestOutcome::CommitTransition`. This is gated on a MIXED result
+            //     (>=1 committed AND >=1 rejected): an all-committed commit already reconstructs exactly from its
+            //     `Finalize` runs (the marker would be redundant and would churn the existing all-committed log
+            //     shape), and an all-rejected commit appends nothing (its re-execution re-rejects identically, so
+            //     it stays faithful without a durable record). Because a mixed commit already committed >=1 entry
+            //     under the current epoch (held lock), this extra append cannot spuriously epoch-fence.
+            if let Some(rid) = &request_id {
+                let has_committed = recovery
+                    .iter()
+                    .any(|r| matches!(r.status, CommitEntryStatus::Committed));
+                let has_rejected = recovery
+                    .iter()
+                    .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
+                if has_committed && has_rejected {
+                    let entries: Vec<CommitOutcomeEntry> =
+                        recovery.iter().map(outcome_entry_from_recovery).collect();
+                    let command_id = Self::next_command_id(&mut g, self.node_id);
+                    let marker = CommandEnvelope {
+                        command_id,
+                        request_id: Some(rid.clone()),
+                        request_fingerprint: Some(fingerprint.0),
+                        request_outcome: Some(RequestOutcome::CommitTransition { entries }),
+                        item_ids: Vec::new(),
+                        command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                            records: Vec::new(),
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    };
+                    Self::commit_locked_batch(&mut g, shard, vec![marker], expected_epoch)?;
+                }
+            }
+
+            // (4) Record the whole-body recovery only AFTER success, so a later replay/explain returns it
             //     verbatim with no second append.
             let outcomes = outcomes_from_recovery(&recovery);
             if let Some(rid) = request_id {

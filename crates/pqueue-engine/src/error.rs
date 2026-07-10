@@ -104,4 +104,125 @@ impl std::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+/// A durable, serializable projection of the [`EngineError`] variants a `commit_transition` entry rejection
+/// can carry, so a mixed committed+rejected commit's per-entry outcome can be recorded on the log and
+/// replayed BYTE-IDENTICALLY across a restart (bead pqueue-db60657d). Lives next to [`EngineError`] because
+/// it mirrors it 1:1: [`CommitRejection::from_error`] projects every variant and
+/// [`CommitRejection::into_error`] reconstructs it, so the round-trip preserves `PartialEq` for the errors a
+/// commit rejection actually produces.
+///
+/// The `&'static str`-bearing variants ([`EngineError::Invalid`] / [`EngineError::Forbidden`]) cannot
+/// recreate an arbitrary static from a decoded `String`, so [`CommitRejection::into_error`] maps the reasons
+/// the commit path actually emits (`commit_validate`'s "item is not leased" and `validate_instance_fence`'s
+/// "instance fence is not monotonic") back to their exact literals; any other reason falls back to a stable
+/// static. Every rejection `commit_validate` / `validate_instance_fence` / `validate_entity` /
+/// `index_validate_push` can emit therefore round-trips byte-identically.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CommitRejection {
+    NotFound,
+    QueueDefinitionConflict,
+    Invalid(String),
+    Terminal,
+    StaleLease,
+    Superseded,
+    Unavailable,
+    Conflict,
+    BatchTooLarge,
+    RequestIdConflict,
+    Paused { drain_intake: bool },
+    RequestExpired,
+    EpochFenced,
+    Forbidden(String),
+    EntitySchemaViolation(String),
+    Storage(String),
+}
+
+impl CommitRejection {
+    /// Project an [`EngineError`] to its durable, serializable form.
+    pub fn from_error(e: &EngineError) -> Self {
+        match e {
+            EngineError::NotFound => CommitRejection::NotFound,
+            EngineError::QueueDefinitionConflict => CommitRejection::QueueDefinitionConflict,
+            EngineError::Invalid(why) => CommitRejection::Invalid((*why).to_string()),
+            EngineError::Terminal => CommitRejection::Terminal,
+            EngineError::StaleLease => CommitRejection::StaleLease,
+            EngineError::Superseded => CommitRejection::Superseded,
+            EngineError::Unavailable => CommitRejection::Unavailable,
+            EngineError::Conflict => CommitRejection::Conflict,
+            EngineError::BatchTooLarge => CommitRejection::BatchTooLarge,
+            EngineError::RequestIdConflict => CommitRejection::RequestIdConflict,
+            EngineError::Paused { drain_intake } => CommitRejection::Paused {
+                drain_intake: *drain_intake,
+            },
+            EngineError::RequestExpired => CommitRejection::RequestExpired,
+            EngineError::EpochFenced => CommitRejection::EpochFenced,
+            EngineError::Forbidden(why) => CommitRejection::Forbidden((*why).to_string()),
+            EngineError::EntitySchemaViolation(msg) => {
+                CommitRejection::EntitySchemaViolation(msg.clone())
+            }
+            EngineError::Storage(msg) => CommitRejection::Storage(msg.clone()),
+        }
+    }
+
+    /// Reconstruct the [`EngineError`] from its durable form. The two `Invalid` reasons the commit path emits
+    /// round-trip to their exact `&'static str`; any other reason (unreachable on the commit path) falls back
+    /// to a stable static so the variant is still preserved.
+    pub fn into_error(self) -> EngineError {
+        match self {
+            CommitRejection::NotFound => EngineError::NotFound,
+            CommitRejection::QueueDefinitionConflict => EngineError::QueueDefinitionConflict,
+            CommitRejection::Invalid(why) => EngineError::Invalid(match why.as_str() {
+                "item is not leased" => "item is not leased",
+                "instance fence is not monotonic" => "instance fence is not monotonic",
+                _ => "invalid",
+            }),
+            CommitRejection::Terminal => EngineError::Terminal,
+            CommitRejection::StaleLease => EngineError::StaleLease,
+            CommitRejection::Superseded => EngineError::Superseded,
+            CommitRejection::Unavailable => EngineError::Unavailable,
+            CommitRejection::Conflict => EngineError::Conflict,
+            CommitRejection::BatchTooLarge => EngineError::BatchTooLarge,
+            CommitRejection::RequestIdConflict => EngineError::RequestIdConflict,
+            CommitRejection::Paused { drain_intake } => EngineError::Paused { drain_intake },
+            CommitRejection::RequestExpired => EngineError::RequestExpired,
+            CommitRejection::EpochFenced => EngineError::EpochFenced,
+            CommitRejection::Forbidden(_) => EngineError::Forbidden("forbidden"),
+            CommitRejection::EntitySchemaViolation(msg) => EngineError::EntitySchemaViolation(msg),
+            CommitRejection::Storage(msg) => EngineError::Storage(msg),
+        }
+    }
+}
+
 pub type EngineResult<T> = Result<T, EngineError>;
+
+#[cfg(test)]
+mod commit_rejection_tests {
+    use super::*;
+
+    /// Every rejection the commit-validate path can emit must round-trip BYTE-IDENTICALLY through the durable
+    /// projection (this is what makes a mixed commit's Rejected entries replay with their exact structured
+    /// error across a restart).
+    #[test]
+    fn commit_rejections_round_trip_identically() {
+        let cases = [
+            EngineError::NotFound,
+            EngineError::StaleLease,
+            EngineError::Terminal,
+            EngineError::Superseded,
+            EngineError::Conflict,
+            EngineError::Invalid("item is not leased"),
+            EngineError::Invalid("instance fence is not monotonic"),
+            EngineError::EntitySchemaViolation("bad doc".into()),
+        ];
+        for e in cases {
+            let projected = CommitRejection::from_error(&e);
+            let json = serde_json::to_string(&projected).unwrap();
+            let decoded: CommitRejection = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                decoded.into_error(),
+                e,
+                "commit rejection {e:?} must round-trip byte-identically"
+            );
+        }
+    }
+}

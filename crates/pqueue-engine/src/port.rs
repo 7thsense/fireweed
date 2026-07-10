@@ -511,6 +511,32 @@ pub trait RequestIdReplayProbe: Send + Sync {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> EngineResult<(CommandEnvelope, BodyHash)>;
+
+    /// The MIXED-commit generalization of [`Self::build_request_id_commit_envelope`] (bead pqueue-db60657d).
+    /// Build (but do not commit) the FULL durable envelope sequence a `commit_transition` of a FINALIZE-ONLY
+    /// body (each entry finalizes one claimed input; no side records / lifecycle items / instance fence) would
+    /// append: the committed entries' `Finalize` envelopes AND, when the result is MIXED (at least one
+    /// committed AND at least one rejected), the terminal
+    /// [`RequestOutcome::CommitTransition`](crate::command::RequestOutcome) marker
+    /// carrying the whole per-entry outcome vec (committed AND rejected, each rejection's structured error
+    /// projected durably). Every envelope is stamped with the SAME whole-body fingerprint `commit_transition`
+    /// computes, so a post-reopen retry of the same body Replays (not Conflicts). Each `claim_ref` is validated
+    /// exactly like the real commit path (a rejection here matches it), against the CURRENT projection with no
+    /// intervening apply — correct for INDEPENDENT entries (the conformance mixed case). Appends/applies/records
+    /// NOTHING: the caller drives the returned envelopes through [`crate::Backend::write`] with an
+    /// `AfterAppendBeforeApply` fault to strike the durable-but-unapplied window for a mixed commit, then
+    /// reopens so recovery replays the durable tail AND rebuilds `commit_idempotency` from the durable marker.
+    /// Returns the envelopes plus the whole-body fingerprint. Default: [`EngineError::Unavailable`].
+    fn build_request_id_commit_envelopes(
+        &self,
+        _shard: &QueueKey,
+        _request_id: RequestId,
+        _entries: Vec<CommitTransitionEntry>,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> EngineResult<(Vec<CommandEnvelope>, BodyHash)> {
+        Err(EngineError::Unavailable)
+    }
 }
 
 /// Operator gate-state mutation. Gate support is backend-capability-specific: relational backends

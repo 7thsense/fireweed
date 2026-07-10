@@ -38,11 +38,16 @@
 //! [`RequestIdReplayProbe::build_request_id_commit_envelope`], kill before apply, reopen) — recovery rebuilds
 //! `commit_idempotency` from the durable log (`rebuild_commit_idempotency_from_log`, the symmetric twin of the
 //! push rebuild), so a same-body retry Replays the exact per-entry outcome, a different body → RequestIdConflict,
-//! and the input is finalized exactly once. A MIXED committed+rejected commit is NOT faithfully replayed across
-//! restart (a rejected entry appends nothing durable, so recovery reconstructs only the committed entries); the
-//! engine does NOT silently replay the short vec — the replay path guards on `recovery.len() == body.len()` and
-//! a mixed retry safely RE-EXECUTES (0 duplicate). That honest residual keeps sqlite_log/postgres AC-TXN-3
-//! `partial` (a `GAP`, tracked in `pqueue-db60657d`). The classic ports
+//! and the input is finalized exactly once. A MIXED committed+rejected commit is ALSO now replayed
+//! BYTE-IDENTICALLY across restart at both cut points (bead pqueue-db60657d, closed): `commit_transition`
+//! stamps the whole per-entry vec (committed AND rejected, each rejection's structured error projected via
+//! `CommitRejection`) onto a terminal `RequestOutcome::CommitTransition` marker, and recovery reconstructs the
+//! full `Vec<EntryRecovery>` from it — so a `[valid→Committed, stale→Rejected(StaleLease)]` retry replays the
+//! exact vec (Rejected carrying the same StaleLease), `explain_commit` returns the identical full vec, and the
+//! committed input is finalized exactly once (0 duplicate). The `AfterAppendBeforeApply` mixed cut is struck by
+//! appending the mixed commit's durable envelopes (via
+//! [`RequestIdReplayProbe::build_request_id_commit_envelopes`]) unapplied, then reopening. No residual `GAP`
+//! remains for AC-TXN-3. The classic ports
 //! (claim/renew/finalize/update_fields/purge/replace_if_pending) carry NO `request_id` and record
 //! capability-N/A. This split is recorded per row in the evidence JSONL rather than papered over.
 
@@ -50,13 +55,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, GroupKey, Metadata, PriorityValue, RequestId};
+use pqueue_core::{ClientItemKey, GroupKey, LeaseToken, Metadata, PriorityValue, RequestId};
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimRef, CommandEnvelope, CommandPosition, CommitEntryOutcome,
-    CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
-    DurabilityClass, EngineError, FenceLeaseCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
-    LogRead, PayloadUpdate, PushCommand, PushSpec, QueueCommand, RequestIdReplayProbe,
-    SetGatesCommand, SetGatesPort, UnfenceLeaseCommand,
+    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
+    CommitTransitionPort, ControlPlaneStore, DurabilityClass, EngineError, EntryRecovery,
+    FenceLeaseCommand, FinalizeKind, FinalizeOutcome, GroupBatching, LogRead, PayloadUpdate,
+    PushCommand, PushSpec, QueueCommand, RecoveryReadPort, RequestIdReplayProbe, SetGatesCommand,
+    SetGatesPort, UnfenceLeaseCommand,
 };
 
 use crate::{ConformanceCore, claim_req, commit, envelope, item, qdef, qkey, shard, ts};
@@ -1302,7 +1308,7 @@ pub async fn ac_txn_2_commit_timeout_path<B: ConformanceCore + LogRead>(
 /// * The classic ports (claim/renew/finalize/update_fields/purge/replace_if_pending) carry NO `request_id`
 ///   and are recorded capability-N/A (covered by AC-TXN-1 durability + AC-TXN-6 parity).
 pub async fn ac_txn_3_unknown_outcome_replay<
-    B: ConformanceCore + LogRead + RequestIdReplayProbe + CommitTransitionPort,
+    B: ConformanceCore + LogRead + RequestIdReplayProbe + CommitTransitionPort + RecoveryReadPort,
 >(
     make: impl Fn(&str) -> B,
     caps: TxnCaps,
@@ -1522,6 +1528,60 @@ pub async fn ac_txn_3_mid_pipeline_request_id_bearing<
     ])
 }
 
+/// Seed a fresh durable backend for the MIXED commit_transition probes (bead pqueue-db60657d): create the
+/// queue, push two items, claim both, then REASSIGN the second item's lease to a new consumer so its cached
+/// [`ClaimRef`] (holding the OLD token) rejects with [`EngineError::StaleLease`] at commit — while the first
+/// item's `ClaimRef` stays valid → Committed. Returns `(backend, valid_claim_ref, stale_claim_ref)`.
+async fn seed_mixed_commit<B: ConformanceCore, F: Fn(&str) -> B>(
+    make: &F,
+    tag: &'static str,
+) -> Result<(B, ClaimRef, ClaimRef), String> {
+    let a = make(tag);
+    a.create_queue(qdef())
+        .await
+        .map_err(|e| format!("mixed create_queue: {e:?}"))?;
+    a.push(
+        &shard(),
+        vec![spec("txn3-ct-mixed-a", 5), spec("txn3-ct-mixed-b", 5)],
+        ts(0),
+        None,
+    )
+    .await
+    .map_err(|e| format!("mixed seed push: {e:?}"))?;
+    let claimed = a
+        .claim(claim_req(2, 500, 1))
+        .await
+        .map_err(|e| format!("mixed claim: {e:?}"))?;
+    ensure!(claimed.items.len() == 2, "mixed claim leased two items");
+    let cref = |i: usize| -> Result<ClaimRef, String> {
+        let ci = &claimed.items[i];
+        Ok(ClaimRef {
+            item_id: ci.item_id,
+            lease_token: ci
+                .lease_token
+                .clone()
+                .ok_or_else(|| "mixed claimed item is missing its lease token".to_string())?,
+            lease_expires_at: ci.lease_expires_at,
+            item_version: ci.item_version,
+        })
+    };
+    let claim_ref_valid = cref(0)?;
+    let claim_ref_stale = cref(1)?;
+    // Reassign the SECOND item's lease to a NEW consumer: the item stays Leased but its token changes, so
+    // `claim_ref_stale` (old token) → StaleLease at commit (a genuine structured rejection, not terminal/absent).
+    a.reassign(
+        &shard(),
+        vec![claim_ref_stale.item_id],
+        LeaseToken::new("mixed-reassigned").unwrap(),
+        ts(500),
+        ts(2),
+        None,
+    )
+    .await
+    .map_err(|e| format!("mixed reassign (make claim_ref_stale StaleLease): {e:?}"))?;
+    Ok((a, claim_ref_valid, claim_ref_stale))
+}
+
 /// **AC-TXN-3 commit_transition** (TP-003 §3.10 row 208, the OTHER request_id-bearing mutating op). The
 /// authoritative claimed-work commit (`commit_transition`) carries a `request_id` idempotent over the whole
 /// commit body (`commit_idempotency` cache). Coverage, capability-gated honestly:
@@ -1536,14 +1596,16 @@ pub async fn ac_txn_3_mid_pipeline_request_id_bearing<
 ///   `AfterAppendBeforeApply` (append the request_id-bearing commit envelope, kill before apply, reopen) both
 ///   replay the exact per-entry outcome across restart — a same-body retry replays it, a different body →
 ///   `RequestIdConflict`, and the input is finalized exactly once (0 duplicate transitions).
-/// * RESIDUAL (honest, recorded as a `GAP` → `partial`, tracked in `pqueue-db60657d`): a MIXED
-///   committed+rejected commit is NOT faithfully replayed across restart. A rejected entry mutates/appends
-///   nothing durable, so recovery reconstructs only the committed entries (a short vec). The engine does NOT
-///   silently replay it — the replay path guards on `recovery.len() == body.len()`, so a mixed retry safely
-///   RE-EXECUTES (committed input stays finalized exactly once, 0 duplicate) rather than returning a stale
-///   short outcome. This function proves that safety invariant directly.
+/// * MIXED committed+rejected commit (bead pqueue-db60657d, closed): a commit whose entries are
+///   `[valid claim → Committed, stale claim → Rejected(StaleLease)]` is now replayed BYTE-IDENTICALLY across
+///   restart at BOTH cut points. `commit_transition` stamps the whole per-entry vec (committed AND rejected,
+///   each rejection's structured error projected via `CommitRejection`) onto a terminal
+///   `RequestOutcome::CommitTransition` marker; recovery rebuilds the full `Vec<EntryRecovery>` from that
+///   durable marker, so the retry replays the exact `[Committed, Rejected(StaleLease)]` (not a short/stale
+///   vec, not an all-Rejected re-execution) and `explain_commit` returns the identical full vec — with the
+///   committed input finalized exactly once (0 duplicate).
 pub async fn ac_txn_3_commit_transition_request_id<
-    B: ConformanceCore + CommitTransitionPort + LogRead + RequestIdReplayProbe,
+    B: ConformanceCore + CommitTransitionPort + LogRead + RequestIdReplayProbe + RecoveryReadPort,
 >(
     make: impl Fn(&str) -> B,
     caps: TxnCaps,
@@ -1787,145 +1849,237 @@ pub async fn ac_txn_3_commit_transition_request_id<
         "commit_transition AfterAppendBeforeApply (request_id-bearing) across-restart request_id replay PROVEN: a kill in the append->apply window leaves the request_id-bearing commit durable-but-unapplied; on reopen recovery replays it exactly once AND rebuilds commit_idempotency from that durable envelope, so a retry by request_id replays the ONE committed per-entry outcome (same body -> Replay, different body -> RequestIdConflict, 0 duplicate state transitions)".into(),
     );
 
-    // ---- MIXED committed+rejected commit across restart (residual honesty probe, bead pqueue-db60657d).
-    // A vectorized commit whose entries are [valid claim, stale claim] records LIVE [Committed, Rejected] —
-    // the full per-entry vec, including the Rejected entry. But a REJECTED entry mutates and appends NOTHING
-    // durable, so rebuild_commit_idempotency_from_log can only reconstruct the COMMITTED, Finalize-delimited
-    // entry across a restart — a SHORTER vec than the live record. The engine does NOT silently replay that
-    // short vec: commit_transition's replay path guards on recovery.len()==body.len(), so the retry falls
-    // through to SAFE 0-duplicate re-execution. This probe proves the invariant that holds (0 duplicate; the
-    // committed input stays finalized exactly once) and that the retry does NOT return a falsely-complete
-    // cached vec — while honestly recording (via the GAP below) that faithful mixed replay is NOT yet provided.
-    let rid_mixed = RequestId::new("ac-txn-3-commit-transition-mixed").unwrap();
-    let a = make("txn3-ct-mixed");
-    a.create_queue(qdef())
-        .await
-        .map_err(|e| format!("mixed create_queue: {e:?}"))?;
-    a.push(
-        &shard(),
-        vec![spec("txn3-ct-mixed-a", 5), spec("txn3-ct-mixed-b", 5)],
-        ts(0),
-        None,
-    )
-    .await
-    .map_err(|e| format!("mixed seed push: {e:?}"))?;
-    let claimed = a
-        .claim(claim_req(2, 500, 1))
-        .await
-        .map_err(|e| format!("mixed claim: {e:?}"))?;
-    ensure!(claimed.items.len() == 2, "mixed claim leased two items");
-    let cref = |i: usize| -> Result<ClaimRef, String> {
-        let ci = &claimed.items[i];
-        Ok(ClaimRef {
-            item_id: ci.item_id,
-            lease_token: ci
-                .lease_token
-                .clone()
-                .ok_or_else(|| "mixed claimed item is missing its lease token".to_string())?,
-            lease_expires_at: ci.lease_expires_at,
-            item_version: ci.item_version,
-        })
+    // ---- MIXED committed+rejected commit across restart (bead pqueue-db60657d, faithful replay). A
+    // vectorized commit whose entries are [valid claim → Committed, stale claim → Rejected(StaleLease)] records
+    // a mixed per-entry vec. A rejected entry mutates and appends nothing of its own, so to reconstruct the
+    // WHOLE vec on recovery `commit_transition` stamps it (committed AND rejected, each rejection's structured
+    // error projected durably) onto a terminal `RequestOutcome::CommitTransition` marker. This probe proves the
+    // retry replays that vec BYTE-IDENTICALLY across a real drop+reopen at BOTH cut points, `explain_commit`
+    // returns the identical full vec, and the committed input stays finalized exactly once (0 duplicate).
+    //
+    // A MIXED commit body: entry 0 (valid) commits, entry 1 (stale token) is rejected with StaleLease.
+    let mixed_entries = |valid: &ClaimRef, stale: &ClaimRef, finalize0: FinalizeKind| {
+        vec![
+            CommitTransitionEntry {
+                claim_ref: valid.clone(),
+                finalize: finalize0,
+                side_records: Vec::new(),
+                lifecycle_items: Vec::new(),
+                instance_fence: None,
+            },
+            CommitTransitionEntry {
+                claim_ref: stale.clone(),
+                finalize: FinalizeKind::Complete,
+                side_records: Vec::new(),
+                lifecycle_items: Vec::new(),
+                instance_fence: None,
+            },
+        ]
     };
-    let claim_ref_valid = cref(0)?;
-    let claim_ref_stale = cref(1)?;
-    // Finalize the SECOND claimed input under a separate request_id so its claim_ref goes stale (Terminal).
-    let pre = a
-        .commit_transition(
-            &shard(),
-            CommitTransition {
-                request_id: Some(RequestId::new("ac-txn-3-commit-transition-mixed-pre").unwrap()),
-                entries: vec![CommitTransitionEntry {
-                    claim_ref: claim_ref_stale.clone(),
-                    finalize: FinalizeKind::Complete,
-                    side_records: Vec::new(),
-                    lifecycle_items: Vec::new(),
-                    instance_fence: None,
-                }],
-            },
-            ts(2),
-            None,
+    // The expected mixed outcome shape, shared by both cut points: entry 0 Committed (no lifecycle items),
+    // entry 1 Rejected with the exact structured StaleLease error.
+    let is_mixed_stale = |o: &[CommitEntryOutcome]| -> bool {
+        matches!(
+            o,
+            [
+                CommitEntryOutcome::Committed { lifecycle_item_ids },
+                CommitEntryOutcome::Rejected(EngineError::StaleLease),
+            ] if lifecycle_item_ids.is_empty()
         )
-        .await
-        .map_err(|e| format!("mixed pre-finalize: {e:?}"))?;
-    ensure!(
-        matches!(pre.as_slice(), [CommitEntryOutcome::Committed { .. }]),
-        "mixed pre-finalize must commit the second input; got {pre:?}"
-    );
-    // The MIXED commit: entry 0 (valid) commits, entry 1 (now stale/terminal) is rejected. Live vec is mixed.
-    let mixed_body = || CommitTransition {
+    };
+    // The expected reconstructed recovery vec (what `explain_commit` returns): [Committed, Rejected(StaleLease)].
+    let is_mixed_recovery = |rec: &CommitRecovery| -> bool {
+        matches!(
+            rec.entries.as_slice(),
+            [
+                EntryRecovery {
+                    status: CommitEntryStatus::Committed,
+                    lifecycle_item_ids: l,
+                    side_record_keys: s,
+                    instance: None,
+                    ..
+                },
+                EntryRecovery {
+                    status: CommitEntryStatus::Rejected(EngineError::StaleLease),
+                    ..
+                },
+            ] if l.is_empty() && s.is_empty()
+        )
+    };
+
+    // ==== Cut point AfterApplyBeforeResponse (mixed): full commit in-process, drop, reopen, retry. ====
+    let rid_mixed = RequestId::new("ac-txn-3-commit-transition-mixed").unwrap();
+    let (a, valid, stale) = seed_mixed_commit(&make, "txn3-ct-mixed").await?;
+    let mixed_body = |finalize0: FinalizeKind| CommitTransition {
         request_id: Some(rid_mixed.clone()),
-        entries: vec![
-            CommitTransitionEntry {
-                claim_ref: claim_ref_valid.clone(),
-                finalize: FinalizeKind::Complete,
-                side_records: Vec::new(),
-                lifecycle_items: Vec::new(),
-                instance_fence: None,
-            },
-            CommitTransitionEntry {
-                claim_ref: claim_ref_stale.clone(),
-                finalize: FinalizeKind::Complete,
-                side_records: Vec::new(),
-                lifecycle_items: Vec::new(),
-                instance_fence: None,
-            },
-        ],
+        entries: mixed_entries(&valid, &stale, finalize0),
     };
     let live = a
-        .commit_transition(&shard(), mixed_body(), ts(3), None)
+        .commit_transition(&shard(), mixed_body(FinalizeKind::Complete), ts(3), None)
         .await
         .map_err(|e| format!("mixed commit: {e:?}"))?;
     ensure!(
-        matches!(
-            live.as_slice(),
-            [
-                CommitEntryOutcome::Committed { .. },
-                CommitEntryOutcome::Rejected(_)
-            ]
-        ),
-        "the mixed commit must live-record [Committed, Rejected]; got {live:?}"
+        is_mixed_stale(&live),
+        "the mixed commit must live-record [Committed, Rejected(StaleLease)]; got {live:?}"
+    );
+    // The full per-entry recovery vec (with the structured StaleLease) BEFORE restart, via explain_commit.
+    let explain_before = a
+        .explain_commit(&shard(), rid_mixed.clone())
+        .await
+        .map_err(|e| format!("mixed explain_commit before restart: {e:?}"))?
+        .ok_or_else(|| "mixed explain_commit returned None before restart".to_string())?;
+    ensure!(
+        is_mixed_recovery(&explain_before),
+        "explain_commit before restart must return [Committed, Rejected(StaleLease)]; got {explain_before:?}"
     );
     let m_before = a
         .metrics(&qkey())
         .await
         .map_err(|e| format!("mixed metrics before restart: {e:?}"))?;
     ensure!(
-        m_before.complete == 2 && m_before.leased == 0,
-        "mixed: both inputs finalized exactly once in-process (0 duplicate); got complete={} leased={}",
+        m_before.complete == 1 && m_before.leased == 1,
+        "mixed in-process: the valid input finalized exactly once, the stale input stays leased; got complete={} leased={}",
         m_before.complete,
         m_before.leased
     );
     drop(a);
-    // Reopen: recovery reconstructs ONLY the committed entry for rid_mixed (the rejected entry left no durable
-    // trace), so the reconstructed cache vec is SHORT (len 1) vs the resubmitted body (len 2). The retry must
-    // NOT return the short/misleading vec — the len guard forces safe re-execution (both inputs are now
-    // finalized, so both re-reject: 0 duplicate), and NO entry comes back falsely Committed.
+    // Reopen: recovery rebuilds commit_idempotency SOLELY from the durable log (the in-memory cache is gone),
+    // reconstructing the FULL [Committed, Rejected(StaleLease)] vec from the durable CommitTransition marker.
     let b = make("txn3-ct-mixed");
     let retry = b
-        .commit_transition(&shard(), mixed_body(), ts(4), None)
+        .commit_transition(&shard(), mixed_body(FinalizeKind::Complete), ts(4), None)
         .await
         .map_err(|e| format!("mixed retry after restart: {e:?}"))?;
     ensure!(
-        !retry
-            .iter()
-            .any(|o| matches!(o, CommitEntryOutcome::Committed { .. })),
-        "mixed across-restart retry must NOT return a falsely-complete cached vec (got {retry:?}); the short reconstruction must re-execute (both inputs already finalized -> all Rejected), not replay a stale Committed"
+        retry == live,
+        "AfterApplyBeforeResponse: the mixed retry across restart must replay the BYTE-IDENTICAL original vec (incl Rejected(StaleLease)); got {retry:?} vs {live:?}"
+    );
+    let explain_after = b
+        .explain_commit(&shard(), rid_mixed.clone())
+        .await
+        .map_err(|e| format!("mixed explain_commit after restart: {e:?}"))?
+        .ok_or_else(|| "mixed explain_commit returned None after restart".to_string())?;
+    ensure!(
+        explain_after == explain_before,
+        "AfterApplyBeforeResponse: explain_commit after restart must return the identical full vec; got {explain_after:?} vs {explain_before:?}"
+    );
+    // A different body under the same request_id still conflicts after restart (fingerprint rebuilt from log).
+    ensure!(
+        matches!(
+            b.commit_transition(&shard(), mixed_body(FinalizeKind::Fail), ts(5), None)
+                .await,
+            Err(EngineError::RequestIdConflict)
+        ),
+        "AfterApplyBeforeResponse: a different mixed body under the same request_id must be RequestIdConflict after restart"
     );
     let m_after = b
         .metrics(&qkey())
         .await
         .map_err(|e| format!("mixed metrics after restart: {e:?}"))?;
     ensure!(
-        m_after.complete == 2 && m_after.leased == 0,
-        "mixed across-restart retry must keep the committed input finalized EXACTLY ONCE (0 duplicate); got complete={} leased={}",
+        m_after.complete == 1 && m_after.leased == 1,
+        "AfterApplyBeforeResponse: the committed input must stay finalized EXACTLY ONCE (0 duplicate); got complete={} leased={}",
         m_after.complete,
         m_after.leased
     );
+    drop(b);
     asserts.push(
-        "commit_transition mixed committed+rejected across-restart is SAFE (0 duplicate): the committed input stays finalized exactly once and a same-body retry does NOT return a falsely-complete cached vec — the short reconstruction re-executes rather than replaying a stale outcome".into(),
+        "commit_transition MIXED committed+rejected AfterApplyBeforeResponse across-restart replay PROVEN (bead pqueue-db60657d): a [valid→Committed, stale→Rejected(StaleLease)] commit, fully committed then killed + reopened, replays the BYTE-IDENTICAL per-entry vec (Rejected carrying the same structured StaleLease) because recovery rebuilds commit_idempotency from the durable CommitTransition marker; explain_commit returns the identical full vec, a different body → RequestIdConflict, and the committed input stays finalized exactly once (0 duplicate)".into(),
+    );
+
+    // ==== Cut point AfterAppendBeforeApply (mixed): the mixed commit's durable envelopes (the committed
+    // entry's Finalize + the CommitTransition marker) are appended durably but NOT applied in-process, then
+    // drop+reopen. Recovery replays the durable tail (finalizing the valid input) AND rebuilds the full vec
+    // from the durable marker. Built via `build_request_id_commit_envelopes` (the mixed analog of the
+    // single-entry mid-pipeline builder) so the durable footprint matches the real commit exactly. ====
+    let rid_mixed_mid = RequestId::new("ac-txn-3-commit-transition-mixed-mid").unwrap();
+    let (a, valid, stale) = seed_mixed_commit(&make, "txn3-ct-mixed-mid").await?;
+    let mid_entries = mixed_entries(&valid, &stale, FinalizeKind::Complete);
+    let (envs, _fp) = a
+        .build_request_id_commit_envelopes(
+            &shard(),
+            rid_mixed_mid.clone(),
+            mid_entries,
+            ts(3),
+            None,
+        )
+        .map_err(|e| format!("build_request_id_commit_envelopes: {e:?}"))?;
+    ensure!(
+        envs.len() == 2
+            && matches!(
+                envs[1].request_outcome,
+                Some(pqueue_engine::RequestOutcome::CommitTransition { .. })
+            ),
+        "the mixed durable footprint must be [Finalize(valid), CommitTransition marker]; got {envs:?}"
+    );
+    let before = durable_command_count(&a).await?;
+    // Append ALL the mixed commit's envelopes durably, then SKIP apply (the append→apply kill window).
+    let epoch = a
+        .current_epoch(&shard())
+        .await
+        .map_err(|e| format!("current_epoch: {e:?}"))?;
+    let envs_for_write = envs.clone();
+    let pos = a
+        .write(move |lw, _pw| {
+            let pos = lw.append(&shard(), &envs_for_write, epoch)?;
+            // AfterAppendBeforeApply: durable append committed; skip apply to model the mid-pipeline kill.
+            Ok(pos)
+        })
+        .await
+        .map_err(|e| format!("mixed AfterAppendBeforeApply append (skip apply): {e:?}"))?;
+    ensure!(!pos.is_empty(), "the mixed commit envelopes are durable");
+    let after = durable_command_count(&a).await?;
+    ensure!(
+        after == before + envs.len(),
+        "the mixed mid-pipeline append must add exactly {} durable commands (before={before} after={after})",
+        envs.len()
+    );
+    // The apply was skipped, so the valid input is NOT yet finalized in-process (both items still leased).
+    ensure!(
+        a.metrics(&qkey()).await.unwrap().leased == 2,
+        "apply was skipped, so the in-process projection has finalized neither input"
+    );
+    drop(a);
+    // Reopen: recovery replays the durable-but-unapplied tail (finalizing the valid input) AND rebuilds the
+    // full [Committed, Rejected(StaleLease)] vec from the durable marker.
+    let b = make("txn3-ct-mixed-mid");
+    let retry = b
+        .commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: Some(rid_mixed_mid.clone()),
+                entries: mixed_entries(&valid, &stale, FinalizeKind::Complete),
+            },
+            ts(4),
+            None,
+        )
+        .await
+        .map_err(|e| format!("mixed mid retry after reopen: {e:?}"))?;
+    ensure!(
+        is_mixed_stale(&retry),
+        "AfterAppendBeforeApply: the mixed retry across restart must replay [Committed, Rejected(StaleLease)]; got {retry:?}"
+    );
+    let explain_mid = b
+        .explain_commit(&shard(), rid_mixed_mid.clone())
+        .await
+        .map_err(|e| format!("mixed mid explain_commit after reopen: {e:?}"))?
+        .ok_or_else(|| "mixed mid explain_commit returned None after reopen".to_string())?;
+    ensure!(
+        is_mixed_recovery(&explain_mid),
+        "AfterAppendBeforeApply: explain_commit after reopen must return [Committed, Rejected(StaleLease)]; got {explain_mid:?}"
+    );
+    let m_mid = b
+        .metrics(&qkey())
+        .await
+        .map_err(|e| format!("mixed mid metrics after reopen: {e:?}"))?;
+    ensure!(
+        m_mid.complete == 1 && m_mid.leased == 1,
+        "AfterAppendBeforeApply: the committed input must be finalized EXACTLY ONCE across the mid-pipeline kill (0 duplicate); got complete={} leased={}",
+        m_mid.complete,
+        m_mid.leased
     );
     asserts.push(
-        "GAP (mixed committed+rejected commit_transition across-restart replay): all-committed commits replay their exact per-entry outcome across restart; a commit that mixed committed + rejected entries does NOT cache-replay across restart (rejected entries append nothing durable, so the outcome vec cannot be faithfully reconstructed) — such a retry safely re-executes (committed input stays finalized exactly once, 0 duplicate transitions) rather than replaying the original per-entry vec. Faithful mixed replay needs durable rejection records — tracked in pqueue-db60657d.".into(),
+        "commit_transition MIXED committed+rejected AfterAppendBeforeApply across-restart replay PROVEN (bead pqueue-db60657d): the mixed commit's durable envelopes (the committed entry's Finalize + the CommitTransition marker) appended durably-but-unapplied, then reopened, replay the BYTE-IDENTICAL [Committed, Rejected(StaleLease)] per-entry vec (recovery replays the durable tail AND rebuilds commit_idempotency from the durable marker); explain_commit returns the identical full vec and the committed input is finalized exactly once (0 duplicate)".into(),
     );
     Ok(asserts)
 }

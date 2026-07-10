@@ -51,15 +51,15 @@ pub use command::{
     AdvanceInstanceFenceCommand, ChangeRecord, ChangeRecordKind, ChangeRecordPosition,
     ChangeRecordState, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
-    CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, PurgeItemsCommand, PushCommand,
-    PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
+    CommitOutcomeEntry, CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, PurgeItemsCommand,
+    PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
     ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand, SideRecord,
     UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items,
     command_envelope_change_records, validate_gate_command, validate_gate_push,
     validate_request_replay_metadata,
 };
-pub use error::{EngineError, EngineResult};
+pub use error::{CommitRejection, EngineError, EngineResult};
 pub use finalize_validation::{
     FinalizeTargeting, validate_finalize_targeting, validate_purge_force, validate_purge_targeting,
     validate_rearm,
