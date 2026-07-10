@@ -1921,6 +1921,89 @@ async fn async_push(
         .await
 }
 
+/// Push one single-item body under `rid` through the REAL composed request-id write path. Same `rid` + same
+/// `key` is a same-body idempotent retry (must replay the committed ids); a fresh `rid` is genuinely new work.
+async fn async_push_rid(
+    backend: &HybridBackend,
+    rid: &str,
+    key: &str,
+) -> Result<Vec<pqueue_core::ItemId>, EngineError> {
+    backend
+        .push_with_request_id(
+            &pqueue_conformance::shard(),
+            RequestId::new(rid.to_string()).unwrap(),
+            vec![pqueue_conformance::fault::spec(key, 5)],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+}
+
+/// **AC-TXN-5A idempotent replay under debt** on the REAL server-wired hybrid-async composition (TD-004:361,
+/// replay-safety). Under Hard async-apply debt, a same-body retry of an ALREADY-COMMITTED `request_id` MUST
+/// REPLAY its committed ids (an idempotent replay of durable work adds ZERO new debt), NOT be rejected —
+/// while a brand-new `request_id` (genuinely new work) is still rejected with typed backpressure. This proves
+/// the admission gate sits AFTER the idempotency replay resolution, not before it.
+async fn ac_txn_5a_idempotent_replay_under_debt_scenario() -> AcOutcome {
+    let base = base_dir("hybrid-async-idempotent-replay-under-debt");
+    let thresholds =
+        HybridAsyncThresholds::new(5, 1_000_000, 1_000_000, 3_600_000, 3).expect("valid thresholds");
+    let backend = objectlog_hybrid_async_composed(&base.join("run"), thresholds, 1024);
+    backend
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+    let level = |b: &HybridBackend| b.with_projection(|p| p.async_backpressure_level());
+
+    // Commit a request_id'd push while debt is clear: its result is now durable + idempotency-recorded, and
+    // it deferred 1 command toward the backlog.
+    let committed = async_push_rid(&backend, "rid-committed", "rc")
+        .await
+        .map_err(|e| format!("commit rid push: {e:?}"))?;
+    ensure!(committed.len() == 1, "the committed rid push must mint 1 id");
+
+    // Drive the backlog to the hard budget (5): 1 already deferred + 4 plain new-work pushes → Hard.
+    for i in 0..4u64 {
+        async_push(&backend, &format!("filler-{i}"))
+            .await
+            .map_err(|e| format!("filler push {i}: {e:?}"))?;
+    }
+    ensure!(
+        level(&backend) == Some(BackpressureLevel::Hard),
+        "5 deferred commands must trip Hard backpressure; got {:?}",
+        level(&backend)
+    );
+    let durable_before = durable_command_count(&backend).await?;
+
+    // (1) Same-body retry of the ALREADY-COMMITTED request_id under Hard debt: MUST replay the original ids
+    // (not Unavailable), and add NO new durable command.
+    let replay = async_push_rid(&backend, "rid-committed", "rc").await;
+    ensure!(
+        replay.as_ref().map(Vec::as_slice) == Ok(committed.as_slice()),
+        "an idempotent same-body retry of a committed request_id must REPLAY the original ids under Hard debt, not be rejected; got {replay:?}"
+    );
+    ensure!(
+        durable_command_count(&backend).await? == durable_before,
+        "an idempotent replay must add NO durable command"
+    );
+
+    // (2) A brand-new request_id push (genuinely new work) is still rejected CLOSED with typed backpressure,
+    // and adds no durable command.
+    let fresh = async_push_rid(&backend, "rid-fresh", "rf").await;
+    ensure!(
+        matches!(fresh, Err(EngineError::Unavailable)),
+        "a brand-new request_id push must be rejected with typed backpressure under Hard debt; got {fresh:?}"
+    );
+    ensure!(
+        durable_command_count(&backend).await? == durable_before,
+        "the rejected new-work push must add NO durable command"
+    );
+
+    Ok(vec![
+        "idempotent replay under debt (real server-wired composition): under Hard backpressure a same-body retry of an already-committed request_id REPLAYS its committed ids (0 new durable commands), while a brand-new request_id push is rejected with typed backpressure (Unavailable) — the admission gate sits after idempotency replay resolution".into(),
+    ])
+}
+
 /// **AC-TXN-5A hard-debt admission** on the REAL server-wired hybrid-async composition (TD-004:361). Drives
 /// GENUINE async-apply debt — the deferred-checkpoint backlog the monitor observes on every live apply, NOT
 /// a test poke — over the hard budget, then proves a NEW mutating push fails CLOSED with the typed retryable
@@ -2010,7 +2093,12 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
     let high_water = |b: &HybridBackend| {
         b.with_projection(|p| ProjectionStore::recovery_high_water(p, &shard))
     };
-    let retention_ok = |b: &HybridBackend| b.with_projection(|p| p.async_retention_may_advance());
+    // The wired retention gate the REAL reap path (`reap_terminal_items_locked` →
+    // `ProjectionStore::retention_may_advance`) consults before advancing terminal-item retention / segment
+    // expiry. See the honest GAP below: the gate is wired into production, but no retention-ADVANCEMENT path
+    // is implemented for `objectlog/hybrid-async` yet (the hybrid store does not override `reap_terminal_items`
+    // and object-log segment expiry is unimplemented), so the gate's downstream effect is not exercisable.
+    let retention_gate_open = |b: &HybridBackend| b.with_projection(|p| p.async_retention_may_advance());
 
     // Establish a NON-None durable SQLite high-water: 2 pushes (below budget), then drain so the checkpoint
     // advances the durable high-water. This is the high-water that MUST later be withheld under debt.
@@ -2030,8 +2118,8 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
         "a drained checkpoint must advertise a real durable high-water before debt; got {hw_seed:?}"
     );
     ensure!(
-        level(&backend) != Some(BackpressureLevel::Hard) && retention_ok(&backend),
-        "the store must be below backpressure with retention allowed after the seed drain"
+        level(&backend) != Some(BackpressureLevel::Hard) && retention_gate_open(&backend),
+        "the store must be below backpressure with the retention gate open after the seed drain"
     );
 
     // Drive real debt over budget: 6 more pushes with NO flush. The deferred backlog hits 6 == hard budget.
@@ -2046,7 +2134,8 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
         level(&backend)
     );
     // While Hard: the lagging high-water is WITHHELD (None) even though the underlying durable high-water is
-    // still `hw_seed`, and retention advancement is refused.
+    // still `hw_seed` (REAL, observable on `recovery_high_water`), and the retention gate the real reap path
+    // consults is CLOSED.
     ensure!(
         high_water(&backend)
             .map_err(|e| format!("withheld high-water: {e:?}"))?
@@ -2054,16 +2143,16 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
         "the lagging high-water must be withheld (None) while async-apply debt is Hard"
     );
     ensure!(
-        !retention_ok(&backend),
-        "retention advancement must be refused while async-apply debt is Hard"
+        !retention_gate_open(&backend),
+        "the retention gate consulted by the real reap path must be CLOSED while async-apply debt is Hard"
     );
     ensure!(
         backend.with_projection(|p| ProjectionStore::recovery_backpressured(p, &shard)),
         "recovery must report hard backpressure so replay does not trust the lagging high-water"
     );
 
-    // Drain one command at a time. Hysteresis holds Hard (high-water withheld, retention refused) until the
-    // backlog clears below the release band; then BOTH advance in the same step and the high-water is now
+    // Drain one command at a time. Hysteresis holds Hard (high-water withheld, retention gate closed) until
+    // the backlog clears below the release band; then BOTH release in the same step and the high-water is now
     // strictly ahead of the pre-debt seed (it advanced through the drained batch).
     loop {
         if level(&backend) == Some(BackpressureLevel::Hard) {
@@ -2075,8 +2164,8 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
                 deferred(&backend)
             );
             ensure!(
-                !retention_ok(&backend),
-                "retention must stay refused while still Hard (deferred={})",
+                !retention_gate_open(&backend),
+                "the retention gate must stay closed while still Hard (deferred={})",
                 deferred(&backend)
             );
             ensure!(
@@ -2093,8 +2182,8 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
                 "the high-water must advance the instant debt clears below the release band"
             );
             ensure!(
-                retention_ok(&backend),
-                "retention advancement must resume the instant debt clears"
+                retention_gate_open(&backend),
+                "the retention gate must reopen the instant debt clears below the release band"
             );
             let (seed, cleared) = (hw_seed.as_ref().unwrap(), hw_cleared.as_ref().unwrap());
             ensure!(
@@ -2108,7 +2197,9 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
     }
 
     Ok(vec![
-        "high-water + retention withholding (real server-wired composition): a real deferred backlog over budget withholds the lagging durable high-water (None) and refuses retention advancement while Hard; both advance exactly once the drain clears debt below the release band, with the high-water strictly ahead of the withheld value".into(),
+        "high-water withholding (real server-wired composition): a real deferred backlog over budget withholds the lagging durable high-water (None, observed on recovery_high_water) and recovery reports hard backpressure while Hard; the high-water advances strictly ahead of the withheld seed exactly once the drain clears debt below the release band".into(),
+        "retention gate wired (real path, effect not yet exercisable): the retention gate the real reap path (reap_terminal_items_locked → retention_may_advance) consults is CLOSED under Hard debt and reopens once debt clears".into(),
+        "GAP (retention advancement not exercised end-to-end): objectlog/hybrid-async implements no retention-ADVANCEMENT path to gate — the hybrid store does not override reap_terminal_items (trait-default no-op) and object-log segment expiry is unimplemented — so while the TD-004 retention gate is wired into the real reap path, its downstream withholding effect cannot be observed/asserted end-to-end on this backend; tracked follow-up (implement + prove hybrid-async retention/segment-expiry under debt)".into(),
     ])
 }
 
@@ -2278,6 +2369,7 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
     // than a standalone-monitor poke. See `ac_txn_5a_hard_debt_fails_mutating_admission` and
     // `ac_txn_5a_debt_withholds_high_water_and_retention` (also run standalone). ---
     asserts.extend(ac_txn_5a_hard_debt_admission_scenario().await?);
+    asserts.extend(ac_txn_5a_idempotent_replay_under_debt_scenario().await?);
     asserts.extend(ac_txn_5a_high_water_withhold_scenario().await?);
 
     Ok(asserts)
@@ -2315,6 +2407,18 @@ async fn ac_txn_5a_debt_withholds_high_water_and_retention() {
     assert!(
         outcome.is_ok(),
         "AC-TXN-5A high-water/retention withholding failed: {:?}",
+        outcome.err()
+    );
+}
+
+/// AC-TXN-5A replay-safety (bead pqueue-c21635b9, codex review): under Hard debt an idempotent same-body
+/// retry of an already-committed request_id REPLAYS (not rejected), while a brand-new request_id is rejected.
+#[tokio::test]
+async fn ac_txn_5a_idempotent_replay_admitted_under_debt() {
+    let outcome = ac_txn_5a_idempotent_replay_under_debt_scenario().await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-5A idempotent replay under debt failed: {:?}",
         outcome.err()
     );
 }

@@ -514,15 +514,33 @@ pub trait ProjectionStore: Send {
         Ok(false)
     }
 
-    /// Admission gate consulted by the composition BEFORE a new mutating command is committed to the durable
-    /// log (TD-004 "Hard debt threshold"). A projection under HARD async-apply backpressure — its deferred
-    /// durable-checkpoint backlog over budget — fails new mutating admission CLOSED here with a typed
-    /// retryable error ([`EngineError::Unavailable`]) or a `Storage` poison error, so no further command is
-    /// enqueued/sealed/acked while the backlog is at risk of an SLO violation. Called on the pre-commit push
-    /// path with the unit-of-work lock held, so a rejection leaves NO durable effect. Default: always admit
-    /// — only the `objectlog/hybrid-async` projection (with an armed monitor) gates.
+    /// Admission gate consulted by the composition BEFORE a new-work mutating command is committed to the
+    /// durable log (TD-004 "Hard debt threshold"). A projection under HARD async-apply backpressure — its
+    /// deferred durable-checkpoint backlog over budget — fails new mutating admission CLOSED here with a
+    /// typed retryable error ([`EngineError::Unavailable`]) or a `Storage` poison error, so no further
+    /// new-work command is enqueued/sealed/acked while the backlog is at risk of an SLO violation. Called on
+    /// the pre-commit path with the unit-of-work lock held, so a rejection leaves NO durable effect.
+    ///
+    /// Gated ops (the operations that ADMIT NEW WORK, growing the async-apply backlog): `push` (and
+    /// `push_with_request_id` on its non-replay PROCEED path — an idempotent replay of already-committed work
+    /// adds zero debt and is NOT gated) and a non-empty `claim`. Lifecycle/drain ops on in-flight work
+    /// (`finalize`, `renew`, `reassign`, `reclaim_expired`, `update`) are intentionally NOT gated: they
+    /// complete or recover work already admitted, gating them would not reduce async-apply debt (only ordered
+    /// `flush_deferred` does) and could stall lease lifecycle/recovery, whereas TD-004's clear threshold is
+    /// reached by DRAINING, not by blocking completion. Default: always admit — only the
+    /// `objectlog/hybrid-async` projection (with an armed monitor) gates.
     fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
         Ok(())
+    }
+
+    /// Whether segment expiry / terminal-item retention advancement is currently allowed for `shard`
+    /// (TD-004 "Retention backpressure"): retention MUST stop advancing while async-apply debt is over
+    /// budget, lineage validation is incomplete, or the async SQLite worker is poisoned — a lagging local
+    /// `sqlite_high_water` alone never authorizes deletion. The composition consults this on the real
+    /// terminal-reap path and withholds reaping when it returns `false`. Default: `true` — only the
+    /// `objectlog/hybrid-async` projection (with an armed monitor) withholds retention.
+    fn retention_may_advance(&self, _shard: &QueueKey) -> bool {
+        true
     }
 
     /// Drain any deferred durable projection work. Default is a no-op for synchronous projections.
@@ -1104,6 +1122,14 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         terminal_retention_ms: u64,
         emit_change_records: bool,
     ) -> EngineResult<usize> {
+        // TD-004 "Retention backpressure": retention advancement (terminal-item reaping here; the segment
+        // expiry it enables) MUST stop while async-apply debt is over budget, lineage is unproven, or the
+        // async SQLite worker is poisoned. Withhold reaping (advance nothing) when the projection reports
+        // retention may not advance. No-op unless the projection is a hard-backpressured/poisoned
+        // `objectlog/hybrid-async` store.
+        if !inner.projection.retention_may_advance(shard) {
+            return Ok(0);
+        }
         let emission_cursor = if emit_change_records {
             inner.log.emission_cursor(shard)?
         } else {
@@ -2262,10 +2288,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(now, def.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
-            // TD-004 hard-debt admission gate (same as `push`): reject a new mutating admission CLOSED under
-            // Hard async-apply backpressure BEFORE force-sealing / committing, so no durable effect and no
-            // idempotency replay record is written for a rejected push.
-            g.projection.admit_mutation(shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -2279,6 +2301,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                 IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
             }
+            // TD-004 hard-debt admission gate — placed AFTER the idempotency Replay/Conflict resolution so it
+            // gates only the PROCEED path (genuinely new work that adds async-apply debt). An idempotent
+            // same-body retry of an already-committed `request_id` replays its committed ids above and adds
+            // ZERO new debt, so it MUST NOT be rejected under Hard backpressure. No-op unless the projection
+            // is a hard-backpressured `objectlog/hybrid-async` store.
+            g.projection.admit_mutation(shard)?;
             let epoch = expected_epoch.unwrap_or(0);
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
             let (push_items, ids) =
@@ -2501,6 +2529,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
             if candidates.is_empty() {
                 return Ok(ClaimStart::Ready(Claimed::default()));
             }
+            // TD-004 hard-debt admission gate: a claim that will lease candidates commits a new `Claim`
+            // command into the async-apply backlog — new work that adds debt — so it fails CLOSED under Hard
+            // backpressure, exactly like a push. Gated only here (candidates non-empty), so an empty claim
+            // that commits nothing is never rejected. No-op unless the projection is a hard-backpressured
+            // `objectlog/hybrid-async` store.
+            g.projection.admit_mutation(&req.shard)?;
             let env = Self::make_envelope(
                 &mut g,
                 self.node_id,

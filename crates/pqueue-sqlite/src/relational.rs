@@ -9493,6 +9493,15 @@ impl ProjectionStore for HybridProjectionStore {
         }
     }
 
+    /// `objectlog/hybrid-async` (TD-004 "Retention backpressure"): withhold terminal-item retention /
+    /// segment-expiry advancement while async-apply debt is over budget or the worker is poisoned. `true`
+    /// when no monitor is armed (the non-async profiles have no async retention gate).
+    fn retention_may_advance(&self, _shard: &QueueKey) -> bool {
+        self.async_monitor
+            .as_ref()
+            .map_or(true, HybridAsyncMonitor::retention_may_advance)
+    }
+
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         self.check_healthy()?;
         Ok(self.sqlite.lock().queues.values().cloned().collect())
