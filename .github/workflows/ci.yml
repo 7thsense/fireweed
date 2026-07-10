@@ -41,7 +41,7 @@ jobs:
           df -h /
 
       - name: Checkout pqueue
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: pqueue
 
@@ -107,15 +107,15 @@ jobs:
             projection_backend: postgres
     steps:
       - name: Checkout pqueue
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.16.3
 
       - name: Install kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@v5
         with:
           version: v1.31.0
 
