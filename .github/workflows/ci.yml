@@ -30,25 +30,9 @@ jobs:
         with:
           path: pqueue
 
-      - name: Checkout fjord dependency
-        uses: actions/checkout@v4
-        with:
-          repository: telepathdata/fjord
-          path: fjord
-          ssh-key: ${{ secrets.FJORD_DEPLOY_KEY }}
-
-      - name: Checkout object-log dependency
-        uses: actions/checkout@v4
-        with:
-          repository: telepathdata/object-log
-          path: object-log
-          ssh-key: ${{ secrets.OBJECT_LOG_DEPLOY_KEY }}
-
-      - name: Checkout heimq dependency
-        uses: actions/checkout@v4
-        with:
-          repository: easel/heimq
-          path: heimq
+      # No dependency pre-checkouts needed: cargo resolves every git dependency itself, and all of them —
+      # fjord (github.com/7thsense/fjord), heimq, and axon — are public, so they clone anonymously over
+      # HTTPS with no deploy keys or credentials. (object-log is no longer a cargo dependency at all.)
 
       - name: Install Rust 1.92.0
         run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
