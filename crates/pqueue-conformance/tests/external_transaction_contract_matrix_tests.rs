@@ -697,7 +697,11 @@ async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcO
             )
             .await
             .map_err(|e| format!("seed push_with_request_id: {e:?}"))?;
-        ensure!(acked.len() == 3, "seed accepted 3 items, got {}", acked.len());
+        ensure!(
+            acked.len() == 3,
+            "seed accepted 3 items, got {}",
+            acked.len()
+        );
         acked
     };
     let a1 = acked[0];
@@ -782,7 +786,8 @@ async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcO
     // fresh epoch on the durable manifest (advance_epoch_object). A stale writer at the superseded epoch is
     // then rejected EpochFenced from the durable manifest tail, while a commit at the current epoch succeeds.
     let new_epoch = {
-        let mut owner2 = ObjectLog::open(root.clone()).map_err(|e| format!("open new owner: {e:?}"))?;
+        let mut owner2 =
+            ObjectLog::open(root.clone()).map_err(|e| format!("open new owner: {e:?}"))?;
         owner2
             .ensure_shard(&shard)
             .map_err(|e| format!("ensure_shard (new owner): {e:?}"))?;
@@ -807,7 +812,11 @@ async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcO
         let stale = ac_txn_4_push_env("900000005", "txn4c-stale");
         let stale_res = d
             .write(move |lw, pw| {
-                let pos = lw.append(&pqueue_conformance::shard(), std::slice::from_ref(&stale), 0)?;
+                let pos = lw.append(
+                    &pqueue_conformance::shard(),
+                    std::slice::from_ref(&stale),
+                    0,
+                )?;
                 pw.apply(&pos, std::slice::from_ref(&stale))?;
                 Ok(pos)
             })
@@ -818,8 +827,11 @@ async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcO
         );
         let cur = ac_txn_4_push_env("900000006", "txn4c-cur");
         d.write(move |lw, pw| {
-            let pos =
-                lw.append(&pqueue_conformance::shard(), std::slice::from_ref(&cur), cur_epoch)?;
+            let pos = lw.append(
+                &pqueue_conformance::shard(),
+                std::slice::from_ref(&cur),
+                cur_epoch,
+            )?;
             pw.apply(&pos, std::slice::from_ref(&cur))?;
             Ok(pos)
         })
@@ -1657,8 +1669,10 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutco
         let root = base.join("run");
         let hook = ArmableHybridHook::new(HybridFaultCutPoint::BeforeSqliteApply);
         {
-            let backend =
-                objectlog_hybrid_strict_composed(&root, Some(hook.clone() as Arc<dyn HybridFaultHook>));
+            let backend = objectlog_hybrid_strict_composed(
+                &root,
+                Some(hook.clone() as Arc<dyn HybridFaultHook>),
+            );
             backend
                 .create_queue(pqueue_conformance::qdef())
                 .await
@@ -1727,8 +1741,10 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutco
         let root = base.join("run");
         let hook = ArmableHybridHook::new(HybridFaultCutPoint::AfterSqliteCommitBeforeMemoryApply);
         {
-            let backend =
-                objectlog_hybrid_strict_composed(&root, Some(hook.clone() as Arc<dyn HybridFaultHook>));
+            let backend = objectlog_hybrid_strict_composed(
+                &root,
+                Some(hook.clone() as Arc<dyn HybridFaultHook>),
+            );
             backend
                 .create_queue(pqueue_conformance::qdef())
                 .await
@@ -1807,16 +1823,25 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutco
         // command commits durably to SQLite AND the object log, but the memory apply faults, so the store
         // poisons and the caller sees Err — a committed-but-unreturned unknown outcome.
         {
-            let hook = ArmableHybridHook::new(HybridFaultCutPoint::AfterSqliteCommitBeforeMemoryApply);
+            let hook =
+                ArmableHybridHook::new(HybridFaultCutPoint::AfterSqliteCommitBeforeMemoryApply);
             hook.arm();
-            let backend =
-                objectlog_hybrid_strict_composed(&root, Some(hook.clone() as Arc<dyn HybridFaultHook>));
+            let backend = objectlog_hybrid_strict_composed(
+                &root,
+                Some(hook.clone() as Arc<dyn HybridFaultHook>),
+            );
             backend
                 .create_queue(pqueue_conformance::qdef())
                 .await
                 .map_err(|e| format!("create_queue: {e:?}"))?;
             let unknown = backend
-                .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(1), None)
+                .push_with_request_id(
+                    &shard,
+                    rid.clone(),
+                    body.clone(),
+                    pqueue_conformance::ts(1),
+                    None,
+                )
                 .await;
             ensure!(
                 unknown.is_err(),
@@ -1833,7 +1858,7 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutco
                 .await
                 .map_err(|e| format!("create_queue after restart: {e:?}"))?;
             let live = backend
-                .live_items(&shard, &[rid_key.clone()])
+                .live_items(&shard, std::slice::from_ref(&rid_key))
                 .await
                 .map_err(|e| format!("live_items after restart: {e:?}"))?;
             ensure!(
@@ -1854,7 +1879,13 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutco
             // id) with 0 duplicate state transitions (projected pending stays 1 — asserted on state, not log
             // rows).
             let replay = backend
-                .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(2), None)
+                .push_with_request_id(
+                    &shard,
+                    rid.clone(),
+                    body.clone(),
+                    pqueue_conformance::ts(2),
+                    None,
+                )
                 .await
                 .map_err(|e| format!("unknown-outcome same-body retry: {e:?}"))?;
             ensure!(
@@ -1970,8 +2001,8 @@ async fn async_push_rid(
 /// the admission gate sits AFTER the idempotency replay resolution, not before it.
 async fn ac_txn_5a_idempotent_replay_under_debt_scenario() -> AcOutcome {
     let base = base_dir("hybrid-async-idempotent-replay-under-debt");
-    let thresholds =
-        HybridAsyncThresholds::new(5, 1_000_000, 1_000_000, 3_600_000, 3).expect("valid thresholds");
+    let thresholds = HybridAsyncThresholds::new(5, 1_000_000, 1_000_000, 3_600_000, 3)
+        .expect("valid thresholds");
     let backend = objectlog_hybrid_async_composed(&base.join("run"), thresholds, 1024);
     backend
         .create_queue(pqueue_conformance::qdef())
@@ -1984,7 +2015,10 @@ async fn ac_txn_5a_idempotent_replay_under_debt_scenario() -> AcOutcome {
     let committed = async_push_rid(&backend, "rid-committed", "rc")
         .await
         .map_err(|e| format!("commit rid push: {e:?}"))?;
-    ensure!(committed.len() == 1, "the committed rid push must mint 1 id");
+    ensure!(
+        committed.len() == 1,
+        "the committed rid push must mint 1 id"
+    );
 
     // Drive the backlog to the hard budget (5): 1 already deferred + 4 plain new-work pushes → Hard.
     for i in 0..4u64 {
@@ -2037,8 +2071,8 @@ async fn ac_txn_5a_hard_debt_admission_scenario() -> AcOutcome {
     let base = base_dir("hybrid-async-hard-debt-admission");
     // Hard budget = 5 deferred commands; every other metric is set out of reach so the apply-lag backlog is
     // the sole trip. flush_chunk large (drain-in-one) — this scenario never drains.
-    let thresholds =
-        HybridAsyncThresholds::new(5, 1_000_000, 1_000_000, 3_600_000, 3).expect("valid thresholds");
+    let thresholds = HybridAsyncThresholds::new(5, 1_000_000, 1_000_000, 3_600_000, 3)
+        .expect("valid thresholds");
     let backend = objectlog_hybrid_async_composed(&base.join("run"), thresholds, 1024);
     backend
         .create_queue(pqueue_conformance::qdef())
@@ -2104,8 +2138,8 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
     let base = base_dir("hybrid-async-high-water-withhold");
     // Hard budget = 6; release band = strictly below 50% (< 3). flush_chunk = 1 so the drain steps the
     // backlog down one command at a time and the Hard→Clear release lands on an exact backlog value.
-    let thresholds =
-        HybridAsyncThresholds::new(6, 1_000_000, 1_000_000, 3_600_000, 3).expect("valid thresholds");
+    let thresholds = HybridAsyncThresholds::new(6, 1_000_000, 1_000_000, 3_600_000, 3)
+        .expect("valid thresholds");
     let backend = objectlog_hybrid_async_composed(&base.join("run"), thresholds, 1);
     backend
         .create_queue(pqueue_conformance::qdef())
@@ -2114,15 +2148,15 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
 
     let deferred = |b: &HybridBackend| b.with_projection(|p| p.deferred_command_count());
     let level = |b: &HybridBackend| b.with_projection(|p| p.async_backpressure_level());
-    let high_water = |b: &HybridBackend| {
-        b.with_projection(|p| ProjectionStore::recovery_high_water(p, &shard))
-    };
+    let high_water =
+        |b: &HybridBackend| b.with_projection(|p| ProjectionStore::recovery_high_water(p, &shard));
     // The wired retention gate the REAL reap path (`reap_terminal_items_locked` →
     // `ProjectionStore::retention_may_advance`) consults before advancing terminal-item retention / segment
     // expiry. See the honest GAP below: the gate is wired into production, but no retention-ADVANCEMENT path
     // is implemented for `objectlog/hybrid-async` yet (the hybrid store does not override `reap_terminal_items`
     // and object-log segment expiry is unimplemented), so the gate's downstream effect is not exercisable.
-    let retention_gate_open = |b: &HybridBackend| b.with_projection(|p| p.async_retention_may_advance());
+    let retention_gate_open =
+        |b: &HybridBackend| b.with_projection(|p| p.async_retention_may_advance());
 
     // Establish a NON-None durable SQLite high-water: 2 pushes (below budget), then drain so the checkpoint
     // advances the durable high-water. This is the high-water that MUST later be withheld under debt.
@@ -2200,7 +2234,8 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
                 .flush_deferred_projection()
                 .map_err(|e| format!("drain flush: {e:?}"))?;
         } else {
-            let hw_cleared = high_water(&backend).map_err(|e| format!("cleared high-water: {e:?}"))?;
+            let hw_cleared =
+                high_water(&backend).map_err(|e| format!("cleared high-water: {e:?}"))?;
             ensure!(
                 hw_cleared.is_some(),
                 "the high-water must advance the instant debt clears below the release band"
@@ -2533,7 +2568,12 @@ async fn ac_txn_7_numeric_latency_sweep() -> AcOutcome {
         // flusher drove the seal (see the separate no-flusher liveness proof in the caller). ---
         let seals_before = backend.with_log(|l| l.counters()).segments_sealed;
         let cobuf_ids = backend
-            .push(&shard, vec![pqueue_conformance::fault::spec("cobuf", 5)], pqueue_conformance::ts(1), None)
+            .push(
+                &shard,
+                vec![pqueue_conformance::fault::spec("cobuf", 5)],
+                pqueue_conformance::ts(1),
+                None,
+            )
             .await
             .map_err(|e| format!("@ {bound_ms}ms co-buffering push: {e:?}"))?;
         ensure!(
@@ -2566,7 +2606,13 @@ async fn ac_txn_7_numeric_latency_sweep() -> AcOutcome {
         let rid = RequestId::new("numeric-sweep-rid").unwrap();
         let body = vec![pqueue_conformance::fault::spec("ridbody", 7)];
         let orig = backend
-            .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(1), None)
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                body.clone(),
+                pqueue_conformance::ts(1),
+                None,
+            )
             .await
             .map_err(|e| format!("@ {bound_ms}ms request_id push: {e:?}"))?;
         let replay = backend
@@ -2606,7 +2652,13 @@ async fn ac_txn_7_numeric_latency_sweep() -> AcOutcome {
         let rid2 = RequestId::new("numeric-sweep-lost").unwrap();
         let lost_body = vec![pqueue_conformance::fault::spec("lost", 3)];
         let committed = backend
-            .push_with_request_id(&shard, rid2.clone(), lost_body.clone(), pqueue_conformance::ts(1), None)
+            .push_with_request_id(
+                &shard,
+                rid2.clone(),
+                lost_body.clone(),
+                pqueue_conformance::ts(1),
+                None,
+            )
             .await
             .map_err(|e| format!("@ {bound_ms}ms lost-response push: {e:?}"))?;
         // Simulate the kill: retire the flusher, then drop the backend so the object-log file handles close.
@@ -2688,7 +2740,12 @@ async fn ac_txn_7_numeric_latency_sweep() -> AcOutcome {
             .await
             .map_err(|e| format!("no-flusher create_queue: {e:?}"))?;
         let parked = backend
-            .push(&shard, vec![pqueue_conformance::fault::spec("noflush", 5)], pqueue_conformance::ts(1), None)
+            .push(
+                &shard,
+                vec![pqueue_conformance::fault::spec("noflush", 5)],
+                pqueue_conformance::ts(1),
+                None,
+            )
             .now_or_never();
         ensure!(
             parked.is_none(),
@@ -2724,13 +2781,14 @@ async fn ac_txn_7_numeric_latency_sweep() -> AcOutcome {
         E3_LATENCY_BOUNDS_MS.len()
     ));
     if let Some(base) = baseline {
-        asserts.extend(base.into_iter().map(|a| format!("  invariant held at every bound: {a}")));
+        asserts.extend(
+            base.into_iter()
+                .map(|a| format!("  invariant held at every bound: {a}")),
+        );
     }
-    asserts.extend(
-        metadata
-            .into_iter()
-            .map(|m| format!("  per-bound latency/cost metadata (MAY differ, does not affect invariants): {m}")),
-    );
+    asserts.extend(metadata.into_iter().map(|m| {
+        format!("  per-bound latency/cost metadata (MAY differ, does not affect invariants): {m}")
+    }));
 
     Ok(asserts)
 }

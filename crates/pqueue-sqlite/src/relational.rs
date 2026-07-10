@@ -4366,7 +4366,7 @@ impl HybridProjectionStore {
     pub fn async_retention_may_advance(&self) -> bool {
         self.async_monitor
             .as_ref()
-            .map_or(true, HybridAsyncMonitor::retention_may_advance)
+            .is_none_or(HybridAsyncMonitor::retention_may_advance)
     }
 
     /// Fold the store's CURRENT async-apply debt into the armed monitor (no-op when unarmed). The genuine
@@ -9499,7 +9499,7 @@ impl ProjectionStore for HybridProjectionStore {
     fn retention_may_advance(&self, _shard: &QueueKey) -> bool {
         self.async_monitor
             .as_ref()
-            .map_or(true, HybridAsyncMonitor::retention_may_advance)
+            .is_none_or(HybridAsyncMonitor::retention_may_advance)
     }
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {

@@ -1642,6 +1642,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
 /// backend shared by the `objectlog/hybrid` and `objectlog/hybrid-async` profiles: open the group-commit
 /// object log at `root` + the hybrid projection store at `path`, run the ack-after-seal group-commit write
 /// path, and recover-on-open (hydrate memory from the validated SQLite image + replay the object-log tail).
+// Composition-root builder: threads the object-log + hybrid-projection knobs (strict apply, async
+// backpressure monitor) into one backend. The arity reflects the wiring surface, not incidental complexity.
+#[allow(clippy::too_many_arguments)]
 fn open_objectlog_hybrid_backend(
     root: &std::path::Path,
     path: &std::path::Path,

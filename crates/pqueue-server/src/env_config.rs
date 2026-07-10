@@ -626,8 +626,7 @@ mod tests {
                 panic!("{log}/hybrid-strict must not be wired");
             };
             assert!(
-                err.0
-                    .contains("PQUEUE_PROJECTION_BACKEND=hybrid-strict"),
+                err.0.contains("PQUEUE_PROJECTION_BACKEND=hybrid-strict"),
                 "{}",
                 err.0
             );
