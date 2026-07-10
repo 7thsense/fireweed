@@ -9,6 +9,13 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # The full `cargo test --workspace` links a test binary per crate; with default full DWARF debuginfo
+    # that overflows the ~14 GB runner disk and the linker dies with SIGBUS. Keep line-tables-only debuginfo
+    # (enough for backtraces) and disable incremental to keep the target dir within the runner's disk budget.
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     services:
       postgres:
         image: postgres:16
@@ -25,6 +32,14 @@ jobs:
       run:
         working-directory: pqueue
     steps:
+      # Reclaim ~25 GB of preinstalled tooling (dotnet/android/ghc) the Rust build never uses, so the
+      # full-workspace test link has disk headroom (see the debuginfo note above).
+      - name: Free disk space
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          df -h /
+
       - name: Checkout pqueue
         uses: actions/checkout@v4
         with:
