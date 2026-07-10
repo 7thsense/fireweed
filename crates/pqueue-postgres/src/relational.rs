@@ -979,6 +979,50 @@ fn maintain_typed_indexes_on_insert(
     Ok(())
 }
 
+/// Pre-commit (ADR-010 §5.1; `commit` has no rollback) UNIQUE typed-index validation for a push batch:
+/// reject with [`EngineError::Conflict`] when inserting `items` would collide on a UNIQUE typed index —
+/// against existing durable rows AND against another item earlier in the same batch — mirroring the
+/// apply-time enforcement in [`maintain_typed_indexes_on_insert`]. The composed commit path stages every
+/// committed entry's pushes into ONE candidate batch and validates here BEFORE the durable append, so an
+/// in-commit duplicate unique key is caught at VALIDATION and the appended batch is always appliable (no
+/// relational recovery poison — pqueue-29bef1e4). Mutates nothing; non-unique indexes and disjoint keys pass.
+fn validate_typed_unique_push(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    typed_indexes: &[QueueIndex],
+    items: &[PushItem],
+) -> EngineResult<()> {
+    if typed_indexes.is_empty() {
+        return Ok(());
+    }
+    let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
+        std::collections::HashMap::new();
+    for item in items {
+        let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
+        check_typed_unique_conflicts(tx, t, q, typed_indexes, &keys, None)?;
+        for (name, key) in &keys {
+            if typed_indexes
+                .iter()
+                .find(|qi| &qi.name == name)
+                .map(index_is_unique)
+                .unwrap_or(false)
+            {
+                let bk = (name.clone(), key.clone());
+                let id_str = item.item_id.to_string();
+                if let Some(prev) = batch_unique.get(&bk) {
+                    if prev != &id_str {
+                        return Err(EngineError::Conflict);
+                    }
+                } else {
+                    batch_unique.insert(bk, id_str);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Inner: the durable client + the queue-definition cache + the live-token map
 // ---------------------------------------------------------------------------
@@ -5138,8 +5182,24 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
-    fn index_validate_push(&self, _shard: &QueueKey, _items: &[PushItem]) -> EngineResult<()> {
-        Ok(())
+    // ADR-011 typed indexes ARE enforced at apply time (`maintain_typed_indexes_on_insert`), so the composed
+    // postgres commit path MUST reject an in-commit duplicate UNIQUE typed-index key HERE (before the durable
+    // append) — otherwise the batch appends durably then fails apply, poisoning recovery (pqueue-29bef1e4).
+    // Mirrors the in-memory `InMemoryProjection::index_validate_push`.
+    fn index_validate_push(&self, shard: &QueueKey, items: &[PushItem]) -> EngineResult<()> {
+        let mut g = self.lock();
+        let Inner { client, queues, .. } = &mut *g;
+        let typed_indexes = queues
+            .get(shard)
+            .map(|d| d.typed_indexes.as_slice())
+            .unwrap_or(&[]);
+        if typed_indexes.is_empty() {
+            return Ok(());
+        }
+        let (t, q) = parts(shard);
+        let mut tx = st(client.transaction())?;
+        validate_typed_unique_push(&mut tx, &t, &q, typed_indexes, items)
+        // tx dropped (rolled back) — validation reads only, no durable effect.
     }
 
     fn index_validate_replace(
@@ -5934,5 +5994,113 @@ mod commit_transition_tests {
         assert!(matches!(outcomes[1], CommitEntryOutcome::Committed { .. }));
         assert!(read_side_record(&b1, "state/stale").is_none());
         assert!(read_side_record(&b1, "state/live").is_some());
+    }
+
+    // pqueue-29bef1e4: a COMPOSED relational commit whose two entries enqueue lifecycle items sharing the
+    // SAME unique typed-index key must reject the colliding entry at VALIDATION (Conflict) — before the
+    // durable append — so the appended batch is always appliable and a reconnect recovers cleanly. Pre-fix
+    // `PostgresRelational::index_validate_push` was a no-op, so the whole commit failed at apply time with a
+    // typed-unique Conflict instead of returning a clean per-entry Rejected(Conflict).
+    #[test]
+    fn composed_commit_rejects_in_commit_duplicate_unique_key_and_reconnects_clean() {
+        use axon_esf::IndexDef;
+
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (composed_commit_rejects_in_commit_duplicate_unique_key_and_reconnects_clean) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = unique_schema("dupidx");
+
+        fn qdef_unique_email() -> QueueDefinition {
+            QueueDefinition {
+                typed_indexes: vec![QueueIndex {
+                    name: "by_email".to_string(),
+                    declaration: IndexDeclaration::Single(IndexDef {
+                        field: "email".to_string(),
+                        index_type: IndexType::String,
+                        unique: true,
+                    }),
+                }],
+                ..qdef()
+            }
+        }
+        fn lifecycle_with_email(priority: i64, email: &str) -> PushSpec {
+            PushSpec {
+                priority: Some(PriorityValue::Int64(priority)),
+                entity: Some(serde_json::json!({ "email": email })),
+                ..Default::default()
+            }
+        }
+
+        let backend = composed_postgres_relational_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(qdef_unique_email())).unwrap();
+
+        // Two claimable inputs, both claimed under one lease → two claim_refs.
+        block_on(backend.push(&shard(), vec![item(10), item(10)], ts(0), None)).unwrap();
+        let claimed = block_on(backend.claim(claim_req(2, 600, 0))).unwrap();
+        assert_eq!(claimed.items.len(), 2, "both inputs claimed");
+        let claim_ref = |i: usize| ClaimRef {
+            item_id: claimed.items[i].item_id,
+            lease_token: claimed.items[i]
+                .lease_token
+                .clone()
+                .expect("claimed item carries a token"),
+            lease_expires_at: claimed.items[i].lease_expires_at,
+            item_version: claimed.items[i].item_version,
+        };
+
+        let outcomes = block_on(backend.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: None,
+                entries: vec![
+                    CommitTransitionEntry {
+                        claim_ref: claim_ref(0),
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![lifecycle_with_email(20, "dup@example.com")],
+                        instance_fence: None,
+                    },
+                    CommitTransitionEntry {
+                        claim_ref: claim_ref(1),
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![lifecycle_with_email(20, "dup@example.com")],
+                        instance_fence: None,
+                    },
+                ],
+            },
+            ts(1),
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(outcomes.len(), 2);
+        assert!(
+            matches!(outcomes[0], CommitEntryOutcome::Committed { .. }),
+            "first entry commits: {:?}",
+            outcomes[0]
+        );
+        assert_eq!(
+            outcomes[1],
+            CommitEntryOutcome::Rejected(EngineError::Conflict),
+            "the in-commit duplicate unique key is rejected at validation"
+        );
+        assert_eq!(
+            block_on(backend.metrics(&shard())).unwrap().pending,
+            1,
+            "exactly one lifecycle item enqueued"
+        );
+        drop(backend);
+
+        // Reconnect (recovery-on-open) is clean and the projected state is consistent (one lifecycle item).
+        let reopened = composed_postgres_relational_in_schema(&url, &schema).unwrap();
+        assert_eq!(
+            block_on(reopened.metrics(&shard())).unwrap().pending,
+            1,
+            "reconnect recovers exactly one lifecycle item"
+        );
     }
 }

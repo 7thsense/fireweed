@@ -1496,6 +1496,57 @@ fn maintain_typed_indexes_on_insert(
     Ok(())
 }
 
+/// Pre-commit (ADR-010 §5.1; `commit` has no rollback) UNIQUE typed-index validation for a push batch on
+/// the relational projection: reject with [`EngineError::Conflict`] when inserting `items` would collide on
+/// a UNIQUE typed index — against existing durable rows AND against another item earlier in the same batch —
+/// mirroring the apply-time enforcement in [`maintain_typed_indexes_on_insert`] (identical key derivation
+/// and uniqueness rule). The composed commit path stages every committed entry's pushes into ONE candidate
+/// batch and validates here BEFORE the durable log append, so a within-commit duplicate unique key is caught
+/// at VALIDATION and the appended batch is always appliable (no recovery poison). Mutates nothing; non-unique
+/// indexes and disjoint keys pass; schema-less queues (no typed indexes) short-circuit.
+fn validate_typed_unique_push(
+    conn: &Connection,
+    shard: &QueueKey,
+    typed_indexes: &[QueueIndex],
+    items: &[PushItem],
+) -> EngineResult<()> {
+    if typed_indexes.is_empty() {
+        return Ok(());
+    }
+    let (t, q) = parts(shard);
+    // Read-only unchecked transaction (dropped/rolled back — no writes): a stable snapshot for the DB-level
+    // unique lookups, exactly the queries `maintain_typed_indexes_on_insert` runs at apply time.
+    let tx = st(conn.unchecked_transaction())?;
+    let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
+        std::collections::HashMap::new();
+    for item in items {
+        let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
+        // (b) DB-level unique check (no exclusion: pushed items are new and hold no prior rows).
+        check_typed_unique_conflicts(&tx, &t, &q, typed_indexes, &keys, None)?;
+        // (a) Within-batch: two items in the SAME candidate batch (possibly from different commit entries)
+        // sharing a unique key collide — this is the cross-entry duplicate apply enforces only at insert time.
+        for (name, key) in &keys {
+            if typed_indexes
+                .iter()
+                .find(|qi| &qi.name == name)
+                .map(index_is_unique)
+                .unwrap_or(false)
+            {
+                let bk = (name.clone(), key.clone());
+                let id_str = item.item_id.to_string();
+                if let Some(prev) = batch_unique.get(&bk) {
+                    if prev != &id_str {
+                        return Err(EngineError::Conflict);
+                    }
+                } else {
+                    batch_unique.insert(bk, id_str);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Pack a timestamp as nanoseconds-since-epoch (comparable in SQL for `not_before`/expiry ordering).
 /// Saturating so a far-future timestamp (> ~year 2262) clamps rather than overflow-panics; realistic
 /// queue timestamps are far inside the i64-nanos range.
@@ -9187,8 +9238,8 @@ impl ProjectionStore for SqliteRelational {
         update_fields_validate_sql(&self.lock().conn, shard, id, expected_item_version)
     }
 
-    // Secondary indexes are a deferred relational feature (the family stubs them) — validation is a no-op
-    // and queries report `Unavailable`, exactly like the monolithic `SqliteRelationalBackend`.
+    // Field-based secondary indexes are a deferred relational feature (the family stubs them) — validation
+    // is a no-op and queries report `Unavailable`, exactly like the monolithic `SqliteRelationalBackend`.
     fn index_validate(
         &self,
         _shard: &QueueKey,
@@ -9200,8 +9251,18 @@ impl ProjectionStore for SqliteRelational {
         Ok(())
     }
 
-    fn index_validate_push(&self, _shard: &QueueKey, _items: &[PushItem]) -> EngineResult<()> {
-        Ok(())
+    // ADR-011 typed indexes ARE enforced (see `maintain_typed_indexes_on_insert`), so pre-commit push
+    // validation must reject an in-commit duplicate UNIQUE key HERE (before the durable append) or the
+    // composed commit path could append a batch that then fails apply → relational recovery poison
+    // (pqueue-29bef1e4). Mirrors the in-memory `InMemoryProjection::index_validate_push`.
+    fn index_validate_push(&self, shard: &QueueKey, items: &[PushItem]) -> EngineResult<()> {
+        let g = self.lock();
+        let typed_indexes = g
+            .queues
+            .get(shard)
+            .map(|d| d.typed_indexes.as_slice())
+            .unwrap_or(&[]);
+        validate_typed_unique_push(&g.conn, shard, typed_indexes, items)
     }
 
     fn index_validate_replace(
@@ -10052,8 +10113,18 @@ impl ProjectionStore for SqliteProjectionStore {
         Ok(())
     }
 
-    fn index_validate_push(&self, _shard: &QueueKey, _items: &[PushItem]) -> EngineResult<()> {
-        Ok(())
+    // ADR-011 typed indexes ARE enforced at apply time (`maintain_typed_indexes_on_insert`), so the composed
+    // sqlite_log + sqlite-projection commit path MUST reject an in-commit duplicate UNIQUE typed-index key
+    // HERE (before the durable log append) — otherwise the batch appends durably then fails apply, poisoning
+    // recovery (pqueue-29bef1e4). Mirrors the in-memory `InMemoryProjection::index_validate_push`.
+    fn index_validate_push(&self, shard: &QueueKey, items: &[PushItem]) -> EngineResult<()> {
+        let g = self.lock();
+        let typed_indexes = g
+            .queues
+            .get(shard)
+            .map(|d| d.typed_indexes.as_slice())
+            .unwrap_or(&[]);
+        validate_typed_unique_push(&g.conn, shard, typed_indexes, items)
     }
 
     fn index_validate_replace(
