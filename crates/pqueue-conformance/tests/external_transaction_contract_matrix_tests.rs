@@ -1764,44 +1764,106 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutco
         "real hybrid-strict write path: a SQLite-commit-then-memory-apply failure poisons the store fail-closed (reads AND writes error, serving stops); a restart rehydrates memory from the durable SQLite ProjectionImage so the poisoned command's durable effect is recovered (projected pending=2)".into(),
     );
 
-    // --- Clause 4: request-id replay + conflict on the real hybrid-strict composed backend. ---
+    // --- Clause 4: request-id UNKNOWN-OUTCOME replay/conflict ACROSS the strict cut + a real restart (bead
+    // pqueue-da1965d7 review; TP-003 §3.10 row 210 + TD-004 durable request-id replay). This is the AC-TXN-5
+    // -specific case, NOT a clean in-process replay: a request_id-bearing push is struck at
+    // AfterSqliteCommitBeforeMemoryApply, so it is durable-in-SQLite + durable-on-the-object-log but returns
+    // Err (an UNKNOWN outcome to the caller — the poison means no success is returned). A real drop+reopen
+    // then rebuilds the push `request_id -> result` idempotency map from the durable object log
+    // (`rebuild_push_idempotency_from_log`), so a retry of the SAME request_id must REPLAY the one original
+    // item id (0 duplicate transitions) and a conflicting body must return request-id-conflict. ---
     {
-        let base = base_dir("hybrid-strict-real-rid");
-        let backend = objectlog_hybrid_strict_composed(&base.join("run"), None);
-        backend
-            .create_queue(pqueue_conformance::qdef())
-            .await
-            .map_err(|e| format!("create_queue: {e:?}"))?;
-        let rid = RequestId::new("ac-txn-5-real-rid").unwrap();
-        let body = vec![pqueue_conformance::fault::spec("rid-item", 1)];
-        let first = backend
-            .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(1), None)
-            .await
-            .map_err(|e| format!("first request-id push: {e:?}"))?;
-        let replay = backend
-            .push_with_request_id(&shard, rid.clone(), body, pqueue_conformance::ts(2), None)
-            .await
-            .map_err(|e| format!("same-body retry: {e:?}"))?;
-        ensure!(
-            replay == first,
-            "same-body retry under the same request_id must replay the original result"
-        );
-        let conflict = backend
-            .push_with_request_id(
-                &shard,
-                rid,
-                vec![pqueue_conformance::fault::spec("rid-item-different", 2)],
-                pqueue_conformance::ts(3),
-                None,
-            )
-            .await;
-        ensure!(
-            matches!(conflict, Err(EngineError::RequestIdConflict)),
-            "a conflicting body under the same request_id must return request-id-conflict; got {conflict:?}"
-        );
+        let base = base_dir("hybrid-strict-real-rid-unknown");
+        let root = base.join("run");
+        let rid = RequestId::new("ac-txn-5-unknown").unwrap();
+        let body = vec![pqueue_conformance::fault::spec("rid-item", 7)];
+        let rid_key = ClientItemKey::new("rid-item").unwrap();
+
+        // (1) The request_id push is struck at the strict post-SQLite-commit / pre-memory-apply cut: the
+        // command commits durably to SQLite AND the object log, but the memory apply faults, so the store
+        // poisons and the caller sees Err — a committed-but-unreturned unknown outcome.
+        {
+            let hook = ArmableHybridHook::new(HybridFaultCutPoint::AfterSqliteCommitBeforeMemoryApply);
+            hook.arm();
+            let backend =
+                objectlog_hybrid_strict_composed(&root, Some(hook.clone() as Arc<dyn HybridFaultHook>));
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .map_err(|e| format!("create_queue: {e:?}"))?;
+            let unknown = backend
+                .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(1), None)
+                .await;
+            ensure!(
+                unknown.is_err(),
+                "a request_id push struck at the strict cut must return Err (unknown outcome, no success); got {unknown:?}"
+            );
+        }
+        // (2) Real restart at the same durable root: recovery rehydrates memory from the SQLite
+        // ProjectionImage AND rebuilds the push idempotency map from the durable object log. The
+        // durably-committed-but-unreturned item is present exactly once.
+        {
+            let backend = objectlog_hybrid_strict_composed(&root, None);
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .map_err(|e| format!("create_queue after restart: {e:?}"))?;
+            let live = backend
+                .live_items(&shard, &[rid_key.clone()])
+                .await
+                .map_err(|e| format!("live_items after restart: {e:?}"))?;
+            ensure!(
+                live.len() == 1 && live[0].is_some(),
+                "the unknown-outcome item must be durably present exactly once after restart; got {live:?}"
+            );
+            let original_id = live[0].as_ref().unwrap().item_id;
+            let m = backend
+                .metrics(&shard)
+                .await
+                .map_err(|e| format!("metrics after restart: {e:?}"))?;
+            ensure!(
+                m.pending == 1,
+                "restart must recover exactly the one durable item (pending=1); got {m:?}"
+            );
+
+            // (3) Retry the SAME request_id with the SAME body → REPLAYS the ONE original result (same item
+            // id) with 0 duplicate state transitions (projected pending stays 1 — asserted on state, not log
+            // rows).
+            let replay = backend
+                .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(2), None)
+                .await
+                .map_err(|e| format!("unknown-outcome same-body retry: {e:?}"))?;
+            ensure!(
+                replay == vec![original_id],
+                "the same-body retry must replay the ONE original item id (not re-mint); got {replay:?} vs original {original_id:?}"
+            );
+            let m2 = backend
+                .metrics(&shard)
+                .await
+                .map_err(|e| format!("metrics after replay: {e:?}"))?;
+            ensure!(
+                m2.pending == 1,
+                "the replay must not create a duplicate (projected pending stays 1); got {m2:?}"
+            );
+
+            // (4) Retry the SAME request_id with a DIFFERENT body → request-id-conflict.
+            let conflict = backend
+                .push_with_request_id(
+                    &shard,
+                    rid,
+                    vec![pqueue_conformance::fault::spec("rid-item-different", 8)],
+                    pqueue_conformance::ts(3),
+                    None,
+                )
+                .await;
+            ensure!(
+                matches!(conflict, Err(EngineError::RequestIdConflict)),
+                "a conflicting body under the same request_id must return request-id-conflict; got {conflict:?}"
+            );
+        }
     }
     asserts.push(
-        "real hybrid-strict write path: same-body retry under a request_id replays the original result; a conflicting body returns request-id-conflict".into(),
+        "real hybrid-strict write path: a request_id push struck at the strict cut is durable-but-unreturned (unknown outcome); after a real drop+reopen the log-rebuilt push idempotency REPLAYS the ONE original item id (0 duplicate transitions, projected pending=1) and a conflicting body returns request-id-conflict".into(),
     );
 
     Ok(asserts)
