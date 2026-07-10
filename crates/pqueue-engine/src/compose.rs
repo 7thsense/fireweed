@@ -22,7 +22,7 @@
 //! path (memory, sqlite-log-replay). The unified-transactional path (relational) reuses the same choke
 //! point with a single transactional store implementing BOTH axes — see ADR-012 §"The atomic write seam".
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -1641,14 +1641,16 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// (logs written before commit envelopes carried one) is skipped — its cross-restart replay stays
     /// unavailable, exactly as before, rather than being reconstructed without a conflict-detection fingerprint.
     ///
-    /// MIXED committed+rejected commits (bead pqueue-db60657d): a REJECTED entry mutates nothing and appends
-    /// nothing durable of its own, so the piecemeal `Finalize`-delimited fold alone reconstructs only the
-    /// COMMITTED entries — a SHORTER vec than the live record. To replay a mixed commit faithfully,
-    /// `commit_transition` stamps the WHOLE per-entry vec (committed AND rejected, each rejection's structured
-    /// error projected via [`CommitRejection`]) onto a terminal marker envelope carrying
-    /// [`RequestOutcome::CommitTransition`]. This fold treats that marker as AUTHORITATIVE (`durable_full`),
-    /// superseding the piecemeal reconstruction, so the rebuilt record equals the live one and the
-    /// `recovery.len() == entries.len()` replay guard passes — a mixed retry replays byte-identically.
+    /// REJECTION-bearing commits — MIXED committed+rejected AND ALL-REJECTED (bead pqueue-db60657d): a
+    /// REJECTED entry mutates nothing and appends nothing durable of its own, so the piecemeal
+    /// `Finalize`-delimited fold alone reconstructs only the COMMITTED entries (a SHORTER vec for a mixed
+    /// commit; NOTHING for an all-rejected one). To replay such a commit faithfully, `commit_transition` stamps
+    /// the WHOLE per-entry vec (committed AND rejected, each rejection's structured error projected via
+    /// [`CommitRejection`]) onto a terminal marker envelope carrying [`RequestOutcome::CommitTransition`],
+    /// appended in the SAME atomic batch as the committed entries. This fold treats that marker as
+    /// AUTHORITATIVE (`durable_full`), superseding the piecemeal reconstruction, so the rebuilt record equals
+    /// the live one and the `recovery.len() == entries.len()` replay guard passes — the retry replays
+    /// byte-identically (including a time-dependent rejection that bare re-execution would resolve differently).
     ///
     /// BACK-COMPAT: a log written before the marker existed simply has no `CommitTransition` envelope, so
     /// `durable_full` stays `None` and the fold falls back to the committed-only piecemeal `entries`. An
@@ -2602,15 +2604,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
                 }),
             }
         }
-        // Emit the terminal marker for a MIXED result, byte-for-byte as `commit_transition` does, so recovery
-        // rebuilds the FULL per-entry vec (committed + rejected) from this durable envelope.
-        let has_committed = recovery
-            .iter()
-            .any(|r| matches!(r.status, CommitEntryStatus::Committed));
+        // Emit the terminal marker whenever the commit has >=1 REJECTED entry (mixed OR all-rejected),
+        // byte-for-byte as `commit_transition` does, so recovery rebuilds the FULL per-entry vec (committed +
+        // rejected) from this durable envelope.
         let has_rejected = recovery
             .iter()
             .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
-        if has_committed && has_rejected {
+        if has_rejected {
             let outcome_entries: Vec<CommitOutcomeEntry> =
                 recovery.iter().map(outcome_entry_from_recovery).collect();
             let command_id = Self::next_command_id(&mut g, self.node_id);
@@ -3846,9 +3846,27 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
             }
 
             // (2) Per entry: validate the lease-token + version-fenced claim_ref AND the optional instance
-            //     fence, then commit the entry's side-records + fence advance + lifecycle push + input
-            //     finalize atomically. A rejected entry mutates nothing.
+            //     fence, then BUILD (but do not yet append) the entry's side-records + fence advance +
+            //     lifecycle push + input finalize. A rejected entry mutates nothing. The whole commit — every
+            //     committed entry's envelopes AND the outcome marker (below) — is appended as ONE atomic log
+            //     batch at the end, so a crash can never leave a HALF state (committed entries durable but the
+            //     outcome record not, or vice-versa; bead pqueue-db60657d Problem 1).
+            //
+            //     Because the durable append is deferred to the end, a committed entry is NOT applied to the
+            //     projection before the next entry validates, so we thread the in-commit effects that a later
+            //     entry could observe through lightweight overlays: `finalized_in_commit` (an input already
+            //     finalized by a prior entry is no longer a live claim), `staged_fences` (a prior entry may
+            //     have advanced an instance fence this entry chains onto), and `committed_pushes` (a prior
+            //     entry's lifecycle push occupies unique-index keys). These make the deferred-append path
+            //     BYTE-IDENTICAL to the old per-entry apply for the realistic disjoint-entry commit AND prevent
+            //     a batched apply from ever double-finalizing (an apply error) or double-inserting a unique key
+            //     (silent overwrite) when two entries touch the same input/index within one commit.
+            let commit_fingerprint = fingerprint.0;
             let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+            let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
+            let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
+            let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
+            let mut committed_pushes: Vec<PushItem> = Vec::new();
             for entry in entries {
                 let claim_ref = entry.claim_ref;
                 let consumed_input_id = claim_ref.item_id;
@@ -3860,6 +3878,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     status: CommitEntryStatus::Rejected(e),
                 };
 
+                // In-commit duplicate-input guard: a prior entry in THIS commit already finalized this input,
+                // so it is no longer a live claim (mirrors the sequential-apply rejection — its lease is gone —
+                // and prevents a second Finalize for the same item, which would be an apply error).
+                if finalized_in_commit.contains(&consumed_input_id) {
+                    recovery.push(reject(EngineError::Terminal));
+                    continue;
+                }
                 if let Err(e) =
                     g.projection
                         .commit_validate(shard, std::slice::from_ref(&claim_ref), now)
@@ -3868,12 +3893,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     continue;
                 }
 
-                // C6: validate the caller-supplied instance fence against the stored fence (absent == 0).
+                // C6: validate the caller-supplied instance fence against the stored fence (absent == 0),
+                // reading through the in-commit `staged_fences` overlay so a fence a prior entry advanced is
+                // visible here exactly as sequential apply would have made it.
                 if let Some(fence) = &entry.instance_fence {
-                    let stored = g
-                        .projection
-                        .instance_fence(shard, &fence.instance_key)?
-                        .unwrap_or(0);
+                    let stored = match staged_fences.get(&fence.instance_key) {
+                        Some(v) => *v,
+                        None => g
+                            .projection
+                            .instance_fence(shard, &fence.instance_key)?
+                            .unwrap_or(0),
+                    };
                     if let Err(e) = validate_instance_fence(stored, fence) {
                         recovery.push(reject(e));
                         continue;
@@ -3896,7 +3926,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 // wire-format change, no new serialization) is exactly what lets recovery rebuild the
                 // `commit_idempotency` cache from the log (`rebuild_commit_idempotency_from_log`) so a
                 // post-restart request_id retry replays the one committed result instead of re-executing.
-                let commit_fingerprint = fingerprint.0;
                 let mut envelopes: Vec<CommandEnvelope> = Vec::new();
                 let mk_env = |g: &mut Inner<L, P>, command: QueueCommand, item_ids: Vec<ItemId>| {
                     let command_id = Self::next_command_id(g, self.node_id);
@@ -3934,6 +3963,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     envelopes.push(e);
                 }
                 let mut lifecycle_item_ids = Vec::new();
+                let mut entry_pushes: Vec<PushItem> = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
                     if let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
                         validate_entity(schema.as_ref(), item.entity.as_ref()).err()
@@ -3952,11 +3982,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                         counter_base,
                         max_attempts,
                     );
-                    if let Err(e) = g.projection.index_validate_push(shard, &push_items) {
+                    // Index-validate against the projection AND the pushes prior committed entries in THIS
+                    // commit already claimed (they are not yet applied), so a unique-key collision between two
+                    // entries of the same commit rejects here exactly as sequential apply would have.
+                    let mut candidate = committed_pushes.clone();
+                    candidate.extend(push_items.iter().cloned());
+                    if let Err(e) = g.projection.index_validate_push(shard, &candidate) {
                         recovery.push(reject(e));
                         continue;
                     }
                     lifecycle_item_ids = ids.clone();
+                    entry_pushes = push_items.clone();
                     let e = mk_env(
                         &mut g,
                         QueueCommand::Push(PushCommand { items: push_items }),
@@ -3967,16 +4003,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 let e = mk_env(
                     &mut g,
                     QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: vec![FinalizeOutcome::new(claim_ref.item_id, entry.finalize)],
+                        outcomes: vec![FinalizeOutcome::new(consumed_input_id, entry.finalize)],
                     }),
-                    vec![claim_ref.item_id],
+                    vec![consumed_input_id],
                 );
                 envelopes.push(e);
 
-                // Commit the entry's envelopes under the held lock as one append batch. The epoch cannot
-                // change while we hold the lock, so either the append fences (EpochFenced, before any
-                // mutation) or all of the entry's writes commit and apply together.
-                Self::commit_locked_batch(&mut g, shard, envelopes, expected_epoch)?;
+                // Accept: fold this committed entry's effects into the in-commit overlays and collect its
+                // envelopes for the single atomic append below (NOT appended yet).
+                finalized_in_commit.insert(consumed_input_id);
+                if let Some((key, next)) = &instance {
+                    staged_fences.insert(key.clone(), *next);
+                }
+                committed_pushes.extend(entry_pushes);
+                committed_envelopes.append(&mut envelopes);
                 recovery.push(EntryRecovery {
                     consumed_input_id,
                     instance,
@@ -3986,43 +4026,49 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 });
             }
 
-            // (3) Durably record the FULL per-entry outcome (committed AND rejected) for a MIXED commit, so a
-            //     cross-restart replay reconstructs the whole vec — not just its committed, `Finalize`-delimited
-            //     subset (bead pqueue-db60657d). A rejected entry mutates and appends nothing itself, so a mixed
-            //     commit's rebuilt record would otherwise be SHORTER than the live one and fall through the
-            //     `recovery.len() == entries.len()` replay guard to re-execution. We stamp the whole vec on ONE
-            //     terminal marker envelope (a no-op empty `WriteSideRecords`) carrying the caller's request_id +
-            //     whole-body fingerprint + `RequestOutcome::CommitTransition`. This is gated on a MIXED result
-            //     (>=1 committed AND >=1 rejected): an all-committed commit already reconstructs exactly from its
-            //     `Finalize` runs (the marker would be redundant and would churn the existing all-committed log
-            //     shape), and an all-rejected commit appends nothing (its re-execution re-rejects identically, so
-            //     it stays faithful without a durable record). Because a mixed commit already committed >=1 entry
-            //     under the current epoch (held lock), this extra append cannot spuriously epoch-fence.
-            if let Some(rid) = &request_id {
-                let has_committed = recovery
+            // (3) Durably record the FULL per-entry outcome (committed AND rejected) for ANY request_id-bearing
+            //     commit that has >=1 REJECTED entry — MIXED and ALL-REJECTED alike (bead pqueue-db60657d
+            //     Problems 1 & 2). A rejected entry mutates and appends nothing of its own, so without this its
+            //     outcome is lost across a restart: a MIXED commit would rebuild a SHORTER vec (falling through
+            //     the `recovery.len() == entries.len()` guard to re-execution), and an ALL-REJECTED commit would
+            //     rebuild NOTHING and re-execute — and re-execution reads `now`, so a Conflict rejected before a
+            //     lease expired can re-reject StaleLease after it (a DIFFERENT structured error, not the
+            //     byte-identical replay the live in-memory record gives). We stamp the whole vec on ONE terminal
+            //     marker envelope (a no-op empty `WriteSideRecords`) carrying the caller's request_id +
+            //     whole-body fingerprint + `RequestOutcome::CommitTransition`. An ALL-COMMITTED commit needs no
+            //     marker (recovery reconstructs it exactly from its `Finalize` runs). The marker rides in the
+            //     SAME atomic append as the committed envelopes, so the outcome is durable EXACTLY when the
+            //     commit is — never a half state.
+            let mut batch = committed_envelopes;
+            if let Some(rid) = &request_id
+                && recovery
                     .iter()
-                    .any(|r| matches!(r.status, CommitEntryStatus::Committed));
-                let has_rejected = recovery
-                    .iter()
-                    .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
-                if has_committed && has_rejected {
-                    let entries: Vec<CommitOutcomeEntry> =
-                        recovery.iter().map(outcome_entry_from_recovery).collect();
-                    let command_id = Self::next_command_id(&mut g, self.node_id);
-                    let marker = CommandEnvelope {
-                        command_id,
-                        request_id: Some(rid.clone()),
-                        request_fingerprint: Some(fingerprint.0),
-                        request_outcome: Some(RequestOutcome::CommitTransition { entries }),
-                        item_ids: Vec::new(),
-                        command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                            records: Vec::new(),
-                        }),
-                        checksum: CommandChecksum(0),
-                        created_at: now,
-                    };
-                    Self::commit_locked_batch(&mut g, shard, vec![marker], expected_epoch)?;
-                }
+                    .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)))
+            {
+                let outcome_entries: Vec<CommitOutcomeEntry> =
+                    recovery.iter().map(outcome_entry_from_recovery).collect();
+                let command_id = Self::next_command_id(&mut g, self.node_id);
+                batch.push(CommandEnvelope {
+                    command_id,
+                    request_id: Some(rid.clone()),
+                    request_fingerprint: Some(commit_fingerprint),
+                    request_outcome: Some(RequestOutcome::CommitTransition {
+                        entries: outcome_entries,
+                    }),
+                    item_ids: Vec::new(),
+                    command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                        records: Vec::new(),
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: now,
+                });
+            }
+            // ONE atomic append+apply for the WHOLE commit (all committed entries' envelopes + the outcome
+            // marker). The epoch cannot change while we hold the lock, so either this fences (EpochFenced,
+            // before any mutation) or the whole commit's writes commit and apply together — no crash window
+            // between committed-entry durability and outcome durability.
+            if !batch.is_empty() {
+                Self::commit_locked_batch(&mut g, shard, batch, expected_epoch)?;
             }
 
             // (4) Record the whole-body recovery only AFTER success, so a later replay/explain returns it

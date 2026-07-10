@@ -1906,6 +1906,15 @@ pub async fn ac_txn_3_commit_transition_request_id<
             ] if l.is_empty() && s.is_empty()
         )
     };
+    // The exact expected per-entry outcome vec. No server-minted id varies (a Committed finalize-only entry
+    // carries no lifecycle items; the Rejected entry carries the structured StaleLease), so this is a
+    // fully-determined, backend-independent BYTE-IDENTICAL target for `retry == expected_mixed`.
+    let expected_mixed = vec![
+        CommitEntryOutcome::Committed {
+            lifecycle_item_ids: Vec::new(),
+        },
+        CommitEntryOutcome::Rejected(EngineError::StaleLease),
+    ];
 
     // ==== Cut point AfterApplyBeforeResponse (mixed): full commit in-process, drop, reopen, retry. ====
     let rid_mixed = RequestId::new("ac-txn-3-commit-transition-mixed").unwrap();
@@ -1919,7 +1928,7 @@ pub async fn ac_txn_3_commit_transition_request_id<
         .await
         .map_err(|e| format!("mixed commit: {e:?}"))?;
     ensure!(
-        is_mixed_stale(&live),
+        is_mixed_stale(&live) && live == expected_mixed,
         "the mixed commit must live-record [Committed, Rejected(StaleLease)]; got {live:?}"
     );
     // The full per-entry recovery vec (with the structured StaleLease) BEFORE restart, via explain_commit.
@@ -1987,11 +1996,14 @@ pub async fn ac_txn_3_commit_transition_request_id<
         "commit_transition MIXED committed+rejected AfterApplyBeforeResponse across-restart replay PROVEN (bead pqueue-db60657d): a [valid→Committed, stale→Rejected(StaleLease)] commit, fully committed then killed + reopened, replays the BYTE-IDENTICAL per-entry vec (Rejected carrying the same structured StaleLease) because recovery rebuilds commit_idempotency from the durable CommitTransition marker; explain_commit returns the identical full vec, a different body → RequestIdConflict, and the committed input stays finalized exactly once (0 duplicate)".into(),
     );
 
-    // ==== Cut point AfterAppendBeforeApply (mixed): the mixed commit's durable envelopes (the committed
-    // entry's Finalize + the CommitTransition marker) are appended durably but NOT applied in-process, then
-    // drop+reopen. Recovery replays the durable tail (finalizing the valid input) AND rebuilds the full vec
-    // from the durable marker. Built via `build_request_id_commit_envelopes` (the mixed analog of the
-    // single-entry mid-pipeline builder) so the durable footprint matches the real commit exactly. ====
+    // ==== Cut point AfterAppendBeforeApply (mixed): reproduce the REAL production write ordering. The
+    // production `commit_transition` appends the WHOLE commit — the committed entry's Finalize AND the
+    // CommitTransition outcome marker — as ONE atomic log batch (no crash window between committed-entry
+    // durability and outcome durability). This probe builds that exact batch via
+    // `build_request_id_commit_envelopes` and drives it through `Backend::write` appending the whole batch
+    // durably then SKIPPING apply — striking the append→apply crash window on the atomic commit unit. On
+    // drop+reopen, recovery replays the durable tail (finalizing the valid input) AND rebuilds the full
+    // [Committed, Rejected(StaleLease)] vec from the durable marker, so the retry replays it byte-identically. ====
     let rid_mixed_mid = RequestId::new("ac-txn-3-commit-transition-mixed-mid").unwrap();
     let (a, valid, stale) = seed_mixed_commit(&make, "txn3-ct-mixed-mid").await?;
     let mid_entries = mixed_entries(&valid, &stale, FinalizeKind::Complete);
@@ -2056,8 +2068,8 @@ pub async fn ac_txn_3_commit_transition_request_id<
         .await
         .map_err(|e| format!("mixed mid retry after reopen: {e:?}"))?;
     ensure!(
-        is_mixed_stale(&retry),
-        "AfterAppendBeforeApply: the mixed retry across restart must replay [Committed, Rejected(StaleLease)]; got {retry:?}"
+        retry == expected_mixed,
+        "AfterAppendBeforeApply: the mixed retry across restart must replay the BYTE-IDENTICAL [Committed, Rejected(StaleLease)] vec; got {retry:?} vs {expected_mixed:?}"
     );
     let explain_mid = b
         .explain_commit(&shard(), rid_mixed_mid.clone())
@@ -2080,6 +2092,115 @@ pub async fn ac_txn_3_commit_transition_request_id<
     );
     asserts.push(
         "commit_transition MIXED committed+rejected AfterAppendBeforeApply across-restart replay PROVEN (bead pqueue-db60657d): the mixed commit's durable envelopes (the committed entry's Finalize + the CommitTransition marker) appended durably-but-unapplied, then reopened, replay the BYTE-IDENTICAL [Committed, Rejected(StaleLease)] per-entry vec (recovery replays the durable tail AND rebuilds commit_idempotency from the durable marker); explain_commit returns the identical full vec and the committed input is finalized exactly once (0 duplicate)".into(),
+    );
+
+    // ==== ALL-REJECTED commit across restart (bead pqueue-db60657d Problem 2): EVERY entry rejects, and the
+    // rejection is TIME-DEPENDENT. The one entry rejects with a version `Conflict` while the lease is still
+    // valid; bare re-execution AFTER the lease expires would instead reject `StaleLease` (a DIFFERENT structured
+    // error — commit_validate checks lease expiry before the version fence). An all-rejected commit records a
+    // durable CommitTransition marker too, so the retry replays the ORIGINAL `Conflict` byte-identically rather
+    // than the time-dependent `StaleLease`. Proves the marker is genuinely load-bearing for all-rejected. ====
+    let rid_allrej = RequestId::new("ac-txn-3-commit-transition-all-rejected").unwrap();
+    let a = make("txn3-ct-allrej");
+    a.create_queue(qdef())
+        .await
+        .map_err(|e| format!("all-rejected create_queue: {e:?}"))?;
+    a.push(&shard(), vec![spec("txn3-ct-allrej-a", 5)], ts(0), None)
+        .await
+        .map_err(|e| format!("all-rejected seed push: {e:?}"))?;
+    let claimed = a
+        .claim(claim_req(1, 500, 1))
+        .await
+        .map_err(|e| format!("all-rejected claim: {e:?}"))?;
+    ensure!(
+        claimed.items.len() == 1,
+        "all-rejected claim leased one item"
+    );
+    let ci = &claimed.items[0];
+    let claim_ref_v0 = ClaimRef {
+        item_id: ci.item_id,
+        lease_token: ci
+            .lease_token
+            .clone()
+            .ok_or_else(|| "all-rejected claimed item missing lease token".to_string())?,
+        lease_expires_at: ci.lease_expires_at,
+        item_version: ci.item_version,
+    };
+    // Bump the item's version (keeps the SAME lease + token), so the cached `claim_ref_v0` now holds a STALE
+    // version → commit_validate returns Conflict (while the lease is still valid).
+    a.update_fields(
+        &shard(),
+        claim_ref_v0.item_id,
+        BTreeMap::from([("bump".to_string(), Some(Bytes::from_static(b"1")))]),
+        PayloadUpdate::Keep,
+        None,
+        None,
+        ts(1),
+        None,
+    )
+    .await
+    .map_err(|e| format!("all-rejected update_fields (bump version): {e:?}"))?;
+    let allrej_body = || CommitTransition {
+        request_id: Some(rid_allrej.clone()),
+        entries: vec![CommitTransitionEntry {
+            claim_ref: claim_ref_v0.clone(),
+            finalize: FinalizeKind::Complete,
+            side_records: Vec::new(),
+            lifecycle_items: Vec::new(),
+            instance_fence: None,
+        }],
+    };
+    // Commit while the lease is still VALID (ts(490) < expiry 500): the stale version → Conflict. The commit
+    // time is chosen so the request_id retention window (60s → expires ts(550)) OUTLASTS the lease expiry
+    // (ts(500)), leaving a window in which the lease is expired but the idempotency record is still live.
+    let live = a
+        .commit_transition(&shard(), allrej_body(), ts(490), None)
+        .await
+        .map_err(|e| format!("all-rejected commit: {e:?}"))?;
+    let expected_allrej = vec![CommitEntryOutcome::Rejected(EngineError::Conflict)];
+    ensure!(
+        live == expected_allrej,
+        "the all-rejected commit must live-record [Rejected(Conflict)] (stale version while lease valid); got {live:?}"
+    );
+    let explain_allrej_before = a
+        .explain_commit(&shard(), rid_allrej.clone())
+        .await
+        .map_err(|e| format!("all-rejected explain_commit before restart: {e:?}"))?
+        .ok_or_else(|| "all-rejected explain_commit returned None before restart".to_string())?;
+    ensure!(
+        matches!(
+            explain_allrej_before.entries.as_slice(),
+            [EntryRecovery {
+                status: CommitEntryStatus::Rejected(EngineError::Conflict),
+                ..
+            }]
+        ),
+        "explain_commit before restart must return [Rejected(Conflict)]; got {explain_allrej_before:?}"
+    );
+    drop(a);
+    // Reopen and retry AFTER the lease has EXPIRED (ts(520) > expiry 500) but WHILE the request_id record is
+    // still live (ts(520) < retention expiry ts(550)). Bare re-execution would now reject StaleLease; the
+    // durable marker replays the ORIGINAL Conflict byte-identically.
+    let b = make("txn3-ct-allrej");
+    let retry = b
+        .commit_transition(&shard(), allrej_body(), ts(520), None)
+        .await
+        .map_err(|e| format!("all-rejected retry after restart: {e:?}"))?;
+    ensure!(
+        retry == live && retry == expected_allrej,
+        "ALL-REJECTED across-restart retry must replay the BYTE-IDENTICAL [Rejected(Conflict)] (NOT the time-dependent StaleLease bare re-execution past the lease expiry would give); got {retry:?} vs {live:?}"
+    );
+    let explain_allrej_after = b
+        .explain_commit(&shard(), rid_allrej.clone())
+        .await
+        .map_err(|e| format!("all-rejected explain_commit after restart: {e:?}"))?
+        .ok_or_else(|| "all-rejected explain_commit returned None after restart".to_string())?;
+    ensure!(
+        explain_allrej_after == explain_allrej_before,
+        "all-rejected explain_commit after restart must return the identical [Rejected(Conflict)] vec; got {explain_allrej_after:?} vs {explain_allrej_before:?}"
+    );
+    asserts.push(
+        "commit_transition ALL-REJECTED across-restart replay PROVEN (bead pqueue-db60657d Problem 2): a commit whose entry rejects with a TIME-DEPENDENT version Conflict (stale item_version while the lease is valid) records a durable CommitTransition marker; after kill+reopen a retry PAST the lease expiry replays the BYTE-IDENTICAL [Rejected(Conflict)] — not the StaleLease that bare re-execution would produce once the lease expired — and explain_commit returns the identical vec".into(),
     );
     Ok(asserts)
 }

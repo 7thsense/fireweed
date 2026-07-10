@@ -1314,9 +1314,16 @@ async fn ac_txn_3_request_id_replay_all_ops_all_cut_points() {
         )),
         "sqlite_log must prove faithful mixed-commit AfterAppendBeforeApply across-restart replay: {sqlite_ct:?}"
     );
+    // An ALL-REJECTED commit is likewise faithfully replayed (durable marker prevents time-dependent divergence).
+    assert!(
+        sqlite_ct
+            .iter()
+            .any(|s| s.contains("ALL-REJECTED across-restart replay PROVEN")),
+        "sqlite_log must prove faithful all-rejected commit_transition across-restart replay: {sqlite_ct:?}"
+    );
     assert!(
         !sqlite_ct.iter().any(|s| s.contains("GAP")),
-        "sqlite_log commit_transition must carry NO residual GAP once mixed replay is faithful: {sqlite_ct:?}"
+        "sqlite_log commit_transition must carry NO residual GAP once mixed + all-rejected replay is faithful: {sqlite_ct:?}"
     );
 
     let ol_ct = ac_txn_3_commit_transition_request_id(objectlog_factory(), DURABLE).await;
