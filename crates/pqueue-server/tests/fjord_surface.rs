@@ -171,8 +171,8 @@ fn fjord_dependency_is_git_pinned_no_path_deps() {
 
 #[test]
 fn no_c_kafka_client_dependency() {
-    // The C Kafka client is fully removed: no C build, no loopback socket on the write path. The pure-Rust
-    // kafka-protocol codec encodes the in-process change-record batches instead.
+    // The C Kafka client is fully removed: no C build, no loopback socket on the write path. heimq's
+    // vendored pure-Rust codec (heimq-protocol) encodes the in-process change-record batches instead.
     let cargo_toml =
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
             .expect("read pqueue-server Cargo.toml");
@@ -182,8 +182,8 @@ fn no_c_kafka_client_dependency() {
         "pqueue-server must not depend on the C Kafka client"
     );
     assert!(
-        cargo_toml.contains("kafka-protocol"),
-        "the pure-Rust kafka-protocol codec encodes the in-process change-record batches"
+        cargo_toml.contains("heimq-protocol"),
+        "the vendored pure-Rust codec (heimq-protocol) encodes the in-process change-record batches"
     );
 }
 

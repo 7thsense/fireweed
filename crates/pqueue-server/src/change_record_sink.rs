@@ -8,9 +8,9 @@ use std::time::Duration;
 use crate::fjord_topic_name;
 use bytes::{Bytes, BytesMut};
 use heimq_broker::storage::LogBackend;
-use kafka_protocol::indexmap::IndexMap;
-use kafka_protocol::protocol::StrBytes;
-use kafka_protocol::records::{
+use heimq_protocol::indexmap::IndexMap;
+use heimq_protocol::protocol::StrBytes;
+use heimq_protocol::records::{
     Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
 };
 use pqueue_core::{QueueDefinition, UtcTimestamp};
