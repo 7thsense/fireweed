@@ -4270,6 +4270,14 @@ pub struct HybridProjectionStore {
     poisoned: Option<String>,
     /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-5/5A). `None` in every production path.
     fault_hook: Mutex<Option<Arc<dyn HybridFaultHook>>>,
+    /// `objectlog/hybrid-async` (TD-004) admission/high-water/retention gate. `Some` ONLY for the
+    /// `hybrid-async` server profile (wired by `with_async_monitor`); `None` for `objectlog/hybrid` and
+    /// `objectlog/hybrid-strict`, which do not gate on async-apply debt. When present, the store-wide async
+    /// apply debt (the deferred-checkpoint backlog) is folded into this monitor on every live apply and
+    /// deferred flush, so [`ProjectionStore::admit_mutation`] fails new mutating admission closed under Hard
+    /// backpressure and [`ProjectionStore::recovery_high_water`] withholds the lagging high-water until debt
+    /// drains below the release band.
+    async_monitor: Option<HybridAsyncMonitor>,
 }
 
 impl HybridProjectionStore {
@@ -4293,6 +4301,7 @@ impl HybridProjectionStore {
             strict: false,
             poisoned: None,
             fault_hook: Mutex::new(None),
+            async_monitor: None,
         }
     }
 
@@ -4309,6 +4318,7 @@ impl HybridProjectionStore {
             strict: false,
             poisoned: None,
             fault_hook: Mutex::new(None),
+            async_monitor: None,
         }
     }
 
@@ -4324,6 +4334,65 @@ impl HybridProjectionStore {
     /// Whether this store runs the `objectlog/hybrid-strict` SQLite-durable-before-memory apply ordering.
     pub fn is_strict(&self) -> bool {
         self.strict
+    }
+
+    /// Install the `objectlog/hybrid-async` async-apply debt/backpressure/poison monitor (TD-004) with the
+    /// server-configured `thresholds`. This is the ONLY constructor that arms the monitor: the default
+    /// `objectlog/hybrid` and `objectlog/hybrid-strict` profiles leave `async_monitor == None` and are
+    /// unaffected. Once armed, every live apply and deferred flush folds the store's async-apply debt (the
+    /// deferred-checkpoint backlog) into the monitor, so [`ProjectionStore::admit_mutation`] fails new
+    /// mutating admission closed under Hard backpressure and [`ProjectionStore::recovery_high_water`]
+    /// withholds the lagging high-water until the backlog drains below the release band.
+    pub fn with_async_monitor(mut self, thresholds: HybridAsyncThresholds) -> Self {
+        self.async_monitor = Some(HybridAsyncMonitor::new(thresholds));
+        self
+    }
+
+    /// Whether the `objectlog/hybrid-async` debt monitor is armed on this store (test/observability seam).
+    pub fn has_async_monitor(&self) -> bool {
+        self.async_monitor.is_some()
+    }
+
+    /// The current async-apply backpressure level, or `None` when no monitor is armed (test/observability
+    /// seam for the AC-TXN-5A server-wired proof).
+    pub fn async_backpressure_level(&self) -> Option<BackpressureLevel> {
+        self.async_monitor.as_ref().map(HybridAsyncMonitor::level)
+    }
+
+    /// Whether segment expiry / retention advancement is currently allowed under the async-apply monitor
+    /// (TD-004 "Retention backpressure"). `true` when no monitor is armed (the non-async profiles have no
+    /// async retention gate); otherwise deferred to [`HybridAsyncMonitor::retention_may_advance`], which is
+    /// `false` while debt is over budget or the worker is poisoned.
+    pub fn async_retention_may_advance(&self) -> bool {
+        self.async_monitor
+            .as_ref()
+            .map_or(true, HybridAsyncMonitor::retention_may_advance)
+    }
+
+    /// Fold the store's CURRENT async-apply debt into the armed monitor (no-op when unarmed). The genuine
+    /// debt signal for `objectlog/hybrid-async` is the deferred-checkpoint backlog — committed commands
+    /// already durable on the object log and applied to hot memory but not yet checkpointed into the durable
+    /// SQLite image — which is exactly `deferred_commands` (the count of committed sequences trailing the
+    /// SQLite high-water). This is NOT a test-only poke: it is called from the real `apply_live` /
+    /// `apply_live_owned` / `apply_recovery` write path (backlog grows) and from `flush_deferred` (backlog
+    /// drains), so production apply-lag drives the backpressure level.
+    fn observe_async_debt(&mut self) {
+        let lag = self.deferred_commands as u64;
+        if let Some(monitor) = self.async_monitor.as_mut() {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
+            monitor.observe(
+                HybridAsyncDebt {
+                    apply_lag_commands: lag,
+                    apply_debt_bytes: 0,
+                    apply_queue_depth: lag,
+                    oldest_unapplied_age_ms: 0,
+                },
+                now_ms,
+            );
+        }
     }
 
     /// Install (or clear, with `None`) a test-only fault hook (TP-003 §3.10 AC-TXN-5/5A). Never called from
@@ -9225,6 +9294,7 @@ impl ProjectionStore for HybridProjectionStore {
         self.deferred
             .extend(positions.iter().cloned().zip(commands.iter().cloned()));
         self.deferred_commands = self.deferred.len();
+        self.observe_async_debt();
         Ok(())
     }
 
@@ -9251,6 +9321,7 @@ impl ProjectionStore for HybridProjectionStore {
         self.apply_memory(&positions, &commands)?;
         self.deferred.extend(positions.into_iter().zip(commands));
         self.deferred_commands = self.deferred.len();
+        self.observe_async_debt();
         Ok(())
     }
 
@@ -9277,6 +9348,7 @@ impl ProjectionStore for HybridProjectionStore {
         self.deferred
             .extend(positions.iter().cloned().zip(commands.iter().cloned()));
         self.deferred_commands = self.deferred.len();
+        self.observe_async_debt();
         Ok(())
     }
 
@@ -9313,12 +9385,27 @@ impl ProjectionStore for HybridProjectionStore {
         self.sqlite.apply_committed_batch(&positions, &commands)?;
         self.deferred.drain(..take);
         self.deferred_commands = self.deferred.len();
+        // An ordered batch checkpointed cleanly into the durable SQLite image: satisfy the clean-batch
+        // precondition for releasing Hard backpressure, then re-fold the (now-smaller) backlog so the level
+        // can drop once debt falls below the release band. Only the `hybrid-async` profile arms the monitor.
+        if let Some(monitor) = self.async_monitor.as_mut() {
+            monitor.record_apply_success();
+        }
+        self.observe_async_debt();
         Ok(())
     }
 
     fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         self.require_hydrated(shard)?;
-        self.sqlite.recovery_high_water(shard)
+        let high_water = self.sqlite.recovery_high_water(shard)?;
+        // `objectlog/hybrid-async` (TD-004 "Recovery/high-water backpressure"): while async-apply debt is
+        // Hard (or the worker is poisoned) the lagging SQLite high-water MUST NOT be advertised as a safe
+        // replay-skip point, so the monitor withholds it (returns `None`) until the backlog drains below the
+        // release band. The non-async profiles have no monitor and pass the high-water through unchanged.
+        Ok(match self.async_monitor.as_ref() {
+            Some(monitor) => monitor.recovery_high_water_safe(high_water),
+            None => high_water,
+        })
     }
 
     /// Fail closed unless the durable SQLite image provably descends from the object log it is about to be
@@ -9381,6 +9468,29 @@ impl ProjectionStore for HybridProjectionStore {
     /// (TD-004 §backpressure/poison). Feeds [`pqueue_engine::resolve_recovery_start`].
     fn recovery_poison(&self, _shard: &QueueKey) -> Option<String> {
         self.poisoned.clone()
+    }
+
+    /// `objectlog/hybrid-async` (TD-004 "Recovery/high-water backpressure"): a store whose async-apply debt
+    /// is Hard reports backpressure so recovery-on-open replays from an earlier authoritative source instead
+    /// of trusting the lagging SQLite high-water. `false` when no monitor is armed (the non-async profiles).
+    fn recovery_backpressured(&self, _shard: &QueueKey) -> bool {
+        matches!(
+            self.async_monitor.as_ref().map(HybridAsyncMonitor::level),
+            Some(BackpressureLevel::Hard)
+        )
+    }
+
+    /// The `objectlog/hybrid-async` mutation-admission gate (TD-004 "Hard debt threshold"). Fails new
+    /// mutating admission CLOSED — with the typed retryable [`EngineError::Unavailable`] backpressure error
+    /// (or a `Storage` poison error) — once the store-wide async-apply backlog is over its hard budget, so a
+    /// push/claim cannot pile more debt onto a queue already at risk of an SLO violation. The non-async
+    /// profiles arm no monitor and admit unconditionally (the default trait impl semantics).
+    fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
+        self.check_healthy()?;
+        match self.async_monitor.as_ref() {
+            Some(monitor) => monitor.admit_mutation(),
+            None => Ok(()),
+        }
     }
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {

@@ -138,8 +138,8 @@ use pqueue_engine::{
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{
-    HybridAsyncDebt, HybridAsyncMonitor, HybridAsyncThresholds, HybridFaultCutPoint,
-    HybridFaultHook, HybridProjectionStore,
+    BackpressureLevel, HybridAsyncThresholds, HybridFaultCutPoint, HybridFaultHook,
+    HybridProjectionStore,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1879,6 +1879,239 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path() {
     );
 }
 
+/// Open the REAL `objectlog/hybrid-async` composed backend at `root` with the TD-004 debt monitor ARMED —
+/// the exact composition `pqueue-server` builds for `PQUEUE_PROJECTION_BACKEND=hybrid-async`
+/// (`open_objectlog_hybrid_backend(.., strict=false, Some(thresholds))` → `HybridProjectionStore::open(..)
+/// .with_deferred_flush_chunk(..).with_async_monitor(thresholds)`), recovery-on-open. `flush_chunk` bounds
+/// how many deferred commands one `flush_deferred` drains so a drain test can step the backlog down one
+/// command at a time. No background flusher is spawned here, so the deferred-checkpoint backlog accumulates
+/// under the test's control — exactly the real apply-lag signal the monitor folds in on every live apply.
+fn objectlog_hybrid_async_composed(
+    root: &std::path::Path,
+    thresholds: HybridAsyncThresholds,
+    flush_chunk: usize,
+) -> HybridBackend {
+    std::fs::create_dir_all(root).ok();
+    let sqlite_path = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap())
+        .expect("open object log");
+    let hybrid = HybridProjectionStore::open(sqlite_path.to_str().unwrap())
+        .expect("open hybrid projection")
+        .with_deferred_flush_chunk(flush_chunk)
+        .with_async_monitor(thresholds);
+    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover()
+        .expect("recover objectlog/hybrid-async")
+}
+
+/// Push one single-item body through the REAL composed group-commit write path (no `request_id`, the
+/// co-buffering hot path). Returns the admission result so a caller can assert a Hard-debt rejection.
+async fn async_push(
+    backend: &HybridBackend,
+    key: &str,
+) -> Result<Vec<pqueue_core::ItemId>, EngineError> {
+    backend
+        .push(
+            &pqueue_conformance::shard(),
+            vec![pqueue_conformance::fault::spec(key, 5)],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+}
+
+/// **AC-TXN-5A hard-debt admission** on the REAL server-wired hybrid-async composition (TD-004:361). Drives
+/// GENUINE async-apply debt — the deferred-checkpoint backlog the monitor observes on every live apply, NOT
+/// a test poke — over the hard budget, then proves a NEW mutating push fails CLOSED with the typed retryable
+/// backpressure error AND leaves no durable/projected effect (asserts on state, not just the error).
+async fn ac_txn_5a_hard_debt_admission_scenario() -> AcOutcome {
+    let shard = pqueue_conformance::shard();
+    let base = base_dir("hybrid-async-hard-debt-admission");
+    // Hard budget = 5 deferred commands; every other metric is set out of reach so the apply-lag backlog is
+    // the sole trip. flush_chunk large (drain-in-one) — this scenario never drains.
+    let thresholds =
+        HybridAsyncThresholds::new(5, 1_000_000, 1_000_000, 3_600_000, 3).expect("valid thresholds");
+    let backend = objectlog_hybrid_async_composed(&base.join("run"), thresholds, 1024);
+    backend
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+
+    // Drive real debt: 5 single-item pushes. Each seals + live-applies to hot memory and defers its durable
+    // SQLite checkpoint (no flusher runs), so the deferred backlog climbs to the hard budget (5). All 5 are
+    // admitted (debt below/at budget is admitted; the trip gates the NEXT admission).
+    for i in 0..5u64 {
+        async_push(&backend, &format!("hd-{i}"))
+            .await
+            .map_err(|e| format!("push {i} must be admitted below budget: {e:?}"))?;
+    }
+    ensure!(
+        backend.with_projection(|p| p.async_backpressure_level()) == Some(BackpressureLevel::Hard),
+        "5 deferred commands must trip Hard async-apply backpressure on the real composition"
+    );
+    let pending_before = backend
+        .metrics(&shard)
+        .await
+        .map_err(|e| format!("metrics before: {e:?}"))?
+        .pending;
+    ensure!(
+        pending_before == 5,
+        "the 5 admitted pushes must be projected (pending=5); got {pending_before}"
+    );
+    let durable_before = durable_command_count(&backend).await?;
+
+    // A NEW mutating push under Hard debt fails CLOSED with the typed retryable backpressure error...
+    let rejected = async_push(&backend, "hd-rejected").await;
+    ensure!(
+        matches!(rejected, Err(EngineError::Unavailable)),
+        "a push over the hard debt budget must be rejected with the typed retryable backpressure error (Unavailable); got {rejected:?}"
+    );
+    // ...and left NO durable and NO projected effect (assert on state, not merely the error type).
+    let durable_after = durable_command_count(&backend).await?;
+    ensure!(
+        durable_after == durable_before,
+        "the rejected push must add NO durable command (before={durable_before}, after={durable_after})"
+    );
+    let pending_after = backend
+        .metrics(&shard)
+        .await
+        .map_err(|e| format!("metrics after: {e:?}"))?
+        .pending;
+    ensure!(
+        pending_after == 5,
+        "the rejected push must not be applied/acknowledged (pending stays 5); got {pending_after}"
+    );
+
+    Ok(vec![
+        "hard-debt admission (real server-wired composition): 5 real deferred-checkpoint commands trip Hard backpressure; a new mutating push fails closed with the typed retryable error (Unavailable) and adds 0 durable + 0 projected commands".into(),
+    ])
+}
+
+/// **AC-TXN-5A high-water / retention withholding** on the REAL server-wired hybrid-async composition
+/// (TD-004:361). Establishes a genuine durable SQLite high-water, drives real debt over budget, proves the
+/// lagging high-water AND retention advancement are WITHHELD while Hard, then drains the backlog and proves
+/// both advance the instant debt clears below the release band.
+async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
+    let shard = pqueue_conformance::shard();
+    let base = base_dir("hybrid-async-high-water-withhold");
+    // Hard budget = 6; release band = strictly below 50% (< 3). flush_chunk = 1 so the drain steps the
+    // backlog down one command at a time and the Hard→Clear release lands on an exact backlog value.
+    let thresholds =
+        HybridAsyncThresholds::new(6, 1_000_000, 1_000_000, 3_600_000, 3).expect("valid thresholds");
+    let backend = objectlog_hybrid_async_composed(&base.join("run"), thresholds, 1);
+    backend
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+
+    let deferred = |b: &HybridBackend| b.with_projection(|p| p.deferred_command_count());
+    let level = |b: &HybridBackend| b.with_projection(|p| p.async_backpressure_level());
+    let high_water = |b: &HybridBackend| {
+        b.with_projection(|p| ProjectionStore::recovery_high_water(p, &shard))
+    };
+    let retention_ok = |b: &HybridBackend| b.with_projection(|p| p.async_retention_may_advance());
+
+    // Establish a NON-None durable SQLite high-water: 2 pushes (below budget), then drain so the checkpoint
+    // advances the durable high-water. This is the high-water that MUST later be withheld under debt.
+    for i in 0..2u64 {
+        async_push(&backend, &format!("hw-a-{i}"))
+            .await
+            .map_err(|e| format!("seed push {i}: {e:?}"))?;
+    }
+    while deferred(&backend) > 0 {
+        backend
+            .flush_deferred_projection()
+            .map_err(|e| format!("seed flush: {e:?}"))?;
+    }
+    let hw_seed = high_water(&backend).map_err(|e| format!("seed high-water: {e:?}"))?;
+    ensure!(
+        hw_seed.is_some(),
+        "a drained checkpoint must advertise a real durable high-water before debt; got {hw_seed:?}"
+    );
+    ensure!(
+        level(&backend) != Some(BackpressureLevel::Hard) && retention_ok(&backend),
+        "the store must be below backpressure with retention allowed after the seed drain"
+    );
+
+    // Drive real debt over budget: 6 more pushes with NO flush. The deferred backlog hits 6 == hard budget.
+    for i in 0..6u64 {
+        async_push(&backend, &format!("hw-b-{i}"))
+            .await
+            .map_err(|e| format!("debt push {i}: {e:?}"))?;
+    }
+    ensure!(
+        level(&backend) == Some(BackpressureLevel::Hard),
+        "6 deferred commands must trip Hard backpressure; got {:?}",
+        level(&backend)
+    );
+    // While Hard: the lagging high-water is WITHHELD (None) even though the underlying durable high-water is
+    // still `hw_seed`, and retention advancement is refused.
+    ensure!(
+        high_water(&backend)
+            .map_err(|e| format!("withheld high-water: {e:?}"))?
+            .is_none(),
+        "the lagging high-water must be withheld (None) while async-apply debt is Hard"
+    );
+    ensure!(
+        !retention_ok(&backend),
+        "retention advancement must be refused while async-apply debt is Hard"
+    );
+    ensure!(
+        backend.with_projection(|p| ProjectionStore::recovery_backpressured(p, &shard)),
+        "recovery must report hard backpressure so replay does not trust the lagging high-water"
+    );
+
+    // Drain one command at a time. Hysteresis holds Hard (high-water withheld, retention refused) until the
+    // backlog clears below the release band; then BOTH advance in the same step and the high-water is now
+    // strictly ahead of the pre-debt seed (it advanced through the drained batch).
+    loop {
+        if level(&backend) == Some(BackpressureLevel::Hard) {
+            ensure!(
+                high_water(&backend)
+                    .map_err(|e| format!("mid-drain high-water: {e:?}"))?
+                    .is_none(),
+                "high-water must stay withheld while still Hard (deferred={})",
+                deferred(&backend)
+            );
+            ensure!(
+                !retention_ok(&backend),
+                "retention must stay refused while still Hard (deferred={})",
+                deferred(&backend)
+            );
+            ensure!(
+                deferred(&backend) > 0,
+                "backlog must remain drainable while Hard — never releases"
+            );
+            backend
+                .flush_deferred_projection()
+                .map_err(|e| format!("drain flush: {e:?}"))?;
+        } else {
+            let hw_cleared = high_water(&backend).map_err(|e| format!("cleared high-water: {e:?}"))?;
+            ensure!(
+                hw_cleared.is_some(),
+                "the high-water must advance the instant debt clears below the release band"
+            );
+            ensure!(
+                retention_ok(&backend),
+                "retention advancement must resume the instant debt clears"
+            );
+            let (seed, cleared) = (hw_seed.as_ref().unwrap(), hw_cleared.as_ref().unwrap());
+            ensure!(
+                cleared.sequence > seed.sequence,
+                "the released high-water must be strictly ahead of the withheld seed (advanced through the drained batch); seed={:?} cleared={:?}",
+                seed,
+                cleared
+            );
+            break;
+        }
+    }
+
+    Ok(vec![
+        "high-water + retention withholding (real server-wired composition): a real deferred backlog over budget withholds the lagging durable high-water (None) and refuses retention advancement while Hard; both advance exactly once the drain clears debt below the release band, with the high-water strictly ahead of the withheld value".into(),
+    ])
+}
+
 /// **AC-TXN-5A** (TP-003 §3.10 row 211, `objectlog/hybrid-async`): the success barrier is manifest commit
 /// PLUS a completed synchronous memory apply — a memory-apply failure must not return success even though
 /// the manifest commit is durable; the deferred SQLite checkpoint applies a whole ordered batch exactly
@@ -2037,54 +2270,15 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
         txn3.len()
     ));
 
-    // --- (d) backpressure fail-closed: once async apply debt trips Hard backpressure, new mutations are
-    // rejected retryably and the lagging high-water is withheld until the backlog drains below budget. ---
-    {
-        let thresholds =
-            HybridAsyncThresholds::new(100, 1_000_000, 100, 60_000, 3).expect("valid thresholds");
-        let mut monitor = HybridAsyncMonitor::new(thresholds);
-        let hw = CommandPosition::new(shard.clone(), 0, 41);
-        monitor.observe(
-            HybridAsyncDebt {
-                apply_lag_commands: 10,
-                ..Default::default()
-            },
-            0,
-        );
-        ensure!(
-            monitor.admit_mutation().is_ok(),
-            "clear debt must admit mutations"
-        );
-        monitor.observe(
-            HybridAsyncDebt {
-                apply_lag_commands: 100,
-                ..Default::default()
-            },
-            1,
-        );
-        ensure!(
-            matches!(monitor.admit_mutation(), Err(EngineError::Unavailable)),
-            "debt over the hard budget must reject new admission with a retryable error"
-        );
-        ensure!(
-            monitor.recovery_high_water_safe(Some(hw)).is_none(),
-            "the lagging high-water must not be advertised while debt is over budget"
-        );
-    }
-    asserts.push(
-        "backpressure fail-closed (component-level): async apply debt over the hard budget rejects new mutation admission (Unavailable) and withholds the lagging high-water".into(),
-    );
-    // Honest server-wiring caveat: the assertion above proves the TD-004 admission/high-water/retention gate
-    // ONLY against the standalone `HybridAsyncMonitor` component. pqueue-server opens `HybridProjectionStore`
-    // WITHOUT threading a monitor/thresholds into the composed write path — `open_objectlog_hybrid_backend`
-    // constructs no monitor, and the `hybrid-async` arm merely LOGS the resolved thresholds (lib.rs:1455).
-    // No `admit_mutation` call gates a real push/claim, and no observed debt withholds `recovery_high_water`
-    // on the server pipeline. So TD-004:361's "hard debt fails mutating admission / high-water / retention"
-    // is NOT proven end-to-end on the server; it is a tracked follow-up (wire monitor+thresholds into the
-    // backend write path).
-    asserts.push(
-        "GAP (server not wired): the TD-004 hard-debt admission/high-water/retention gate is proven only against the standalone HybridAsyncMonitor; pqueue-server opens HybridProjectionStore without wiring the monitor/thresholds into the write path (lib.rs merely logs them), so debt does not yet gate real admission — tracked follow-up".into(),
-    );
+    // --- (d) backpressure fail-closed on the REAL server-wired composition (TD-004:361, prior GAP now
+    // CLOSED): the `hybrid-async` arm of `pqueue-server` now arms the `HybridAsyncMonitor` inside the
+    // `HybridProjectionStore` write path (`with_async_monitor`), so real deferred-checkpoint debt gates real
+    // mutating admission (`admit_mutation`) and withholds the lagging `recovery_high_water` + retention. Both
+    // facets are proven end-to-end on the composition `start()` builds, driven by genuine apply-lag rather
+    // than a standalone-monitor poke. See `ac_txn_5a_hard_debt_fails_mutating_admission` and
+    // `ac_txn_5a_debt_withholds_high_water_and_retention` (also run standalone). ---
+    asserts.extend(ac_txn_5a_hard_debt_admission_scenario().await?);
+    asserts.extend(ac_txn_5a_high_water_withhold_scenario().await?);
 
     Ok(asserts)
 }
@@ -2095,6 +2289,32 @@ async fn ac_txn_5a_hybrid_async_success_barrier() {
     assert!(
         outcome.is_ok(),
         "AC-TXN-5A hybrid-async success barrier failed: {:?}",
+        outcome.err()
+    );
+}
+
+/// AC-TXN-5A acceptance test 2 (bead pqueue-c21635b9): on the REAL server-wired hybrid-async composition,
+/// real async-apply debt over the hard budget fails a new mutating push CLOSED with the typed backpressure
+/// error and leaves no durable/projected effect.
+#[tokio::test]
+async fn ac_txn_5a_hard_debt_fails_mutating_admission() {
+    let outcome = ac_txn_5a_hard_debt_admission_scenario().await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-5A hard-debt admission gate failed: {:?}",
+        outcome.err()
+    );
+}
+
+/// AC-TXN-5A acceptance test 3 (bead pqueue-c21635b9): on the REAL server-wired hybrid-async composition,
+/// real debt over budget withholds the lagging recovery high-water and retention advancement until the
+/// backlog drains below the release band, at which point both advance.
+#[tokio::test]
+async fn ac_txn_5a_debt_withholds_high_water_and_retention() {
+    let outcome = ac_txn_5a_high_water_withhold_scenario().await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-5A high-water/retention withholding failed: {:?}",
         outcome.err()
     );
 }

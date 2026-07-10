@@ -514,6 +514,17 @@ pub trait ProjectionStore: Send {
         Ok(false)
     }
 
+    /// Admission gate consulted by the composition BEFORE a new mutating command is committed to the durable
+    /// log (TD-004 "Hard debt threshold"). A projection under HARD async-apply backpressure — its deferred
+    /// durable-checkpoint backlog over budget — fails new mutating admission CLOSED here with a typed
+    /// retryable error ([`EngineError::Unavailable`]) or a `Storage` poison error, so no further command is
+    /// enqueued/sealed/acked while the backlog is at risk of an SLO violation. Called on the pre-commit push
+    /// path with the unit-of-work lock held, so a rejection leaves NO durable effect. Default: always admit
+    /// — only the `objectlog/hybrid-async` projection (with an armed monitor) gates.
+    fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
+        Ok(())
+    }
+
     /// Drain any deferred durable projection work. Default is a no-op for synchronous projections.
     fn flush_deferred(&mut self) -> EngineResult<()> {
         Ok(())
@@ -2188,6 +2199,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             let mut g = self.inner.lock().expect("poisoned");
+            // TD-004 hard-debt admission gate: fail a new mutating push CLOSED (typed backpressure) BEFORE it
+            // is enqueued/sealed, so async-apply debt over budget adds no durable effect. No-op unless the
+            // projection is a hard-backpressured `objectlog/hybrid-async` store.
+            g.projection.admit_mutation(shard)?;
             g.projection.index_validate_push(shard, &push_items)?;
             if g.projection.pause_blocks_intake(shard)? {
                 return Err(EngineError::Paused { drain_intake: true });
@@ -2247,6 +2262,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(now, def.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
+            // TD-004 hard-debt admission gate (same as `push`): reject a new mutating admission CLOSED under
+            // Hard async-apply backpressure BEFORE force-sealing / committing, so no durable effect and no
+            // idempotency replay record is written for a rejected push.
+            g.projection.admit_mutation(shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;

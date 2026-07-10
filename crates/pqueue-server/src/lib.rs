@@ -1437,6 +1437,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 node_id,
                 deferred_flush_chunk,
                 false,
+                None,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
@@ -1474,6 +1475,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 node_id,
                 deferred_flush_chunk,
                 true,
+                None,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
@@ -1499,8 +1501,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // The `objectlog/hybrid-async` profile runs the same object-log + hybrid (hot-memory serving,
             // durable SQLite checkpoint) substrate as `objectlog/hybrid`; the distinction is the profile's
             // async-apply debt/backpressure/poison threshold config, validated fail-closed at config time
-            // (see `Config::hybrid_async` / `HybridAsyncThresholds`). Log the resolved thresholds so the
-            // operator can confirm the async debt bounds the queue admits before backpressure/poison.
+            // (see `Config::hybrid_async` / `HybridAsyncThresholds`). Log the resolved thresholds, then WIRE
+            // them into the composed write path: the `HybridAsyncMonitor` armed inside the hybrid store
+            // observes the real deferred-checkpoint backlog on every live apply / flush, so `admit_mutation`
+            // gates real mutating pushes closed under Hard debt and `recovery_high_water` withholds the
+            // lagging high-water until the backlog drains (TD-004:361).
             eprintln!(
                 "[objectlog/hybrid-async] async-apply thresholds: lag_max_commands={} debt_max_bytes={} \
                  queue_depth_max={} oldest_unapplied_max_ms={} poison_retry_threshold={}",
@@ -1518,6 +1523,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 node_id,
                 deferred_flush_chunk,
                 false,
+                Some(hybrid_async),
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
@@ -1644,16 +1650,25 @@ fn open_objectlog_hybrid_backend(
     node_id: u8,
     deferred_flush_chunk: usize,
     strict: bool,
+    async_monitor: Option<HybridAsyncThresholds>,
 ) -> EngineResult<Arc<ObjectLogHybridBackend>> {
     let p = path
         .to_str()
         .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+    let mut projection = HybridProjectionStore::open(p)?
+        .with_deferred_flush_chunk(deferred_flush_chunk)
+        .with_strict_apply(strict);
+    // `objectlog/hybrid-async` ONLY: arm the TD-004 debt/backpressure/poison monitor with the operator's
+    // configured thresholds so observed async-apply debt gates real mutating admission (`admit_mutation`) and
+    // withholds the lagging recovery high-water (`recovery_high_water`). `objectlog/hybrid` and
+    // `objectlog/hybrid-strict` pass `None` and are behaviorally unchanged (no monitor, no gating).
+    if let Some(thresholds) = async_monitor {
+        projection = projection.with_async_monitor(thresholds);
+    }
     Ok(Arc::new(
         ComposedBackend::new(
             ObjectLog::open_group_commit(root, segment_config)?,
-            HybridProjectionStore::open(p)?
-                .with_deferred_flush_chunk(deferred_flush_chunk)
-                .with_strict_apply(strict),
+            projection,
             InProcessControlPlane::new(),
         )
         .with_group_commit(true)
