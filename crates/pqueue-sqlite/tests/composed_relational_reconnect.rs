@@ -9,8 +9,8 @@
 use pqueue_conformance::{claim_req, qdef, shard, ts};
 use pqueue_core::{ItemId, PriorityValue};
 use pqueue_engine::{
-    ClaimPort, CommandPosition, ControlPlaneStore, LogStore, ProjectionRead, ProjectionStore,
-    PushPort, PushSpec,
+    ClaimPort, CommandPosition, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
+    LogStore, ProjectionRead, ProjectionStore, PushPort, PushSpec,
 };
 use pqueue_sqlite::{SqliteRelational, composed_sqlite_relational};
 use std::cell::Cell;
@@ -125,6 +125,68 @@ fn composed_relational_recovery_seeds_counters() {
         ItemId::mint(0, 0, 2),
         "item-id counters must resume past the durable projection snapshot"
     );
+}
+
+/// Terminal-item reaping deletes durable `pqueue_items` rows (the mint-counter authority for this
+/// DB-authoritative backend), so recovery must restore the id-mint floor from the durable
+/// `pqueue_id_high_water` high-water, NOT only from surviving rows — otherwise reaping ALL rows and reopening
+/// on the SAME epoch re-mints a reaped id (ADR-009 id-uniqueness). Regression guard for the unified relational
+/// family (bead pqueue-41bf00d7, codex review), the analogue of the hybrid-async guard.
+#[test]
+fn composed_relational_reap_all_does_not_resurrect_ids() {
+    let path = unique_path("reap-no-resurrect");
+    let _ = std::fs::remove_file(&path);
+
+    let reaped_ids: Vec<ItemId> = {
+        let backend =
+            composed_sqlite_relational(&path).expect("open composed sqlite-relational db");
+        block_on(backend.create_queue(qdef())).unwrap();
+        let mut ids = Vec::new();
+        for p in [10i64, 20, 30] {
+            ids.extend(block_on(backend.push(&shard(), vec![push(p)], ts(0), None)).unwrap());
+        }
+        // Claim + finalize all three Complete so they become terminal.
+        let claimed = block_on(backend.claim(claim_req(10, 500, 1))).unwrap();
+        assert_eq!(claimed.items.len(), 3, "claim must lease all 3 items");
+        let outcomes = claimed
+            .items
+            .iter()
+            .map(|it| FinalizeOutcome::new(it.item_id, FinalizeKind::Complete))
+            .collect::<Vec<_>>();
+        block_on(backend.finalize(&shard(), outcomes, ts(2), None)).unwrap();
+        // Reap ALL terminal rows (retention elapsed; opted-out of emission so retention alone reaps).
+        let reaped = backend
+            .reap_terminal_items(&shard(), ts(10), 1, false)
+            .unwrap();
+        assert_eq!(reaped, 3, "all 3 terminal rows must reap");
+        assert_eq!(
+            block_on(backend.metrics(&shard())).unwrap().complete,
+            0,
+            "no terminal row survives the full reap"
+        );
+        ids
+    };
+    let max_reaped = reaped_ids
+        .iter()
+        .max_by_key(|id| (id.epoch(), id.counter()))
+        .copied()
+        .expect("3 ids");
+
+    // Reopen on the SAME epoch (no re-acquire) and push. The new id MUST be strictly past every reaped id —
+    // the durable mint-counter floor survived the reap of the rows that carried it (no remint/resurrection).
+    let reopened = composed_sqlite_relational(&path).expect("reopen composed sqlite-relational db");
+    let new_ids = block_on(reopened.push(&shard(), vec![push(40)], ts(3), None)).unwrap();
+    let new_id = new_ids[0];
+    assert!(
+        (new_id.epoch(), new_id.counter()) > (max_reaped.epoch(), max_reaped.counter()),
+        "post-reopen mint must be strictly past the greatest reaped id (no resurrection): new={new_id:?} max_reaped={max_reaped:?}"
+    );
+    for r in &reaped_ids {
+        assert_ne!(
+            new_id, *r,
+            "post-reopen mint reused a reaped id (resurrection)"
+        );
+    }
 }
 
 #[tokio::test]

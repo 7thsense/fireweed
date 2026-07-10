@@ -153,11 +153,12 @@ use pqueue_conformance::fault::{
     ac_txn_3_commit_transition_request_id, ac_txn_3_mid_pipeline_request_id_bearing,
     ac_txn_3_unknown_outcome_replay, ac_txn_6_parity, durable_command_count, write_evidence,
 };
-use pqueue_core::{ClientItemKey, RequestId};
+use pqueue_core::{ClientItemKey, ItemId, RequestId};
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, CommandPosition, ComposeFaultHook, ComposeFaultPoint,
-    ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane, LogStore,
-    ProjectionRead, ProjectionSnapshot, ProjectionStore, PushCommand, PushPort, QueueCommand,
+    ComposedBackend, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
+    InProcessControlPlane, LogStore, ProjectionRead, ProjectionSnapshot, ProjectionStore,
+    PushCommand, PushPort, QueueCommand,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{
@@ -2269,8 +2270,306 @@ async fn ac_txn_5a_high_water_withhold_scenario() -> AcOutcome {
 
     Ok(vec![
         "high-water withholding (real server-wired composition): a real deferred backlog over budget withholds the lagging durable high-water (None, observed on recovery_high_water) and recovery reports hard backpressure while Hard; the high-water advances strictly ahead of the withheld seed exactly once the drain clears debt below the release band".into(),
-        "retention gate wired (real path, effect not yet exercisable): the retention gate the real reap path (reap_terminal_items_locked → retention_may_advance) consults is CLOSED under Hard debt and reopens once debt clears".into(),
-        "GAP (retention advancement not exercised end-to-end): objectlog/hybrid-async implements no retention-ADVANCEMENT path to gate — the hybrid store does not override reap_terminal_items (trait-default no-op) and object-log segment expiry is unimplemented — so while the TD-004 retention gate is wired into the real reap path, its downstream withholding effect cannot be observed/asserted end-to-end on this backend; tracked follow-up (implement + prove hybrid-async retention/segment-expiry under debt)".into(),
+        "retention gate wired (real path): the retention gate the real reap path (reap_terminal_items_locked → retention_may_advance) consults is CLOSED under Hard debt and reopens once debt clears (its downstream segment-trim effect is proven end-to-end in ac_txn_5a_retention_advancement_scenario)".into(),
+    ])
+}
+
+/// **AC-TXN-5A retention advancement** on the REAL server-wired hybrid-async composition (TD-004 "Retention
+/// advancement / backpressure"). Proves terminal-item retention advancement — reclaiming durable space for
+/// terminal (Complete/Failed) items whose records are past retention, from the checkpointed SQLite image — is
+/// WITHHELD while async-apply debt is Hard and ADVANCES once debt drains below the release band. Asserted on
+/// DURABLE state (`durable_resident_terminal_count`, the terminal-item count in the durable SQLite checkpoint
+/// image), plus a reopen that proves the reclaim is durable + recovery-safe.
+async fn ac_txn_5a_retention_advancement_scenario() -> AcOutcome {
+    let shard = pqueue_conformance::shard();
+    let base = base_dir("hybrid-async-retention-advance");
+    // Hard budget = 6; release band strictly below 50% (< 3). flush_chunk = 1 so the drain steps the backlog
+    // down one command at a time and the Hard→Clear release lands on an exact backlog value.
+    let mk_thresholds =
+        || HybridAsyncThresholds::new(6, 1_000_000, 1_000_000, 3_600_000, 3).expect("thresholds");
+    let run_root = base.join("run");
+    let backend = objectlog_hybrid_async_composed(&run_root, mk_thresholds(), 1);
+    backend
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+
+    let deferred = |b: &HybridBackend| b.with_projection(|p| p.deferred_command_count());
+    let level = |b: &HybridBackend| b.with_projection(|p| p.async_backpressure_level());
+    let gate_open = |b: &HybridBackend| b.with_projection(|p| p.async_retention_may_advance());
+    // DURABLE observable: terminal-item rows physically resident in the durable, checkpointed SQLite image
+    // for this shard (NOT the hot-memory serving count).
+    let durable_terminals =
+        |b: &HybridBackend| b.with_projection(|p| p.durable_resident_terminal_count(&shard));
+    // Drive the REAL reap tick — retention advancement is gated INSIDE it on `retention_may_advance`, exactly
+    // as production drives it. `terminal_retention_ms = 0` makes an already-terminal item immediately
+    // reclaimable at `now`.
+    let reap =
+        |b: &HybridBackend| b.reap_terminal_items(&shard, pqueue_conformance::ts(1), 0, false);
+
+    // Establish durable, CHECKPOINTED terminal items that are now reclaimable: push 3, claim+finalize them
+    // Complete (terminal), then drain fully so the terminal transitions checkpoint into the durable SQLite
+    // image. This is the durable retention that MUST later be withheld under debt.
+    for i in 0..3u64 {
+        async_push(&backend, &format!("seed-{i}"))
+            .await
+            .map_err(|e| format!("seed push {i}: {e:?}"))?;
+    }
+    while deferred(&backend) > 0 {
+        backend
+            .flush_deferred_projection()
+            .map_err(|e| format!("seed push flush: {e:?}"))?;
+    }
+    let claimed = backend
+        .claim(pqueue_conformance::claim_req(10, 5_000, 1))
+        .await
+        .map_err(|e| format!("claim: {e:?}"))?;
+    ensure!(
+        claimed.items.len() == 3,
+        "the claim must lease all 3 seed items; got {}",
+        claimed.items.len()
+    );
+    let outcomes = claimed
+        .items
+        .iter()
+        .map(|it| FinalizeOutcome::new(it.item_id, FinalizeKind::Complete))
+        .collect::<Vec<_>>();
+    backend
+        .finalize(&shard, outcomes, pqueue_conformance::ts(1), None)
+        .await
+        .map_err(|e| format!("finalize: {e:?}"))?;
+    while deferred(&backend) > 0 {
+        backend
+            .flush_deferred_projection()
+            .map_err(|e| format!("terminal flush: {e:?}"))?;
+    }
+    let durable_before_debt =
+        durable_terminals(&backend).map_err(|e| format!("seed durable terminals: {e:?}"))?;
+    ensure!(
+        durable_before_debt == 3,
+        "the drain must checkpoint all 3 terminal items into the durable SQLite image; got {durable_before_debt}"
+    );
+    ensure!(
+        level(&backend) != Some(BackpressureLevel::Hard) && gate_open(&backend),
+        "the store must be below backpressure with the retention gate open after the seed drain"
+    );
+
+    // Drive real debt over budget WITHOUT flushing: 6 fresh pushes → backlog == hard budget. Those are
+    // PENDING (not terminal) and uncheckpointed; the 3 durable terminal rows are untouched and reclaimable.
+    for i in 0..6u64 {
+        async_push(&backend, &format!("debt-{i}"))
+            .await
+            .map_err(|e| format!("debt push {i}: {e:?}"))?;
+    }
+    ensure!(
+        level(&backend) == Some(BackpressureLevel::Hard),
+        "6 deferred commands must trip Hard backpressure; got {:?}",
+        level(&backend)
+    );
+    ensure!(
+        !gate_open(&backend),
+        "the retention gate the real reap path consults must be CLOSED while async-apply debt is Hard"
+    );
+
+    // WITHHELD: a real reap tick while Hard reclaims NOTHING — the DURABLE terminal-item count is frozen even
+    // though all 3 terminal rows are past retention. The withholding gate has a REAL advancement path to
+    // withhold.
+    reap(&backend).map_err(|e| format!("reap while Hard: {e:?}"))?;
+    ensure!(
+        durable_terminals(&backend)
+            .map_err(|e| format!("durable terminals after Hard reap: {e:?}"))?
+            == durable_before_debt,
+        "durable terminal-item retention must NOT advance while Hard (the 3 reclaimable rows stay resident)"
+    );
+
+    // Drain one command at a time. Hysteresis holds Hard (reap stays withheld — durable count frozen) until
+    // the backlog clears below the release band; then the gate reopens.
+    loop {
+        if level(&backend) == Some(BackpressureLevel::Hard) {
+            reap(&backend).map_err(|e| format!("mid-drain reap: {e:?}"))?;
+            ensure!(
+                durable_terminals(&backend).map_err(|e| format!("mid-drain terminals: {e:?}"))?
+                    == durable_before_debt,
+                "durable terminal-item retention must stay frozen while still Hard (deferred={})",
+                deferred(&backend)
+            );
+            ensure!(
+                deferred(&backend) > 0,
+                "backlog must remain drainable while Hard — never releases"
+            );
+            backend
+                .flush_deferred_projection()
+                .map_err(|e| format!("drain flush: {e:?}"))?;
+        } else {
+            ensure!(
+                gate_open(&backend),
+                "the retention gate must reopen the instant debt clears below the release band"
+            );
+            break;
+        }
+    }
+
+    // ADVANCED: with debt cleared, the very next reap tick reclaims the durable terminal rows past retention —
+    // the DURABLE terminal-item count STRICTLY DROPS to 0. Measured immediately before/after the same reap
+    // tick so the drop is attributable to it (the drain only checkpoints; it never reaps).
+    let durable_before_reap =
+        durable_terminals(&backend).map_err(|e| format!("pre-release terminals: {e:?}"))?;
+    ensure!(
+        durable_before_reap == durable_before_debt,
+        "the drain must not have reaped anything ({durable_before_debt} → {durable_before_reap})"
+    );
+    let reaped = reap(&backend).map_err(|e| format!("reap after drain: {e:?}"))?;
+    let durable_after_reap =
+        durable_terminals(&backend).map_err(|e| format!("post-release terminals: {e:?}"))?;
+    ensure!(
+        reaped == 3 && durable_after_reap == 0,
+        "durable terminal-item retention must ADVANCE (durable rows reclaimed) once debt clears: reaped={reaped}, durable {durable_before_reap} → {durable_after_reap}"
+    );
+
+    // Durable + recovery-safe: reopen and prove the reclaim survived (the reaped terminals are gone from the
+    // durable image AND recovery does not resurrect them from the object-log tail — its replay resumes
+    // strictly after the checkpoint) while the 6 live pending items are fully recovered.
+    let pending_before = backend
+        .metrics(&shard)
+        .await
+        .map_err(|e| format!("metrics before reopen: {e:?}"))?
+        .pending;
+    drop(backend);
+    let reopened = objectlog_hybrid_async_composed(&run_root, mk_thresholds(), 1);
+    let durable_reopened = reopened
+        .with_projection(|p| p.durable_resident_terminal_count(&shard))
+        .map_err(|e| format!("durable terminals after reopen: {e:?}"))?;
+    let pending_reopened = reopened
+        .metrics(&shard)
+        .await
+        .map_err(|e| format!("metrics after reopen: {e:?}"))?
+        .pending;
+    ensure!(
+        durable_reopened == 0,
+        "the reclaimed terminal rows must stay reaped across restart (recovery must not resurrect them); got {durable_reopened}"
+    );
+    ensure!(
+        pending_reopened == pending_before && pending_before == 6,
+        "recovery must rebuild the live serving image unharmed by the reap: pending {pending_before} → {pending_reopened} (expected 6)"
+    );
+
+    Ok(vec![
+        "retention advancement (real server-wired composition, DURABLE state): a real deferred backlog over the hard budget WITHHOLDS terminal-item retention — the durable terminal-item count in the checkpointed SQLite image is frozen while debt is Hard (3 past-retention rows NOT reclaimed) — and the very next reap tick after the drain clears debt below the release band reclaims them (durable count 3 → 0), reclaiming durable space for terminal records no longer needed".into(),
+        "retention advancement is durable + recovery-safe: the reap deletes only rows the durable checkpoint image already shows terminal, so a reopen keeps them reaped (0 resurrected from the object-log tail, which replays strictly after the checkpoint) while the 6 live pending items recover intact".into(),
+        "GAP (object-log SEGMENT-object reclamation deferred): retention advancement here reclaims durable TERMINAL-ITEM rows from the checkpointed SQLite image (the withholding gate now has a real durable path to withhold). Reclaiming the underlying object-log SEGMENT objects is NOT yet done: recovery rebuilds the push/commit request-id idempotency maps by folding the object log FROM GENESIS (ComposedBackend::run_recovery), so deleting a segment object breaks that fold and — even with a retention-floor read-clamp — would drop request-ids still within request_id_retention_ms, regressing the proven AC-TXN-3 unknown-outcome-replay-across-restart guarantee. Safe segment-object expiry needs a bounded-recovery redesign (a durable retention floor honored by the idempotency rebuild, with the trim horizon respecting request-id retention); tracked follow-up".into(),
+    ])
+}
+
+/// **AC-TXN-5A retention advancement is id-safe** (bead pqueue-41bf00d7, codex review): the terminal-item
+/// reap DELETES durable rows, so mint-counter recovery must NOT depend on surviving rows or a reopen could
+/// re-mint a reaped id (ADR-009 id-uniqueness). On the REAL composed hybrid-async backend, reap ALL terminal
+/// items (debt clear so the gate allows it), reopen WITHOUT an epoch change, push again, and assert the new
+/// id is strictly greater than every reaped id — no resurrection.
+async fn ac_txn_5a_retention_no_id_resurrection_scenario() -> AcOutcome {
+    let shard = pqueue_conformance::shard();
+    let base = base_dir("hybrid-async-retention-no-resurrection");
+    // A high hard budget so the handful of pushes below NEVER trip backpressure — the retention gate stays
+    // open and the reap is allowed. flush_chunk = 1 keeps the drain fine-grained.
+    let mk_thresholds = || {
+        HybridAsyncThresholds::new(1_000, 1_000_000, 1_000_000, 3_600_000, 3).expect("thresholds")
+    };
+    let run_root = base.join("run");
+    let backend = objectlog_hybrid_async_composed(&run_root, mk_thresholds(), 1);
+    backend
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("create_queue: {e:?}"))?;
+
+    let deferred = |b: &HybridBackend| b.with_projection(|p| p.deferred_command_count());
+    let durable_terminals =
+        |b: &HybridBackend| b.with_projection(|p| p.durable_resident_terminal_count(&shard));
+
+    // Push 4, claim them all, finalize Complete, and drain so every terminal transition checkpoints into the
+    // durable SQLite image. The claimed ids ARE the ids the reap will delete.
+    for i in 0..4u64 {
+        async_push(&backend, &format!("res-{i}"))
+            .await
+            .map_err(|e| format!("push {i}: {e:?}"))?;
+    }
+    while deferred(&backend) > 0 {
+        backend
+            .flush_deferred_projection()
+            .map_err(|e| format!("push flush: {e:?}"))?;
+    }
+    let claimed = backend
+        .claim(pqueue_conformance::claim_req(10, 5_000, 1))
+        .await
+        .map_err(|e| format!("claim: {e:?}"))?;
+    ensure!(
+        claimed.items.len() == 4,
+        "claim must lease all 4 items; got {}",
+        claimed.items.len()
+    );
+    let reaped_ids: Vec<ItemId> = claimed.items.iter().map(|it| it.item_id).collect();
+    let max_reaped = reaped_ids
+        .iter()
+        .max_by_key(|id| (id.epoch(), id.counter()))
+        .copied()
+        .expect("4 ids");
+    let outcomes = reaped_ids
+        .iter()
+        .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
+        .collect::<Vec<_>>();
+    backend
+        .finalize(&shard, outcomes, pqueue_conformance::ts(1), None)
+        .await
+        .map_err(|e| format!("finalize: {e:?}"))?;
+    while deferred(&backend) > 0 {
+        backend
+            .flush_deferred_projection()
+            .map_err(|e| format!("terminal flush: {e:?}"))?;
+    }
+    ensure!(
+        durable_terminals(&backend).map_err(|e| format!("durable terminals: {e:?}"))? == 4,
+        "all 4 terminal items must be checkpointed durable before the reap"
+    );
+
+    // Reap ALL terminal items — the durable rows that carried the mint counter are now gone.
+    let reaped = backend
+        .reap_terminal_items(&shard, pqueue_conformance::ts(1), 0, false)
+        .map_err(|e| format!("reap: {e:?}"))?;
+    ensure!(
+        reaped == 4
+            && durable_terminals(&backend).map_err(|e| format!("post-reap terminals: {e:?}"))? == 0,
+        "the reap must delete all 4 durable terminal rows; reaped={reaped}"
+    );
+
+    // Reopen on the SAME epoch (no re-acquire) and push a NEW item. Its id MUST be strictly greater than every
+    // reaped id — the mint-counter floor survived the reap of the rows that carried it (no remint / no
+    // resurrection). BEFORE the durable id-high-water fix this reminted the reaped ids (counter reset to 0).
+    drop(backend);
+    let reopened = objectlog_hybrid_async_composed(&run_root, mk_thresholds(), 1);
+    let new_ids = async_push(&reopened, "res-after-reap")
+        .await
+        .map_err(|e| format!("post-reopen push: {e:?}"))?;
+    ensure!(
+        new_ids.len() == 1,
+        "one new item pushed; got {}",
+        new_ids.len()
+    );
+    let new_id = new_ids[0];
+    ensure!(
+        (new_id.epoch(), new_id.counter()) > (max_reaped.epoch(), max_reaped.counter()),
+        "the post-reopen mint must be strictly past the greatest reaped id (no resurrection): new=(epoch {},counter {}) vs max reaped=(epoch {},counter {})",
+        new_id.epoch(),
+        new_id.counter(),
+        max_reaped.epoch(),
+        max_reaped.counter()
+    );
+    for r in &reaped_ids {
+        ensure!(
+            new_id != *r,
+            "the post-reopen mint reused a reaped id {r:?} — resurrection"
+        );
+    }
+
+    Ok(vec![
+        "retention advancement is id-safe (no resurrection): after reaping ALL 4 durable terminal rows and reopening on the SAME epoch, the next push mints strictly past every reaped id — the durable mint-counter high-water survives the reap of the rows that carried it, so no reaped id is ever re-minted (ADR-009)".into(),
     ])
 }
 
@@ -2442,6 +2741,8 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
     asserts.extend(ac_txn_5a_hard_debt_admission_scenario().await?);
     asserts.extend(ac_txn_5a_idempotent_replay_under_debt_scenario().await?);
     asserts.extend(ac_txn_5a_high_water_withhold_scenario().await?);
+    asserts.extend(ac_txn_5a_retention_advancement_scenario().await?);
+    asserts.extend(ac_txn_5a_retention_no_id_resurrection_scenario().await?);
 
     Ok(asserts)
 }
@@ -2478,6 +2779,31 @@ async fn ac_txn_5a_debt_withholds_high_water_and_retention() {
     assert!(
         outcome.is_ok(),
         "AC-TXN-5A high-water/retention withholding failed: {:?}",
+        outcome.err()
+    );
+}
+
+/// AC-TXN-5A retention advancement (bead pqueue-41bf00d7): on the REAL server-wired hybrid-async
+/// composition, object-log segment-trim retention is WITHHELD while async-apply debt is Hard and ADVANCES
+/// (durable segment objects reclaimed) once the backlog drains — asserted on durable state + a recovery reopen.
+#[tokio::test]
+async fn ac_txn_5a_retention_advances_when_debt_clears() {
+    let outcome = ac_txn_5a_retention_advancement_scenario().await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-5A retention advancement failed: {:?}",
+        outcome.err()
+    );
+}
+
+/// AC-TXN-5A retention id-safety (bead pqueue-41bf00d7, codex review): reaping ALL terminal rows then
+/// reopening on the same epoch must mint strictly past every reaped id — no counter remint / id resurrection.
+#[tokio::test]
+async fn ac_txn_5a_retention_reap_does_not_resurrect_ids() {
+    let outcome = ac_txn_5a_retention_no_id_resurrection_scenario().await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-5A retention id-resurrection guard failed: {:?}",
         outcome.err()
     );
 }

@@ -153,6 +153,18 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     assignment_epoch INTEGER NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
+-- Durable item-id high-water (ADR-009 mint-counter recovery floor). Terminal-item retention reaping now
+-- DELETES item rows (objectlog/hybrid-async), so the surviving `pqueue_items` rows are no longer the complete
+-- minted set — a reopen that seeded `QueueCounters` only from survivors could re-mint a reaped id. Every reap
+-- advances this MONOTONIC per-queue high-water past the greatest id it deletes, and recovery observes it, so a
+-- push after reaping ALL rows still mints strictly past every previously-minted id. Stored as the raw
+-- `ItemId` (it encodes `(epoch, counter)`); recovery decodes + `QueueCounters::observe`s it, which is
+-- epoch-aware and only ever advances — a stale lower-epoch floor never lowers a fresh tenure.
+CREATE TABLE IF NOT EXISTS pqueue_id_high_water (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
 CREATE TABLE IF NOT EXISTS relational_emission_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
@@ -2281,6 +2293,11 @@ fn reap_terminal_items_sql(
         &id_strs,
     )?;
     delete_typed_index_rows(tx, &t, &q, &id_strs)?;
+    // Preserve the mint-counter recovery floor BEFORE the deleted rows vanish: the surviving `pqueue_items`
+    // are no longer the complete minted set, so recovery must restore the id ceiling from here or it could
+    // re-mint a reaped id (ADR-009 id-uniqueness). Runs in the same reap transaction, so the floor advance is
+    // atomic with the deletion — a crash never leaves rows deleted without the floor recorded.
+    advance_id_high_water_sql(tx, shard, &ids)?;
     Ok(ids)
 }
 
@@ -4369,6 +4386,15 @@ impl HybridProjectionStore {
             .is_none_or(HybridAsyncMonitor::retention_may_advance)
     }
 
+    /// The count of terminal (Complete/Failed) items currently resident in the DURABLE, checkpointed SQLite
+    /// image for `shard` — a durable-state observable for the TD-004 retention proof (it DROPS when
+    /// [`ProjectionStore::reap_terminal_items`] reclaims past-retention terminal rows, and is FROZEN while
+    /// async-apply debt is Hard because the composition withholds the reap). Distinct from the hot-memory
+    /// `metrics().resident_terminal_count`, which reflects the (unreaped) in-memory serving image.
+    pub fn durable_resident_terminal_count(&self, shard: &QueueKey) -> EngineResult<u64> {
+        Ok(metrics_sql(&self.sqlite.lock().conn, shard)?.resident_terminal_count)
+    }
+
     /// Fold the store's CURRENT async-apply debt into the armed monitor (no-op when unarmed). The genuine
     /// debt signal for `objectlog/hybrid-async` is the deferred-checkpoint backlog — committed commands
     /// already durable on the object log and applied to hot memory but not yet checkpointed into the durable
@@ -4645,7 +4671,10 @@ impl SqliteRelationalBackend {
             let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
             self.counters.observe(&key, item_id);
         }
-        Ok(())
+        // Terminal-item reaping (`reap_terminal_items_sql`) deletes rows, so the scan above is no longer the
+        // complete minted set; also restore the durable mint-counter floor for every queue, or a reopen after
+        // a full reap could re-mint a reaped id (ADR-009). Inert when no reap has advanced the floor.
+        observe_all_id_high_water_sql(&g.conn, &self.counters)
     }
 }
 
@@ -4778,7 +4807,20 @@ impl SqliteProjectionStore {
             let id = ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?;
             counters.observe(shard, id);
         }
-        Ok(())
+        // Terminal-item reaping deletes rows, so the surviving set above is NOT the complete minted set;
+        // restore the durable mint-counter floor too, or a reopen after a full reap could re-mint a reaped id.
+        observe_id_high_water_sql(&g.conn, shard, counters)
+    }
+
+    /// Restore ONLY the durable item-id high-water (ADR-009 mint-counter recovery floor) into `counters`. The
+    /// `objectlog/hybrid-async` store seeds counters from its hydrated hot memory (the surviving rows), so it
+    /// calls this separately to also fold in the ceiling of any REAPED rows the survivors no longer carry.
+    pub fn observe_id_high_water(
+        &self,
+        shard: &QueueKey,
+        counters: &QueueCounters,
+    ) -> EngineResult<()> {
+        observe_id_high_water_sql(&self.lock().conn, shard, counters)
     }
 }
 
@@ -5342,6 +5384,98 @@ impl HybridAsyncMonitor {
             poisoned: self.poisoned.is_some(),
         }
     }
+}
+
+/// Advance the durable per-queue item-id high-water past the greatest of `reaped` (ADR-009 mint-counter
+/// recovery floor). MONOTONIC by `(epoch, counter)`: a reap that deletes only lower-id rows never lowers the
+/// stored floor. This is what keeps terminal-item reaping from re-minting a reaped id — the deleted rows are
+/// no longer in `pqueue_items`, but their ceiling is preserved here and restored by
+/// [`observe_id_high_water_sql`]. No-op when `reaped` is empty.
+fn advance_id_high_water_sql(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    reaped: &[ItemId],
+) -> EngineResult<()> {
+    let Some(max_reaped) = reaped
+        .iter()
+        .max_by_key(|id| (id.epoch(), id.counter()))
+        .copied()
+    else {
+        return Ok(());
+    };
+    let (t, q) = parts(shard);
+    let existing: Option<String> = st(tx
+        .query_row(
+            "SELECT item_id FROM pqueue_id_high_water WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?;
+    let keep = match existing {
+        Some(s) => {
+            let cur = ItemId::new(s).map_err(|e| EngineError::Storage(e.to_string()))?;
+            if (max_reaped.epoch(), max_reaped.counter()) > (cur.epoch(), cur.counter()) {
+                max_reaped
+            } else {
+                cur
+            }
+        }
+        None => max_reaped,
+    };
+    st(tx.execute(
+        "INSERT INTO pqueue_id_high_water(tenant,queue,item_id) VALUES(?1,?2,?3) \
+         ON CONFLICT(tenant,queue) DO UPDATE SET item_id=?3",
+        params![t, q, keep.to_string()],
+    ))?;
+    Ok(())
+}
+
+/// Restore the durable item-id high-water into `counters` (ADR-009 mint-counter recovery floor), so a reopen
+/// resumes minting past every previously-minted id even after retention reaping deleted the rows that carried
+/// them. [`QueueCounters::observe`] is epoch-aware + monotonic, so a stale lower-epoch floor is safely ignored
+/// once a fresh tenure resets the sequence. No-op if the queue never reaped.
+fn observe_id_high_water_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    counters: &QueueCounters,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let stored: Option<String> = st(conn
+        .query_row(
+            "SELECT item_id FROM pqueue_id_high_water WHERE tenant=?1 AND queue=?2",
+            params![t, q],
+            |row| row.get(0),
+        )
+        .optional())?;
+    if let Some(s) = stored {
+        let id = ItemId::new(s).map_err(|e| EngineError::Storage(e.to_string()))?;
+        counters.observe(shard, id);
+    }
+    Ok(())
+}
+
+/// Restore the durable item-id high-water for EVERY queue into `counters` — the all-queues counterpart to
+/// [`observe_id_high_water_sql`] for the monolithic [`SqliteRelationalBackend`], whose restore scans the whole
+/// `pqueue_items` table in one pass rather than per shard. Inert when no reap has ever advanced a floor.
+fn observe_all_id_high_water_sql(conn: &Connection, counters: &QueueCounters) -> EngineResult<()> {
+    let mut stmt = st(conn.prepare("SELECT tenant, queue, item_id FROM pqueue_id_high_water"))?;
+    let rows = st(stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }))?;
+    for r in rows {
+        let (t, q, id) = st(r)?;
+        let key = QueueKey::new(
+            TenantId::new(t).map_err(|e| EngineError::Storage(e.to_string()))?,
+            QueueId::new(q).map_err(|e| EngineError::Storage(e.to_string()))?,
+        );
+        let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+        counters.observe(&key, item_id);
+    }
+    Ok(())
 }
 
 /// The persisted LOGICAL high-water for `shard`: `relational_cursor.next_seq`, or `None` if the queue has
@@ -8970,7 +9104,9 @@ impl ProjectionStore for SqliteRelational {
             let id = ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?;
             counters.observe(shard, id);
         }
-        Ok(())
+        // Terminal-item reaping deletes rows, so the survivors above are not the complete minted set; also
+        // restore the durable mint-counter floor or a reopen after a full reap could re-mint a reaped id.
+        observe_id_high_water_sql(&g.conn, shard, counters)
     }
 
     fn eligible_candidates(
@@ -9502,6 +9638,45 @@ impl ProjectionStore for HybridProjectionStore {
             .is_none_or(HybridAsyncMonitor::retention_may_advance)
     }
 
+    /// `objectlog/hybrid-async` (TD-004 "Retention advancement"): reclaim terminal-item retention from the
+    /// DURABLE, checkpointed SQLite image. The composition gates this on [`Self::retention_may_advance`], so a
+    /// reap tick under Hard async-apply debt (or a poisoned worker) is WITHHELD entirely (this override is not
+    /// even reached) and only advances once the backlog drains below the release band.
+    ///
+    /// Gated to the armed-monitor profile: the non-async `objectlog/hybrid` and `objectlog/hybrid-strict`
+    /// profiles keep the trait-default no-op, so their retention behavior is UNCHANGED (no async-apply debt
+    /// gate, no reap).
+    ///
+    /// SAFE against recovery: [`reap_terminal_items_sql`] deletes only rows the DURABLE image shows terminal
+    /// — an item is terminal in the durable image only once its terminal transition has been CHECKPOINTED
+    /// (i.e. is at or below the durable SQLite high-water), so restart rehydrates neither from the SQLite
+    /// image (row deleted) nor from the object-log tail replay (which resumes STRICTLY AFTER that high-water).
+    /// Hot memory is intentionally left untouched: it is rebuilt from the durable image on restart, so
+    /// reclaiming the durable rows IS the durable retention advancement, whereas over-reaping the hot set
+    /// (which runs ahead of the checkpoint) could drop a terminal item whose finalize is still deferred and
+    /// would then be resurrected by tail replay.
+    fn reap_terminal_items(
+        &mut self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<ItemId>> {
+        if self.async_monitor.is_none() {
+            return Ok(Vec::new());
+        }
+        self.check_healthy()?;
+        ProjectionStore::reap_terminal_items(
+            &mut self.sqlite,
+            shard,
+            now,
+            terminal_retention_ms,
+            emit_change_records,
+            emission_cursor,
+        )
+    }
+
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         self.check_healthy()?;
         Ok(self.sqlite.lock().queues.values().cloned().collect())
@@ -9509,7 +9684,11 @@ impl ProjectionStore for HybridProjectionStore {
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         self.require_hydrated(shard)?;
-        self.memory.observe_item_counters(shard, counters)
+        // Seed from the hydrated hot set (the surviving durable rows) AND from the durable mint-counter floor:
+        // terminal-item retention reaping deletes rows, so hot memory alone is no longer the complete minted
+        // set — without the floor a reopen after a full reap could re-mint a reaped id (ADR-009).
+        self.memory.observe_item_counters(shard, counters)?;
+        self.sqlite.observe_id_high_water(shard, counters)
     }
 
     fn eligible_candidates(
