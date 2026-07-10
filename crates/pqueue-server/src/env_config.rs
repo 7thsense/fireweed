@@ -255,6 +255,18 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
                 "/var/lib/pqueue/pqueue-projection.db",
             )),
         },
+        // The `objectlog/hybrid-strict` profile (TD-004): same hot-memory-over-durable-SQLite substrate as
+        // `hybrid`, but the group-commit write path commits the sealed batch DURABLY to SQLite BEFORE applying
+        // it to hot memory (`apply_durable_then_memory`). Selected under its canonical name so the SQLite
+        // durable-before-visible barrier and the SQLite-commit-then-memory-fail poison cut land on the real
+        // server write pipeline.
+        "hybrid-strict" => ProjectionSpec::HybridStrict {
+            path: PathBuf::from(env_or(
+                env,
+                "PQUEUE_SQLITE_PROJECTION_PATH",
+                "/var/lib/pqueue/pqueue-projection.db",
+            )),
+        },
         // The `objectlog/hybrid-async` profile (TD-004): same hot-memory-over-durable-SQLite substrate as
         // `hybrid`, selected under its canonical name so the deployment carries the async-apply threshold
         // config (`PQUEUE_HYBRID_ASYNC_*`, already parsed into `Config::hybrid_async`).
@@ -288,7 +300,7 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
                 &log,
                 &projection,
                 &format!(
-                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid|hybrid-async|postgres"
+                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid|hybrid-strict|hybrid-async|postgres"
                 ),
             ));
         }
@@ -303,6 +315,7 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
         (LogSpec::ObjectLog { .. }, ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog { .. }, ProjectionSpec::Sqlite { .. }) => true,
         (LogSpec::ObjectLog { .. }, ProjectionSpec::Hybrid { .. }) => true,
+        (LogSpec::ObjectLog { .. }, ProjectionSpec::HybridStrict { .. }) => true,
         (LogSpec::ObjectLog { .. }, ProjectionSpec::HybridAsync { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
@@ -574,6 +587,51 @@ mod tests {
             PathBuf::from("/data/fjord")
         );
         assert_eq!(config.embedded_fjord.cluster_id, "fjord-test");
+    }
+
+    #[test]
+    fn objectlog_hybrid_strict_projection_selects_profile_and_carries_sqlite_path() {
+        // The canonical `objectlog/hybrid-strict` runtime profile (TD-004): the object-log log axis paired
+        // with the hybrid-strict projection, carrying the sqlite durable-projection path. This is the profile
+        // whose group-commit write path commits SQLite durably BEFORE hot memory.
+        let config = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "objectlog"),
+            ("PQUEUE_PROJECTION_BACKEND", "hybrid-strict"),
+            ("PQUEUE_OBJECT_LOG_ROOT", "/data/olog"),
+            ("PQUEUE_SQLITE_PROJECTION_PATH", "/data/hybrid-strict.db"),
+            ("PQUEUE_SEGMENT_TARGET_BYTES", "65536"),
+            ("PQUEUE_SEGMENT_MAX_LATENCY_MS", "9"),
+        ]))
+        .expect("valid hybrid-strict env");
+        assert_eq!(config.segment_config.target_bytes, 65_536);
+        assert_eq!(config.segment_config.max_latency_ms, 9);
+        match (config.backend.log, config.backend.projection) {
+            (LogSpec::ObjectLog { root }, ProjectionSpec::HybridStrict { path }) => {
+                assert_eq!(root, PathBuf::from("/data/olog"));
+                assert_eq!(path, PathBuf::from("/data/hybrid-strict.db"));
+            }
+            _ => panic!("expected objectlog log × hybrid-strict projection"),
+        }
+    }
+
+    #[test]
+    fn non_objectlog_hybrid_strict_pairing_is_rejected() {
+        // Only the object-log log axis pairs with hybrid-strict; any other log backend fails closed.
+        for log in ["memory", "sqlite"] {
+            let result = Config::from_env(&map(&[
+                ("PQUEUE_LOG_BACKEND", log),
+                ("PQUEUE_PROJECTION_BACKEND", "hybrid-strict"),
+            ]));
+            let Err(err) = result else {
+                panic!("{log}/hybrid-strict must not be wired");
+            };
+            assert!(
+                err.0
+                    .contains("PQUEUE_PROJECTION_BACKEND=hybrid-strict"),
+                "{}",
+                err.0
+            );
+        }
     }
 
     #[test]

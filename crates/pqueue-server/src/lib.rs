@@ -110,6 +110,12 @@ pub enum ProjectionSpec {
     Sqlite { path: PathBuf },
     /// SQLite-first durable projection image plus hot in-memory serving at `path`.
     Hybrid { path: PathBuf },
+    /// The `objectlog/hybrid-strict` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
+    /// projection image at `path` as [`Self::Hybrid`], but the group-commit write path commits the sealed
+    /// batch DURABLY to SQLite BEFORE applying it to hot memory (`apply_durable_then_memory`). A SQLite
+    /// failure returns no success and replays the object-log tail; a SQLite-commit-then-memory-apply failure
+    /// poisons the store fail-closed until restart, when memory rehydrates from the SQLite `ProjectionImage`.
+    HybridStrict { path: PathBuf },
     /// The `objectlog/hybrid-async` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
     /// projection image at `path` as [`Self::Hybrid`], selected under its canonical `hybrid-async` name so
     /// the deployment carries the async-apply debt/backpressure/poison threshold config
@@ -131,6 +137,7 @@ impl ProjectionSpec {
             ProjectionSpec::InMemory => "inmemory",
             ProjectionSpec::Sqlite { .. } => "sqlite",
             ProjectionSpec::Hybrid { .. } => "hybrid",
+            ProjectionSpec::HybridStrict { .. } => "hybrid-strict",
             ProjectionSpec::HybridAsync { .. } => "hybrid-async",
             #[cfg(feature = "postgres")]
             ProjectionSpec::Postgres { .. } => "postgres",
@@ -150,6 +157,10 @@ fn change_record_sink_profile_is_wired(log: &LogSpec, projection: &ProjectionSpe
     matches!(
         (log, projection),
         (LogSpec::ObjectLog { .. }, ProjectionSpec::Hybrid { .. })
+            | (
+                LogSpec::ObjectLog { .. },
+                ProjectionSpec::HybridStrict { .. }
+            )
             | (
                 LogSpec::ObjectLog { .. },
                 ProjectionSpec::HybridAsync { .. }
@@ -1368,7 +1379,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         && !change_record_sink_profile_is_wired(&log, &projection)
     {
         return Err(EngineError::Invalid(
-            "change record sink is only wired for objectlog/hybrid and objectlog/hybrid-async",
+            "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
         ));
     }
 
@@ -1425,6 +1436,44 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 recovery_max_tail,
                 node_id,
                 deferred_flush_chunk,
+                false,
+            )?;
+            spawn_hybrid_flusher(backend.clone(), debug_segments);
+            let fjord_task = maybe_spawn_embedded_broker(
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                &change_record_sink,
+                &queues,
+            )
+            .await?;
+            let _change_record_emitter =
+                change_record_sink::spawn_change_record_emitter_if_enabled(
+                    backend.clone(),
+                    &queues,
+                    &change_record_sink,
+                    fjord_log.clone(),
+                )?;
+            run_owned_with_fjord_task(
+                backend, node_id, clock, &listen, interval, &queues, fjord_task,
+            )
+            .await
+        }
+        (LogSpec::ObjectLog { root }, ProjectionSpec::HybridStrict { path }) => {
+            // The `objectlog/hybrid-strict` profile (TD-004): the same object-log group-commit substrate as
+            // `objectlog/hybrid`, but the projection commits every sealed batch DURABLY to SQLite BEFORE
+            // applying it to hot memory (`apply_durable_then_memory`, selected by `with_strict_apply(true)`).
+            // This puts the SQLite-durable-before-visible barrier and the SQLite-commit-then-memory-fail
+            // poison cut on the real server write pipeline: a SQLite failure returns no success and replays
+            // the object-log tail, and a poisoned store fails closed until a restart rehydrates memory from
+            // the durable SQLite `ProjectionImage`.
+            let backend = open_objectlog_hybrid_backend(
+                &root,
+                &path,
+                segment_config,
+                recovery_max_tail,
+                node_id,
+                deferred_flush_chunk,
+                true,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
@@ -1468,6 +1517,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 recovery_max_tail,
                 node_id,
                 deferred_flush_chunk,
+                false,
             )?;
             spawn_hybrid_flusher(backend.clone(), debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
@@ -1593,6 +1643,7 @@ fn open_objectlog_hybrid_backend(
     recovery_max_tail: u64,
     node_id: u8,
     deferred_flush_chunk: usize,
+    strict: bool,
 ) -> EngineResult<Arc<ObjectLogHybridBackend>> {
     let p = path
         .to_str()
@@ -1600,7 +1651,9 @@ fn open_objectlog_hybrid_backend(
     Ok(Arc::new(
         ComposedBackend::new(
             ObjectLog::open_group_commit(root, segment_config)?,
-            HybridProjectionStore::open(p)?.with_deferred_flush_chunk(deferred_flush_chunk),
+            HybridProjectionStore::open(p)?
+                .with_deferred_flush_chunk(deferred_flush_chunk)
+                .with_strict_apply(strict),
             InProcessControlPlane::new(),
         )
         .with_group_commit(true)

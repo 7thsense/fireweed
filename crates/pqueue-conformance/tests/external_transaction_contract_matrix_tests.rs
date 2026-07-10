@@ -15,7 +15,7 @@
 //! | AC-TXN-2 rejection no-effect | ✓§ (in-proc; restart n/a) | ✓§ | ✓§ | ✓§ | ✓§ | ✓§ |
 //! | AC-TXN-3 unknown-outcome replay | ✓‖ | partial¶ | n/a (unified store, no cut window) | ✓‖ | ✓‖ | partial¶ |
 //! | AC-TXN-4 objectlog crash-point matrix | — | — | — | ✓ (5 substrate + 2 composed cut points)* | — | — |
-//! | AC-TXN-5 hybrid poison + replay | — | — | — | | partial (projection cut points)† | — |
+//! | AC-TXN-5 hybrid-strict poison + replay | — | — | — | | ✓ (real hybrid-strict server write path)† | — |
 //! | AC-TXN-5A hybrid-async success barrier | — | — | — | | partial (projection cut points)† | — |
 //! | AC-TXN-6 cross-combination parity | — | ✓ (sqlite-log vs objectlog+sqlite) | | | | — |
 //! | AC-TXN-7 latency-bound invariance | — | — | — | partial (force-seal vs group-commit) | | — |
@@ -103,33 +103,34 @@
 //! the atomic create-only PUT already bracketed by the two manifest cut points.) So all 7 named cut points are
 //! genuinely struck — no remaining coverage `GAP`.
 //!
-//! `†` AC-TXN-5/5A (both `partial`; see `ac_txn_5_hybrid_strict_poison_replay_scenario` /
-//! `ac_txn_5a_hybrid_async_success_barrier_scenario` below) add the analogous seam on the PROJECTION side —
+//! `†` AC-TXN-5/5A add the analogous seam on the PROJECTION side —
 //! [`pqueue_sqlite::HybridFaultHook`] on `HybridProjectionStore` — for the instants the public seam cannot
 //! isolate: a fault strictly between the durable SQLite commit and the in-memory apply
-//! (`AfterSqliteCommitBeforeMemoryApply`), a memory-apply failure (`DuringMemoryApply`), and one strictly
-//! inside the deferred async SQLite checkpoint (`DuringAsyncSqliteApply`, now actually installed + triggered
-//! via `flush_deferred` in AC-TXN-5A). Two honest caveats keep these `partial`, not `pass`: (1) real-server
-//! path — the `AfterSqliteCommitBeforeMemoryApply` poison instant is the SQLite-first `apply`
-//! (`apply_durable_then_memory`) ordering, which NO real server pipeline runs: both the `hybrid` and
-//! `hybrid-async` runtime profiles compose `with_group_commit(true)` and apply MEMORY-FIRST via
-//! `apply_live_owned` (deferring SQLite to `flush_deferred`), and pqueue-server wires no `hybrid-strict`
-//! profile — so that cut is verified at the ProjectionStore layer only; (2) backpressure — AC-TXN-5A's
-//! fail-closed clause is proven against the standalone [`pqueue_sqlite::HybridAsyncMonitor`], but pqueue-server
-//! opens `HybridProjectionStore` WITHOUT wiring that monitor/thresholds into the composed write path (the
-//! `hybrid-async` arm merely logs the resolved thresholds), so TD-004's hard-debt admission/high-water/
-//! retention gate is NOT yet enforced end-to-end on the server (tracked follow-up). Both caveats are recorded
-//! as explicit `GAP` assertions in the evidence rows.
+//! (`AfterSqliteCommitBeforeMemoryApply`), a memory-apply failure (`DuringMemoryApply`), one strictly before
+//! the durable SQLite apply (`BeforeSqliteApply`), and one strictly inside the deferred async SQLite
+//! checkpoint (`DuringAsyncSqliteApply`, installed + triggered via `flush_deferred` in AC-TXN-5A). AC-TXN-5 is
+//! now `pass`: bead pqueue-da1965d7 WIRED the `objectlog/hybrid-strict` server profile
+//! (`PQUEUE_PROJECTION_BACKEND=hybrid-strict`, `HybridProjectionStore::with_strict_apply`), and
+//! `ac_txn_5_hybrid_strict_poison_on_real_server_path` drives all four clauses (SQLite-failure/no-success +
+//! tail replay, SQLite-commit-then-memory-fail poison fail-closed, restart rehydration from the SQLite
+//! ProjectionImage, request-id replay/conflict) through that real group-commit composed write pipeline
+//! (`apply_live_owned` → strict `apply_durable_then_memory`) — closing the prior real-server-path GAP. The
+//! `ac_txn_5_hybrid_strict_poison_replay_scenario` row remains as the direct ProjectionStore-layer companion.
+//! AC-TXN-5A stays `partial` on ONE remaining caveat — backpressure: its fail-closed clause is proven against
+//! the standalone [`pqueue_sqlite::HybridAsyncMonitor`], but pqueue-server opens `HybridProjectionStore`
+//! WITHOUT wiring that monitor/thresholds into the composed write path (the `hybrid-async` arm merely logs the
+//! resolved thresholds), so TD-004's hard-debt admission/high-water/retention gate is NOT yet enforced
+//! end-to-end on the server (tracked follow-up), recorded as an explicit `GAP` assertion in that row.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use pqueue_conformance::fault::{
     AcEvidence, AcOutcome, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
     ac_txn_3_commit_transition_request_id, ac_txn_3_mid_pipeline_request_id_bearing,
     ac_txn_3_unknown_outcome_replay, ac_txn_6_parity, durable_command_count, write_evidence,
 };
-use pqueue_core::RequestId;
+use pqueue_core::{ClientItemKey, RequestId};
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, CommandPosition, ComposeFaultHook, ComposeFaultPoint,
     ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane, LogStore,
@@ -1489,15 +1490,15 @@ async fn ac_txn_5_hybrid_strict_poison_replay_scenario() -> AcOutcome {
         "request-id semantics on the objectlog/hybrid substrate: same-body retry replays the original result; conflicting body returns request-id-conflict".into(),
     );
 
-    // Honest real-server-path caveat: the AfterSqliteCommitBeforeMemoryApply poison instant above is struck
-    // on `HybridProjectionStore::apply` (`apply_durable_then_memory`, SQLite-first). NO real server pipeline
-    // runs that ordering: both the `hybrid` and `hybrid-async` runtime profiles compose the backend with
-    // `with_group_commit(true)` and apply MEMORY-FIRST via `apply_live_owned` (deferring SQLite to
-    // `flush_deferred`), and pqueue-server wires no `hybrid-strict` profile (env_config accepts only
-    // inmemory|sqlite|hybrid|hybrid-async|postgres). So this SQLite-first poison/fail-closed instant is
-    // verified at the ProjectionStore layer, not on a real server write pipeline.
+    // Real-server-path coverage (bead pqueue-da1965d7): the AfterSqliteCommitBeforeMemoryApply poison instant
+    // above is struck on `HybridProjectionStore::apply` (`apply_durable_then_memory`, SQLite-first) — the
+    // direct ProjectionStore view. The SAME SQLite-first ordering is now WIRED as the `objectlog/hybrid-strict`
+    // server profile (`PQUEUE_PROJECTION_BACKEND=hybrid-strict`, `HybridProjectionStore::with_strict_apply`),
+    // and `ac_txn_5_hybrid_strict_poison_on_real_server_path` drives all four clauses through that real
+    // group-commit composed write pipeline (`apply_live_owned` → strict `apply_durable_then_memory`). So this
+    // cut is no longer verified at the ProjectionStore layer ONLY — the prior real-server-path GAP is closed.
     asserts.push(
-        "GAP (real-server-path caveat): AfterSqliteCommitBeforeMemoryApply is the SQLite-first `apply` ordering, verified at the ProjectionStore layer only; the real `hybrid`/`hybrid-async` server profiles apply memory-first via apply_live_owned (with_group_commit) and no `hybrid-strict` profile is wired in pqueue-server, so this exact cut is not on a real server pipeline".into(),
+        "real-server-path cut is WIRED and proven separately: the `objectlog/hybrid-strict` server profile (with_strict_apply) runs this exact SQLite-first ordering on the group-commit write path; see ac_txn_5_hybrid_strict_poison_on_real_server_path".into(),
     );
 
     Ok(asserts)
@@ -1509,6 +1510,309 @@ async fn ac_txn_5_hybrid_strict_poison_replay() {
     assert!(
         outcome.is_ok(),
         "AC-TXN-5 hybrid-strict poison/replay failed: {:?}",
+        outcome.err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC-TXN-5 on the REAL server write path (bead pqueue-da1965d7)
+// ---------------------------------------------------------------------------
+//
+// The scenario above strikes the `AfterSqliteCommitBeforeMemoryApply` cut on `HybridProjectionStore::apply`
+// DIRECTLY (bypassing `ComposedBackend`), which — until this bead — was the only place that SQLite-first
+// ordering ran. This scenario instead drives every clause through the REAL `objectlog/hybrid-strict` server
+// write pipeline: a group-commit `ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>`
+// with `with_strict_apply(true)` (the exact composition `pqueue-server` builds for
+// `PQUEUE_PROJECTION_BACKEND=hybrid-strict`). Pushes go through `push_with_request_id`, so the sealed batch
+// is applied by the composed group-commit distribute path (`apply_live_owned` → strict
+// `apply_durable_then_memory`), and the fault cuts land on that real pipeline. Assertions are on PROJECTED
+// STATE (`metrics`/`live_items`), never log-row counts, and restart is a real drop+reopen at the same root.
+
+/// An arm-able [`HybridFaultHook`]: crashes at `cut` only while `armed`, so a test can push the first command
+/// through cleanly, ARM the cut, then push the command that must strike it. Toggled through the `Arc` the test
+/// keeps after installing a clone on the store (the hook uses interior mutability behind the store's mutex).
+struct ArmableHybridHook {
+    cut: HybridFaultCutPoint,
+    armed: AtomicBool,
+}
+
+impl ArmableHybridHook {
+    fn new(cut: HybridFaultCutPoint) -> Arc<Self> {
+        Arc::new(Self {
+            cut,
+            armed: AtomicBool::new(false),
+        })
+    }
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+    }
+}
+
+impl HybridFaultHook for ArmableHybridHook {
+    fn fault_point(&self, cut: HybridFaultCutPoint) -> pqueue_engine::EngineResult<()> {
+        if self.armed.load(Ordering::SeqCst) && cut == self.cut {
+            Err(EngineError::Storage(format!(
+                "fault-injection: crash at {cut:?}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Open (or reopen) the REAL `objectlog/hybrid-strict` composed backend at `root`: the segmented
+/// group-commit object log + a `HybridProjectionStore` in STRICT mode (`with_strict_apply(true)` — SQLite
+/// durable BEFORE hot memory on the write path), recovery-on-open. `hook`, when present, is installed on the
+/// store BEFORE recover so it can strike the very first apply; a restart passes `None` for a clean replay.
+fn objectlog_hybrid_strict_composed(
+    root: &std::path::Path,
+    hook: Option<Arc<dyn HybridFaultHook>>,
+) -> HybridBackend {
+    std::fs::create_dir_all(root).ok();
+    let sqlite_path = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap())
+        .expect("open object log");
+    let hybrid = HybridProjectionStore::open(sqlite_path.to_str().unwrap())
+        .expect("open hybrid projection")
+        .with_strict_apply(true);
+    if let Some(hook) = hook {
+        hybrid.set_fault_hook(Some(hook));
+    }
+    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover()
+        .expect("recover objectlog/hybrid-strict")
+}
+
+/// Push one single-item body through the real composed write path under its own `request_id`.
+async fn strict_push(
+    backend: &HybridBackend,
+    key: &str,
+) -> Result<Vec<pqueue_core::ItemId>, EngineError> {
+    let rid = RequestId::new(format!("ac-txn-5-real-{key}")).unwrap();
+    backend
+        .push_with_request_id(
+            &pqueue_conformance::shard(),
+            rid,
+            vec![pqueue_conformance::fault::spec(key, 5)],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+}
+
+/// **AC-TXN-5 on the real server write path** (bead pqueue-da1965d7, TP-003 §3.10 row 210,
+/// `objectlog/hybrid-strict`). Drives the wired hybrid-strict composition — the composition `pqueue-server`
+/// builds for `PQUEUE_PROJECTION_BACKEND=hybrid-strict` — and proves ALL four clauses on that real pipeline:
+///
+/// 1. **SQLite failure → no success + tail replays.** A `BeforeSqliteApply` fault aborts the durable SQLite
+///    apply: the push returns no success, the store stays healthy (no poison), and because the object-log
+///    manifest entry is already durable, a restart replays the tail and the command is neither lost nor
+///    duplicated.
+/// 2. **SQLite-commit-then-memory-fail → poison fail-closed.** An `AfterSqliteCommitBeforeMemoryApply` fault
+///    poisons the store: the push returns no success, subsequent reads AND writes fail closed (serving stops).
+/// 3. **Restart → memory rehydrated from the SQLite `ProjectionImage`.** A real drop+reopen at the same root
+///    rebuilds hot memory from durable SQLite; the durably-committed-but-never-memory-applied command from
+///    clause 2 is now visible (projected state correct after reopen).
+/// 4. **Request-id replay/conflict.** A same-body retry returns the original ids; a conflicting body under
+///    the same `request_id` returns `RequestIdConflict`.
+///
+/// Every assertion is on PROJECTED STATE (`metrics.pending` / `live_items`), never log-row counts.
+async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutcome {
+    let mut asserts = Vec::new();
+    let shard = pqueue_conformance::shard();
+    let key_a = ClientItemKey::new("a").unwrap();
+    let key_b = ClientItemKey::new("b").unwrap();
+
+    // --- Clause 1: SQLite failure returns no success AND the tail replays (no lost/duplicated commands). ---
+    {
+        let base = base_dir("hybrid-strict-real-sqlite-fail");
+        let root = base.join("run");
+        let hook = ArmableHybridHook::new(HybridFaultCutPoint::BeforeSqliteApply);
+        {
+            let backend =
+                objectlog_hybrid_strict_composed(&root, Some(hook.clone() as Arc<dyn HybridFaultHook>));
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .map_err(|e| format!("create_queue: {e:?}"))?;
+            // A commits cleanly on the real strict write path.
+            strict_push(&backend, "a")
+                .await
+                .map_err(|e| format!("push A: {e:?}"))?;
+            let m = backend
+                .metrics(&shard)
+                .await
+                .map_err(|e| format!("metrics after A: {e:?}"))?;
+            ensure!(m.pending == 1, "A must be visible (pending=1); got {m:?}");
+            // Arm the SQLite-apply fault and push B: the object-log manifest entry commits durably, but the
+            // strict SQLite apply aborts, so the push returns no success.
+            hook.arm();
+            let b = strict_push(&backend, "b").await;
+            ensure!(
+                b.is_err(),
+                "a SQLite-apply failure must return no success on the real write path; got {b:?}"
+            );
+            // The store is NOT poisoned by a pre-commit SQLite failure: it keeps serving, and B is simply not
+            // yet applied (memory == SQLite == {A}).
+            hook.disarm();
+            let m = backend
+                .metrics(&shard)
+                .await
+                .map_err(|e| format!("metrics after failed B: {e:?}"))?;
+            ensure!(
+                m.pending == 1,
+                "a SQLite-apply failure must leave the store healthy with B unapplied (pending=1); got {m:?}"
+            );
+        }
+        // Restart: the object-log tail beyond the SQLite high-water replays B exactly once.
+        {
+            let backend = objectlog_hybrid_strict_composed(&root, None);
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .map_err(|e| format!("create_queue after restart: {e:?}"))?;
+            let m = backend
+                .metrics(&shard)
+                .await
+                .map_err(|e| format!("metrics after restart: {e:?}"))?;
+            ensure!(
+                m.pending == 2,
+                "restart must replay the committed tail (B) exactly once (pending=2, no lost/duplicated); got {m:?}"
+            );
+            let live = backend
+                .live_items(&shard, &[key_a.clone(), key_b.clone()])
+                .await
+                .map_err(|e| format!("live_items after restart: {e:?}"))?;
+            ensure!(
+                live.len() == 2 && live[0].is_some() && live[1].is_some(),
+                "both A and B must be live after tail-replay recovery; got {live:?}"
+            );
+        }
+    }
+    asserts.push(
+        "real hybrid-strict write path: a SQLite-apply failure returns no success and leaves the store healthy; a restart replays the durable object-log tail so the command is neither lost nor duplicated (projected pending=2)".into(),
+    );
+
+    // --- Clause 2 + 3: SQLite-commit-then-memory-fail poisons fail-closed; restart rehydrates from SQLite. ---
+    {
+        let base = base_dir("hybrid-strict-real-poison");
+        let root = base.join("run");
+        let hook = ArmableHybridHook::new(HybridFaultCutPoint::AfterSqliteCommitBeforeMemoryApply);
+        {
+            let backend =
+                objectlog_hybrid_strict_composed(&root, Some(hook.clone() as Arc<dyn HybridFaultHook>));
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .map_err(|e| format!("create_queue: {e:?}"))?;
+            strict_push(&backend, "a")
+                .await
+                .map_err(|e| format!("push A: {e:?}"))?;
+            // Arm the post-SQLite-commit / pre-memory-apply cut and push B: SQLite commits B durably, then the
+            // memory apply faults, so the store poisons and the push returns no success.
+            hook.arm();
+            let b = strict_push(&backend, "b").await;
+            ensure!(
+                b.is_err(),
+                "a SQLite-commit-then-memory-fail must return no success; got {b:?}"
+            );
+            // Serving stops: reads fail closed.
+            let m = backend.metrics(&shard).await;
+            ensure!(
+                m.is_err(),
+                "a poisoned store must fail reads closed (serving stops); got {m:?}"
+            );
+            // And writes fail closed: the high-water/serving does not advance past the poison.
+            hook.disarm();
+            let c = strict_push(&backend, "c").await;
+            ensure!(
+                c.is_err(),
+                "a poisoned store must fail new writes closed until restart; got {c:?}"
+            );
+        }
+        // Restart: memory rehydrates from the durable SQLite ProjectionImage — B's durably-committed effect
+        // (never applied to the pre-restart memory image) is now visible.
+        {
+            let backend = objectlog_hybrid_strict_composed(&root, None);
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .map_err(|e| format!("create_queue after restart: {e:?}"))?;
+            let m = backend
+                .metrics(&shard)
+                .await
+                .map_err(|e| format!("metrics after restart: {e:?}"))?;
+            ensure!(
+                m.pending == 2,
+                "restart must rehydrate memory from the SQLite ProjectionImage including B's durable commit (pending=2); got {m:?}"
+            );
+            let live = backend
+                .live_items(&shard, &[key_a.clone(), key_b.clone()])
+                .await
+                .map_err(|e| format!("live_items after restart: {e:?}"))?;
+            ensure!(
+                live.len() == 2 && live[0].is_some() && live[1].is_some(),
+                "both A and the poisoned-then-recovered B must be live after restart; got {live:?}"
+            );
+        }
+    }
+    asserts.push(
+        "real hybrid-strict write path: a SQLite-commit-then-memory-apply failure poisons the store fail-closed (reads AND writes error, serving stops); a restart rehydrates memory from the durable SQLite ProjectionImage so the poisoned command's durable effect is recovered (projected pending=2)".into(),
+    );
+
+    // --- Clause 4: request-id replay + conflict on the real hybrid-strict composed backend. ---
+    {
+        let base = base_dir("hybrid-strict-real-rid");
+        let backend = objectlog_hybrid_strict_composed(&base.join("run"), None);
+        backend
+            .create_queue(pqueue_conformance::qdef())
+            .await
+            .map_err(|e| format!("create_queue: {e:?}"))?;
+        let rid = RequestId::new("ac-txn-5-real-rid").unwrap();
+        let body = vec![pqueue_conformance::fault::spec("rid-item", 1)];
+        let first = backend
+            .push_with_request_id(&shard, rid.clone(), body.clone(), pqueue_conformance::ts(1), None)
+            .await
+            .map_err(|e| format!("first request-id push: {e:?}"))?;
+        let replay = backend
+            .push_with_request_id(&shard, rid.clone(), body, pqueue_conformance::ts(2), None)
+            .await
+            .map_err(|e| format!("same-body retry: {e:?}"))?;
+        ensure!(
+            replay == first,
+            "same-body retry under the same request_id must replay the original result"
+        );
+        let conflict = backend
+            .push_with_request_id(
+                &shard,
+                rid,
+                vec![pqueue_conformance::fault::spec("rid-item-different", 2)],
+                pqueue_conformance::ts(3),
+                None,
+            )
+            .await;
+        ensure!(
+            matches!(conflict, Err(EngineError::RequestIdConflict)),
+            "a conflicting body under the same request_id must return request-id-conflict; got {conflict:?}"
+        );
+    }
+    asserts.push(
+        "real hybrid-strict write path: same-body retry under a request_id replays the original result; a conflicting body returns request-id-conflict".into(),
+    );
+
+    Ok(asserts)
+}
+
+#[tokio::test]
+async fn ac_txn_5_hybrid_strict_poison_on_real_server_path() {
+    let outcome = ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario().await;
+    assert!(
+        outcome.is_ok(),
+        "AC-TXN-5 hybrid-strict on the real server write path failed: {:?}",
         outcome.err()
     );
 }
@@ -1876,12 +2180,22 @@ async fn ac_txn_contract_matrix() {
         ac_txn_4_crash_point_matrix().await,
     );
 
-    // --- AC-TXN-5 hybrid-strict poison + restart hydration + request-id semantics (see module doc). ---
+    // --- AC-TXN-5 hybrid-strict poison + restart hydration + request-id semantics (see module doc). The
+    // real-server-path row (bead pqueue-da1965d7) drives all four clauses through the WIRED
+    // `objectlog/hybrid-strict` composed backend (`with_strict_apply(true)`), closing the prior
+    // real-server-path GAP; the ProjectionStore-layer row remains as the direct-apply companion view. ---
     record(
         &mut records,
         &mut failures,
         "AC-TXN-5",
-        "object_log_sqlite(hybrid, ProjectionStore-layer)",
+        "object_log_sqlite(hybrid-strict, real server write path)",
+        ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario().await,
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-5",
+        "object_log_sqlite(hybrid-strict, ProjectionStore-layer)",
         ac_txn_5_hybrid_strict_poison_replay_scenario().await,
     );
 

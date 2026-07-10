@@ -4227,6 +4227,12 @@ pub const DEFAULT_DEFERRED_FLUSH_CHUNK: usize = 250;
 // (AC-TXN-4) for the projection-apply side of the hybrid substrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HybridFaultCutPoint {
+    /// Struck at the top of the SQLite-first `apply_durable_then_memory` ordering, BEFORE the durable SQLite
+    /// checkpoint commits (models "the SQLite apply itself failed"). A fault here aborts the whole apply with
+    /// NO durable projection effect, NO memory effect, and — crucially — NO poison: the object-log manifest
+    /// entry is already durable, so recovery replays the tail beyond the prior SQLite high-water and the
+    /// command is neither lost nor duplicated (TD-004 §"hybrid-strict apply path", "SQLite failure" row).
+    BeforeSqliteApply,
     /// The SQLite checkpoint for this batch committed durably, but the in-memory apply that makes it
     /// client-visible has not run yet (the "hybrid-strict" `apply` ordering: SQLite, then memory).
     AfterSqliteCommitBeforeMemoryApply,
@@ -4255,6 +4261,12 @@ pub struct HybridProjectionStore {
     deferred: VecDeque<(CommandPosition, CommandEnvelope)>,
     deferred_commands: usize,
     deferred_flush_chunk: usize,
+    /// `objectlog/hybrid-strict` (TD-004): when set, the group-commit write path (`apply_live`,
+    /// `apply_live_owned`, `apply_recovery`) commits the sealed batch DURABLY to SQLite BEFORE applying it to
+    /// hot memory — the `apply_durable_then_memory` ordering — instead of the default `objectlog/hybrid`
+    /// memory-first-then-deferred-checkpoint ordering. This puts the `AfterSqliteCommitBeforeMemoryApply`
+    /// poison cut and the durable-before-visible barrier on the real server write pipeline.
+    strict: bool,
     poisoned: Option<String>,
     /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-5/5A). `None` in every production path.
     fault_hook: Mutex<Option<Arc<dyn HybridFaultHook>>>,
@@ -4278,6 +4290,7 @@ impl HybridProjectionStore {
             deferred: VecDeque::new(),
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
+            strict: false,
             poisoned: None,
             fault_hook: Mutex::new(None),
         }
@@ -4293,9 +4306,24 @@ impl HybridProjectionStore {
             deferred: VecDeque::new(),
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
+            strict: false,
             poisoned: None,
             fault_hook: Mutex::new(None),
         }
+    }
+
+    /// Select the `objectlog/hybrid-strict` apply ordering (TD-004): the group-commit write path commits the
+    /// sealed batch durably to SQLite BEFORE applying it to hot memory, so a SQLite failure returns no success
+    /// and a SQLite-commit-then-memory-fail poisons the store fail-closed. `false` (the default) is the
+    /// `objectlog/hybrid` / `objectlog/hybrid-async` memory-first + deferred-checkpoint ordering.
+    pub fn with_strict_apply(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Whether this store runs the `objectlog/hybrid-strict` SQLite-durable-before-memory apply ordering.
+    pub fn is_strict(&self) -> bool {
+        self.strict
     }
 
     /// Install (or clear, with `None`) a test-only fault hook (TP-003 §3.10 AC-TXN-5/5A). Never called from
@@ -4451,6 +4479,11 @@ impl HybridProjectionStore {
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
         self.check_healthy()?;
+        // A "SQLite apply failed" fault aborts BEFORE the durable commit: no durable projection effect, no
+        // memory effect, and NO poison. The object-log manifest entry is already durable, so recovery replays
+        // the tail beyond the prior SQLite high-water and the command is neither lost nor duplicated (TD-004
+        // hybrid-strict "SQLite failure" row). Unlike the post-commit cut below, the store stays healthy.
+        self.fault(HybridFaultCutPoint::BeforeSqliteApply)?;
         self.sqlite.apply_committed_batch(positions, commands)?;
         if let Err(e) = self.fault(HybridFaultCutPoint::AfterSqliteCommitBeforeMemoryApply) {
             // The SQLite checkpoint already committed durably; a memory apply that never runs would leave
@@ -9183,6 +9216,11 @@ impl ProjectionStore for HybridProjectionStore {
         if positions.is_empty() {
             return Ok(());
         }
+        // `objectlog/hybrid-strict`: commit durably to SQLite BEFORE hot memory (no deferral); the default
+        // `objectlog/hybrid` ordering applies memory first and defers the SQLite checkpoint.
+        if self.strict {
+            return self.apply_durable_then_memory(positions, commands);
+        }
         self.apply_memory(positions, commands)?;
         self.deferred
             .extend(positions.iter().cloned().zip(commands.iter().cloned()));
@@ -9204,6 +9242,12 @@ impl ProjectionStore for HybridProjectionStore {
         if positions.is_empty() {
             return Ok(());
         }
+        // `objectlog/hybrid-strict`: SQLite-durable-before-memory on the group-commit write path (this is the
+        // method the composed group-commit distribute path calls, so the `AfterSqliteCommitBeforeMemoryApply`
+        // poison cut lands on the real server write pipeline).
+        if self.strict {
+            return self.apply_durable_then_memory(&positions, &commands);
+        }
         self.apply_memory(&positions, &commands)?;
         self.deferred.extend(positions.into_iter().zip(commands));
         self.deferred_commands = self.deferred.len();
@@ -9223,6 +9267,11 @@ impl ProjectionStore for HybridProjectionStore {
         }
         if positions.is_empty() {
             return Ok(());
+        }
+        // `objectlog/hybrid-strict`: replay the recovered tail SQLite-durable-first so the durable image and
+        // hot memory stay in lockstep (idempotent — already-applied prefixes are skipped by both stores).
+        if self.strict {
+            return self.apply_durable_then_memory(positions, commands);
         }
         self.apply_memory(positions, commands)?;
         self.deferred
