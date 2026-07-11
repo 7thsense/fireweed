@@ -575,6 +575,15 @@ struct ManifestEntry {
     /// Per-segment checksum over the serialized commands (TD-004 step 2 segment checksum), validated on read.
     checksum: u64,
     committed_at_ms: i64,
+    /// A RETENTION-FLOOR-ADVANCE entry (bead pqueue-b5cc2bc7 bug 3): names no segment (`segment_key: None`,
+    /// `fence: false`) and records the highest command sequence whose segment objects are reclaimed, at this
+    /// entry's `epoch`. The AUTHORITATIVE floor is the max of these across the manifest. The advance is an
+    /// epoch-fenced, create-only manifest CAS at the next index — EXACTLY like a data/fence commit — so a
+    /// superseded owner cannot atomically-lose-the-CAS-and-still-regress the floor (closing the racy
+    /// read-then-overwrite TOCTOU of the old `retention_floor.json` blob). `None` for data/fence entries; a
+    /// pre-existing manifest (written before this field existed) defaults every entry to `None`.
+    #[serde(default)]
+    retention_floor_through: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -604,6 +613,16 @@ fn store_err<E: std::fmt::Display>(e: E) -> EngineError {
 
 fn to_json<T: serde::Serialize>(v: &T) -> EngineResult<Vec<u8>> {
     serde_json::to_vec(v).map_err(store_err)
+}
+
+/// Epoch-milliseconds of a command envelope's `created_at` (bead pqueue-b5cc2bc7 bug 1). Mirrors
+/// `pqueue_engine`'s internal `ts_to_ms`; used to stamp a sealed segment's `committed_at_ms` as an upper bound
+/// on the `created_at` of every envelope it holds.
+fn created_at_ms(env: &CommandEnvelope) -> i64 {
+    env.created_at
+        .seconds
+        .saturating_mul(1000)
+        .saturating_add((env.created_at.nanoseconds / 1_000_000) as i64)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -701,6 +720,11 @@ struct ShardBuf {
     buffered_bytes: usize,
     /// `now` (ms) of the oldest buffered command, for the latency seal trigger.
     oldest_buffered_ms: Option<i64>,
+    /// The MAX `created_at` (ms) over the currently-buffered envelopes (bead pqueue-b5cc2bc7 bug 1). The seal
+    /// stamps the segment's `committed_at_ms` as `max(now_ms, this)` so `committed_at_ms >= every envelope's
+    /// created_at` even when a later buffered push has a SMALLER `created_at` than an earlier one (created_at
+    /// is not monotonic across co-buffered pushes) — the soundness precondition the retention-floor trim needs.
+    max_created_ms: i64,
     /// Next sequence to assign (recovered from the manifest on open).
     next_seq: u64,
     /// Next manifest object index to write (recovered from the manifest on open).
@@ -862,6 +886,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buffered: Vec::new(),
             buffered_bytes: 0,
             oldest_buffered_ms: None,
+            max_created_ms: 0,
             next_seq,
             next_manifest_index: next_index,
             committed_epoch: epoch,
@@ -893,7 +918,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         };
         let tail: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
         let next_index = tail.index + 1;
-        let next_seq = if tail.fence {
+        // A fence entry AND a retention-floor-advance entry both name no segment and carry the LIVE next-seq in
+        // `first_seq` (they don't add commands), so the tail's next-seq is `first_seq`; a data entry's is
+        // `visible_last_seq + 1`.
+        let next_seq = if tail.fence || tail.retention_floor_through.is_some() {
             tail.first_seq
         } else {
             Self::visible_last_seq(&tail) + 1
@@ -951,6 +979,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 visible_last_seq: None,
                 checksum: 0,
                 committed_at_ms: now_ms,
+                retention_floor_through: None,
             };
             let key = format!("{prefix}manifest/{next_index:020}.json");
             if self.store_put_if_absent(&key, &to_json(&entry)?, true)? {
@@ -996,6 +1025,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 buf.buffered_bytes += bytes.len();
                 buf.buffered.push(bytes);
                 buf.oldest_buffered_ms.get_or_insert(now_ms);
+                // Track the batch-max created_at so the seal stamps a sound committed_at_ms upper bound.
+                buf.max_created_ms = buf.max_created_ms.max(created_at_ms(env));
             }
             let one_command_seal = self.config.dev_unsafe_one_command_segments;
             buf.buffered_bytes >= self.config.target_bytes
@@ -1048,16 +1079,22 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         now_ms: i64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let prefix = shard_prefix(shard);
-        // 1. Snapshot+drain the buffer under the lock; nothing buffered → nothing to do.
-        let drained = {
+        // 1. Snapshot+drain the buffer under the lock; nothing buffered → nothing to do. Also snapshot the
+        //    batch-max created_at so the segment's committed_at_ms is a sound upper bound (bug 1).
+        let (drained, batch_max_created_ms) = {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             if buf.buffered.is_empty() {
                 return Ok(Vec::new());
             }
-            std::mem::take(&mut buf.buffered)
+            (std::mem::take(&mut buf.buffered), buf.max_created_ms)
         };
         let n = drained.len();
+        // `committed_at_ms >= every sealed envelope's created_at` MUST hold for the retention-floor trim to be
+        // AC-TXN-3-safe. `now_ms` alone is NOT sufficient (a size-seal is stamped with the TRIGGERING push's
+        // now, which can be smaller than an earlier buffered push's created_at); take the max with the batch's
+        // own created_at ceiling. A larger committed_at_ms is always safe (it only delays age-trimming).
+        let committed_at_ms = now_ms.max(batch_max_created_ms);
 
         // 2. Epoch fence from the recovered in-memory tail. Recovery/acquire/CAS-lost paths refresh this tail
         //    from the manifest; the normal single-writer hot path must not list the manifest before every seal.
@@ -1068,6 +1105,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 // Fenced: discard the buffer (the commands are unacked; no segment, no manifest entry).
                 buf.buffered_bytes = 0;
                 buf.oldest_buffered_ms = None;
+                buf.max_created_ms = 0;
                 return Err(EngineError::EpochFenced);
             }
             (buf.next_seq, buf.next_manifest_index, buf.committed_epoch)
@@ -1096,7 +1134,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             last_seq,
             visible_last_seq: None,
             checksum: seg_checksum,
-            committed_at_ms: now_ms,
+            committed_at_ms,
+            retention_floor_through: None,
         };
         let manifest_key = format!("{prefix}manifest/{cur_index:020}.json");
         let won = self.store_put_if_absent(&manifest_key, &to_json(&entry)?, true)?;
@@ -1107,6 +1146,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             buf.buffered_bytes = 0;
             buf.oldest_buffered_ms = None;
+            buf.max_created_ms = 0;
             if observed_epoch > expected_epoch {
                 return Err(EngineError::EpochFenced);
             }
@@ -1140,6 +1180,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buf.next_manifest_index = cur_index + 1;
             buf.buffered_bytes = 0;
             buf.oldest_buffered_ms = None;
+            buf.max_created_ms = 0;
         }
         Ok(positions)
     }
@@ -1352,6 +1393,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let mut next_index = 0u64;
         let entries = self.read_manifest(source)?;
         for entry in entries {
+            // A branch is a fresh copy-on-write view with NO inherited trim history: skip the source's
+            // retention-floor-advance entries (bead pqueue-b5cc2bc7 bug 3). The branch reads its shared/pinned
+            // parent segments from genesis and manages its own floor independently.
+            if entry.retention_floor_through.is_some() {
+                continue;
+            }
             if entry.fence {
                 if entry.first_seq > position.sequence + 1 {
                     break;
@@ -1468,6 +1515,32 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(deleted)
     }
 
+    /// The LOWEST `first_seq` among data segments at or below `through_seq` that `expire_segments_through`
+    /// would SKIP because a live branch pins them (bead pqueue-b5cc2bc7 bug 2b). A branch pin is a TRANSIENT
+    /// condition — once the branch is discarded the segment becomes reclaimable again — so the trim caller must
+    /// NOT record "fully reclaimed up to the floor" past a pinned segment, or a released pin would leave the
+    /// object leaked forever. `None` when nothing at/below the horizon is branch-pinned.
+    pub fn lowest_branch_pinned_below(
+        &self,
+        source: &QueueKey,
+        through_seq: u64,
+        now_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        let mut lowest: Option<u64> = None;
+        for entry in self.read_manifest(source)? {
+            if entry.fence || entry.segment_key.is_none() {
+                continue;
+            }
+            if Self::visible_last_seq(&entry) > through_seq {
+                continue;
+            }
+            if self.branch_pins_segment(source, entry.first_seq, now_ms)? {
+                lowest = Some(lowest.map_or(entry.first_seq, |l| l.min(entry.first_seq)));
+            }
+        }
+        Ok(lowest)
+    }
+
     /// A snapshot of the measured segment/object counters (release-ledger harness surface).
     pub fn counters(&self) -> SegmentCounters {
         self.inner
@@ -1526,71 +1599,95 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     // -- retention floor (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7) -------------
     //
-    // The retention floor is a SEPARATE small overwrite-able blob (`retention_floor.json`), modeled exactly
-    // on the high-water blob above. It records the highest command position whose segment OBJECTS have been
-    // trimmed (`expire_segments_through`), as an EXCLUSIVE lower bound — recovery resumes at floor+1, mirroring
-    // `recovery_high_water`'s "resume at next_seq" semantics. It is written BEFORE the segment objects are
-    // deleted (crash-safe order): a crash after the floor write but before the delete leaves floor=F with some
-    // below-F segments still present; recovery reads from F+1 and skips them (no "missing segment" error). The
-    // reverse order would leave the floor pointing past a deleted segment. This blob does NOT touch the
-    // append-only manifest CAS / epoch-fence invariants — it is an independent overwrite blob.
+    // The AUTHORITATIVE retention floor is a MANIFEST ENTRY (`retention_floor_through`), advanced by the SAME
+    // atomic, create-only, epoch-fenced manifest CAS the substrate uses for data segments and epoch fences —
+    // NOT a racy read-then-overwrite blob (bug 3). It records the highest command sequence whose segment
+    // OBJECTS have been trimmed (`expire_segments_through`), an EXCLUSIVE lower bound: recovery + the
+    // idempotency folds resume at `floor + 1`, mirroring `recovery_high_water`'s "resume at next_seq". The
+    // floor entry is committed BEFORE the segment objects are deleted (crash-safe order): a crash after the
+    // floor commit but before the delete leaves floor=F with some below-F segments still present; recovery
+    // reads from F+1 and skips them (no "missing segment" error). Because the advance is a manifest CAS, a
+    // superseded owner either LOSES the CAS (its index is already taken) or is `EpochFenced`, so it can never
+    // regress a newer owner's floor and strand recovery at a reclaimed segment.
 
-    /// Read the durable retention-floor blob (`None` if no trim has advanced it yet). Mirrors
-    /// [`Self::read_high_water`]. The returned position is the EXCLUSIVE lower bound (last-trimmed seq);
-    /// recovery/idempotency folds resume at `sequence + 1`.
+    /// Read the AUTHORITATIVE durable retention floor: the highest `retention_floor_through` recorded across the
+    /// manifest (`None` if no trim has advanced it yet). The returned position is the EXCLUSIVE lower bound
+    /// (last-trimmed seq), carrying the epoch of the entry that set it; recovery/idempotency folds resume at
+    /// `sequence + 1`.
     pub fn read_retention_floor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
-        let key = format!("{}retention_floor.json", shard_prefix(shard));
-        match self.store_get(&key)? {
-            Some(bytes) => {
-                let floor: RetentionFloorBlob =
-                    serde_json::from_slice(&bytes).map_err(store_err)?;
-                Ok(Some(CommandPosition::new(
-                    shard.clone(),
-                    floor.epoch,
-                    floor.seq,
-                )))
+        let mut best: Option<(u64, u64)> = None; // (seq, epoch)
+        for entry in self.read_manifest(shard)? {
+            if let Some(seq) = entry.retention_floor_through
+                && best.is_none_or(|(bs, _)| seq >= bs)
+            {
+                best = Some((seq, entry.epoch));
             }
-            None => Ok(None),
         }
+        Ok(best.map(|(seq, epoch)| CommandPosition::new(shard.clone(), epoch, seq)))
     }
 
-    /// Monotonically advance the retention-floor blob to `position` (the trim caller's durable "written first"
-    /// step), EPOCH-FENCED against a superseded owner (bead pqueue-b5cc2bc7 bug 2b). Mirrors
-    /// [`Self::set_high_water`] for the monotonic check, and mirrors the manifest-CAS epoch fence for
-    /// cross-owner safety:
+    /// Advance the durable retention floor to `position` by appending a retention-floor-advance MANIFEST ENTRY
+    /// via the create-only, epoch-fenced manifest CAS (bead pqueue-b5cc2bc7 bug 3 — atomic, not a racy blob
+    /// overwrite). `expected_epoch` is the writing owner's currently-held assignment epoch.
     ///
-    /// - **Epoch fence.** `expected_epoch` is the writing owner's currently-held assignment epoch. The
-    ///   authoritative current epoch is re-read from the manifest tail; if a NEWER owner has taken over
-    ///   (`current > expected_epoch`), this writer is superseded and is rejected [`EngineError::EpochFenced`]
-    ///   — a stale owner must NOT overwrite (lower) the newer owner's floor, which would strand recovery at a
-    ///   segment the newer owner already reclaimed ("missing segment"). This is the overwrite-blob analogue of
-    ///   the create-only manifest CAS fence; the composed UoW lock is process-local and cannot fence peers.
-    /// - **Monotonic.** A position that REGRESSES the stored floor by `(epoch, sequence)` is rejected; an
-    ///   equal one is a no-op; an advancing one is persisted.
+    /// - **Epoch fence + atomic CAS.** The authoritative current epoch is read from the manifest tail; a
+    ///   superseded writer (`current > expected_epoch`) is rejected [`EngineError::EpochFenced`]. The floor
+    ///   entry is then committed with `put_if_absent` at the next index — so even if a newer owner takes over
+    ///   BETWEEN the epoch read and the write, this writer LOSES the CAS (the index is taken) and re-checks the
+    ///   epoch, returning `EpochFenced`/`Conflict` rather than regressing the newer owner's floor.
+    /// - **Monotonic.** A `position.sequence` below the current authoritative floor is rejected; equal is an
+    ///   idempotent no-op (no new entry). The trim caller only ever calls this to strictly advance.
     pub fn advance_retention_floor(
         &self,
         shard: &QueueKey,
         position: CommandPosition,
         expected_epoch: u64,
     ) -> EngineResult<()> {
-        // Re-read the AUTHORITATIVE current epoch from the manifest tail (not in-memory state, which is stale
-        // for a superseded owner). A higher committed epoch means a newer owner fenced this one.
-        let current_epoch = self.recover_manifest(shard)?.2;
-        if current_epoch > expected_epoch {
+        let prefix = shard_prefix(shard);
+        let (cur_seq, cur_index, cur_epoch) = self.recover_manifest(shard)?;
+        if cur_epoch > expected_epoch {
             return Err(EngineError::EpochFenced);
         }
-        if let Some(cur) = self.read_retention_floor(shard)?
-            && !cur.precedes(&position)
-            && cur != position
-        {
-            return Err(EngineError::Invalid("retention floor regression"));
+        if let Some(cur_floor) = self.read_retention_floor(shard)? {
+            if position.sequence < cur_floor.sequence {
+                return Err(EngineError::Invalid("retention floor regression"));
+            }
+            if position.sequence == cur_floor.sequence {
+                return Ok(()); // already at/above this floor — idempotent no-op, no redundant entry
+            }
         }
-        let key = format!("{}retention_floor.json", shard_prefix(shard));
-        let blob = RetentionFloorBlob {
-            epoch: position.backend_epoch,
-            seq: position.sequence,
+        // A floor-advance entry: no segment, carries the LIVE next-seq in `first_seq` (like a fence) so
+        // `recover_manifest` derives the tail's next-seq correctly, and the trim-through in
+        // `retention_floor_through`, committed at the current epoch.
+        let entry = ManifestEntry {
+            index: cur_index,
+            epoch: cur_epoch,
+            fence: false,
+            segment_key: None,
+            first_seq: cur_seq,
+            last_seq: cur_seq,
+            visible_last_seq: None,
+            checksum: 0,
+            committed_at_ms: 0, // audit-only; floor entries are skipped by every age/segment scanner
+            retention_floor_through: Some(position.sequence),
         };
-        self.store_put(&key, &to_json(&blob)?, false)
+        let key = format!("{prefix}manifest/{cur_index:020}.json");
+        let won = self.store_put_if_absent(&key, &to_json(&entry)?, false)?;
+        if !won {
+            // CAS lost: a peer extended the manifest between our read and our write. If a newer epoch is now
+            // present we are fenced; otherwise surface a transient conflict (the trim caller skips this tick).
+            let observed_epoch = self.recover_manifest(shard)?.2;
+            if observed_epoch > expected_epoch {
+                return Err(EngineError::EpochFenced);
+            }
+            return Err(EngineError::Conflict);
+        }
+        // Keep the in-memory tail bookkeeping in sync so the next seal's CAS uses the right index.
+        let mut g = self.inner.lock().expect("segmented log poisoned");
+        if let Some(buf) = g.shards.get_mut(shard) {
+            buf.next_manifest_index = buf.next_manifest_index.max(cur_index + 1);
+        }
+        Ok(())
     }
 
     /// The highest `visible_last_seq` over the CONTIGUOUS PREFIX of DATA manifest segments whose
@@ -1740,6 +1837,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buffered: Vec::new(),
             buffered_bytes: 0,
             oldest_buffered_ms: None,
+            max_created_ms: 0,
             next_seq,
             next_manifest_index: next_index,
             committed_epoch: epoch,
@@ -1776,15 +1874,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 /// Durable high-water blob (the explicit command-position high-water; TD-007 §4).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HighWaterBlob {
-    epoch: u64,
-    seq: u64,
-}
-
-/// Durable retention-floor blob (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7): the
-/// highest command position whose segment objects have been trimmed, an EXCLUSIVE lower bound (recovery
-/// resumes at `seq + 1`). Same shape as [`HighWaterBlob`]; a distinct type so the two blobs never alias.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RetentionFloorBlob {
     epoch: u64,
     seq: u64,
 }

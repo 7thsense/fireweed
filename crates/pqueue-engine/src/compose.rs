@@ -171,6 +171,19 @@ pub trait LogStore: Send {
         Ok(0)
     }
 
+    /// The lowest segment sequence at or below `through_seq` that `expire_segments_through` SKIPS only because
+    /// a live branch pins it (a transient condition). The composed trim caller uses this to keep its
+    /// completed-deletion watermark BELOW a branch-pinned segment so a released pin is re-scanned later (bug
+    /// 2b). Default: `None` (no branch-pin concept).
+    fn lowest_branch_pinned_below(
+        &self,
+        _shard: &QueueKey,
+        _through_seq: u64,
+        _now_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        Ok(None)
+    }
+
     /// The current durable command position for `shard` (thin wrapper over `high_water`).
     fn current_position(&self, shard: &QueueKey) -> EngineResult<CommandPosition> {
         self.high_water(shard)?.ok_or(EngineError::NotFound)
@@ -1277,11 +1290,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// durable floor to finish that deletion (idempotent), even when the newly-computed horizon does not
     /// advance. Once completed, the watermark suppresses re-scanning on idle ticks.
     ///
-    /// EPOCH FENCE (bug 2b): the composed UoW lock is process-LOCAL and does not fence a peer owner. The floor
-    /// write is therefore epoch-fenced INSIDE `advance_retention_floor` against the authoritative manifest tail
-    /// epoch — a superseded owner (whose held `expected_epoch` is below the manifest's current epoch) is
-    /// rejected `EpochFenced` and cannot lower a newer owner's floor (which would strand recovery at a deleted
-    /// segment). The trim caller passes the owner's currently-held epoch, re-read here right before the write.
+    /// EPOCH FENCE (bug 2b/3): the composed UoW lock is process-LOCAL and does not fence a peer owner. The floor
+    /// advance is therefore an EPOCH-FENCED MANIFEST CAS inside `advance_retention_floor` — a superseded owner
+    /// LOSES the CAS or is `EpochFenced` and cannot regress a newer owner's floor (which would strand recovery
+    /// at a reclaimed segment). A fenced/raced advance is treated here as a benign skip (delete nothing, don't
+    /// error the tick). BRANCH PINS (bug 2b): the completed-deletion watermark is held BELOW any branch-pinned
+    /// segment (a transient condition) so a released pin is re-scanned and reclaimed on a later tick.
     fn trim_reclaimable_segments_locked(
         inner: &mut Inner<L, P>,
         shard: &QueueKey,
@@ -1297,22 +1311,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         let mut deleted = 0u64;
 
         // (bug 2a) FINISH any crash-interrupted deletion up to the DURABLE floor before considering new
-        // reclamation. `trim_completed_through` is empty on process start, so this runs once after each
-        // (re)open per shard and is skipped thereafter (until the horizon advances below).
+        // reclamation. `trim_completed_through` is `None` (absent) on process start, so this runs once after
+        // each (re)open per shard — INCLUDING when the durable floor is at sequence 0 (an absent watermark is
+        // treated as "nothing completed yet", not 0, which a bare `0 < 0` comparison would wrongly skip). A
+        // watermark held below a branch pin also re-triggers this until the pin releases.
         let durable_floor = inner.log.retention_floor(shard)?;
         if let Some(floor) = &durable_floor {
-            let completed = inner
-                .trim_completed_through
-                .get(shard)
-                .copied()
-                .unwrap_or(0);
-            if completed < floor.sequence {
+            let completed = inner.trim_completed_through.get(shard).copied();
+            if completed.is_none_or(|c| c < floor.sequence) {
                 deleted += inner
                     .log
                     .expire_segments_through(shard, floor.sequence, now_ms)?;
-                inner
-                    .trim_completed_through
-                    .insert(shard.clone(), floor.sequence);
+                Self::record_trim_watermark_locked(inner, shard, floor.sequence, now_ms)?;
             }
         }
 
@@ -1339,23 +1349,53 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             return Ok(deleted);
         }
         // The owner's currently-held epoch — re-read authoritatively inside `advance_retention_floor` against
-        // the manifest tail, so a superseded owner is fenced (bug 2b). Stamp the floor position with the
+        // the manifest tail, so a superseded owner is fenced (bug 3). Stamp the floor position with the
         // checkpoint epoch (<= held epoch), which keeps the recovery-start `max_position` compare well-defined
         // (`trim_through_seq <= checkpoint.sequence`, so the floor never exceeds the checkpoint position).
         let expected_epoch = inner.log.current_epoch(shard)?;
         let floor_pos =
             CommandPosition::new(shard.clone(), checkpoint.backend_epoch, trim_through_seq);
-        // (b) Durable floor FIRST (epoch-fenced + monotonic), (c) THEN delete the segment objects.
-        inner
+        // (b) Durable floor FIRST via the epoch-fenced manifest CAS. A fenced/raced advance means another owner
+        // is authoritative here — skip cleanly (delete nothing) rather than deleting under a floor we did not
+        // durably set.
+        match inner
             .log
-            .advance_retention_floor(shard, floor_pos, expected_epoch)?;
+            .advance_retention_floor(shard, floor_pos, expected_epoch)
+        {
+            Ok(()) => {}
+            Err(EngineError::EpochFenced) | Err(EngineError::Conflict) => return Ok(deleted),
+            Err(e) => return Err(e),
+        }
+        // (c) THEN delete the segment objects, and record the completed watermark (below any branch pin).
         deleted += inner
             .log
             .expire_segments_through(shard, trim_through_seq, now_ms)?;
-        inner
-            .trim_completed_through
-            .insert(shard.clone(), trim_through_seq);
+        Self::record_trim_watermark_locked(inner, shard, trim_through_seq, now_ms)?;
         Ok(deleted)
+    }
+
+    /// Record the completed-deletion watermark after an `expire_segments_through(target)` (bug 2b). If nothing
+    /// at/below `target` is branch-pinned, record `target` (idle ticks then skip the re-scan). If ANY segment
+    /// at/below `target` was skipped ONLY because a live branch pins it — a TRANSIENT condition — CLEAR the
+    /// watermark instead, so every subsequent tick re-scans up to the floor and reclaims the segment the
+    /// instant the pin is released (correct even when `target == 0`, where a numeric "below the pin" watermark
+    /// could not go lower).
+    fn record_trim_watermark_locked(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        target: u64,
+        now_ms: i64,
+    ) -> EngineResult<()> {
+        if inner
+            .log
+            .lowest_branch_pinned_below(shard, target, now_ms)?
+            .is_some()
+        {
+            inner.trim_completed_through.remove(shard);
+        } else {
+            inner.trim_completed_through.insert(shard.clone(), target);
+        }
+        Ok(())
     }
 
     /// Public entry to [`Self::trim_reclaimable_segments_locked`] (the background sink loop drives this after

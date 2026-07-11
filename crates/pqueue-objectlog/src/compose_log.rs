@@ -93,6 +93,26 @@ impl ObjectLog {
     pub fn set_fault_hook(&self, hook: Option<std::sync::Arc<dyn crate::segmented::FaultHook>>) {
         self.log.set_fault_hook(hook);
     }
+
+    /// Create a copy-on-write branch of `source` cut at `position` on the underlying substrate (pins the
+    /// source segments at/below the cut against retention trimming while the branch is live). Passthrough to
+    /// [`SegmentedObjectLog::branch`] — the object log's branching capability, surfaced on the adapter.
+    pub fn branch(
+        &self,
+        source: &QueueKey,
+        branch_def: &pqueue_core::QueueDefinition,
+        position: &CommandPosition,
+        ttl_ms: u64,
+        now_ms: i64,
+    ) -> EngineResult<u64> {
+        self.log
+            .branch(source, branch_def, position, ttl_ms, now_ms)
+    }
+
+    /// Discard a branch and release its retention pins. Passthrough to [`SegmentedObjectLog::discard_branch`].
+    pub fn discard_branch(&self, source: &QueueKey, branch: &QueueKey) -> EngineResult<()> {
+        self.log.discard_branch(source, branch)
+    }
 }
 
 impl LogStore for ObjectLog {
@@ -212,6 +232,16 @@ impl LogStore for ObjectLog {
         now_ms: i64,
     ) -> EngineResult<u64> {
         self.log.expire_segments_through(shard, through_seq, now_ms)
+    }
+
+    fn lowest_branch_pinned_below(
+        &self,
+        shard: &QueueKey,
+        through_seq: u64,
+        now_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        self.log
+            .lowest_branch_pinned_below(shard, through_seq, now_ms)
     }
 
     fn write_snapshot(

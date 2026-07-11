@@ -9,12 +9,13 @@
 //! OBJECTS are reclaimed from durable storage WITHOUT regressing the proven AC-TXN-3
 //! unknown-outcome-request_id-replay-across-restart guarantee.
 //!
-//! Design: a durable, monotonic `retention_floor.json` blob records the highest trimmed position (exclusive
-//! lower bound). The trim caller runs under the composed unit-of-work lock, gated on
-//! `retention_may_advance`, and writes the floor FIRST then deletes the segment objects (crash-safe order).
-//! Recovery reads the floor once per shard and starts BOTH idempotency folds AND the projection replay at
-//! `floor + 1` (the R1 fix: `max(resolve_recovery_start, floor)`), so a trimmed below-floor segment is never
-//! read.
+//! Design: the durable, monotonic retention floor is a MANIFEST ENTRY (`retention_floor_through`), advanced by
+//! the same atomic, create-only, epoch-fenced manifest CAS as data segments and epoch fences (so a superseded
+//! owner cannot regress it). The trim caller runs under the composed unit-of-work lock, gated on
+//! `retention_may_advance`, and commits the floor entry FIRST then deletes the segment objects (crash-safe
+//! order). Recovery derives the floor from the manifest once per shard and starts BOTH idempotency folds AND
+//! the projection replay at `floor + 1` (the R1 fix: `max(resolve_recovery_start, floor)`), so a trimmed
+//! below-floor segment is never read.
 //!
 //! `SegmentConfig::new(1, 1)` seals each push into its own segment immediately (size trigger), so "one push =
 //! one segment" and a push's timestamp becomes its segment's `committed_at_ms` — the harness controls the
@@ -857,6 +858,145 @@ async fn seed_reopen_and_check(root: &Path) -> HybridBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Bug 2a (floor at sequence 0) — a crash after writing floor=seq0 must still be FINISHED on reopen. The
+//   completed-deletion watermark is absent (None) on process start, so the first tick runs the finish-pass
+//   even when floor.sequence == 0 (a `0 < 0` numeric default would wrongly skip it).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_bug2a_floor_zero_crash_is_finished_on_reopen() {
+    let root = base_dir("floor-zero-crash");
+    let backend = open_hybrid(&root, clear_thresholds());
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+    push(&backend, "old", 10).await; // seq 0 @ 10_000ms
+    drain(&backend);
+    push(&backend, "tail", 2_000_000).await; // seq 1, fresh
+    drain(&backend);
+
+    // Crash on the FIRST expiry strike: floor=seq0 is written, but seg0 is not deleted.
+    backend.with_log(|l| {
+        l.set_fault_hook(Some(CrashOnNth::new(FaultCutPoint::DuringSegmentExpiry, 1)))
+    });
+    let res = backend.trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000));
+    assert!(res.is_err(), "the injected fault crashes the trim");
+    assert_eq!(
+        floor_seq(&backend),
+        Some(0),
+        "floor durably advanced to seq 0 before the crash"
+    );
+    assert_eq!(
+        count_seg_files(&root),
+        2,
+        "both segment objects still present after the floor-0 crash"
+    );
+    backend.with_log(|l| l.set_fault_hook(None));
+    drop(backend);
+
+    // Reopen: the FIRST trim tick must FINISH the interrupted deletion even though floor.sequence == 0.
+    let reopened = open_hybrid(&root, clear_thresholds());
+    let deletes_before = delete_count(&reopened);
+    reopened
+        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+        .expect("finish floor-0 deletion");
+    assert!(
+        delete_count(&reopened) > deletes_before,
+        "a floor-at-seq-0 crash-interrupted deletion IS finished on the first reopen tick (not skipped by 0<0)"
+    );
+    assert_eq!(
+        count_seg_files(&root),
+        1,
+        "the below-floor seg0 is reclaimed; only the fresh tail remains"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bug 2b (released branch pin) — a below-floor segment skipped ONLY because a live branch pins it must be
+//   re-scanned and reclaimed once the pin is released; the completed watermark must not skip it forever.
+// ---------------------------------------------------------------------------
+
+/// A distinct branch queue under the same tenant as the shared shard.
+fn branch_key() -> QueueKey {
+    QueueKey::new(
+        pqueue_conformance::tenant(),
+        pqueue_core::QueueId::new(format!("branch-{}", std::process::id())).unwrap(),
+    )
+}
+
+fn branch_def() -> QueueDefinition {
+    let mut d = qdef_short_retention();
+    d.queue_id = branch_key().queue_id;
+    d
+}
+
+#[tokio::test]
+async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
+    let root = base_dir("released-pin");
+    let backend = open_hybrid(&root, clear_thresholds());
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+    // Two OLD segments (seq 0, seq 1) checkpointed + past retention, then a fresh tail (seq 2).
+    push(&backend, "old-0", 10).await;
+    drain(&backend);
+    push(&backend, "old-1", 10).await;
+    drain(&backend);
+    push(&backend, "tail", 2_000_000).await;
+    drain(&backend);
+
+    // A live branch cut at seq 0 pins seg0 (first_seq 0 <= cut 0). Created "in the past" with a huge TTL so it
+    // stays live through the trim at t=1_000_000s.
+    backend
+        .with_log(|l| {
+            l.branch(
+                &shard(),
+                &branch_def(),
+                &CommandPosition::new(shard(), 0, 0),
+                1_000_000_000_000,
+                10_000,
+            )
+        })
+        .expect("create branch pin");
+
+    // Trim: floor advances to seq 1 (both old expired, checkpoint covers them). expire SKIPS the pinned seg0
+    // and deletes seg1. Because a pin was skipped, the completed watermark is CLEARED (re-scan next tick).
+    backend
+        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+        .expect("trim with a live pin");
+    assert_eq!(floor_seq(&backend), Some(1), "floor advanced to seq 1");
+    assert_eq!(
+        count_seg_files(&root),
+        2,
+        "the pinned seg0 survives (skipped) + the fresh tail; only seg1 was reclaimed"
+    );
+
+    // Idle re-tick while the pin is still live reclaims nothing new (seg0 stays pinned).
+    backend
+        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+        .expect("idle re-tick while pinned");
+    assert_eq!(
+        count_seg_files(&root),
+        2,
+        "the pinned seg0 is still retained while the branch is live"
+    );
+
+    // Release the pin; the NEXT trim tick re-scans and reclaims the previously-pinned seg0.
+    backend
+        .with_log(|l| l.discard_branch(&shard(), &branch_key()))
+        .expect("discard branch");
+    let deletes_before = delete_count(&backend);
+    backend
+        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+        .expect("trim after pin release");
+    assert!(
+        delete_count(&backend) > deletes_before,
+        "a released branch pin is re-scanned and the previously-pinned segment is actually reclaimed"
+    );
+    assert_eq!(
+        count_seg_files(&root),
+        1,
+        "seg0 reclaimed after the pin releases; only the fresh tail remains"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 6 — BACKWARD COMPAT: a never-trimmed (pre-floor) log has no retention_floor.json; recovery folds from
 //          genesis, byte-identical to baseline, no missing segments.
 // ---------------------------------------------------------------------------
@@ -872,19 +1012,15 @@ async fn test6_pre_floor_log_recovers_from_genesis_unchanged() {
     drain(&backend);
     let pending_before = pending(&backend).await;
 
-    // Never trimmed -> no durable floor blob, on disk or via the reader.
+    // Never trimmed -> no durable retention floor (no floor-advance manifest entry), and no floor blob file.
     assert_eq!(
         floor_seq(&backend),
         None,
         "a never-trimmed log has no retention floor"
     );
-    let floor_blob = root.join("t").exists() && {
-        // The blob key is retention_floor.json under the shard prefix; a directory walk finds none.
-        !walk_has_file(&root, "retention_floor.json")
-    };
     assert!(
-        floor_blob,
-        "no retention_floor.json is written for a never-trimmed log"
+        !walk_has_file(&root, "retention_floor.json"),
+        "the floor is a manifest entry, not a retention_floor.json blob — none is written"
     );
 
     drop(backend);

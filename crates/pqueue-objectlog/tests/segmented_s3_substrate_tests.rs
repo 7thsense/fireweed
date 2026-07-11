@@ -645,6 +645,13 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         deleted, 1,
         "only the UNPINNED below-floor segment (seg1) is reclaimed; the branch-pinned seg0 is skipped"
     );
+    // The pinned seg0 is reported so the composed trim caller holds its completed-deletion watermark BELOW it
+    // (a released pin must be re-scanned, not skipped forever — bug 2b).
+    assert_eq!(
+        log.lowest_branch_pinned_below(&parent, 3, 30).unwrap(),
+        Some(0),
+        "the branch-pinned below-floor segment (first_seq 0) is reported while the pin is live"
+    );
 
     let seg_key = |first: u64| {
         format!(
@@ -692,6 +699,11 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
 
     // The original pin is still honored (branch is live); discarding it releases seg0 for the next trim.
     log.discard_branch(&parent, &branch_shard).unwrap();
+    assert_eq!(
+        log.lowest_branch_pinned_below(&parent, 3, 41).unwrap(),
+        None,
+        "after the pin releases nothing below the floor is pinned (the watermark can settle at the floor)"
+    );
     let deleted_after = log.expire_segments_through(&parent, 3, 41).unwrap();
     assert_eq!(
         deleted_after, 1,
@@ -703,30 +715,33 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
     );
 }
 
-/// Test (bead pqueue-b5cc2bc7 bug 2b — cross-owner floor fence): the durable retention floor is an OVERWRITE
-/// blob and the composed unit-of-work lock is process-LOCAL, so a superseded owner must be prevented from
-/// LOWERING a newer owner's floor (which would strand recovery at a segment the newer owner already
-/// reclaimed). `advance_retention_floor` is epoch-fenced against the authoritative manifest tail epoch.
+/// Test (bead pqueue-b5cc2bc7 bug 3 — cross-owner floor is an ATOMIC epoch-fenced MANIFEST CAS): the composed
+/// unit-of-work lock is process-LOCAL and cannot fence a peer owner, so the floor advance is routed through the
+/// same create-only, epoch-fenced manifest CAS as data segments and epoch fences. A superseded owner
+/// interleaved with a new owner's higher floor advance is rejected (EpochFenced / CAS-lost), the floor stays at
+/// the higher value, and — after the new owner reclaims through it — recovery reads NO missing segment.
 #[test]
-fn retention_floor_advance_is_epoch_fenced_against_a_superseded_owner() {
+fn retention_floor_advance_is_epoch_fenced_manifest_cas_against_a_superseded_owner() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let log = SegmentedObjectLog::open(store, cfg);
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
     let shard = shard();
     log.create_queue(&qdef()).unwrap();
-    // One segment [0..3] at epoch 0.
+    // One data segment [0..3] at epoch 0, then a fresh tail segment [4..4].
     log.enqueue(&shard, &pushes(4), 0, 10).unwrap();
     log.seal(&shard, 0, 11).unwrap();
+    log.enqueue(&shard, &pushes(1), 0, 10).unwrap();
+    log.seal(&shard, 0, 11).unwrap();
 
-    // Owner at epoch 0 advances the floor to seq 1.
+    // Owner at epoch 0 advances the floor to seq 1 (a floor MANIFEST ENTRY committed via CAS).
     log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
         .unwrap();
 
-    // A NEW owner takes over: acquire a strictly-greater epoch (publishes a fence entry to the manifest).
+    // A NEW owner takes over: acquire a strictly-greater epoch (a fence entry committed to the manifest).
     let new_epoch = log.acquire_epoch(&shard, 20).unwrap();
     assert!(new_epoch > 0, "acquire_epoch must bump the manifest epoch");
 
-    // The new owner advances the floor to seq 3 at the new epoch — accepted.
+    // The new owner advances the floor to seq 3 at the new epoch — accepted (CAS won) — and reclaims through it.
     log.advance_retention_floor(
         &shard,
         CommandPosition::new(shard.clone(), new_epoch, 3),
@@ -737,17 +752,19 @@ fn retention_floor_advance_is_epoch_fenced_against_a_superseded_owner() {
         log.read_retention_floor(&shard)
             .unwrap()
             .map(|p| p.sequence),
-        Some(3)
+        Some(3),
+        "the AUTHORITATIVE floor is the max retention-floor manifest entry (seq 3)"
     );
+    log.expire_segments_through(&shard, 3, 21).unwrap();
 
-    // The SUPERSEDED owner (still believing it holds epoch 0) tries to LOWER the floor back to seq 2 -> the
-    // epoch fence rejects it; the floor stays at the newer owner's seq 3.
+    // The SUPERSEDED owner (still believing it holds epoch 0) tries to LOWER the floor to seq 2 -> rejected by
+    // the epoch-fenced CAS; the floor stays at the newer owner's seq 3.
     let fenced = log
         .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 2), 0)
         .unwrap_err();
     assert!(
-        matches!(fenced, EngineError::EpochFenced),
-        "a superseded owner's floor write must be EpochFenced, got {fenced:?}"
+        matches!(fenced, EngineError::EpochFenced | EngineError::Conflict),
+        "a superseded owner's floor advance must be rejected (EpochFenced/Conflict), got {fenced:?}"
     );
     assert_eq!(
         log.read_retention_floor(&shard)
@@ -756,6 +773,71 @@ fn retention_floor_advance_is_epoch_fenced_against_a_superseded_owner() {
         Some(3),
         "the newer owner's floor is not regressed by the superseded owner"
     );
+
+    // Recovery over the SAME store derives the authoritative floor from the manifest and reads no missing
+    // segment: read_from(floor+1 = 4) surfaces the tail with NO GET of the reclaimed below-floor segment.
+    let reopened = SegmentedObjectLog::open(store, SegmentConfig::new(10_000_000, 100).unwrap());
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened
+            .read_retention_floor(&shard)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the floor survives reopen (it is a durable manifest entry, not a lost blob)"
+    );
+    let tail = reopened.read_from(&shard, 4).unwrap();
+    assert_eq!(
+        tail.len(),
+        1,
+        "recovery reads the tail with no missing segment"
+    );
+}
+
+/// Test (bead pqueue-b5cc2bc7 bug 1 — GROUP-COMMIT batch-max seal timestamp): when several pushes co-buffer
+/// into ONE segment and a LATER push has a SMALLER `created_at` than an earlier buffered one, the sealed
+/// segment's `committed_at_ms` is the batch MAX (not the triggering call's `now_ms`), so a cutoff between the
+/// two does NOT age-trim the segment while the earlier push is still within retention.
+#[test]
+fn group_commit_seal_stamps_committed_at_as_the_batch_max_created_at() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    // Large target so both pushes co-buffer into ONE segment (no auto-seal on the first).
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store, cfg);
+    let shard = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    // Buffer A (created_at = 10_000ms) then B (created_at = 1_000ms) — a LATER push with a SMALLER created_at.
+    log.enqueue(&shard, &envelope_created_at(10), 0, 5).unwrap();
+    log.enqueue(&shard, &envelope_created_at(1), 0, 5).unwrap();
+    // Seal with a deliberately SMALL now_ms (1) — the pathological trigger timestamp.
+    log.seal(&shard, 0, 1).unwrap();
+
+    // committed_at_ms = max(now_ms=1, batch_max_created=10_000) = 10_000. A cutoff at 5_000 must NOT trim it.
+    assert_eq!(
+        log.max_trimmable_seq_before(&shard, 5_000).unwrap(),
+        None,
+        "the segment's committed_at is the batch MAX (10_000ms); a 5_000ms cutoff does not age-trim it"
+    );
+    // A cutoff PAST the batch max does trim (visible_last_seq = 1, the two co-buffered commands seq 0,1).
+    assert_eq!(
+        log.max_trimmable_seq_before(&shard, 20_000).unwrap(),
+        Some(1),
+        "a cutoff past the batch max age-trims the co-buffered segment"
+    );
+}
+
+/// A single-item Push envelope with an explicit `created_at` of `created_secs` seconds (bug 1 group-commit
+/// test): returns a one-element Vec so it can be passed by slice to `enqueue`.
+fn envelope_created_at(created_secs: i64) -> Vec<pqueue_engine::CommandEnvelope> {
+    let mut env = envelope(
+        QueueCommand::Push(PushCommand {
+            items: vec![item("0", "k0", 5)],
+        }),
+        vec![],
+    );
+    env.created_at = pqueue_core::UtcTimestamp::new(created_secs, 0).unwrap();
+    vec![env]
 }
 
 #[test]
