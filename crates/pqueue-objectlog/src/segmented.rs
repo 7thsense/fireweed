@@ -700,6 +700,11 @@ pub enum FaultCutPoint {
     /// some below-F segment objects still present; recovery reads from F+1 and skips them (no "missing
     /// segment" error), and re-running the trim with an advanced horizon reaches the same consistent state.
     DuringSegmentExpiry,
+    /// Struck DURING branch creation (bead pqueue-b5cc2bc7 HOLE B), AFTER the branch has published its source
+    /// pin and read the source floor but BEFORE it copies the retained manifest entries. A test uses this to
+    /// interleave a concurrent peer trim (advance the source floor + reclaim), exercising the pin-first +
+    /// validate-after-copy cross-owner guard.
+    DuringBranchCopy,
 }
 
 /// A test-only fault hook: called at each [`FaultCutPoint`] the pipeline passes through. Returning `Err`
@@ -1375,17 +1380,66 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Err(EngineError::Invalid("branch queue must differ from source"));
         }
 
+        // Roll back a partially-created branch (best-effort): drop the source pin + all branch objects + the
+        // in-memory branch shard. Used when a concurrent trim reclaims the branched range mid-creation.
+        let rollback = |this: &Self| {
+            let _ = this.discard_branch(source, &branch);
+            this.inner
+                .lock()
+                .expect("segmented log poisoned")
+                .shards
+                .remove(&branch);
+        };
+
+        // CROSS-OWNER SAFETY (bead pqueue-b5cc2bc7 HOLE B): a peer owner may CONCURRENTLY advance the source
+        // retention floor + reclaim segments while this branch is being created. Guard with (1) PIN-FIRST:
+        // publish the branch's source pin BEFORE reading the floor / copying manifests, so a concurrent trim
+        // whose `branch_pins_segment` check runs after the pin is published SKIPS the branched range; and
+        // (2) VALIDATE-AFTER-COPY: re-read the AUTHORITATIVE (epoch-fenced manifest) floor after copying and, if
+        // it MOVED, roll back and fail cleanly (`Conflict`) so a retry re-reads the advanced floor — NEVER
+        // leaving a branch that GETs a reclaimed object.
+        let metadata = BranchMetadata {
+            source: source.clone(),
+            branch: branch.clone(),
+            cut_sequence: position.sequence,
+            ttl_ms,
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(ttl_ms as i64),
+            emit_change_records,
+        };
+        // (1) Publish the source PIN first (the registry entry `branch_pins_segment` consults).
+        self.store_put(
+            &branch_registry_key(source, &branch),
+            &to_json(&metadata)?,
+            true,
+        )?;
+
         // The source's retention floor (bead pqueue-b5cc2bc7 bug B): the below-floor segment OBJECTS are already
         // reclaimed, so the branch must INHERIT the floor — it can only view commands at/above `floor + 1`.
-        let source_floor = self.read_retention_floor(source)?.map(|p| p.sequence);
+        // Read it AFTER the pin is published so the copy baseline is consistent with the pin.
+        let source_floor = match self.read_retention_floor(source) {
+            Ok(f) => f.map(|p| p.sequence),
+            Err(e) => {
+                rollback(self);
+                return Err(e);
+            }
+        };
         // Reject a cut at or below the floor CLEANLY: such a branch would have NO retained data (its whole view
         // is reclaimed), and copying the below-floor tombstones would surface a later "missing segment".
         if let Some(f) = source_floor
             && position.sequence <= f
         {
+            rollback(self);
             return Err(EngineError::Invalid(
                 "branch cut at or below the source retention floor: those segments were reclaimed",
             ));
+        }
+
+        // Test seam (never armed in production): lets a test interleave a concurrent peer trim here, between
+        // this branch's floor read and its copy, to exercise the validate-after-copy guard.
+        if let Err(e) = self.fault(FaultCutPoint::DuringBranchCopy) {
+            rollback(self);
+            return Err(e);
         }
 
         self.create_queue(branch_def)?;
@@ -1457,7 +1511,30 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
         }
 
-        let (next_seq, next_manifest_index, committed_epoch) = self.recover_manifest(&branch)?;
+        // (2) VALIDATE-AFTER-COPY: re-read the AUTHORITATIVE source floor. If it MOVED during the copy, a peer
+        // concurrently reclaimed part of the branched range whose pin-check ran before our pin was published —
+        // the copied entries may now reference deleted objects. Roll back and fail cleanly so a retry re-reads
+        // the advanced floor (and either succeeds against the retained range or is cleanly rejected).
+        let floor_after = match self.read_retention_floor(source) {
+            Ok(f) => f.map(|p| p.sequence),
+            Err(e) => {
+                rollback(self);
+                return Err(e);
+            }
+        };
+        if floor_after != source_floor {
+            rollback(self);
+            return Err(EngineError::Conflict);
+        }
+
+        let (next_seq, next_manifest_index, committed_epoch) = match self.recover_manifest(&branch)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                rollback(self);
+                return Err(e);
+            }
+        };
         {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(&branch).ok_or(EngineError::NotFound)?;
@@ -1466,22 +1543,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buf.committed_epoch = committed_epoch;
         }
 
-        let metadata = BranchMetadata {
-            source: source.clone(),
-            branch: branch.clone(),
-            cut_sequence: position.sequence,
-            ttl_ms,
-            created_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(ttl_ms as i64),
-            emit_change_records,
-        };
+        // The source pin (registry entry) was published up front; write the branch's OWN metadata blob now.
         self.store_put(
             &format!("{branch_prefix}branch.json"),
-            &to_json(&metadata)?,
-            true,
-        )?;
-        self.store_put(
-            &branch_registry_key(source, &branch),
             &to_json(&metadata)?,
             true,
         )?;

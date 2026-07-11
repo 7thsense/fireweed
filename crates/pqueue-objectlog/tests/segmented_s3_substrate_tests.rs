@@ -905,6 +905,101 @@ fn group_commit_seal_committed_at_is_race_free_across_an_interleaved_enqueue() {
     );
 }
 
+/// A fault hook that runs a concurrent PEER TRIM (advance the source floor + reclaim) exactly once, when a
+/// branch reaches `DuringBranchCopy` — after it has published its source pin + read the source floor but
+/// before it copies (bead pqueue-b5cc2bc7 HOLE B, branch-vs-concurrent-trim).
+struct PeerTrimDuringBranch {
+    log: std::sync::Weak<SegmentedObjectLog<InMemoryBlobStore>>,
+    source: pqueue_engine::QueueKey,
+    new_floor: u64,
+    now_ms: i64,
+    fired: AtomicBool,
+}
+
+impl FaultHook for PeerTrimDuringBranch {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == FaultCutPoint::DuringBranchCopy
+            && !self.fired.swap(true, Ordering::SeqCst)
+            && let Some(log) = self.log.upgrade()
+        {
+            // Peer trim: advance the source floor (epoch-fenced manifest CAS) then reclaim. The branch's pin is
+            // already published, so `expire_segments_through` SKIPS the pinned segments — nothing is deleted.
+            log.advance_retention_floor(
+                &self.source,
+                CommandPosition::new(self.source.clone(), 0, self.new_floor),
+                0,
+            )
+            .unwrap();
+            log.expire_segments_through(&self.source, self.new_floor, self.now_ms)
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// HOLE B cross-owner (bead pqueue-b5cc2bc7 — branch vs CONCURRENT trim): a peer that advances the source floor
+/// and reclaims WHILE a branch is being created must never yield a corrupt/missing-segment branch. Pin-first
+/// makes the peer's `expire` SKIP the branched range (no data deleted); validate-after-copy detects the floor
+/// movement and FAILS the branch cleanly (`Conflict`) with a full rollback. A retry re-reads the advanced floor.
+#[test]
+fn branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segment() {
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        InMemoryBlobStore::new(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    // Arm the concurrent peer trim (advance source floor to 5 + reclaim) to fire DURING branch creation.
+    log.set_fault_hook(Some(std::sync::Arc::new(PeerTrimDuringBranch {
+        log: std::sync::Arc::downgrade(&log),
+        source: source.clone(),
+        new_floor: 5,
+        now_ms: 100,
+        fired: AtomicBool::new(false),
+    })));
+
+    let branch_def = branch_qdef("concurrent-trim");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    let result = log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        1_000_000_000,
+        100,
+    );
+    log.set_fault_hook(None);
+
+    // The branch creation FAILS CLEANLY — NEVER a corrupt/missing-segment branch.
+    assert!(
+        matches!(result, Err(EngineError::Conflict)),
+        "a branch racing a concurrent source reclaim must fail cleanly (Conflict), got {result:?}"
+    );
+    // NO data loss: the branch pin protected the segments during the peer's expire, so all six source segment
+    // objects are intact — read_all(source) GETs them with NO missing segment.
+    assert_eq!(
+        log.read_all(&source).unwrap().len(),
+        6,
+        "the pin protected every branched segment during the concurrent expire — no object was deleted"
+    );
+    // The partial branch is fully rolled back, leaving NO lingering source pin: a subsequent trim (the floor is
+    // now 5) reclaims all six segments, proving the rollback released the pin.
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 200).unwrap(),
+        6,
+        "the rolled-back branch left no lingering pin — the source is fully reclaimable afterward"
+    );
+    assert!(
+        log.read_retention_floor(&branch).unwrap().is_none(),
+        "the failed branch was rolled back (no branch floor / manifest remains)"
+    );
+}
+
 /// HOLE B (bead pqueue-b5cc2bc7 — branch inherits the source floor; no missing segment): a branch cut ABOVE a
 /// trimmed source floor must copy ONLY the retained (at/above-floor) segments and inherit the floor, so
 /// `read_all(branch)` never GETs a reclaimed object. A cut at/below the floor is rejected cleanly.
