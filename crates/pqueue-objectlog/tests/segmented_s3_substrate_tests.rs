@@ -19,13 +19,14 @@
 //! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, InMemoryBlobStore, ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ObjectStoreStats, S3BlobStore,
+    SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -838,6 +839,146 @@ fn envelope_created_at(created_secs: i64) -> Vec<pqueue_engine::CommandEnvelope>
     );
     env.created_at = pqueue_core::UtcTimestamp::new(created_secs, 0).unwrap();
     vec![env]
+}
+
+/// A fault hook that, the FIRST time a seal reaches `BeforeSegmentWrite` (after it has drained + released the
+/// mutex), enqueues envelope B into the SAME buffer — modelling a concurrent enqueue interleaving an in-flight
+/// seal (bead pqueue-b5cc2bc7 HOLE A). B carries created_at=100s.
+struct EnqueueDuringSeal {
+    log: std::sync::Weak<SegmentedObjectLog<InMemoryBlobStore>>,
+    shard: pqueue_engine::QueueKey,
+    fired: AtomicBool,
+}
+
+impl FaultHook for EnqueueDuringSeal {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == FaultCutPoint::BeforeSegmentWrite
+            && !self.fired.swap(true, Ordering::SeqCst)
+            && let Some(log) = self.log.upgrade()
+        {
+            log.enqueue(&self.shard, &envelope_created_at(100), 0, 1)
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// HOLE A (bead pqueue-b5cc2bc7 — group-commit committed_at is race-free): with the OLD resettable running
+/// `max_created_ms`, a concurrent enqueue during an in-flight seal raised the counter and the seal's completion
+/// then UNCONDITIONALLY reset it to 0 while the new command was still buffered, so THAT command's later seal
+/// stamped `committed_at_ms < its created_at` (a within-retention request_id could be age-trimmed). With each
+/// buffered command carrying its OWN `created_at`, every seal derives `committed_at_ms` from the batch it holds
+/// in hand — no shared counter to clobber.
+#[test]
+fn group_commit_seal_committed_at_is_race_free_across_an_interleaved_enqueue() {
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        InMemoryBlobStore::new(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let shard = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    // Buffer A (created_at 10s). Arm the hook to enqueue B (created_at 100s) DURING A's seal.
+    log.enqueue(&shard, &envelope_created_at(10), 0, 1).unwrap();
+    log.set_fault_hook(Some(std::sync::Arc::new(EnqueueDuringSeal {
+        log: std::sync::Arc::downgrade(&log),
+        shard: shard.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    // Seal A with a SMALL now_ms (1). B is enqueued mid-seal; A's completion no longer resets a shared max.
+    log.seal(&shard, 0, 1).unwrap(); // seg0 = [A], committed_at = max(1, 10_000) = 10_000ms
+    log.set_fault_hook(None);
+    // B is still buffered with its OWN created_at (100_000ms). Seal it, again with a small now_ms.
+    log.seal(&shard, 0, 1).unwrap(); // seg1 = [B], committed_at = max(1, 100_000) = 100_000ms
+
+    // A 50_000ms cutoff trims ONLY seg0 (10_000); seg1 (B, committed 100_000, still within retention) is
+    // retained. Under the old reset race seg1's committed_at would be 1 and B would be wrongly age-trimmed.
+    assert_eq!(
+        log.max_trimmable_seq_before(&shard, 50_000).unwrap(),
+        Some(0),
+        "the interleaved-enqueue command B keeps its own created_at ceiling; it is NOT age-trimmed early"
+    );
+    assert_eq!(
+        log.max_trimmable_seq_before(&shard, 200_000).unwrap(),
+        Some(1),
+        "a cutoff past B's committed_at trims through both segments"
+    );
+}
+
+/// HOLE B (bead pqueue-b5cc2bc7 — branch inherits the source floor; no missing segment): a branch cut ABOVE a
+/// trimmed source floor must copy ONLY the retained (at/above-floor) segments and inherit the floor, so
+/// `read_all(branch)` never GETs a reclaimed object. A cut at/below the floor is rejected cleanly.
+#[test]
+fn branch_inherits_source_retention_floor_and_reads_no_missing_segment() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store, SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    // Six single-command segments, seq 0..5.
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+    // Reclaim through floor=3 (segments 0-3 deleted).
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 20).unwrap(),
+        4,
+        "segments 0-3 are reclaimed"
+    );
+    assert_eq!(
+        log.read_retention_floor(&source)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3)
+    );
+
+    // A branch cut at 2 (<= floor 3) is rejected cleanly (its whole view is reclaimed).
+    let err = log
+        .branch(
+            &source,
+            &branch_qdef("below-floor-cut"),
+            &CommandPosition::new(source.clone(), 0, 2),
+            60_000,
+            21,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Invalid(_)),
+        "a branch cut at/below the source floor is rejected cleanly (Invalid), got {err:?}"
+    );
+
+    // A branch cut at 5 (> floor 3) INHERITS floor=3 and reads only the retained [4,5] — no missing segment.
+    let branch_def = branch_qdef("above-floor-cut");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        60_000,
+        22,
+    )
+    .unwrap();
+    assert_eq!(
+        log.read_retention_floor(&branch)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the branch INHERITS the source retention floor (its effective genesis is floor+1)"
+    );
+    let seqs: Vec<u64> = log
+        .read_all(&branch)
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![4, 5],
+        "read_all(branch) returns ONLY the retained [4,5] commands — the below-floor tombstones are not copied, so no reclaimed object is ever GET"
+    );
 }
 
 #[test]

@@ -716,15 +716,15 @@ pub trait FaultHook: Send + Sync {
 struct ShardBuf {
     /// Per-command `postcard` record bytes in arrival order (serialized ONCE here at buffer time). On seal
     /// these are concatenated into the segment frame with no re-serialize (Fix A).
-    buffered: Vec<Vec<u8>>,
+    /// Per-command `(serialized record bytes, created_at ms)` in arrival order (bead pqueue-b5cc2bc7 bug 1).
+    /// Carrying each envelope's OWN `created_at` here — rather than a resettable running max — makes the seal's
+    /// `committed_at_ms` computation race-free: the seal takes the max over the ACTUALLY-DRAINED batch it holds
+    /// in hand, so a command still buffered when another batch seals keeps its own `created_at` and its later
+    /// seal computes ITS batch's max (no shared counter to clobber across the drain-then-release-mutex window).
+    buffered: Vec<(Vec<u8>, i64)>,
     buffered_bytes: usize,
     /// `now` (ms) of the oldest buffered command, for the latency seal trigger.
     oldest_buffered_ms: Option<i64>,
-    /// The MAX `created_at` (ms) over the currently-buffered envelopes (bead pqueue-b5cc2bc7 bug 1). The seal
-    /// stamps the segment's `committed_at_ms` as `max(now_ms, this)` so `committed_at_ms >= every envelope's
-    /// created_at` even when a later buffered push has a SMALLER `created_at` than an earlier one (created_at
-    /// is not monotonic across co-buffered pushes) — the soundness precondition the retention-floor trim needs.
-    max_created_ms: i64,
     /// Next sequence to assign (recovered from the manifest on open).
     next_seq: u64,
     /// Next manifest object index to write (recovered from the manifest on open).
@@ -886,7 +886,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buffered: Vec::new(),
             buffered_bytes: 0,
             oldest_buffered_ms: None,
-            max_created_ms: 0,
             next_seq,
             next_manifest_index: next_index,
             committed_epoch: epoch,
@@ -1023,10 +1022,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 // rather than a throwaway serialize-just-to-measure (Fix A: kills the double serialization).
                 let bytes = serde_json::to_vec(env).map_err(store_err)?;
                 buf.buffered_bytes += bytes.len();
-                buf.buffered.push(bytes);
+                // Keep each command's OWN created_at alongside its bytes (bug 1): the seal derives
+                // committed_at_ms from the drained batch, so there is no shared running max to race.
+                buf.buffered.push((bytes, created_at_ms(env)));
                 buf.oldest_buffered_ms.get_or_insert(now_ms);
-                // Track the batch-max created_at so the seal stamps a sound committed_at_ms upper bound.
-                buf.max_created_ms = buf.max_created_ms.max(created_at_ms(env));
             }
             let one_command_seal = self.config.dev_unsafe_one_command_segments;
             buf.buffered_bytes >= self.config.target_bytes
@@ -1079,22 +1078,25 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         now_ms: i64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let prefix = shard_prefix(shard);
-        // 1. Snapshot+drain the buffer under the lock; nothing buffered → nothing to do. Also snapshot the
-        //    batch-max created_at so the segment's committed_at_ms is a sound upper bound (bug 1).
-        let (drained, batch_max_created_ms) = {
+        // 1. Snapshot+drain the buffer under the lock; nothing buffered → nothing to do.
+        let drained: Vec<(Vec<u8>, i64)> = {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             if buf.buffered.is_empty() {
                 return Ok(Vec::new());
             }
-            (std::mem::take(&mut buf.buffered), buf.max_created_ms)
+            std::mem::take(&mut buf.buffered)
         };
         let n = drained.len();
         // `committed_at_ms >= every sealed envelope's created_at` MUST hold for the retention-floor trim to be
         // AC-TXN-3-safe. `now_ms` alone is NOT sufficient (a size-seal is stamped with the TRIGGERING push's
-        // now, which can be smaller than an earlier buffered push's created_at); take the max with the batch's
-        // own created_at ceiling. A larger committed_at_ms is always safe (it only delays age-trimming).
+        // now, which can be smaller than an earlier buffered push's created_at). Compute the max over THIS
+        // drained batch's own `created_at` values (held in hand, so no reset race with a concurrent enqueue).
+        // A larger committed_at_ms is always safe (it only delays age-trimming).
+        let batch_max_created_ms = drained.iter().map(|(_, c)| *c).max().unwrap_or(0);
         let committed_at_ms = now_ms.max(batch_max_created_ms);
+        // The segment frame is the concatenation of the per-command record bytes (no re-serialize).
+        let drained_bytes: Vec<Vec<u8>> = drained.into_iter().map(|(b, _)| b).collect();
 
         // 2. Epoch fence from the recovered in-memory tail. Recovery/acquire/CAS-lost paths refresh this tail
         //    from the manifest; the normal single-writer hot path must not list the manifest before every seal.
@@ -1105,7 +1107,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 // Fenced: discard the buffer (the commands are unacked; no segment, no manifest entry).
                 buf.buffered_bytes = 0;
                 buf.oldest_buffered_ms = None;
-                buf.max_created_ms = 0;
                 return Err(EngineError::EpochFenced);
             }
             (buf.next_seq, buf.next_manifest_index, buf.committed_epoch)
@@ -1118,7 +1119,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         //    re-serialize on seal (Fix A). The checksum covers the records-blob region.
         let first_seq = cur_seq;
         let last_seq = first_seq + n as u64 - 1;
-        let (seg_bytes, seg_checksum) = build_segment_object(cur_epoch, first_seq, &drained);
+        let (seg_bytes, seg_checksum) = build_segment_object(cur_epoch, first_seq, &drained_bytes);
         let seg_key = format!("{prefix}seg/{first_seq:020}.seg");
         self.store_put_segment(&seg_key, &seg_bytes)?;
 
@@ -1146,7 +1147,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             buf.buffered_bytes = 0;
             buf.oldest_buffered_ms = None;
-            buf.max_created_ms = 0;
             if observed_epoch > expected_epoch {
                 return Err(EngineError::EpochFenced);
             }
@@ -1180,7 +1180,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buf.next_manifest_index = cur_index + 1;
             buf.buffered_bytes = 0;
             buf.oldest_buffered_ms = None;
-            buf.max_created_ms = 0;
         }
         Ok(positions)
     }
@@ -1376,14 +1375,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Err(EngineError::Invalid("branch queue must differ from source"));
         }
 
-        // Reject a cut at or below the durable retention floor CLEANLY (bead pqueue-b5cc2bc7): the segments at
-        // and below the floor may already be reclaimed, so a branch cut there would surface a later "missing
-        // segment" on the branch's first read. Failing fast turns that into an explicit, actionable error.
-        if let Some(floor) = self.read_retention_floor(source)?
-            && position.sequence <= floor.sequence
+        // The source's retention floor (bead pqueue-b5cc2bc7 bug B): the below-floor segment OBJECTS are already
+        // reclaimed, so the branch must INHERIT the floor — it can only view commands at/above `floor + 1`.
+        let source_floor = self.read_retention_floor(source)?.map(|p| p.sequence);
+        // Reject a cut at or below the floor CLEANLY: such a branch would have NO retained data (its whole view
+        // is reclaimed), and copying the below-floor tombstones would surface a later "missing segment".
+        if let Some(f) = source_floor
+            && position.sequence <= f
         {
             return Err(EngineError::Invalid(
-                "branch cut at or below the retention floor: the source segments were reclaimed",
+                "branch cut at or below the source retention floor: those segments were reclaimed",
             ));
         }
 
@@ -1391,11 +1392,30 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
         let branch_prefix = shard_prefix(&branch);
         let mut next_index = 0u64;
+        // Seed the branch with the INHERITED floor as its FIRST manifest entry, so the branch's effective
+        // genesis is `floor + 1`: `read_retention_floor(branch)` returns it, and the branch's recovery / read /
+        // idempotency folds resume above the trimmed prefix and never GET a reclaimed object.
+        if let Some(f) = source_floor {
+            let floor_entry = ManifestEntry {
+                index: next_index,
+                epoch: 0,
+                fence: false,
+                segment_key: None,
+                first_seq: f,
+                last_seq: f,
+                visible_last_seq: None,
+                checksum: 0,
+                committed_at_ms: 0,
+                retention_floor_through: Some(f),
+            };
+            let key = format!("{branch_prefix}manifest/{next_index:020}.json");
+            self.store_put(&key, &to_json(&floor_entry)?, true)?;
+            next_index += 1;
+        }
         let entries = self.read_manifest(source)?;
         for entry in entries {
-            // A branch is a fresh copy-on-write view with NO inherited trim history: skip the source's
-            // retention-floor-advance entries (bead pqueue-b5cc2bc7 bug 3). The branch reads its shared/pinned
-            // parent segments from genesis and manages its own floor independently.
+            // Do NOT copy the source's own retention-floor-advance entries verbatim — the branch's inherited
+            // floor was seeded above.
             if entry.retention_floor_through.is_some() {
                 continue;
             }
@@ -1408,6 +1428,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 let key = format!("{branch_prefix}manifest/{next_index:020}.json");
                 self.store_put(&key, &to_json(&copied)?, true)?;
                 next_index += 1;
+                continue;
+            }
+
+            // Skip a data segment that is entirely at/below the source floor — its object is RECLAIMED, so
+            // copying the tombstone would make the branch's read GET a deleted object ("missing segment"). A
+            // segment straddling the floor (visible_last_seq > floor) is retained and IS copied.
+            if let Some(f) = source_floor
+                && Self::visible_last_seq(&entry) <= f
+            {
                 continue;
             }
 
@@ -1837,7 +1866,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buffered: Vec::new(),
             buffered_bytes: 0,
             oldest_buffered_ms: None,
-            max_created_ms: 0,
             next_seq,
             next_manifest_index: next_index,
             committed_epoch: epoch,
