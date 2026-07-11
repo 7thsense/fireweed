@@ -1555,14 +1555,30 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     /// Monotonically advance the retention-floor blob to `position` (the trim caller's durable "written first"
-    /// step). Mirrors [`Self::set_high_water`]: a position that REGRESSES the stored floor is rejected (the
-    /// floor is monotonic — it must never point below already-trimmed segments), an equal one is a no-op, and
-    /// an advancing one is persisted.
+    /// step), EPOCH-FENCED against a superseded owner (bead pqueue-b5cc2bc7 bug 2b). Mirrors
+    /// [`Self::set_high_water`] for the monotonic check, and mirrors the manifest-CAS epoch fence for
+    /// cross-owner safety:
+    ///
+    /// - **Epoch fence.** `expected_epoch` is the writing owner's currently-held assignment epoch. The
+    ///   authoritative current epoch is re-read from the manifest tail; if a NEWER owner has taken over
+    ///   (`current > expected_epoch`), this writer is superseded and is rejected [`EngineError::EpochFenced`]
+    ///   — a stale owner must NOT overwrite (lower) the newer owner's floor, which would strand recovery at a
+    ///   segment the newer owner already reclaimed ("missing segment"). This is the overwrite-blob analogue of
+    ///   the create-only manifest CAS fence; the composed UoW lock is process-local and cannot fence peers.
+    /// - **Monotonic.** A position that REGRESSES the stored floor by `(epoch, sequence)` is rejected; an
+    ///   equal one is a no-op; an advancing one is persisted.
     pub fn advance_retention_floor(
         &self,
         shard: &QueueKey,
         position: CommandPosition,
+        expected_epoch: u64,
     ) -> EngineResult<()> {
+        // Re-read the AUTHORITATIVE current epoch from the manifest tail (not in-memory state, which is stale
+        // for a superseded owner). A higher committed epoch means a newer owner fenced this one.
+        let current_epoch = self.recover_manifest(shard)?.2;
+        if current_epoch > expected_epoch {
+            return Err(EngineError::EpochFenced);
+        }
         if let Some(cur) = self.read_retention_floor(shard)?
             && !cur.precedes(&position)
             && cur != position
@@ -1597,6 +1613,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         for entry in self.read_manifest(shard)? {
             if entry.fence || entry.segment_key.is_none() {
                 continue;
+            }
+            // A non-positive `committed_at_ms` is NOT a trustworthy seal-time upper bound on the segment's
+            // command `created_at` (bead pqueue-b5cc2bc7 bug 1): e.g. a legacy raw-append segment written
+            // before the seal-timestamp fix stamped 0. Treat it as NOT-yet-expired and STOP the prefix scan
+            // (conservative — never age-trim a segment whose age we cannot bound), so a within-retention
+            // request_id in such a segment is never reclaimed. The current write paths always stamp a real
+            // upper bound (group-commit: the push `now`; raw append: max `created_at` over the batch).
+            if entry.committed_at_ms <= 0 {
+                break;
             }
             if entry.committed_at_ms <= cutoff_ms {
                 best = Some(Self::visible_last_seq(&entry));

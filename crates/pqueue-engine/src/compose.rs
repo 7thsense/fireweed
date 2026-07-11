@@ -134,11 +134,15 @@ pub trait LogStore: Send {
     }
 
     /// Monotonically advance the durable retention floor to `position` (rejecting a regression). Written
-    /// BEFORE `expire_segments_through` deletes the corresponding segment objects. Default: no-op.
+    /// BEFORE `expire_segments_through` deletes the corresponding segment objects. `expected_epoch` is the
+    /// writing owner's currently-held assignment epoch; the impl re-reads the authoritative current epoch and
+    /// rejects a SUPERSEDED writer with [`EngineError::EpochFenced`] (bug 2b — a stale owner must not lower a
+    /// newer owner's floor). Default: no-op.
     fn advance_retention_floor(
         &mut self,
         _shard: &QueueKey,
         _position: CommandPosition,
+        _expected_epoch: u64,
     ) -> EngineResult<()> {
         Ok(())
     }
@@ -998,6 +1002,13 @@ struct Inner<L, P> {
     /// path; populated only when the composition runs the ack-after-seal write path against a group-commit
     /// log. Protected by the SAME `Mutex<Inner>` as `log`/`projection` — no async lock.
     coords: HashMap<QueueKey, ShardCoord>,
+    /// Per-queue IN-MEMORY watermark of the highest sequence whose below-floor segment objects this process
+    /// has already fully deleted (bead pqueue-b5cc2bc7). Empty on process start, so the FIRST trim tick after
+    /// a (re)open re-runs `expire_segments_through` up to the durable floor to FINISH any deletion a crash
+    /// interrupted BETWEEN the floor write and the segment delete — the deletion is idempotent, and this
+    /// watermark keeps subsequent idle ticks from re-scanning the manifest once the durable floor is fully
+    /// reclaimed. NOT durable: a restart re-verifies against the durable floor.
+    trim_completed_through: HashMap<QueueKey, u64>,
 }
 
 /// Default recovery-window budget: the max durable-log tail (commands) a normal reopen replays beyond the
@@ -1078,6 +1089,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 commit_idempotency: HashMap::new(),
                 cmd_seq: 0,
                 coords: HashMap::new(),
+                trim_completed_through: HashMap::new(),
             }),
             control,
             fault_hook: Mutex::new(None),
@@ -1258,6 +1270,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// A crash between them leaves floor=F with some below-F segments still present — recovery reads from F+1
     /// and skips them, no "missing segment" error. The reverse order would leave the floor pointing past a
     /// deleted segment. Returns the number of segment objects deleted.
+    ///
+    /// FINISH-INTERRUPTED-DELETION (bug 2a): a crash BETWEEN (b) and (c) — or a partial (c) — leaves segment
+    /// objects at/below the durable floor undeleted. The in-memory `trim_completed_through` watermark is empty
+    /// on process start, so the FIRST trim tick after a (re)open re-runs `expire_segments_through` up to the
+    /// durable floor to finish that deletion (idempotent), even when the newly-computed horizon does not
+    /// advance. Once completed, the watermark suppresses re-scanning on idle ticks.
+    ///
+    /// EPOCH FENCE (bug 2b): the composed UoW lock is process-LOCAL and does not fence a peer owner. The floor
+    /// write is therefore epoch-fenced INSIDE `advance_retention_floor` against the authoritative manifest tail
+    /// epoch — a superseded owner (whose held `expected_epoch` is below the manifest's current epoch) is
+    /// rejected `EpochFenced` and cannot lower a newer owner's floor (which would strand recovery at a deleted
+    /// segment). The trim caller passes the owner's currently-held epoch, re-read here right before the write.
     fn trim_reclaimable_segments_locked(
         inner: &mut Inner<L, P>,
         shard: &QueueKey,
@@ -1269,39 +1293,69 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         if !inner.projection.retention_may_advance(shard) {
             return Ok(0);
         }
+        let now_ms = ts_to_ms(now);
+        let mut deleted = 0u64;
+
+        // (bug 2a) FINISH any crash-interrupted deletion up to the DURABLE floor before considering new
+        // reclamation. `trim_completed_through` is empty on process start, so this runs once after each
+        // (re)open per shard and is skipped thereafter (until the horizon advances below).
+        let durable_floor = inner.log.retention_floor(shard)?;
+        if let Some(floor) = &durable_floor {
+            let completed = inner
+                .trim_completed_through
+                .get(shard)
+                .copied()
+                .unwrap_or(0);
+            if completed < floor.sequence {
+                deleted += inner
+                    .log
+                    .expire_segments_through(shard, floor.sequence, now_ms)?;
+                inner
+                    .trim_completed_through
+                    .insert(shard.clone(), floor.sequence);
+            }
+        }
+
         // (a1) The durable checkpoint high-water — the highest seq the durable projection image has absorbed.
         // Under the Clear gate the hybrid-async monitor returns the REAL (un-withheld) value. `None` means
         // nothing is durably applied, so nothing is safe to trim.
         let Some(checkpoint) = inner.projection.recovery_high_water(shard)? else {
-            return Ok(0);
+            return Ok(deleted);
         };
         // (a2) The request-id-retention horizon: newest data segment whose commands are all past retention.
-        let now_ms = ts_to_ms(now);
         let cutoff_ms = now_ms
             .saturating_sub(request_id_retention_ms as i64)
             .saturating_sub(RETENTION_TRIM_SKEW_MARGIN_MS);
         let Some(time_expired_seq) = inner.log.max_trimmable_seq_before(shard, cutoff_ms)? else {
-            return Ok(0);
+            return Ok(deleted);
         };
         // (a3) The trim horizon is the min of the two terms.
         let trim_through_seq = checkpoint.sequence.min(time_expired_seq);
-        // Skip a tick with no NEW reclamation (both terms are monotone non-decreasing, so a horizon at or
-        // below the durable floor means we already trimmed through here — avoids re-scanning every tick).
-        if let Some(floor) = inner.log.retention_floor(shard)?
+        // No NEW reclamation beyond the durable floor (both terms are monotone; the finish-deletion pass above
+        // already handled the existing floor).
+        if let Some(floor) = &durable_floor
             && trim_through_seq <= floor.sequence
         {
-            return Ok(0);
+            return Ok(deleted);
         }
-        // Stamp the floor with the checkpoint's epoch (well-defined for the monotonic `precedes` compare and
-        // the recovery-start max; `trim_through_seq <= checkpoint.sequence` so the floor never exceeds it).
+        // The owner's currently-held epoch — re-read authoritatively inside `advance_retention_floor` against
+        // the manifest tail, so a superseded owner is fenced (bug 2b). Stamp the floor position with the
+        // checkpoint epoch (<= held epoch), which keeps the recovery-start `max_position` compare well-defined
+        // (`trim_through_seq <= checkpoint.sequence`, so the floor never exceeds the checkpoint position).
+        let expected_epoch = inner.log.current_epoch(shard)?;
         let floor_pos =
             CommandPosition::new(shard.clone(), checkpoint.backend_epoch, trim_through_seq);
-        // (b) Durable floor FIRST (monotonic), (c) THEN delete the segment objects (branch-pinned + fence
-        // entries are skipped inside `expire_segments_through`).
-        inner.log.advance_retention_floor(shard, floor_pos)?;
+        // (b) Durable floor FIRST (epoch-fenced + monotonic), (c) THEN delete the segment objects.
         inner
             .log
-            .expire_segments_through(shard, trim_through_seq, now_ms)
+            .advance_retention_floor(shard, floor_pos, expected_epoch)?;
+        deleted += inner
+            .log
+            .expire_segments_through(shard, trim_through_seq, now_ms)?;
+        inner
+            .trim_completed_through
+            .insert(shard.clone(), trim_through_seq);
+        Ok(deleted)
     }
 
     /// Public entry to [`Self::trim_reclaimable_segments_locked`] (the background sink loop drives this after
@@ -1675,6 +1729,34 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
             // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
             let recorded_high_water = projection.recovery_high_water(&key)?;
+            // FAIL-CLOSED (bead pqueue-b5cc2bc7 bug 3): if this shard has a durable retention floor, the
+            // below-floor object-log segments are RECLAIMED, so the durable projection image MUST already
+            // cover the floor (`recovery_high_water >= floor`). It always does for a consistent store (the
+            // floor was advanced only while `checkpoint >= floor`, and the checkpoint is monotone). A
+            // projection BEHIND the floor — a restored, rolled-back, or FOREIGN SQLite image over a trimmed
+            // log — would make the R1 replay-start flooring omit the commands between the image and the floor
+            // (absent from BOTH the reclaimed log AND the behind image): a SILENT data loss. Refuse to serve.
+            // (At reopen the async-apply monitor is Clear — it is memoryless across restart — so
+            // `recovery_high_water` here is the REAL durable high-water, not a withheld one; a poisoned
+            // projection already failed in `resolve_recovery_start` below.)
+            if let Some(fl) = &floor {
+                let covers_floor = recorded_high_water
+                    .as_ref()
+                    .is_some_and(|hw| hw.sequence >= fl.sequence);
+                if !covers_floor {
+                    return Err(EngineError::Storage(format!(
+                        "recovery refused: {}/{} has a durable retention floor at seq {} but the projection \
+                         image high-water is {:?} (behind the floor); the below-floor object-log segments are \
+                         reclaimed, so replaying from the floor would silently drop commands — a restored/\
+                         rolled-back/foreign projection image over a trimmed log is an unrecoverable \
+                         inconsistency",
+                        key.tenant_id.as_str(),
+                        key.queue_id.as_str(),
+                        fl.sequence,
+                        recorded_high_water,
+                    )));
+                }
+            }
             let resolved_start = match resolve_recovery_start(
                 recovery_poison.as_deref(),
                 hard_backpressure,

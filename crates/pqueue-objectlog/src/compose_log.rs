@@ -25,6 +25,15 @@ use pqueue_projection::InMemoryProjection;
 
 use crate::segmented::{LocalFsBlobStore, SegmentConfig, SegmentedObjectLog};
 
+/// Convert a command envelope's `created_at` to epoch-milliseconds (bead pqueue-b5cc2bc7 bug 1): the raw
+/// append path stamps a segment's `committed_at_ms` from the max of these so `created_at <= committed_at_ms`
+/// holds for the retention-floor trim. Mirrors `pqueue_engine`'s internal `ts_to_ms`.
+fn ts_to_ms(ts: pqueue_core::UtcTimestamp) -> i64 {
+    ts.seconds
+        .saturating_mul(1000)
+        .saturating_add((ts.nanoseconds / 1_000_000) as i64)
+}
+
 /// A large segment target so [`SegmentedObjectLog::enqueue`] never auto-seals mid-`append`; the append path
 /// force-seals exactly one segment per call, so the whole batch is one group commit.
 const APPEND_TARGET_BYTES: usize = 1 << 30;
@@ -110,11 +119,23 @@ impl LogStore for ObjectLog {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
+        // Stamp the sealed segment's `committed_at_ms` with a SOUND upper bound on the `created_at` of every
+        // envelope in the batch (bead pqueue-b5cc2bc7 bug 1): the max `created_at` over the batch. The
+        // composition supplies no wall clock on the raw append path, but `created_at <= committed_at_ms` MUST
+        // hold for the retention-floor trim to be AC-TXN-3-safe (a segment is age-expired only when it holds
+        // ONLY request_ids past retention). A `0` here (the old value) would mark every raw-append segment as
+        // infinitely old and let the trim reclaim a within-retention request_id. Empty batches keep `0` (no
+        // segment is sealed).
+        let seal_ms = commands
+            .iter()
+            .map(|env| ts_to_ms(env.created_at))
+            .max()
+            .unwrap_or(0);
         // Buffer the batch, then force-seal it into one segment (the ack boundary). A stale epoch is fenced at
         // the seal, before any segment object is written, and the buffer is discarded — nothing is acked.
-        let out = self.log.enqueue(shard, commands, expected_epoch, 0)?;
+        let out = self.log.enqueue(shard, commands, expected_epoch, seal_ms)?;
         let mut positions = out.committed;
-        let sealed = self.log.seal(shard, expected_epoch, 0)?;
+        let sealed = self.log.seal(shard, expected_epoch, seal_ms)?;
         positions.extend(sealed);
         // Advance the durable high-water to the last acked position (the per-commit high-water advance the
         // conformance suite asserts; the explicit `set_high_water` setter is for snapshot truncation).
@@ -170,8 +191,10 @@ impl LogStore for ObjectLog {
         &mut self,
         shard: &QueueKey,
         position: CommandPosition,
+        expected_epoch: u64,
     ) -> EngineResult<()> {
-        self.log.advance_retention_floor(shard, position)
+        self.log
+            .advance_retention_floor(shard, position, expected_epoch)
     }
 
     fn max_trimmable_seq_before(

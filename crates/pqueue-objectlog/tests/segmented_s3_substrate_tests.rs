@@ -637,8 +637,8 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
     let horizon = log.max_trimmable_seq_before(&parent, 500).unwrap();
     assert_eq!(horizon, Some(3), "the expired-segment prefix ends at seq 3");
 
-    // Crash-safe order: advance the floor FIRST, then delete the segment objects.
-    log.advance_retention_floor(&parent, CommandPosition::new(parent.clone(), 0, 3))
+    // Crash-safe order: advance the floor FIRST (epoch-fenced at the current epoch 0), then delete.
+    log.advance_retention_floor(&parent, CommandPosition::new(parent.clone(), 0, 3), 0)
         .unwrap();
     let deleted = log.expire_segments_through(&parent, 3, 30).unwrap();
     assert_eq!(
@@ -700,6 +700,61 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
     assert!(
         store.get(&seg_key(0)).unwrap().is_none(),
         "seg0 is reclaimed once the pin is gone"
+    );
+}
+
+/// Test (bead pqueue-b5cc2bc7 bug 2b — cross-owner floor fence): the durable retention floor is an OVERWRITE
+/// blob and the composed unit-of-work lock is process-LOCAL, so a superseded owner must be prevented from
+/// LOWERING a newer owner's floor (which would strand recovery at a segment the newer owner already
+/// reclaimed). `advance_retention_floor` is epoch-fenced against the authoritative manifest tail epoch.
+#[test]
+fn retention_floor_advance_is_epoch_fenced_against_a_superseded_owner() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store, cfg);
+    let shard = shard();
+    log.create_queue(&qdef()).unwrap();
+    // One segment [0..3] at epoch 0.
+    log.enqueue(&shard, &pushes(4), 0, 10).unwrap();
+    log.seal(&shard, 0, 11).unwrap();
+
+    // Owner at epoch 0 advances the floor to seq 1.
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
+        .unwrap();
+
+    // A NEW owner takes over: acquire a strictly-greater epoch (publishes a fence entry to the manifest).
+    let new_epoch = log.acquire_epoch(&shard, 20).unwrap();
+    assert!(new_epoch > 0, "acquire_epoch must bump the manifest epoch");
+
+    // The new owner advances the floor to seq 3 at the new epoch — accepted.
+    log.advance_retention_floor(
+        &shard,
+        CommandPosition::new(shard.clone(), new_epoch, 3),
+        new_epoch,
+    )
+    .unwrap();
+    assert_eq!(
+        log.read_retention_floor(&shard)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3)
+    );
+
+    // The SUPERSEDED owner (still believing it holds epoch 0) tries to LOWER the floor back to seq 2 -> the
+    // epoch fence rejects it; the floor stays at the newer owner's seq 3.
+    let fenced = log
+        .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 2), 0)
+        .unwrap_err();
+    assert!(
+        matches!(fenced, EngineError::EpochFenced),
+        "a superseded owner's floor write must be EpochFenced, got {fenced:?}"
+    );
+    assert_eq!(
+        log.read_retention_floor(&shard)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the newer owner's floor is not regressed by the superseded owner"
     );
 }
 

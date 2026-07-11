@@ -27,9 +27,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pqueue_conformance::fault::spec;
 use pqueue_core::{QueueDefinition, RequestId};
 use pqueue_engine::{
-    CommandPosition, CommitTransition, CommitTransitionPort, ComposedBackend, ControlPlaneStore,
-    EngineError, InProcessControlPlane, LogRead, LogStore, ProjectionRead, ProjectionStore,
-    PushPort, QueueKey, ReclaimDriver, RecoveryStart, resolve_recovery_start,
+    ClaimPort, CommandPosition, CommitTransition, CommitTransitionPort, ComposedBackend,
+    ControlPlaneStore, EngineError, InProcessControlPlane, LogRead, LogStore, ProjectionRead,
+    ProjectionStore, PushPort, QueueKey, ReclaimDriver, RecoveryStart, resolve_recovery_start,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{BackpressureLevel, HybridAsyncThresholds, HybridProjectionStore};
@@ -66,6 +66,23 @@ fn open_hybrid(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend 
         .with_group_commit(true)
         .recover()
         .expect("recover objectlog/hybrid-async")
+}
+
+/// Open the hybrid-async backend on the RAW / synchronous append path (`ObjectLog::open`, NOT group-commit):
+/// every write force-seals its own segment through `LogStore::append`, whose `committed_at_ms` is stamped from
+/// the batch's max `created_at` (bead pqueue-b5cc2bc7 bug 1). Used to prove the retention-floor trim preserves
+/// AC-TXN-3 on the raw-append path too, not only group-commit.
+fn open_hybrid_raw(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend {
+    std::fs::create_dir_all(root).ok();
+    let sqlite = root.join("projection.sqlite");
+    let log = ObjectLog::open(root).expect("raw log");
+    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_deferred_flush_chunk(1)
+        .with_async_monitor(thresholds);
+    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .recover()
+        .expect("recover raw objectlog/hybrid-async")
 }
 
 /// The shared t1/q1 queue with a SHORT request-id retention so the logical clock can step past it. Emission is
@@ -237,6 +254,54 @@ async fn test1_segment_reclamation_trims_expired_checkpointed_segments() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1b (bug 1) — RAW / SYNCHRONOUS APPEND PATH: a request_id committed via the raw append path (not
+//   group-commit) is stamped with a real committed_at_ms (max created_at over the batch, not 0), so a trim
+//   within retention RETAINS its segment and it replays across restart. Before the fix the raw path stamped
+//   committed_at_ms=0, marking the segment infinitely-old and reclaiming a within-retention request_id -> a
+//   fresh (regressed) retry. This is the AC-TXN-3-crux the reviewer flagged.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test1b_raw_append_path_preserves_actxn3_across_trim_within_retention() {
+    let root = base_dir("raw-append-actxn3");
+    let backend = open_hybrid_raw(&root, clear_thresholds());
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+
+    // RAW append path (open_hybrid_raw): an OLD filler (seq 0 @ t=1s) then R (seq 1 @ t=1000s) under a
+    // request_id. `push`/`push_rid` go through commit_locked -> LogStore::append, whose committed_at_ms is now
+    // max(created_at) = the push timestamp (NOT 0).
+    push(&backend, "filler", 1).await;
+    drain(&backend);
+    let r_ids = push_rid(&backend, "R", "R-body", 1_000)
+        .await
+        .expect("commit R (raw)");
+    drain(&backend);
+
+    // Trim at t=4000s, retention 3600s: cutoff = 4_000_000 - 3_600_000 - 5_000 = 395_000ms. filler(committed
+    // 1_000ms) expired; R(committed 1_000_000ms) is WITHIN retention -> RETAINED. Were the raw-append
+    // committed_at_ms still 0, R(0 <= 395_000) would be wrongly reclaimed.
+    backend
+        .trim_reclaimable_segments(&shard(), 3_600_000, pqueue_conformance::ts(4_000))
+        .expect("trim raw");
+    assert_eq!(
+        floor_seq(&backend),
+        Some(0),
+        "only the filler is reclaimed; the within-retention request_id segment is RETAINED (committed_at_ms is a real upper bound, not 0)"
+    );
+
+    // Restart + retry within retention -> REPLAY the committed ids (AC-TXN-3 preserved on the raw path).
+    drop(backend);
+    let reopened = open_hybrid_raw(&root, clear_thresholds());
+    let replay = push_rid(&reopened, "R", "R-body", 4_001)
+        .await
+        .expect("replay R (raw)");
+    assert_eq!(
+        replay, r_ids,
+        "raw-append within-retention request_id REPLAYS across trim+restart (bug 1 fix)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 2 — WITHHELD UNDER HARD DEBT: a reap tick under Hard async-apply debt trims 0 and never advances floor.
 // ---------------------------------------------------------------------------
 
@@ -382,8 +447,10 @@ async fn test3c_commit_transition_is_capability_na_on_eventual_apply_objectlog()
     // commit_transition (the OTHER request_id-bearing op) requires the atomic append+apply boundary; the
     // eventual-apply object-log/hybrid-async backend refuses it (EngineError::Unavailable). It therefore
     // cannot be exercised across a trim on THIS substrate — a durability-class property, not a coverage gap
-    // (same finding as the existing AC-TXN-3 objectlog row). Its recovery fold IS floor-threaded + back-compat
-    // (rebuild_commit_idempotency_from_log starts at the floor), verified by the recovery-correctness test.
+    // (same finding as the existing AC-TXN-3 objectlog row). Its recovery fold (rebuild_commit_idempotency_from_log)
+    // IS floor-threaded + back-compat by construction (it starts the fold at `floor`, symmetric with the push
+    // fold), but that fold is NOT exercised end-to-end here because no commit_transition envelope can exist on
+    // this backend; the push fold is the one proven across trim+restart (test3a/test3b/test4).
     let root = base_dir("actxn3-commit-na");
     let backend = open_hybrid(&root, clear_thresholds());
     backend.create_queue(qdef_short_retention()).await.unwrap();
@@ -409,32 +476,62 @@ async fn test3c_commit_transition_is_capability_na_on_eventual_apply_objectlog()
 //          the floor is contiguous with no missing segment; the R1 start-flooring logic is verified.
 // ---------------------------------------------------------------------------
 
-/// Run the SAME workload with/without a trim tick, reopen, and return (pending, replayed-ids-for-R).
-async fn recovery_run(tag: &str, do_trim: bool) -> (u64, Vec<pqueue_core::ItemId>) {
+/// The full recovered image observed after a reopen: the COMPLETE QueueMetrics, the replayed ids for MULTIPLE
+/// request_ids (one near the retention boundary), and the sorted claimed item-id set (the eligible/active-lease
+/// projection). Two runs that differ only by a trim must produce an IDENTICAL RecoveredImage.
+#[derive(Debug, PartialEq, Eq)]
+struct RecoveredImage {
+    metrics: pqueue_engine::QueueMetrics,
+    replays: Vec<Vec<pqueue_core::ItemId>>,
+    claimed: Vec<pqueue_core::ItemId>,
+}
+
+/// Run the SAME multi-request_id workload with/without a trim tick, on EITHER the group-commit (`raw=false`)
+/// or the raw/synchronous append (`raw=true`) path, reopen, and capture the full recovered image.
+async fn recovery_run(tag: &str, do_trim: bool, raw: bool) -> RecoveredImage {
     let root = base_dir(tag);
-    let backend = open_hybrid(&root, clear_thresholds());
+    let open = |r: &Path| {
+        if raw {
+            open_hybrid_raw(r, clear_thresholds())
+        } else {
+            open_hybrid(r, clear_thresholds())
+        }
+    };
+    let backend = open(&root);
     backend.create_queue(qdef_short_retention()).await.unwrap();
 
-    // filler (seq 0, t=1s), R (seq 1, t=1000s), then a fresh tail (seq 2, t=10_000s).
+    // filler (seq 0, t=1s) — the ONLY segment trimmed. Then THREE request_ids at increasing times (R1 near the
+    // retention boundary at replay, R2/R3 comfortably within), and a fresh tail. All of R1/R2/R3 stay within
+    // retention across the trim, so the rebuilt idempotency map must replay all three identically.
     push(&backend, "filler", 1).await;
     drain(&backend);
-    let r_ids = push_rid(&backend, "R", "R-body", 1_000).await.expect("R");
-    drain(&backend);
+    let mut committed: Vec<Vec<pqueue_core::ItemId>> = Vec::new();
+    for (rid, at) in [("R1", 1_000i64), ("R2", 1_500), ("R3", 2_000)] {
+        committed.push(
+            push_rid(&backend, rid, &format!("{rid}-body"), at)
+                .await
+                .unwrap_or_else(|e| panic!("{tag}: commit {rid}: {e:?}")),
+        );
+        drain(&backend);
+    }
     push(&backend, "tail", 10_000).await;
     drain(&backend);
 
     if do_trim {
-        // Trim at t=4000s: only the filler (seq 0) expires; R + tail retained.
+        // Trim at t=4000s: only the filler (committed 1_000ms) expires; every request_id + the tail retained.
         backend.tick(pqueue_conformance::ts(4_000)).await.unwrap();
-        assert_eq!(floor_seq(&backend), Some(0), "{tag}: filler trimmed");
+        assert_eq!(
+            floor_seq(&backend),
+            Some(0),
+            "{tag}: only the filler is trimmed"
+        );
     }
     drop(backend);
 
-    let reopened = open_hybrid(&root, clear_thresholds());
+    let reopened = open(&root);
     // read_from(floor) is contiguous with no missing-segment error.
-    let start = floor_pos(&reopened);
     let page = reopened
-        .read_from(&shard(), start, 1000)
+        .read_from(&shard(), floor_pos(&reopened), 1000)
         .await
         .unwrap_or_else(|e| panic!("{tag}: read_from floor errored: {e:?}"));
     assert!(
@@ -443,25 +540,105 @@ async fn recovery_run(tag: &str, do_trim: bool) -> (u64, Vec<pqueue_core::ItemId
             .all(|w| w[0].0.sequence < w[1].0.sequence),
         "{tag}: recovered read is strictly ordered / contiguous"
     );
-    // In-retention R replays identically after reopen (R created t=1000s, expires t=4600s; retry at t=4001s).
-    let replay = push_rid(&reopened, "R", "R-body", 4_001)
+    let metrics = reopened.metrics(&shard()).await.expect("metrics");
+    // Replay all three request_ids at t=4599s — R1 (created 1000s, expires 4600s) is ONE SECOND inside its
+    // retention window (near-boundary); each must replay its committed ids from the floor-threaded fold.
+    let mut replays = Vec::new();
+    for rid in ["R1", "R2", "R3"] {
+        replays.push(
+            push_rid(&reopened, rid, &format!("{rid}-body"), 4_599)
+                .await
+                .unwrap_or_else(|e| panic!("{tag}: replay {rid}: {e:?}")),
+        );
+    }
+    assert_eq!(
+        replays, committed,
+        "{tag}: all three request_ids replay their committed ids"
+    );
+    // Claim everything to compare the eligible/active-lease projection (the full serving image, not just counts).
+    let claimed_resp = reopened
+        .claim(pqueue_conformance::claim_req(100, 5_000_000, 4_600))
         .await
-        .expect("replay R");
-    assert_eq!(replay, r_ids, "{tag}: R replays its committed ids");
-    (pending(&reopened).await, replay)
+        .expect("claim");
+    let mut claimed: Vec<pqueue_core::ItemId> =
+        claimed_resp.items.iter().map(|it| it.item_id).collect();
+    claimed.sort();
+    RecoveredImage {
+        metrics,
+        replays,
+        claimed,
+    }
 }
 
 #[tokio::test]
-async fn test4_recovery_from_floor_matches_no_trim_control() {
-    let (control_pending, control_ids) = recovery_run("recover-control", false).await;
-    let (trim_pending, trim_ids) = recovery_run("recover-trim", true).await;
+async fn test4_recovery_from_floor_matches_no_trim_control_group_commit() {
+    let control = recovery_run("recover-control-gc", false, false).await;
+    let trimmed = recovery_run("recover-trim-gc", true, false).await;
     assert_eq!(
-        trim_pending, control_pending,
-        "recovery after trim rebuilds the same projection (pending) as a no-trim control"
+        trimmed, control,
+        "group-commit: recovery after trim rebuilds the FULL image (metrics + multi-request_id idempotency + eligible/lease set) identically to a no-trim control"
     );
+}
+
+#[tokio::test]
+async fn test4_recovery_from_floor_matches_no_trim_control_raw_append() {
+    let control = recovery_run("recover-control-raw", false, true).await;
+    let trimmed = recovery_run("recover-trim-raw", true, true).await;
     assert_eq!(
-        trim_ids, control_ids,
-        "recovery after trim rebuilds the same push-idempotency replay as a no-trim control"
+        trimmed, control,
+        "raw append: recovery after trim rebuilds the FULL image identically to a no-trim control"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bug 3 — BEHIND-IMAGE FAIL-CLOSED: a trimmed log reopened over a projection image BEHIND the durable floor
+//   (restored / rolled-back / foreign SQLite) must FAIL CLOSED, not silently drop the commands between the
+//   behind image and the floor (absent from BOTH the reclaimed log and the behind image).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_bug3_projection_behind_floor_fails_closed() {
+    let root = base_dir("behind-image");
+    let backend = open_hybrid(&root, clear_thresholds());
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        push(&backend, &format!("old-{i}"), 10).await;
+    }
+    drain(&backend);
+    push(&backend, "fresh", 10_000).await;
+    drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        floor_seq(&backend),
+        Some(2),
+        "the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen starts a
+    // FRESH empty image (high-water None < floor 2) while the object-log floor blob + trimmed segments persist.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+    }
+
+    // Recovery must FAIL CLOSED (does not silently drop the reclaimed commands 0..2).
+    let sqlite = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(&root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_deferred_flush_chunk(1)
+        .with_async_monitor(clear_thresholds());
+    let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover();
+    let err = result
+        .err()
+        .expect("recovery over a projection image behind the retention floor MUST fail closed");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("retention floor") && msg.contains("behind"),
+        "the fail-closed error must name the behind-floor inconsistency; got {msg}"
     );
 }
 
@@ -570,15 +747,32 @@ async fn test5_crash_between_floor_write_and_delete_is_recoverable_and_idempoten
     // Recovery succeeds despite floor=3 pointing above still-present below-floor segments (read starts at F+1).
     let reopened = seed_reopen_and_check(&root).await;
 
-    // Re-running the trim is a safe, idempotent no-op at the same horizon: it returns Ok, the durable floor is
-    // unchanged (monotone), and the serving state stays consistent (read from the floor is clean).
+    // Before the re-run the crash-interrupted deletion has left below-floor segment objects behind (5 .seg
+    // files: seq 0..3 undeleted + the tail seq 4).
+    assert_eq!(
+        count_seg_files(&root),
+        5,
+        "crash-before-delete leaves all below-floor segment objects present"
+    );
+    // Re-running the trim FINISHES the interrupted deletion (bug 2a): the below-floor objects are ACTUALLY
+    // deleted this time (delete_count advances), the floor is unchanged (monotone), and only the tail remains.
+    let deletes_before = delete_count(&reopened);
     reopened
         .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
-        .expect("re-run trim is a safe no-op");
+        .expect("re-run trim finishes the interrupted deletion");
+    assert!(
+        delete_count(&reopened) > deletes_before,
+        "the re-run must actually delete the leaked below-floor segment objects (not a silent no-op)"
+    );
     assert_eq!(
         floor_seq(&reopened),
         Some(3),
         "floor stays at the consistent horizon"
+    );
+    assert_eq!(
+        count_seg_files(&root),
+        1,
+        "after the re-run ONLY the fresh tail segment object remains; all below-floor objects reclaimed"
     );
     let page = reopened
         .read_from(&shard(), floor_pos(&reopened), 100)
@@ -615,10 +809,27 @@ async fn test5_crash_mid_delete_is_recoverable_and_idempotent() {
     drop(backend);
 
     let reopened = seed_reopen_and_check(&root).await;
-    // Idempotent re-run after a partial (mid-delete) crash: safe no-op, floor consistent, tail readable.
+    // A mid-delete crash left SOME below-floor objects behind (one was deleted before the fault, so 4 .seg
+    // files remain). The re-run FINISHES the deletion (bug 2a): below-floor objects actually gone, only the
+    // tail remains.
+    let seg_before = count_seg_files(&root);
+    assert!(
+        (2..=4).contains(&seg_before),
+        "a mid-delete crash leaves a partial set of below-floor segment objects; got {seg_before}"
+    );
+    let deletes_before = delete_count(&reopened);
     reopened
         .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
         .expect("re-run trim after mid-delete crash");
+    assert!(
+        delete_count(&reopened) > deletes_before,
+        "the re-run must delete the remaining below-floor stragglers"
+    );
+    assert_eq!(
+        count_seg_files(&root),
+        1,
+        "after the re-run ONLY the fresh tail segment object remains"
+    );
     let page = reopened
         .read_from(&shard(), floor_pos(&reopened), 100)
         .await
@@ -710,4 +921,22 @@ fn walk_has_file(root: &Path, name: &str) -> bool {
         }
     }
     false
+}
+
+/// Count the segment OBJECT files (`*.seg`) physically present under the object-log root — the DURABLE
+/// evidence that a below-floor segment object was (or was not) actually reclaimed from storage.
+fn count_seg_files(root: &Path) -> usize {
+    let mut n = 0;
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            n += count_seg_files(&path);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("seg") {
+            n += 1;
+        }
+    }
+    n
 }
