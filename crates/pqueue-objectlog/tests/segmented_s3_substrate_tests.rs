@@ -1000,6 +1000,172 @@ fn branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segm
     );
 }
 
+/// A [`BlobStore`] wrapper that injects a store failure on the first `put` / `put_if_absent` / `delete` whose
+/// key contains an armed substring (bead pqueue-b5cc2bc7 error-path tests). Reads are never failed.
+#[derive(Default)]
+struct FailingBlobStore {
+    inner: InMemoryBlobStore,
+    fail_put: std::sync::Mutex<Option<String>>,
+    fail_put_if_absent: std::sync::Mutex<Option<String>>,
+    fail_delete: std::sync::Mutex<Option<String>>,
+}
+
+impl FailingBlobStore {
+    fn arm_put(&self, substr: &str) {
+        *self.fail_put.lock().unwrap() = Some(substr.to_string());
+    }
+    fn arm_put_if_absent(&self, substr: &str) {
+        *self.fail_put_if_absent.lock().unwrap() = Some(substr.to_string());
+    }
+    fn arm_delete(&self, substr: &str) {
+        *self.fail_delete.lock().unwrap() = Some(substr.to_string());
+    }
+    fn disarm(&self) {
+        *self.fail_put.lock().unwrap() = None;
+        *self.fail_put_if_absent.lock().unwrap() = None;
+        *self.fail_delete.lock().unwrap() = None;
+    }
+    fn armed(lock: &std::sync::Mutex<Option<String>>, key: &str) -> bool {
+        lock.lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|s| key.contains(s))
+    }
+}
+
+impl BlobStore for FailingBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        if Self::armed(&self.fail_put, key) {
+            return Err(EngineError::Storage(format!("injected put failure: {key}")));
+        }
+        self.inner.put(key, body)
+    }
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        if Self::armed(&self.fail_put_if_absent, key) {
+            return Err(EngineError::Storage(format!(
+                "injected put_if_absent failure: {key}"
+            )));
+        }
+        self.inner.put_if_absent(key, body)
+    }
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        if Self::armed(&self.fail_delete, key) {
+            return Err(EngineError::Storage(format!(
+                "injected delete failure: {key}"
+            )));
+        }
+        self.inner.delete(key)
+    }
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+}
+
+/// Drive a branch creation whose POST-PIN stage hits a store failure (armed via `arm`), then assert the
+/// error-path safety invariants (bead pqueue-b5cc2bc7): (a) branch creation FAILS and NO missing-segment
+/// branch is ever left (the source segments the branch referenced stay intact); (b/c) the source PIN is
+/// released iff cleanup completed — a clean rollback leaves the source fully reclaimable, while a
+/// cleanup-stage failure RETAINS the pin (safe leak) so a reclamation can never delete a referenced segment.
+fn check_post_pin_store_failure(
+    arm: impl Fn(&FailingBlobStore),
+    expect_source_reclaimable_after: bool,
+) {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let log = SegmentedObjectLog::open(
+        std::sync::Arc::clone(&store),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    );
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    arm(&store);
+    let branch_def = branch_qdef("post-pin-fail");
+    let result = log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        1_000_000_000,
+        100,
+    );
+    store.disarm();
+
+    // (a) branch creation FAILED under the store fault.
+    assert!(
+        result.is_err(),
+        "a post-pin store failure must fail branch creation, got {result:?}"
+    );
+    // (a) NO missing-segment branch: every source segment the branch referenced is intact + readable.
+    assert_eq!(
+        log.read_all(&source).unwrap().len(),
+        6,
+        "all six source segments remain readable — no missing segment under any post-pin failure"
+    );
+    // (b)/(c) the pin is released iff the rollback's branch-object cleanup completed.
+    let deleted = log.expire_segments_through(&source, 5, 200).unwrap();
+    if expect_source_reclaimable_after {
+        assert_eq!(
+            deleted, 6,
+            "a clean rollback released the source pin — the source is fully reclaimable afterward"
+        );
+    } else {
+        assert_eq!(
+            deleted, 0,
+            "cleanup failed -> the source pin is RETAINED (a safe, TTL-bounded leak); the source segments stay protected, never deleted out from under the branch"
+        );
+    }
+}
+
+/// Post-pin store failure at the MANIFEST-COPY stage -> clean rollback, pin released, source reclaimable.
+#[test]
+fn branch_manifest_copy_store_failure_rolls_back_and_releases_the_pin() {
+    check_post_pin_store_failure(|s| s.arm_put("/manifest/"), true);
+}
+
+/// Post-pin store failure at the BRANCH.JSON-PUT stage -> clean rollback, pin released, source reclaimable.
+#[test]
+fn branch_metadata_put_store_failure_rolls_back_and_releases_the_pin() {
+    check_post_pin_store_failure(|s| s.arm_put("branch.json"), true);
+}
+
+/// Post-pin store failure at the ACQUIRE-EPOCH stage (a `put_if_absent`) -> clean rollback, pin released.
+#[test]
+fn branch_acquire_epoch_store_failure_rolls_back_and_releases_the_pin() {
+    check_post_pin_store_failure(|s| s.arm_put_if_absent("/manifest/"), true);
+}
+
+/// Post-pin failure PLUS a branch-object-CLEANUP failure -> the pin is RETAINED (safe leak); the source is
+/// NOT reclaimable (its segments stay protected — never an unpinned partial branch / missing segment).
+#[test]
+fn branch_object_cleanup_store_failure_retains_the_pin() {
+    check_post_pin_store_failure(
+        |s| {
+            s.arm_put("branch.json"); // trigger the post-pin failure
+            s.arm_delete("/manifest/"); // and fail the rollback's branch-object cleanup
+        },
+        false,
+    );
+}
+
+/// Post-pin failure where branch-object cleanup SUCCEEDS but the PIN delete fails -> the pin is RETAINED
+/// (safe leak: branch objects gone, source still protected), never released prematurely.
+#[test]
+fn branch_pin_delete_store_failure_retains_the_pin() {
+    check_post_pin_store_failure(
+        |s| {
+            s.arm_put("branch.json"); // trigger the post-pin failure
+            s.arm_delete("branches/"); // branch objects delete fine; the PIN delete (registry key) fails LAST
+        },
+        false,
+    );
+}
+
 /// HOLE B (bead pqueue-b5cc2bc7 — branch inherits the source floor; no missing segment): a branch cut ABOVE a
 /// trimmed source floor must copy ONLY the retained (at/above-floor) segments and inherit the floor, so
 /// `read_all(branch)` never GETs a reclaimed object. A cut at/below the floor is rejected cleanly.

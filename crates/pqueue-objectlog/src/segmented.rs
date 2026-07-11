@@ -1380,17 +1380,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Err(EngineError::Invalid("branch queue must differ from source"));
         }
 
-        // Roll back a partially-created branch (best-effort): drop the source pin + all branch objects + the
-        // in-memory branch shard. Used when a concurrent trim reclaims the branched range mid-creation.
-        let rollback = |this: &Self| {
-            let _ = this.discard_branch(source, &branch);
-            this.inner
-                .lock()
-                .expect("segmented log poisoned")
-                .shards
-                .remove(&branch);
-        };
-
         // CROSS-OWNER SAFETY (bead pqueue-b5cc2bc7 HOLE B): a peer owner may CONCURRENTLY advance the source
         // retention floor + reclaim segments while this branch is being created. Guard with (1) PIN-FIRST:
         // publish the branch's source pin BEFORE reading the floor / copying manifests, so a concurrent trim
@@ -1407,151 +1396,162 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             expires_at_ms: now_ms.saturating_add(ttl_ms as i64),
             emit_change_records,
         };
-        // (1) Publish the source PIN first (the registry entry `branch_pins_segment` consults).
+        // (1) Publish the source PIN first (the registry entry `branch_pins_segment` consults). If THIS fails,
+        // no pin was published, so there is nothing to roll back — just surface the error.
         self.store_put(
             &branch_registry_key(source, &branch),
             &to_json(&metadata)?,
             true,
         )?;
 
-        // The source's retention floor (bead pqueue-b5cc2bc7 bug B): the below-floor segment OBJECTS are already
-        // reclaimed, so the branch must INHERIT the floor — it can only view commands at/above `floor + 1`.
-        // Read it AFTER the pin is published so the copy baseline is consistent with the pin.
-        let source_floor = match self.read_retention_floor(source) {
-            Ok(f) => f.map(|p| p.sequence),
-            Err(e) => {
-                rollback(self);
-                return Err(e);
-            }
+        // Roll back a partially-created branch (bead pqueue-b5cc2bc7 error-path safety). ORDER IS SAFETY-
+        // CRITICAL: delete the branch OBJECTS + in-memory shard FIRST, and release the source PIN LAST. If
+        // branch-object cleanup FAILS, the pin is RETAINED (a safe, TTL-bounded, retryable LEAK that keeps the
+        // source segments protected) and the cleanup error is surfaced — NEVER an unpinned partial branch that
+        // would let reclamation delete a still-referenced segment ("missing segment"). Idempotent: a retry
+        // finishes any partial cleanup (already-deleted objects delete cleanly).
+        let rollback = |this: &Self| -> EngineResult<()> {
+            // Branch OBJECTS first (manifest / branch.json / snapshots / fence). If this errors, return WITHOUT
+            // touching the pin — the source stays protected.
+            this.delete_prefix(&shard_prefix(&branch))?;
+            this.inner
+                .lock()
+                .expect("segmented log poisoned")
+                .shards
+                .remove(&branch);
+            // Source PIN LAST, only after the branch objects are provably gone.
+            this.store_delete(&branch_registry_key(source, &branch))?;
+            Ok(())
         };
-        // Reject a cut at or below the floor CLEANLY: such a branch would have NO retained data (its whole view
-        // is reclaimed), and copying the below-floor tombstones would surface a later "missing segment".
-        if let Some(f) = source_floor
-            && position.sequence <= f
-        {
-            rollback(self);
-            return Err(EngineError::Invalid(
-                "branch cut at or below the source retention floor: those segments were reclaimed",
-            ));
-        }
 
-        // Test seam (never armed in production): lets a test interleave a concurrent peer trim here, between
-        // this branch's floor read and its copy, to exercise the validate-after-copy guard.
-        if let Err(e) = self.fault(FaultCutPoint::DuringBranchCopy) {
-            rollback(self);
-            return Err(e);
-        }
-
-        self.create_queue(branch_def)?;
-
-        let branch_prefix = shard_prefix(&branch);
-        let mut next_index = 0u64;
-        // Seed the branch with the INHERITED floor as its FIRST manifest entry, so the branch's effective
-        // genesis is `floor + 1`: `read_retention_floor(branch)` returns it, and the branch's recovery / read /
-        // idempotency folds resume above the trimmed prefix and never GET a reclaimed object.
-        if let Some(f) = source_floor {
-            let floor_entry = ManifestEntry {
-                index: next_index,
-                epoch: 0,
-                fence: false,
-                segment_key: None,
-                first_seq: f,
-                last_seq: f,
-                visible_last_seq: None,
-                checksum: 0,
-                committed_at_ms: 0,
-                retention_floor_through: Some(f),
-            };
-            let key = format!("{branch_prefix}manifest/{next_index:020}.json");
-            self.store_put(&key, &to_json(&floor_entry)?, true)?;
-            next_index += 1;
-        }
-        let entries = self.read_manifest(source)?;
-        for entry in entries {
-            // Do NOT copy the source's own retention-floor-advance entries verbatim — the branch's inherited
-            // floor was seeded above.
-            if entry.retention_floor_through.is_some() {
-                continue;
+        // FAILURE FUNNEL: ALL post-pin work runs here. Any `?`-propagated failure returns from this closure and
+        // is routed through `rollback` below, so there is NO early-return between "pin published" and "branch
+        // fully committed" that leaves the pin (or an unpinned partial branch) behind.
+        let committed: EngineResult<u64> = (|| {
+            // The source retention floor: the below-floor segment OBJECTS are already reclaimed, so the branch
+            // must INHERIT the floor — it can only view commands at/above `floor + 1`. Read it AFTER the pin is
+            // published so the copy baseline is consistent with the pin.
+            let source_floor = self.read_retention_floor(source)?.map(|p| p.sequence);
+            // Reject a cut at or below the floor CLEANLY (its whole view is reclaimed).
+            if let Some(f) = source_floor
+                && position.sequence <= f
+            {
+                return Err(EngineError::Invalid(
+                    "branch cut at or below the source retention floor: those segments were reclaimed",
+                ));
             }
-            if entry.fence {
-                if entry.first_seq > position.sequence + 1 {
+
+            // Test seam (never armed in production): interleave a concurrent peer trim / inject a store failure
+            // here, between the floor read and the copy.
+            self.fault(FaultCutPoint::DuringBranchCopy)?;
+
+            self.create_queue(branch_def)?;
+
+            let branch_prefix = shard_prefix(&branch);
+            let mut next_index = 0u64;
+            // Seed the branch with the INHERITED floor as its FIRST manifest entry, so the branch's effective
+            // genesis is `floor + 1`: `read_retention_floor(branch)` returns it and the branch's recovery /
+            // read / idempotency folds resume above the trimmed prefix and never GET a reclaimed object.
+            if let Some(f) = source_floor {
+                let floor_entry = ManifestEntry {
+                    index: next_index,
+                    epoch: 0,
+                    fence: false,
+                    segment_key: None,
+                    first_seq: f,
+                    last_seq: f,
+                    visible_last_seq: None,
+                    checksum: 0,
+                    committed_at_ms: 0,
+                    retention_floor_through: Some(f),
+                };
+                let key = format!("{branch_prefix}manifest/{next_index:020}.json");
+                self.store_put(&key, &to_json(&floor_entry)?, true)?;
+                next_index += 1;
+            }
+            let entries = self.read_manifest(source)?;
+            for entry in entries {
+                // Do NOT copy the source's own retention-floor-advance entries verbatim.
+                if entry.retention_floor_through.is_some() {
+                    continue;
+                }
+                if entry.fence {
+                    if entry.first_seq > position.sequence + 1 {
+                        break;
+                    }
+                    let mut copied = entry.clone();
+                    copied.index = next_index;
+                    let key = format!("{branch_prefix}manifest/{next_index:020}.json");
+                    self.store_put(&key, &to_json(&copied)?, true)?;
+                    next_index += 1;
+                    continue;
+                }
+
+                // Skip a data segment entirely at/below the source floor — its object is RECLAIMED, so copying
+                // the tombstone would make the branch's read GET a deleted object. A straddling segment
+                // (visible_last_seq > floor) is retained and IS copied.
+                if let Some(f) = source_floor
+                    && Self::visible_last_seq(&entry) <= f
+                {
+                    continue;
+                }
+
+                if entry.first_seq > position.sequence {
                     break;
                 }
+
                 let mut copied = entry.clone();
                 copied.index = next_index;
+                if entry.last_seq > position.sequence {
+                    copied.visible_last_seq = Some(position.sequence);
+                }
                 let key = format!("{branch_prefix}manifest/{next_index:020}.json");
                 self.store_put(&key, &to_json(&copied)?, true)?;
                 next_index += 1;
-                continue;
+                if entry.last_seq >= position.sequence {
+                    break;
+                }
             }
 
-            // Skip a data segment that is entirely at/below the source floor — its object is RECLAIMED, so
-            // copying the tombstone would make the branch's read GET a deleted object ("missing segment"). A
-            // segment straddling the floor (visible_last_seq > floor) is retained and IS copied.
-            if let Some(f) = source_floor
-                && Self::visible_last_seq(&entry) <= f
+            // (2) VALIDATE-AFTER-COPY: re-read the AUTHORITATIVE source floor. If it MOVED during the copy, a
+            // peer concurrently reclaimed part of the branched range — fail cleanly so a retry re-reads the
+            // advanced floor (and either succeeds against the retained range or is cleanly rejected).
+            let floor_after = self.read_retention_floor(source)?.map(|p| p.sequence);
+            if floor_after != source_floor {
+                return Err(EngineError::Conflict);
+            }
+
+            let (next_seq, next_manifest_index, committed_epoch) =
+                self.recover_manifest(&branch)?;
             {
-                continue;
+                let mut g = self.inner.lock().expect("segmented log poisoned");
+                let buf = g.shards.get_mut(&branch).ok_or(EngineError::NotFound)?;
+                buf.next_seq = next_seq;
+                buf.next_manifest_index = next_manifest_index;
+                buf.committed_epoch = committed_epoch;
             }
 
-            if entry.first_seq > position.sequence {
-                break;
-            }
+            // The source pin (registry entry) was published up front; write the branch's OWN metadata blob now.
+            self.store_put(
+                &format!("{branch_prefix}branch.json"),
+                &to_json(&metadata)?,
+                true,
+            )?;
 
-            let mut copied = entry.clone();
-            copied.index = next_index;
-            if entry.last_seq > position.sequence {
-                copied.visible_last_seq = Some(position.sequence);
-            }
-            let key = format!("{branch_prefix}manifest/{next_index:020}.json");
-            self.store_put(&key, &to_json(&copied)?, true)?;
-            next_index += 1;
-            if entry.last_seq >= position.sequence {
-                break;
-            }
+            // Own lease / epoch: the branch gets its own fence entry without mutating the parent queue.
+            self.acquire_epoch(&branch, now_ms)
+        })();
+
+        match committed {
+            Ok(epoch) => Ok(epoch),
+            Err(original) => match rollback(self) {
+                // Clean rollback (branch objects + pin gone) — surface the original failure.
+                Ok(()) => Err(original),
+                // Cleanup itself failed: the branch objects could not all be removed, so the pin is RETAINED
+                // (source stays protected). Surface the cleanup error so the leak is visible + retryable.
+                Err(cleanup) => Err(cleanup),
+            },
         }
-
-        // (2) VALIDATE-AFTER-COPY: re-read the AUTHORITATIVE source floor. If it MOVED during the copy, a peer
-        // concurrently reclaimed part of the branched range whose pin-check ran before our pin was published —
-        // the copied entries may now reference deleted objects. Roll back and fail cleanly so a retry re-reads
-        // the advanced floor (and either succeeds against the retained range or is cleanly rejected).
-        let floor_after = match self.read_retention_floor(source) {
-            Ok(f) => f.map(|p| p.sequence),
-            Err(e) => {
-                rollback(self);
-                return Err(e);
-            }
-        };
-        if floor_after != source_floor {
-            rollback(self);
-            return Err(EngineError::Conflict);
-        }
-
-        let (next_seq, next_manifest_index, committed_epoch) = match self.recover_manifest(&branch)
-        {
-            Ok(t) => t,
-            Err(e) => {
-                rollback(self);
-                return Err(e);
-            }
-        };
-        {
-            let mut g = self.inner.lock().expect("segmented log poisoned");
-            let buf = g.shards.get_mut(&branch).ok_or(EngineError::NotFound)?;
-            buf.next_seq = next_seq;
-            buf.next_manifest_index = next_manifest_index;
-            buf.committed_epoch = committed_epoch;
-        }
-
-        // The source pin (registry entry) was published up front; write the branch's OWN metadata blob now.
-        self.store_put(
-            &format!("{branch_prefix}branch.json"),
-            &to_json(&metadata)?,
-            true,
-        )?;
-
-        // Own lease / epoch: the branch gets its own fence entry without mutating the parent queue.
-        self.acquire_epoch(&branch, now_ms)
     }
 
     /// Whether a live branch defaults to emitting change records.
