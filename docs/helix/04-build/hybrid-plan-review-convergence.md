@@ -6,8 +6,8 @@ ddx:
   review:
     self_hash: 575b3529a97ffd63e4b01a1cb1420d531295134f1996b323ff74bb3faec61a61
     deps:
-      plan-hybrid-sqlite-inmemory-projection: 5695ee9c00997c12cf2df378af020ae38c2b1e095b2d7e9bc1b3083fc6fb6b65
-    reviewed_at: "2026-07-07T06:16:24Z"
+      plan-hybrid-sqlite-inmemory-projection: eefa6005730f6a31933ab8d9c7ddee9412a09d88d252b1b3bbb91f2d2febea06
+    reviewed_at: "2026-07-11T01:06:40Z"
 ---
 
 # Hybrid Plan Review Convergence

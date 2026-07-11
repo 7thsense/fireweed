@@ -11,11 +11,11 @@ ddx:
     self_hash: 1a69a5ebd1be38b7f17c3be7a1f1319dc6111581fc905fec2c7a894bb3b77bf0
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-fjord-embedded-change-log-consumer-surface: 65104fc200ca12bac3cdc1d116c14da6e4c56839651102227134f7b530330185
-      adr-log-single-source-of-truth: 59aa04e425cda6e2ba888b4fc58108be7727fa9fd168fa9e951909346427c601
+      adr-fjord-embedded-change-log-consumer-surface: 278c336d35ab55c302a1cc321c74a11afca0001545201875fe322a9dd31ebdae
+      adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-08T18:01:17Z"
+    reviewed_at: "2026-07-11T00:58:14Z"
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention
