@@ -656,6 +656,14 @@ fn branch_metadata_key(branch: &QueueKey) -> String {
     format!("{}branch.json", shard_prefix(branch))
 }
 
+/// The "branch creation in progress" sentinel (bead pqueue-b5cc2bc7): written EARLY (right after the source
+/// pin) and dropped when the `branch.json` commit marker lands. Its presence WITHOUT the commit marker means a
+/// PARTIAL/uncommitted branch — treated as non-existent by every segment-reading path, so a failed/partial
+/// branch is never readable and can never GET a (source or its own) object, regardless of pin/TTL/cleanup.
+fn branch_pending_key(branch: &QueueKey) -> String {
+    format!("{}branch.pending", shard_prefix(branch))
+}
+
 // ---------------------------------------------------------------------------
 // Internal fault-injection seam (TP-003 §3.10 AC-TXN-4)
 // ---------------------------------------------------------------------------
@@ -1204,10 +1212,29 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Only segments named by a committed manifest entry are visible — a buffered-but-unsealed command or a
     /// fenced orphan segment is NOT returned, which is what makes "ack only after manifest commit"
     /// observable. Per-segment checksums are validated.
+    /// Whether `shard` is an UNCOMMITTED branch (bead pqueue-b5cc2bc7 — atomic branch existence). Branch
+    /// creation writes a `branch.pending` sentinel FIRST and its `branch.json` commit marker LAST (after the
+    /// pin, floor seed, ALL manifest copies, validate-after-copy, and acquire_epoch). A shard with the sentinel
+    /// but WITHOUT the commit marker is a partial/failed branch and MUST be treated as non-existent by every
+    /// segment-reading path, so it can never GET a reclaimed source object ("missing segment") — regardless of
+    /// the pin/TTL/cleanup outcome. A source queue (no sentinel — fast path, one GET) and a committed branch
+    /// (marker present) read normally.
+    fn branch_uncommitted(&self, shard: &QueueKey) -> EngineResult<bool> {
+        if self.store_get(&branch_pending_key(shard))?.is_none() {
+            return Ok(false); // source queue OR committed branch (sentinel dropped at commit)
+        }
+        Ok(self.store_get(&branch_metadata_key(shard))?.is_none())
+    }
+
     pub fn read_all(
         &self,
         shard: &QueueKey,
     ) -> EngineResult<Vec<(CommandPosition, CommandEnvelope)>> {
+        // A partial/uncommitted branch is NON-EXISTENT: return empty rather than GET a (possibly reclaimed)
+        // shared source segment.
+        if self.branch_uncommitted(shard)? {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::new();
         for entry in self.read_manifest(shard)? {
             if entry.fence {
@@ -1259,6 +1286,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         limit: usize,
     ) -> EngineResult<Vec<(CommandPosition, CommandEnvelope)>> {
         if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // A partial/uncommitted branch is NON-EXISTENT (see `branch_uncommitted`): never GET its shared source
+        // segments.
+        if self.branch_uncommitted(shard)? {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
@@ -1411,15 +1443,25 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // would let reclamation delete a still-referenced segment ("missing segment"). Idempotent: a retry
         // finishes any partial cleanup (already-deleted objects delete cleanly).
         let rollback = |this: &Self| -> EngineResult<()> {
-            // Branch OBJECTS first (manifest / branch.json / snapshots / fence). If this errors, return WITHOUT
-            // touching the pin — the source stays protected.
-            this.delete_prefix(&shard_prefix(&branch))?;
+            let pending = branch_pending_key(&branch);
+            // Delete every branch object EXCEPT the `branch.pending` sentinel FIRST: while ANY manifest entry
+            // survives, the sentinel MUST survive too so the readability gate keeps the branch non-existent (a
+            // plain prefix delete would drop the sentinel before the manifest — lexically `branch.pending` <
+            // `manifest/` — leaving readable manifest entries with no sentinel). If a delete errors here, the
+            // sentinel + pin are RETAINED and the branch stays non-readable + the source protected.
+            for key in this.store_list(&shard_prefix(&branch))? {
+                if key == pending {
+                    continue;
+                }
+                this.store_delete(&key)?;
+            }
             this.inner
                 .lock()
                 .expect("segmented log poisoned")
                 .shards
                 .remove(&branch);
-            // Source PIN LAST, only after the branch objects are provably gone.
+            // The branch's manifest/objects are provably gone — now drop the sentinel, then the source PIN LAST.
+            this.store_delete(&pending)?;
             this.store_delete(&branch_registry_key(source, &branch))?;
             Ok(())
         };
@@ -1428,6 +1470,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // is routed through `rollback` below, so there is NO early-return between "pin published" and "branch
         // fully committed" that leaves the pin (or an unpinned partial branch) behind.
         let committed: EngineResult<u64> = (|| {
+            // ATOMIC BRANCH EXISTENCE (bead pqueue-b5cc2bc7): write the `branch.pending` sentinel FIRST so any
+            // failure/crash before the `branch.json` commit marker (written LAST, below) leaves an UNCOMMITTED
+            // branch that every segment-reading path treats as NON-EXISTENT — never a readable partial branch.
+            self.store_put(&branch_pending_key(&branch), b"1", true)?;
             // The source retention floor: the below-floor segment OBJECTS are already reclaimed, so the branch
             // must INHERIT the floor — it can only view commands at/above `floor + 1`. Read it AFTER the pin is
             // published so the copy baseline is consistent with the pin.
@@ -1531,15 +1577,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 buf.committed_epoch = committed_epoch;
             }
 
-            // The source pin (registry entry) was published up front; write the branch's OWN metadata blob now.
-            self.store_put(
-                &format!("{branch_prefix}branch.json"),
-                &to_json(&metadata)?,
-                true,
-            )?;
-
             // Own lease / epoch: the branch gets its own fence entry without mutating the parent queue.
-            self.acquire_epoch(&branch, now_ms)
+            let epoch = self.acquire_epoch(&branch, now_ms)?;
+
+            // COMMIT MARKER — the LAST durable write (bead pqueue-b5cc2bc7 atomic branch existence). Only now,
+            // after the pin, floor seed, ALL manifest copies + objects, validate-after-copy, and acquire_epoch,
+            // does `branch.json` land — the atomic boundary that makes the branch READABLE (mirrors the
+            // manifest-CAS ack boundary for segments). A crash/failure at ANY point before this leaves an
+            // unreadable (non-existent) branch.
+            self.store_put(&branch_metadata_key(&branch), &to_json(&metadata)?, true)?;
+            // Drop the "in progress" sentinel now that the commit marker is authoritative (best-effort — a
+            // leftover sentinel is harmless because the commit marker wins the readability gate; a leftover is
+            // just non-blocking garbage, same GC class as the deferred manifest-tombstone compaction).
+            let _ = self.store_delete(&branch_pending_key(&branch));
+            Ok(epoch)
         })();
 
         match committed {
@@ -1708,6 +1759,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// (last-trimmed seq), carrying the epoch of the entry that set it; recovery/idempotency folds resume at
     /// `sequence + 1`.
     pub fn read_retention_floor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        // A partial/uncommitted branch is NON-EXISTENT: it has no resolvable floor.
+        if self.branch_uncommitted(shard)? {
+            return Ok(None);
+        }
         let mut best: Option<(u64, u64)> = None; // (seq, epoch)
         for entry in self.read_manifest(shard)? {
             if let Some(seq) = entry.retention_floor_through

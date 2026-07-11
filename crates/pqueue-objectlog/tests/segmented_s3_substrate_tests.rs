@@ -1087,6 +1087,8 @@ fn check_post_pin_store_failure(
 
     arm(&store);
     let branch_def = branch_qdef("post-pin-fail");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
     let result = log.branch(
         &source,
         &branch_def,
@@ -1100,6 +1102,17 @@ fn check_post_pin_store_failure(
     assert!(
         result.is_err(),
         "a post-pin store failure must fail branch creation, got {result:?}"
+    );
+    // (a) ATOMIC EXISTENCE: the failed branch never wrote its `branch.json` commit marker, so it is
+    // NON-READABLE — read_all/read_from return EMPTY (never a missing-segment GET), regardless of what partial
+    // objects survived cleanup.
+    assert!(
+        log.read_all(&branch).unwrap().is_empty(),
+        "a partial (uncommitted) branch is non-readable — read_all returns empty, never a missing segment"
+    );
+    assert!(
+        log.read_from(&branch, 0).unwrap().is_empty(),
+        "a partial branch read_from is empty (non-existent)"
     );
     // (a) NO missing-segment branch: every source segment the branch referenced is intact + readable.
     assert_eq!(
@@ -1163,6 +1176,118 @@ fn branch_pin_delete_store_failure_retains_the_pin() {
             s.arm_delete("branches/"); // branch objects delete fine; the PIN delete (registry key) fails LAST
         },
         false,
+    );
+}
+
+/// THE COMPOUND CORRUPTION SCENARIO (bead pqueue-b5cc2bc7, codex round-7): a double store fault — the
+/// `branch.json` commit-marker PUT fails AND the rollback's branch-object cleanup fails — leaves a PARTIAL
+/// branch (manifest entries present, NO commit marker) protected only by a TTL-bounded pin. Even after the pin
+/// LAPSES at TTL and a trim reclaims the source segments, the partial branch is NON-READABLE (atomic existence
+/// gate), so read_all/read_from return empty — NEVER a missing segment. This closes the entire failed-branch
+/// class structurally, independent of pin/TTL/cleanup.
+#[test]
+fn compound_marker_and_cleanup_failure_then_ttl_and_trim_never_yields_a_missing_segment() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let log = SegmentedObjectLog::open(
+        std::sync::Arc::clone(&store),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    );
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    // Double fault: the commit-marker PUT fails, AND the rollback's branch-object cleanup fails.
+    store.arm_put("branch.json");
+    store.arm_delete("/manifest/");
+    let branch_def = branch_qdef("compound");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    let ttl_ms: u64 = 1_000;
+    let created_now = 100i64;
+    let result = log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        ttl_ms,
+        created_now,
+    );
+    store.disarm();
+    assert!(result.is_err(), "the double-fault branch creation fails");
+
+    // The partial branch (marker absent) is NON-READABLE right now, even though its manifest entries + pin
+    // survived the failed cleanup.
+    assert!(
+        log.read_all(&branch).unwrap().is_empty(),
+        "the partial branch is non-readable immediately after the compound failure"
+    );
+
+    // TTL passes: the pin (expires_at = created_now + ttl) lapses, so a trim on the source now reclaims the
+    // segments the partial branch's manifest still references.
+    let now_after_ttl = created_now + ttl_ms as i64 + 1;
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 5, now_after_ttl)
+            .unwrap(),
+        6,
+        "after the TTL lapses the pin no longer protects the source — all six segments are reclaimed"
+    );
+
+    // THE CRUX: the partial branch is STILL non-readable, so it never GETs the now-deleted source segments —
+    // NO missing segment EVER, regardless of pin/TTL/cleanup outcome.
+    assert!(
+        log.read_all(&branch).unwrap().is_empty(),
+        "the uncommitted branch stays non-readable after TTL + trim — NO missing segment is ever surfaced"
+    );
+    assert!(
+        log.read_from(&branch, 0).unwrap().is_empty(),
+        "read_from(uncommitted branch) is empty after TTL + trim"
+    );
+}
+
+/// A fully-COMMITTED branch (commit marker present) is readable and its live pin protects its referenced
+/// source segments (bead pqueue-b5cc2bc7 — the committed path is unchanged by the atomic-existence gate).
+#[test]
+fn committed_branch_is_readable_and_protected() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store, SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+    let branch_def = branch_qdef("committed");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        1_000_000_000,
+        100,
+    )
+    .unwrap();
+    // The committed branch is READABLE — its [0..5] view reads back (the commit marker landed LAST).
+    let seqs: Vec<u64> = log
+        .read_all(&branch)
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4, 5],
+        "a committed branch reads its full [0..5] view"
+    );
+    // Its live pin protects the source segments against a concurrent trim.
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 200).unwrap(),
+        0,
+        "the committed branch's live pin protects the source segments from reclamation"
     );
 }
 
