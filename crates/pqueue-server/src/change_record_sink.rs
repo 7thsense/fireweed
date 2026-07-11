@@ -108,6 +108,18 @@ pub trait ChangeRecordEmissionBackend {
         Ok(0)
     }
 
+    /// Reclaim object-log SEGMENT OBJECTS past request-id retention + already checkpointed (bead
+    /// pqueue-b5cc2bc7). Driven by the background sink loop right after its reap, mirroring the reap tick.
+    /// Default no-op — only the composed object-log/hybrid-async backend reclaims segments.
+    fn trim_reclaimable_segments(
+        &self,
+        _shard: &QueueKey,
+        _request_id_retention_ms: u64,
+        _now: UtcTimestamp,
+    ) -> EngineResult<u64> {
+        Ok(0)
+    }
+
     fn supports_change_record_emission_cursor(&self) -> bool {
         false
     }
@@ -151,6 +163,15 @@ where
             terminal_retention_ms,
             emit_change_records,
         )
+    }
+
+    fn trim_reclaimable_segments(
+        &self,
+        shard: &QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<u64> {
+        ComposedBackend::trim_reclaimable_segments(self, shard, request_id_retention_ms, now)
     }
 
     fn supports_change_record_emission_cursor(&self) -> bool {
@@ -790,6 +811,19 @@ where
                 ) {
                     eprintln!(
                         "[change-record] terminal reap failed for {}:{}: {e}",
+                        definition.tenant_id, definition.queue_id
+                    );
+                }
+                // Reclaim object-log segment objects past request-id retention (bead pqueue-b5cc2bc7). Gated
+                // internally on retention_may_advance + the durable checkpoint, so a no-op unless this is a
+                // hybrid-async composed object-log backend with cleared debt.
+                if let Err(e) = backend.trim_reclaimable_segments(
+                    &shard,
+                    definition.request_id_retention_ms,
+                    emitted_at,
+                ) {
+                    eprintln!(
+                        "[change-record] segment trim failed for {}:{}: {e}",
                         definition.tenant_id, definition.queue_id
                     );
                 }

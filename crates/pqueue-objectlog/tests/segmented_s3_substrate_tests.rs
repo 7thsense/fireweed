@@ -598,6 +598,111 @@ fn branch_pins_parent_segments_against_expiry() {
     );
 }
 
+/// Test 7 (bead pqueue-b5cc2bc7 — branch-pin safety of segment reclamation): a live branch pinning a
+/// below-floor segment keeps that segment object alive through a trim (`expire_segments_through` skips it via
+/// `branch_pins_segment`), while an unpinned below-floor segment IS reclaimed. Separately, a NEW branch cut at
+/// or below the durable retention floor is rejected CLEANLY (a fast `Invalid`, not a later "missing segment").
+#[test]
+fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let parent = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    // Three segments at distinct commit times: seg0[0..1]@10ms, seg1[2..3]@20ms (both OLD), seg2[4..5]@1000ms
+    // (fresh). One enqueue+seal each.
+    log.enqueue(&parent, &pushes(2), 0, 10).unwrap();
+    log.seal(&parent, 0, 10).unwrap();
+    log.enqueue(&parent, &pushes(2), 0, 20).unwrap();
+    log.seal(&parent, 0, 20).unwrap();
+    log.enqueue(&parent, &pushes(2), 0, 1000).unwrap();
+    log.seal(&parent, 0, 1000).unwrap();
+
+    // A live branch cut inside seg0 (position seq 1) pins seg0 (first_seq 0 <= cut 1).
+    let branch_def = branch_qdef("floor-pin");
+    let branch_shard =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &parent,
+        &branch_def,
+        &CommandPosition::new(parent.clone(), 0, 1),
+        60_000,
+        5,
+    )
+    .unwrap();
+
+    // Retention horizon at cutoff=500ms: seg0(10) + seg1(20) are expired (max visible_last_seq = 3); seg2(1000)
+    // is fresh and stops the prefix scan.
+    let horizon = log.max_trimmable_seq_before(&parent, 500).unwrap();
+    assert_eq!(horizon, Some(3), "the expired-segment prefix ends at seq 3");
+
+    // Crash-safe order: advance the floor FIRST, then delete the segment objects.
+    log.advance_retention_floor(&parent, CommandPosition::new(parent.clone(), 0, 3))
+        .unwrap();
+    let deleted = log.expire_segments_through(&parent, 3, 30).unwrap();
+    assert_eq!(
+        deleted, 1,
+        "only the UNPINNED below-floor segment (seg1) is reclaimed; the branch-pinned seg0 is skipped"
+    );
+
+    let seg_key = |first: u64| {
+        format!(
+            "t/{}/q/{}/seg/{first:020}.seg",
+            hex_lower(parent.tenant_id.as_str().as_bytes()),
+            hex_lower(parent.queue_id.as_str().as_bytes())
+        )
+    };
+    assert!(
+        store.get(&seg_key(0)).unwrap().is_some(),
+        "the branch-pinned below-floor segment survives the trim"
+    );
+    assert!(
+        store.get(&seg_key(2)).unwrap().is_none(),
+        "the unpinned below-floor segment is reclaimed"
+    );
+    assert!(
+        store.get(&seg_key(4)).unwrap().is_some(),
+        "the fresh (above-floor) tail segment survives"
+    );
+
+    // Reading from the floor (seq 3 -> from_seq 4) is contiguous with NO missing-segment error.
+    let tail = log.read_from(&parent, 4).unwrap();
+    assert_eq!(tail.len(), 2, "the tail segment's two commands read back");
+    assert!(
+        tail.iter().all(|(pos, _)| pos.sequence >= 4),
+        "no below-floor position is surfaced"
+    );
+
+    // A NEW branch cut at or below the floor (seq 3) is rejected cleanly.
+    let below = branch_qdef("below-floor");
+    let err = log
+        .branch(
+            &parent,
+            &below,
+            &CommandPosition::new(parent.clone(), 0, 3),
+            60_000,
+            40,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Invalid(_)),
+        "a branch cut at/below the retention floor is rejected cleanly (Invalid), got {err:?}"
+    );
+
+    // The original pin is still honored (branch is live); discarding it releases seg0 for the next trim.
+    log.discard_branch(&parent, &branch_shard).unwrap();
+    let deleted_after = log.expire_segments_through(&parent, 3, 41).unwrap();
+    assert_eq!(
+        deleted_after, 1,
+        "discarding the branch releases seg0 to be reclaimed"
+    );
+    assert!(
+        store.get(&seg_key(0)).unwrap().is_none(),
+        "seg0 is reclaimed once the pin is gone"
+    );
+}
+
 #[test]
 fn counters_surface_emits_a_release_ledger_row() {
     // Drive several group-commit segments, then emit the measured segment/object counts to the release

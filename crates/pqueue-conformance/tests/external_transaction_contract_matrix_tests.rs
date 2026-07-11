@@ -171,7 +171,7 @@ use pqueue_core::{ClientItemKey, ItemId, RequestId};
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, CommandPosition, ComposeFaultHook, ComposeFaultPoint,
     ComposedBackend, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
-    InProcessControlPlane, LogStore, ProjectionRead, ProjectionSnapshot, ProjectionStore,
+    InProcessControlPlane, LogRead, LogStore, ProjectionRead, ProjectionSnapshot, ProjectionStore,
     PushCommand, PushPort, QueueCommand,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
@@ -2539,7 +2539,7 @@ async fn ac_txn_5a_retention_advancement_scenario(target_bytes: usize, bound_ms:
     Ok(vec![
         "retention advancement (real server-wired composition, DURABLE state): a real deferred backlog over the hard budget WITHHOLDS terminal-item retention — the durable terminal-item count in the checkpointed SQLite image is frozen while debt is Hard (3 past-retention rows NOT reclaimed) — and the very next reap tick after the drain clears debt below the release band reclaims them (durable count 3 → 0), reclaiming durable space for terminal records no longer needed".into(),
         "retention advancement is durable + recovery-safe: the reap deletes only rows the durable checkpoint image already shows terminal, so a reopen keeps them reaped (0 resurrected from the object-log tail, which replays strictly after the checkpoint) while the 6 live pending items recover intact".into(),
-        "GAP (object-log SEGMENT-object reclamation deferred): retention advancement here reclaims durable TERMINAL-ITEM rows from the checkpointed SQLite image (the withholding gate now has a real durable path to withhold). Reclaiming the underlying object-log SEGMENT objects is NOT yet done: recovery rebuilds the push/commit request-id idempotency maps by folding the object log FROM GENESIS (ComposedBackend::run_recovery), so deleting a segment object breaks that fold and — even with a retention-floor read-clamp — would drop request-ids still within request_id_retention_ms, regressing the proven AC-TXN-3 unknown-outcome-replay-across-restart guarantee. Safe segment-object expiry needs a bounded-recovery redesign (a durable retention floor honored by the idempotency rebuild, with the trim horizon respecting request-id retention); tracked follow-up".into(),
+        "object-log SEGMENT-object reclamation (bead pqueue-b5cc2bc7, bounded-recovery retention floor): on TOP of the durable TERMINAL-ITEM row reclamation proven above, the underlying object-log SEGMENT OBJECTS are now reclaimed too. A durable, monotonic retention_floor.json records the highest trimmed position; the trim caller (in the reap tick + the background sink loop, under the composed unit-of-work lock, gated on retention_may_advance) computes trim_through = min(checkpoint_high_water, request_id_retention-expired manifest prefix minus a skew guard), writes the floor FIRST, then deletes the segment objects (crash-safe order). Recovery reads the floor once per shard and starts BOTH idempotency folds AND the projection replay at floor+1 (the R1 fix max(resolve_recovery_start, floor)), so a trimmed below-floor segment is never read and NO request-id within request_id_retention_ms is dropped — the AC-TXN-3 unknown-outcome-replay-across-restart guarantee is preserved (proven directly by ac_txn_5a_segment_object_reclamation_scenario below AND the objectlog_segment_reclamation_tests suite tests 1-7: reclaim / withheld-under-Hard / AC-TXN-3-across-trim+restart both replay-if-retained and fresh-if-reclaimed / recovery-correctness-from-floor / crash-safety / backward-compat / branch-pin). commit_transition stays capability-N/A on this eventual-apply backend (Unavailable), so its across-trim replay is vacuous here; its recovery fold is floor-threaded + back-compat regardless.".into(),
     ])
 }
 
@@ -2852,8 +2852,199 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
     asserts.extend(ac_txn_5a_high_water_withhold_scenario(1, 1).await?);
     asserts.extend(ac_txn_5a_retention_advancement_scenario(1, 1).await?);
     asserts.extend(ac_txn_5a_retention_no_id_resurrection_scenario(1, 1).await?);
+    // --- (e) object-log SEGMENT-object reclamation on the bounded-recovery retention floor (bead
+    // pqueue-b5cc2bc7): the prior AC-TXN-5A GAP. Reclaim segment OBJECTS while preserving AC-TXN-3
+    // unknown-outcome-replay-across-restart. ---
+    asserts.extend(ac_txn_5a_segment_object_reclamation_scenario().await?);
 
     Ok(asserts)
+}
+
+/// **AC-TXN-5A object-log segment-object reclamation** on the REAL server-wired `objectlog/hybrid-async`
+/// composition (bead pqueue-b5cc2bc7 — closes the prior AC-TXN-5A GAP). Proves that once a segment's commands
+/// are (a) durably checkpointed AND (b) past `request_id_retention_ms` (+ skew guard), the segment OBJECTS are
+/// reclaimed from durable storage via the durable, monotonic retention floor — WITHOUT regressing AC-TXN-3
+/// unknown-outcome-request_id-replay-across-restart: a request_id still WITHIN retention has its segment
+/// RETAINED and replays its committed ids after a real drop+reopen, while one PAST retention is reclaimed and
+/// a retry is (correctly) fresh. `SegmentConfig(1,1)` seals one segment per push, so a push's timestamp is its
+/// segment's `committed_at_ms` and the logical clock places segments in/out of the retention window.
+async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
+    const RETENTION_MS: u64 = 3_600_000; // 1h in ms; timestamps are in SECONDS.
+    let mk = || {
+        HybridAsyncThresholds::new(10_000, 1_000_000_000, 1_000_000_000, 3_600_000_000, 3)
+            .map_err(|e| format!("thresholds: {e:?}"))
+    };
+    let shard = pqueue_conformance::shard();
+    let qdef = || {
+        let mut d = pqueue_conformance::qdef();
+        d.request_id_retention_ms = RETENTION_MS;
+        d.emit_change_records = false;
+        d
+    };
+    let deferred = |b: &HybridBackend| b.with_projection(|p| p.deferred_command_count());
+    let floor_seq = |b: &HybridBackend| {
+        b.with_log(|l| LogStore::retention_floor(l, &pqueue_conformance::shard()))
+            .ok()
+            .flatten()
+            .map(|p| p.sequence)
+    };
+    let floor_pos = |b: &HybridBackend| {
+        b.with_log(|l| LogStore::retention_floor(l, &pqueue_conformance::shard()))
+            .ok()
+            .flatten()
+    };
+    let deletes = |b: &HybridBackend| b.with_log(|l| l.counters().delete_count);
+    let drain = |b: &HybridBackend| -> Result<(), String> {
+        while deferred(b) > 0 {
+            b.flush_deferred_projection()
+                .map_err(|e| format!("flush: {e:?}"))?;
+        }
+        Ok(())
+    };
+
+    // -- Sub-check A: an OLD filler is reclaimed; R (within retention) is RETAINED and replays across restart.
+    let base_a = base_dir("hybrid-async-seg-reclaim-retain");
+    let root_a = base_a.join("run");
+    let backend = objectlog_hybrid_async_composed_at(
+        &root_a,
+        mk()?,
+        1,
+        SegmentConfig::new(1, 1).map_err(|e| format!("seg: {e:?}"))?,
+    );
+    backend
+        .create_queue(qdef())
+        .await
+        .map_err(|e| format!("create_queue A: {e:?}"))?;
+    backend
+        .push(
+            &shard,
+            vec![pqueue_conformance::fault::spec("filler", 5)],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+        .map_err(|e| format!("push filler: {e:?}"))?; // seq 0 @ 1_000ms
+    drain(&backend)?;
+    let r_ids = backend
+        .push_with_request_id(
+            &shard,
+            RequestId::new("R".to_string()).unwrap(),
+            vec![pqueue_conformance::fault::spec("R-body", 5)],
+            pqueue_conformance::ts(1_000),
+            None,
+        )
+        .await
+        .map_err(|e| format!("commit R: {e:?}"))?; // seq 1 @ 1_000_000ms
+    drain(&backend)?;
+    let deletes_before = deletes(&backend);
+    // Trim at t=4000s: cutoff = 4_000_000 - 3_600_000 - 5_000 = 395_000ms. filler(1_000) expired; R(1_000_000)
+    // retained. trim_through = min(checkpoint=1, time_expired=0) = 0 -> only the filler reclaimed.
+    backend
+        .trim_reclaimable_segments(&shard, RETENTION_MS, pqueue_conformance::ts(4_000))
+        .map_err(|e| format!("trim A: {e:?}"))?;
+    if deletes(&backend) <= deletes_before || floor_seq(&backend) != Some(0) {
+        return Err(format!(
+            "trim must reclaim the filler segment + write floor=0: deletes {}→{}, floor {:?}",
+            deletes_before,
+            deletes(&backend),
+            floor_seq(&backend)
+        ));
+    }
+    // Reading from GENESIS now hits the reclaimed filler segment; reading from the floor is clean.
+    if !matches!(
+        backend.read_from(&shard, None, 100).await,
+        Err(EngineError::Storage(_))
+    ) {
+        return Err("read_from(genesis) after trim must hit the reclaimed segment".into());
+    }
+    backend
+        .read_from(&shard, floor_pos(&backend), 100)
+        .await
+        .map_err(|e| format!("read_from(floor) A must be clean: {e:?}"))?;
+    drop(backend);
+    let reopened = objectlog_hybrid_async_composed_at(
+        &root_a,
+        mk()?,
+        1,
+        SegmentConfig::new(1, 1).map_err(|e| format!("seg: {e:?}"))?,
+    );
+    // R (created t=1000s, expires t=4600s) retried at t=4001s -> REPLAY its committed ids, 0 new segments.
+    let segments_before = reopened.with_log(|l| l.counters().segments_sealed);
+    let replay = reopened
+        .push_with_request_id(
+            &shard,
+            RequestId::new("R".to_string()).unwrap(),
+            vec![pqueue_conformance::fault::spec("R-body", 5)],
+            pqueue_conformance::ts(4_001),
+            None,
+        )
+        .await
+        .map_err(|e| format!("replay R: {e:?}"))?;
+    if replay != r_ids || reopened.with_log(|l| l.counters().segments_sealed) != segments_before {
+        return Err(format!(
+            "within-retention R must REPLAY across trim+restart with 0 new segments: {replay:?} vs {r_ids:?}"
+        ));
+    }
+
+    // -- Sub-check B: R2 PAST retention is reclaimed; a retry after restart is (correctly) FRESH.
+    let base_b = base_dir("hybrid-async-seg-reclaim-fresh");
+    let root_b = base_b.join("run");
+    let backend2 = objectlog_hybrid_async_composed_at(
+        &root_b,
+        mk()?,
+        1,
+        SegmentConfig::new(1, 1).map_err(|e| format!("seg: {e:?}"))?,
+    );
+    backend2
+        .create_queue(qdef())
+        .await
+        .map_err(|e| format!("create_queue B: {e:?}"))?;
+    let r2_ids = backend2
+        .push_with_request_id(
+            &shard,
+            RequestId::new("R2".to_string()).unwrap(),
+            vec![pqueue_conformance::fault::spec("R2-body", 5)],
+            pqueue_conformance::ts(1_000),
+            None,
+        )
+        .await
+        .map_err(|e| format!("commit R2: {e:?}"))?;
+    drain(&backend2)?;
+    backend2
+        .trim_reclaimable_segments(&shard, RETENTION_MS, pqueue_conformance::ts(10_000_000))
+        .map_err(|e| format!("trim B: {e:?}"))?;
+    if floor_seq(&backend2) != Some(0) {
+        return Err(format!(
+            "R2's segment must be reclaimed (floor=0); got {:?}",
+            floor_seq(&backend2)
+        ));
+    }
+    drop(backend2);
+    let reopened2 = objectlog_hybrid_async_composed_at(
+        &root_b,
+        mk()?,
+        1,
+        SegmentConfig::new(1, 1).map_err(|e| format!("seg: {e:?}"))?,
+    );
+    let fresh = reopened2
+        .push_with_request_id(
+            &shard,
+            RequestId::new("R2".to_string()).unwrap(),
+            vec![pqueue_conformance::fault::spec("R2-body", 5)],
+            pqueue_conformance::ts(10_000_000),
+            None,
+        )
+        .await
+        .map_err(|e| format!("fresh R2: {e:?}"))?;
+    if fresh == r2_ids {
+        return Err("after-retention R2 retry must be FRESH (new ids) across trim+restart".into());
+    }
+
+    Ok(vec![
+        "segment-object reclamation (real hybrid-async composition, DURABLE storage): a segment whose commands are checkpointed AND past request_id_retention_ms is reclaimed — the trim writes the monotonic durable retention floor FIRST then deletes the segment objects (crash-safe order), delete_count advances, and reading from GENESIS now hits the reclaimed segment while reading from the floor stays clean".into(),
+        "AC-TXN-3 PRESERVED across segment reclamation + restart (push_with_request_id): a request_id still WITHIN retention has its segment RETAINED across a trim, and after a real drop+reopen a same-body retry REPLAYS its one committed result with 0 new durable segments (the recovery idempotency fold starts at floor+1, and the retained segment is above the floor)".into(),
+        "AC-TXN-3 window-close across segment reclamation + restart: a request_id PAST retention has its segment RECLAIMED, and after restart a retry is correctly FRESH (a new id) — the idempotency window legitimately closed, no stale replay from a trimmed segment".into(),
+    ])
 }
 
 #[tokio::test]

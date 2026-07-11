@@ -675,6 +675,12 @@ pub enum FaultCutPoint {
     /// Kill before a projection snapshot blob is durably written. The command log remains the sole source
     /// of truth, so a lost snapshot write must not lose or corrupt any committed command.
     DuringSnapshotWrite,
+    /// Kill DURING segment-object reclamation (bead pqueue-b5cc2bc7): struck before each below-floor segment
+    /// object delete inside [`SegmentedObjectLog::expire_segments_through`], AFTER the durable retention floor
+    /// was already advanced (the crash-safe order writes the floor first). A crash here leaves floor=F with
+    /// some below-F segment objects still present; recovery reads from F+1 and skips them (no "missing
+    /// segment" error), and re-running the trim with an advanced horizon reaches the same consistent state.
+    DuringSegmentExpiry,
 }
 
 /// A test-only fault hook: called at each [`FaultCutPoint`] the pipeline passes through. Returning `Err`
@@ -1329,6 +1335,17 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Err(EngineError::Invalid("branch queue must differ from source"));
         }
 
+        // Reject a cut at or below the durable retention floor CLEANLY (bead pqueue-b5cc2bc7): the segments at
+        // and below the floor may already be reclaimed, so a branch cut there would surface a later "missing
+        // segment" on the branch's first read. Failing fast turns that into an explicit, actionable error.
+        if let Some(floor) = self.read_retention_floor(source)?
+            && position.sequence <= floor.sequence
+        {
+            return Err(EngineError::Invalid(
+                "branch cut at or below the retention floor: the source segments were reclaimed",
+            ));
+        }
+
         self.create_queue(branch_def)?;
 
         let branch_prefix = shard_prefix(&branch);
@@ -1415,6 +1432,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.
+    ///
+    /// This deletes only segment OBJECTS (`store_delete`, counted in `delete_count`); the manifest entries are
+    /// kept as TOMBSTONES that `read_from`/`read_from_limited` skip (their `visible_last_seq < from_seq`). The
+    /// tombstones are deliberately NOT deleted here — manifest-tombstone accumulation over a long-lived queue
+    /// is risk R5, deferred to a follow-up (compacting the manifest prefix needs its own CAS-safe rewrite so
+    /// it does not race the append-only manifest invariant). Trimming the segment objects reclaims the bulk of
+    /// the durable bytes; the tombstone JSON is small.
     pub fn expire_segments_through(
         &self,
         source: &QueueKey,
@@ -1432,10 +1456,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if self.branch_pins_segment(source, entry.first_seq, now_ms)? {
                 continue;
             }
-            if let Some(seg_key) = entry.segment_key.as_ref()
-                && self.store_delete(seg_key)?
-            {
-                deleted += 1;
+            if let Some(seg_key) = entry.segment_key.as_ref() {
+                // Test-only crash seam (never armed in production): a fault here models a process death mid-
+                // reclamation, after the durable floor advanced but before this object is deleted.
+                self.fault(FaultCutPoint::DuringSegmentExpiry)?;
+                if self.store_delete(seg_key)? {
+                    deleted += 1;
+                }
             }
         }
         Ok(deleted)
@@ -1495,6 +1522,89 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Err(EngineError::Invalid("high-water regression"));
         }
         self.advance_high_water(shard, position)
+    }
+
+    // -- retention floor (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7) -------------
+    //
+    // The retention floor is a SEPARATE small overwrite-able blob (`retention_floor.json`), modeled exactly
+    // on the high-water blob above. It records the highest command position whose segment OBJECTS have been
+    // trimmed (`expire_segments_through`), as an EXCLUSIVE lower bound — recovery resumes at floor+1, mirroring
+    // `recovery_high_water`'s "resume at next_seq" semantics. It is written BEFORE the segment objects are
+    // deleted (crash-safe order): a crash after the floor write but before the delete leaves floor=F with some
+    // below-F segments still present; recovery reads from F+1 and skips them (no "missing segment" error). The
+    // reverse order would leave the floor pointing past a deleted segment. This blob does NOT touch the
+    // append-only manifest CAS / epoch-fence invariants — it is an independent overwrite blob.
+
+    /// Read the durable retention-floor blob (`None` if no trim has advanced it yet). Mirrors
+    /// [`Self::read_high_water`]. The returned position is the EXCLUSIVE lower bound (last-trimmed seq);
+    /// recovery/idempotency folds resume at `sequence + 1`.
+    pub fn read_retention_floor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let key = format!("{}retention_floor.json", shard_prefix(shard));
+        match self.store_get(&key)? {
+            Some(bytes) => {
+                let floor: RetentionFloorBlob =
+                    serde_json::from_slice(&bytes).map_err(store_err)?;
+                Ok(Some(CommandPosition::new(
+                    shard.clone(),
+                    floor.epoch,
+                    floor.seq,
+                )))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Monotonically advance the retention-floor blob to `position` (the trim caller's durable "written first"
+    /// step). Mirrors [`Self::set_high_water`]: a position that REGRESSES the stored floor is rejected (the
+    /// floor is monotonic — it must never point below already-trimmed segments), an equal one is a no-op, and
+    /// an advancing one is persisted.
+    pub fn advance_retention_floor(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        if let Some(cur) = self.read_retention_floor(shard)?
+            && !cur.precedes(&position)
+            && cur != position
+        {
+            return Err(EngineError::Invalid("retention floor regression"));
+        }
+        let key = format!("{}retention_floor.json", shard_prefix(shard));
+        let blob = RetentionFloorBlob {
+            epoch: position.backend_epoch,
+            seq: position.sequence,
+        };
+        self.store_put(&key, &to_json(&blob)?, false)
+    }
+
+    /// The highest `visible_last_seq` over the CONTIGUOUS PREFIX of DATA manifest segments whose
+    /// `committed_at_ms <= cutoff_ms` (bead pqueue-b5cc2bc7). This is the "all request_ids in these segments
+    /// are past retention" horizon: `created_at <= committed_at_ms` by causality, so a segment committed at or
+    /// before `cutoff_ms = now - request_id_retention_ms - SKEW_MARGIN` holds ONLY expired request_ids.
+    ///
+    /// The scan STOPS at the first data segment newer than `cutoff_ms` (rather than taking a global max), so
+    /// the returned seq never spans a still-fresh middle segment even if `committed_at_ms` were ever
+    /// non-monotonic across seals — every data segment at or below the returned seq is provably expired, which
+    /// is exactly the precondition `expire_segments_through` needs (it deletes ALL data segments up to the
+    /// horizon). Fence entries (which name no segment) are skipped, not treated as a boundary. `None` when no
+    /// data segment is old enough (nothing to trim).
+    pub fn max_trimmable_seq_before(
+        &self,
+        shard: &QueueKey,
+        cutoff_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        let mut best: Option<u64> = None;
+        for entry in self.read_manifest(shard)? {
+            if entry.fence || entry.segment_key.is_none() {
+                continue;
+            }
+            if entry.committed_at_ms <= cutoff_ms {
+                best = Some(Self::visible_last_seq(&entry));
+            } else {
+                break;
+            }
+        }
+        Ok(best)
     }
 
     /// Write a projection snapshot blob and return its distinct ref id (`snap-{n}`).
@@ -1641,6 +1751,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 /// Durable high-water blob (the explicit command-position high-water; TD-007 §4).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HighWaterBlob {
+    epoch: u64,
+    seq: u64,
+}
+
+/// Durable retention-floor blob (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7): the
+/// highest command position whose segment objects have been trimmed, an EXCLUSIVE lower bound (recovery
+/// resumes at `seq + 1`). Same shape as [`HighWaterBlob`]; a distinct type so the two blobs never alias.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetentionFloorBlob {
     epoch: u64,
     seq: u64,
 }

@@ -32,7 +32,7 @@ pub use claim_validation::{
 };
 pub use compose::{
     ComposeFaultHook, ComposeFaultPoint, ComposedBackend, ControlPlane, InProcessControlPlane,
-    LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart, RichClaimSelection,
+    LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart, RichClaimSelection, max_position,
     resolve_recovery_start,
 };
 pub use control_plane::{

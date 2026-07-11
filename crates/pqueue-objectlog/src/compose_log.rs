@@ -159,6 +159,38 @@ impl LogStore for ObjectLog {
         self.log.set_high_water(shard, position)
     }
 
+    // -- retention floor (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7) -------------
+    // Passthroughs to the segmented substrate's durable floor blob + manifest-scan + segment-object trim.
+
+    fn retention_floor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        self.log.read_retention_floor(shard)
+    }
+
+    fn advance_retention_floor(
+        &mut self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        self.log.advance_retention_floor(shard, position)
+    }
+
+    fn max_trimmable_seq_before(
+        &self,
+        shard: &QueueKey,
+        cutoff_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        self.log.max_trimmable_seq_before(shard, cutoff_ms)
+    }
+
+    fn expire_segments_through(
+        &mut self,
+        shard: &QueueKey,
+        through_seq: u64,
+        now_ms: i64,
+    ) -> EngineResult<u64> {
+        self.log.expire_segments_through(shard, through_seq, now_ms)
+    }
+
     fn write_snapshot(
         &mut self,
         shard: &QueueKey,

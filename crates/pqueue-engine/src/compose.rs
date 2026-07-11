@@ -116,6 +116,57 @@ pub trait LogStore: Send {
     fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>>;
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()>;
 
+    // -- retention floor (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7) -------------
+    //
+    // The durable retention floor + segment-object trim seam. ALL default to no-op / `Ok(None)` / `Ok(0)`, so
+    // every non-object-log backend (memory, sqlite-log, relational, postgres) is UNAFFECTED — only the
+    // segmented object log overrides them. The composition computes a trim horizon (min of the durable
+    // checkpoint high-water and the request-id-retention-expired manifest prefix), writes the floor FIRST,
+    // then deletes the segment objects — the crash-safe order that never leaves the floor pointing past a
+    // deleted segment. See `trim_reclaimable_segments_locked`.
+
+    /// The durably-recorded retention floor: the highest command position whose segment objects have been
+    /// trimmed, an EXCLUSIVE lower bound (recovery/idempotency folds resume at `sequence + 1`). `None` (the
+    /// default, and a never-trimmed log) means genesis — folds start from the beginning, byte-identical to a
+    /// pre-floor log.
+    fn retention_floor(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        Ok(None)
+    }
+
+    /// Monotonically advance the durable retention floor to `position` (rejecting a regression). Written
+    /// BEFORE `expire_segments_through` deletes the corresponding segment objects. Default: no-op.
+    fn advance_retention_floor(
+        &mut self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// The highest command sequence whose segment is safe to trim by REQUEST-ID RETENTION: the max
+    /// `visible_last_seq` over the contiguous prefix of data segments committed at or before `cutoff_ms`. The
+    /// composition takes the min of this and the durable checkpoint high-water to get the trim horizon.
+    /// Default: `None` — a non-segmented log has nothing to trim.
+    fn max_trimmable_seq_before(
+        &self,
+        _shard: &QueueKey,
+        _cutoff_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Delete the segment OBJECTS at or before `through_seq` (keeping their manifest entries as tombstones the
+    /// read path skips, and skipping branch-pinned segments). Returns the number of objects deleted. Default:
+    /// no-op (0 deleted).
+    fn expire_segments_through(
+        &mut self,
+        _shard: &QueueKey,
+        _through_seq: u64,
+        _now_ms: i64,
+    ) -> EngineResult<u64> {
+        Ok(0)
+    }
+
     /// The current durable command position for `shard` (thin wrapper over `high_water`).
     fn current_position(&self, shard: &QueueKey) -> EngineResult<CommandPosition> {
         self.high_water(shard)?.ok_or(EngineError::NotFound)
@@ -446,6 +497,21 @@ pub fn resolve_recovery_start(
         return Ok(RecoveryStart::FromGenesis);
     }
     Ok(RecoveryStart::FromHighWater(high_water))
+}
+
+/// The greater of two optional replay-start positions by `(epoch, sequence)`, treating `None` as genesis (the
+/// least). Used to floor the recovery replay start at the durable retention floor (bead pqueue-b5cc2bc7): a
+/// `FromGenesis` (None) start under Hard backpressure is lifted to the floor so recovery never reads a trimmed
+/// below-floor segment, while a healthy checkpoint start (>= floor) is left unchanged.
+pub fn max_position(
+    a: Option<CommandPosition>,
+    b: Option<CommandPosition>,
+) -> Option<CommandPosition> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y.precedes(&x) { x } else { y }),
+        (Some(x), None) => Some(x),
+        (None, b) => b,
+    }
 }
 
 /// The result of a NON-item claim selection ([`ProjectionStore::select_rich_claim`]): the candidate item
@@ -942,6 +1008,12 @@ struct Inner<L, P> {
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 const RECOVERY_READ_PAGE_LIMIT: usize = 8_192;
 
+/// A conservative cross-owner clock-skew guard band (ms) subtracted from the retention cutoff before a
+/// segment is eligible for object-log trimming (bead pqueue-b5cc2bc7, risk R4): a segment is trimmed only if
+/// its `committed_at_ms <= now - request_id_retention_ms - RETENTION_TRIM_SKEW_MARGIN_MS`, so a small clock
+/// skew between the sealing owner and the trimming owner can never trim a segment still within retention.
+const RETENTION_TRIM_SKEW_MARGIN_MS: i64 = 5_000;
+
 /// The two composed-layer projection-apply crash instants (TP-003 §3.10 AC-TXN-4, row 209). These live in
 /// the [`ComposedBackend`] apply step — ABOVE the [`LogStore`] substrate, whose own internal cut points
 /// ([`crate`]-external `pqueue_objectlog::FaultCutPoint`) cannot reach them — so they need this seam.
@@ -1165,6 +1237,83 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             terminal_retention_ms,
             emit_change_records,
         )
+    }
+
+    /// Reclaim object-log SEGMENT OBJECTS whose commands are all past request-id retention AND already durably
+    /// checkpointed (bead pqueue-b5cc2bc7). Runs under the composed unit-of-work lock right after the reap tick
+    /// advances retention, so it never races the local writer or the manifest CAS.
+    ///
+    /// GATE: only when [`ProjectionStore::retention_may_advance`] is true (Clear / non-poisoned /
+    /// lineage-proven). Under Hard async-apply debt or poison the reap already short-circuited and this returns
+    /// without deleting anything OR advancing the floor — the durable floor is monotone and never advances past
+    /// unproven debt. (Under Hard the checkpoint high-water is ALSO withheld, so this is belt-and-suspenders.)
+    ///
+    /// HORIZON: `trim_through = min(checkpoint_high_water_seq, max_trimmable_seq_before(cutoff))` with
+    /// `cutoff = now - request_id_retention_ms - SKEW_MARGIN`. The `min` never trims past the durably-applied
+    /// checkpoint (a below-floor command SQLite has not yet applied is never lost — the SQLite next_seq guard
+    /// skips already-applied ones on replay), and the time term guarantees every trimmed segment holds ONLY
+    /// expired request_ids (created_at <= committed_at_ms by causality), preserving AC-TXN-3.
+    ///
+    /// ORDER (crash-safe, MANDATORY): (b) advance the durable floor FIRST, THEN (c) delete the segment objects.
+    /// A crash between them leaves floor=F with some below-F segments still present — recovery reads from F+1
+    /// and skips them, no "missing segment" error. The reverse order would leave the floor pointing past a
+    /// deleted segment. Returns the number of segment objects deleted.
+    fn trim_reclaimable_segments_locked(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<u64> {
+        // (gate) Retention advancement must be permitted — mirrors the reap short-circuit at
+        // `reap_terminal_items_locked`. No-op unless a hybrid-async projection reports Clear.
+        if !inner.projection.retention_may_advance(shard) {
+            return Ok(0);
+        }
+        // (a1) The durable checkpoint high-water — the highest seq the durable projection image has absorbed.
+        // Under the Clear gate the hybrid-async monitor returns the REAL (un-withheld) value. `None` means
+        // nothing is durably applied, so nothing is safe to trim.
+        let Some(checkpoint) = inner.projection.recovery_high_water(shard)? else {
+            return Ok(0);
+        };
+        // (a2) The request-id-retention horizon: newest data segment whose commands are all past retention.
+        let now_ms = ts_to_ms(now);
+        let cutoff_ms = now_ms
+            .saturating_sub(request_id_retention_ms as i64)
+            .saturating_sub(RETENTION_TRIM_SKEW_MARGIN_MS);
+        let Some(time_expired_seq) = inner.log.max_trimmable_seq_before(shard, cutoff_ms)? else {
+            return Ok(0);
+        };
+        // (a3) The trim horizon is the min of the two terms.
+        let trim_through_seq = checkpoint.sequence.min(time_expired_seq);
+        // Skip a tick with no NEW reclamation (both terms are monotone non-decreasing, so a horizon at or
+        // below the durable floor means we already trimmed through here — avoids re-scanning every tick).
+        if let Some(floor) = inner.log.retention_floor(shard)?
+            && trim_through_seq <= floor.sequence
+        {
+            return Ok(0);
+        }
+        // Stamp the floor with the checkpoint's epoch (well-defined for the monotonic `precedes` compare and
+        // the recovery-start max; `trim_through_seq <= checkpoint.sequence` so the floor never exceeds it).
+        let floor_pos =
+            CommandPosition::new(shard.clone(), checkpoint.backend_epoch, trim_through_seq);
+        // (b) Durable floor FIRST (monotonic), (c) THEN delete the segment objects (branch-pinned + fence
+        // entries are skipped inside `expire_segments_through`).
+        inner.log.advance_retention_floor(shard, floor_pos)?;
+        inner
+            .log
+            .expire_segments_through(shard, trim_through_seq, now_ms)
+    }
+
+    /// Public entry to [`Self::trim_reclaimable_segments_locked`] (the background sink loop drives this after
+    /// its reap, mirroring the reap tick). Acquires the unit-of-work lock.
+    pub fn trim_reclaimable_segments(
+        &self,
+        shard: &QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<u64> {
+        let mut g = self.inner.lock().expect("composed backend poisoned");
+        Self::trim_reclaimable_segments_locked(&mut g, shard, request_id_retention_ms, now)
     }
 
     fn durable_definitions_locked(inner: &Inner<L, P>) -> EngineResult<Vec<QueueDefinition>> {
@@ -1483,6 +1632,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             // from genesis rather than trusting its lagging high-water as a safe skip point.
             let recovery_poison = projection.recovery_poison(&key);
             let hard_backpressure = projection.recovery_backpressured(&key);
+            // The durable retention floor (bead pqueue-b5cc2bc7): the highest command position whose segment
+            // OBJECTS have been trimmed, an EXCLUSIVE lower bound. `None` (a never-trimmed / pre-floor log)
+            // means genesis, so every fold below starts from the beginning — BYTE-IDENTICAL to a pre-floor
+            // log. When a trim HAS run, the below-floor segments are gone from the store, so both idempotency
+            // folds AND the projection replay must start at `floor + 1` (the trim guarantees every below-floor
+            // request_id is already past request_id_retention_ms, so none is dropped — see AC-TXN-3 proof).
+            let floor = log.retention_floor(&key)?;
             // Rebuild the in-memory `request_id -> result` push-idempotency map from the durable log for
             // EVERY composed-log backend, not only the eventual-apply ones. `push_with_request_id`
             // consults/records only this in-memory map (see the `check`/`record` calls), which starts
@@ -1498,6 +1654,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 idempotency,
                 &key,
                 def.request_id_retention_ms,
+                floor.clone(),
             )?;
             // Symmetric rebuild for the OTHER request_id-bearing mutating op: `commit_transition` (the
             // authoritative vectorized claimed-work commit). Its in-memory `commit_idempotency` cache is
@@ -1513,11 +1670,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 commit_idempotency,
                 &key,
                 def.request_id_retention_ms,
+                floor.clone(),
             )?;
             // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
             // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
             let recorded_high_water = projection.recovery_high_water(&key)?;
-            let mut from = match resolve_recovery_start(
+            let resolved_start = match resolve_recovery_start(
                 recovery_poison.as_deref(),
                 hard_backpressure,
                 recorded_high_water,
@@ -1525,6 +1683,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 RecoveryStart::FromHighWater(pos) => pos,
                 RecoveryStart::FromGenesis => None,
             };
+            // R1 FIX (bead pqueue-b5cc2bc7): floor the replay start at the durable retention floor. Under Hard
+            // backpressure `resolve_recovery_start` returns `FromGenesis` (start = None) which, on a trimmed
+            // log, would read a DELETED below-floor segment and fail "missing segment". Flooring is safe: the
+            // floor is <= checkpoint_high_water at trim time, and the durable SQLite next_seq guard skips any
+            // below-floor command it has already applied when the tail replays over its durable image. The
+            // healthy path is unchanged — floor <= checkpoint, so the max is the checkpoint high-water.
+            let mut from = max_position(resolved_start, floor.clone());
             let mut tail: u64 = 0;
             loop {
                 let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
@@ -1582,8 +1747,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
         shard: &QueueKey,
         retention_ms: u64,
+        floor: Option<CommandPosition>,
     ) -> EngineResult<()> {
-        let mut from = None;
+        // Start the fold at the durable retention floor (bead pqueue-b5cc2bc7): the below-floor segments are
+        // trimmed away, and the trim horizon guarantees every below-floor push request_id is already past
+        // `retention_ms`, so none is dropped. `None` (a never-trimmed log) is genesis — unchanged behavior.
+        let mut from = floor;
         loop {
             let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
             for (_, env) in &page.entries {
@@ -1662,6 +1831,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         commit_idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
         shard: &QueueKey,
         retention_ms: u64,
+        floor: Option<CommandPosition>,
     ) -> EngineResult<()> {
         /// Per-`request_id` reconstruction state: the completed entries plus the parts of the entry currently
         /// being assembled (until its `Finalize` closes it).
@@ -1681,7 +1851,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             durable_full: Option<Vec<EntryRecovery>>,
         }
         let mut accums: HashMap<RequestId, CommitAccum> = HashMap::new();
-        let mut from = None;
+        // Start at the durable retention floor (bead pqueue-b5cc2bc7). A commit_transition's whole
+        // Finalize-delimited run is durably contiguous and stamped with the SAME created_at; the trim horizon
+        // only reclaims segments all past `retention_ms`, so an unexpired commit's entire run is above the
+        // floor and reconstructed intact. `None` (a never-trimmed log) is genesis — unchanged behavior.
+        let mut from = floor;
         loop {
             let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
             for (_, env) in &page.entries {
@@ -3237,16 +3411,25 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                 report.leases_reclaimed += ids.len() as u64;
             }
             for def in definitions {
-                if !def.emit_change_records {
-                    continue;
-                }
                 let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-                Self::reap_terminal_items_locked(
+                if def.emit_change_records {
+                    Self::reap_terminal_items_locked(
+                        &mut g,
+                        &shard,
+                        now,
+                        def.terminal_retention_ms,
+                        def.emit_change_records,
+                    )?;
+                }
+                // Segment-object reclamation (bead pqueue-b5cc2bc7): gated INSIDE on retention_may_advance +
+                // the durable checkpoint high-water, so it is a no-op for every non-hybrid-async backend (no
+                // durable checkpoint => nothing trimmed) and withheld under Hard debt. Runs for ALL queues
+                // (not just emit-enabled ones) because segment reclamation is independent of change records.
+                Self::trim_reclaimable_segments_locked(
                     &mut g,
                     &shard,
+                    def.request_id_retention_ms,
                     now,
-                    def.terminal_retention_ms,
-                    def.emit_change_records,
                 )?;
             }
             Ok(report)
