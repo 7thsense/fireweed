@@ -664,6 +664,14 @@ fn branch_pending_key(branch: &QueueKey) -> String {
     format!("{}branch.pending", shard_prefix(branch))
 }
 
+/// How long an UNCOMMITTED branch (a `branch.pending` sentinel / source pin WITHOUT a `branch.json` commit
+/// marker) must have existed before [`SegmentedObjectLog::gc_orphaned_branches`] treats it as an abandoned
+/// orphan rather than an in-flight creation (bead pqueue-74f03d0e). Deliberately GENEROUS — a whole branch
+/// creation (pin, floor seed, all manifest copies, validate-after-copy, acquire_epoch, marker) completes in
+/// well under a second, so ten minutes gives an in-flight (or bounded-retrying) attempt an enormous margin
+/// before its objects could ever be eligible for GC.
+pub const ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS: i64 = 10 * 60 * 1000;
+
 /// The outcome of a SINGLE branch-creation attempt ([`SegmentedObjectLog::branch_attempt`]). This is a
 /// crate-PRIVATE signal that NEVER escapes: `FloorAdvanced` is the ONLY retryable outcome (a concurrent
 /// source-floor advance detected by validate-after-copy, AFTER a full rollback), so the bounded retry in
@@ -1511,35 +1519,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             true,
         )?;
 
-        // Roll back a partially-created branch (bead pqueue-b5cc2bc7 error-path safety). ORDER IS SAFETY-
-        // CRITICAL: delete the branch OBJECTS + in-memory shard FIRST, and release the source PIN LAST. If
-        // branch-object cleanup FAILS, the pin is RETAINED (a safe, TTL-bounded, retryable LEAK that keeps the
-        // source segments protected) and the cleanup error is surfaced — NEVER an unpinned partial branch that
-        // would let reclamation delete a still-referenced segment ("missing segment"). Idempotent: a retry
-        // finishes any partial cleanup (already-deleted objects delete cleanly).
-        let rollback = |this: &Self| -> EngineResult<()> {
-            let pending = branch_pending_key(&branch);
-            // Delete every branch object EXCEPT the `branch.pending` sentinel FIRST: while ANY manifest entry
-            // survives, the sentinel MUST survive too so the readability gate keeps the branch non-existent (a
-            // plain prefix delete would drop the sentinel before the manifest — lexically `branch.pending` <
-            // `manifest/` — leaving readable manifest entries with no sentinel). If a delete errors here, the
-            // sentinel + pin are RETAINED and the branch stays non-readable + the source protected.
-            for key in this.store_list(&shard_prefix(&branch))? {
-                if key == pending {
-                    continue;
-                }
-                this.store_delete(&key)?;
-            }
-            this.inner
-                .lock()
-                .expect("segmented log poisoned")
-                .shards
-                .remove(&branch);
-            // The branch's manifest/objects are provably gone — now drop the sentinel, then the source PIN LAST.
-            this.store_delete(&pending)?;
-            this.store_delete(&branch_registry_key(source, &branch))?;
-            Ok(())
-        };
+        // Roll back a partially-created branch (bead pqueue-b5cc2bc7 error-path safety) by the SAFETY-CRITICAL
+        // ordering in [`Self::cleanup_uncommitted_branch`]: branch OBJECTS + in-memory shard FIRST, source PIN
+        // LAST. If branch-object cleanup FAILS, the pin is RETAINED (a safe, TTL-bounded, retryable LEAK that
+        // keeps the source segments protected) and the cleanup error is surfaced — NEVER an unpinned partial
+        // branch that would let reclamation delete a still-referenced segment ("missing segment"). The exact
+        // same routine is what `gc_orphaned_branches` reuses so the two stay consistent.
+        let rollback =
+            |this: &Self| -> EngineResult<()> { this.cleanup_uncommitted_branch(source, &branch) };
 
         // FAILURE FUNNEL: ALL post-pin work runs here. Any `?`-propagated failure returns from this closure and
         // is routed through `rollback` below, so there is NO early-return between "pin published" and "branch
@@ -1710,6 +1697,83 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let _ = self.store_delete(&branch_registry_key(source, branch))?;
         let _ = self.delete_prefix(&shard_prefix(branch))?;
         Ok(())
+    }
+
+    /// Delete ALL durable objects of an UNCOMMITTED/partial `branch` and drop its in-memory shard, then release
+    /// the source PIN (its `branch_registry_key` entry) LAST. This is the single cleanup routine shared by the
+    /// branch-creation rollback ([`Self::branch_attempt`]) and orphan GC ([`Self::gc_orphaned_branches`]) so the
+    /// two stay consistent.
+    ///
+    /// ORDER IS SAFETY-CRITICAL. Delete every branch object EXCEPT the `branch.pending` sentinel FIRST: while ANY
+    /// manifest entry survives, the sentinel MUST survive too so the readability gate keeps the branch
+    /// non-existent (a plain prefix delete would drop the sentinel before the manifest — lexically
+    /// `branch.pending` < `manifest/` — momentarily leaving readable manifest entries with no sentinel). Only
+    /// once the branch's manifest/objects are provably gone is the sentinel dropped, and the source PIN LAST. If
+    /// a delete errors partway, the sentinel + pin are RETAINED (the branch stays non-readable and the source
+    /// segments stay protected) and the error is surfaced — NEVER an unpinned partial branch. Idempotent: a
+    /// re-run finishes any partial cleanup (already-deleted objects delete cleanly).
+    fn cleanup_uncommitted_branch(&self, source: &QueueKey, branch: &QueueKey) -> EngineResult<()> {
+        let pending = branch_pending_key(branch);
+        for key in self.store_list(&shard_prefix(branch))? {
+            if key == pending {
+                continue;
+            }
+            self.store_delete(&key)?;
+        }
+        self.inner
+            .lock()
+            .expect("segmented log poisoned")
+            .shards
+            .remove(branch);
+        self.store_delete(&pending)?;
+        self.store_delete(&branch_registry_key(source, branch))?;
+        Ok(())
+    }
+
+    /// Reclaim the durable objects of ORPHANED uncommitted branches of `source` — the space leak a failed branch
+    /// creation (or a rollback whose own cleanup failed) can leave behind (bead pqueue-74f03d0e, follow-up to
+    /// pqueue-b5cc2bc7). Branch creation writes the source pin + `branch.pending` sentinel + branch manifest
+    /// objects and lands the `branch.json` commit marker LAST; a partial/failed attempt therefore leaves durable
+    /// GARBAGE (a leftover sentinel, partial manifest copies, and a still-registered source pin) that no read
+    /// path can ever see (they gate on the marker) but that is never reclaimed — a slow leak proportional to
+    /// failed-creation attempts, and a source pin that keeps the source's own segments un-reclaimable.
+    ///
+    /// The source's branch registry (`{source}branches/`) is the index of every pin — and a pin is published
+    /// FIRST and released LAST, so an orphan ALWAYS still has its registry entry (if the pin is gone, the
+    /// objects it protected are already gone too). For each registered branch this reclaims it IFF:
+    /// 1. the `branch.json` commit marker is ABSENT (an uncommitted branch); a COMMITTED branch (marker present)
+    ///    is a live, readable branch protected by its own TTL/pin and is NEVER touched; and
+    /// 2. the pin's `created_at_ms` is OLDER than [`ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS`]; a still-in-flight
+    ///    creation (its pin/sentinel within the window) is NEVER touched. `created_at_ms` is the pin's OWN
+    ///    creation timestamp (already carried on `BranchMetadata`, written FIRST and refreshed on every attempt),
+    ///    reused here as the sentinel's age so GC can tell an abandoned attempt from a fresh one.
+    ///
+    /// Reclamation reuses [`Self::cleanup_uncommitted_branch`] (objects first, source pin LAST), so it also
+    /// RELEASES the orphaned source pin and the source becomes fully reclaimable again. Store-failure-tolerant +
+    /// idempotent: a delete that fails surfaces its error and leaves the rest for the NEXT pass (never corrupts,
+    /// and a re-run over an already-cleaned orphan is a clean no-op). Branches copy no segment OBJECTS of their
+    /// own (their manifest entries reference the SOURCE's shared segments via the pin), so no source segment is
+    /// ever deleted here — only branch-local manifest/sentinel/queue objects and the source pin. Returns the
+    /// number of orphans reclaimed.
+    pub fn gc_orphaned_branches(&self, source: &QueueKey, now_ms: i64) -> EngineResult<u64> {
+        let mut reclaimed = 0u64;
+        for meta in self.read_branch_registry(source)? {
+            let branch = &meta.branch;
+            // (1) COMMITTED (marker present) => a live, readable branch protected by its own TTL/pin. NEVER GC.
+            if self.store_get(&branch_metadata_key(branch))?.is_some() {
+                continue;
+            }
+            // (2) IN-FLIGHT: the pin's `created_at_ms` is within the safety window => a creation may still be
+            // running. NEVER GC.
+            if now_ms.saturating_sub(meta.created_at_ms) < ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS {
+                continue;
+            }
+            // ORPHAN: marker absent + pin older than the safety window. Reclaim ALL its objects and release the
+            // source pin. A failing delete surfaces here (`?`) and leaves the remainder for the next pass.
+            self.cleanup_uncommitted_branch(source, branch)?;
+            reclaimed += 1;
+        }
+        Ok(reclaimed)
     }
 
     /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.

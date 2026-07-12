@@ -25,8 +25,8 @@ use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ObjectStoreStats, S3BlobStore,
-    SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS,
+    ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -1842,4 +1842,305 @@ fn segmented_object_log_commits_through_minio() {
         "owner A sealed two segments before being fenced"
     );
     assert_eq!(c.commands_committed, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned uncommitted-branch GC (bead pqueue-74f03d0e)
+// ---------------------------------------------------------------------------
+
+/// The tenant/queue key prefix a shard's objects live under (mirrors the crate-internal `shard_prefix`).
+fn shard_prefix_of(k: &pqueue_engine::QueueKey) -> String {
+    format!(
+        "t/{}/q/{}/",
+        hex_lower(k.tenant_id.as_str().as_bytes()),
+        hex_lower(k.queue_id.as_str().as_bytes())
+    )
+}
+
+/// A store that injects a FAILED branch creation whose OWN rollback cleanup also fails, leaving a durable
+/// orphan (leftover `branch.pending` sentinel + partial branch manifest + a still-registered source pin). While
+/// armed it (a) fails the `branch.json` commit-marker put — the LAST write of a branch creation — so the branch
+/// never commits, and (b) fails every delete — so the creation rollback cannot clean up. Disarm it to let GC's
+/// deletes through.
+struct OrphanBranchFaultStore {
+    inner: InMemoryBlobStore,
+    fail_marker_put: AtomicBool,
+    fail_deletes: AtomicBool,
+}
+
+impl OrphanBranchFaultStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBlobStore::new(),
+            fail_marker_put: AtomicBool::new(false),
+            fail_deletes: AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.fail_marker_put.store(true, Ordering::SeqCst);
+        self.fail_deletes.store(true, Ordering::SeqCst);
+    }
+
+    fn disarm(&self) {
+        self.fail_marker_put.store(false, Ordering::SeqCst);
+        self.fail_deletes.store(false, Ordering::SeqCst);
+    }
+}
+
+impl BlobStore for OrphanBranchFaultStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        if self.fail_marker_put.load(Ordering::SeqCst) && key.ends_with("branch.json") {
+            return Err(EngineError::Storage(
+                "injected: branch commit-marker put failed".into(),
+            ));
+        }
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            return Err(EngineError::Storage(
+                "injected: branch cleanup delete failed".into(),
+            ));
+        }
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(prefix)
+    }
+}
+
+/// Fault-inject a FAILED branch creation (marker-put + rollback-cleanup both fail) that leaves a durable orphan.
+/// Returns the branch key. The source has six single-command segments (seq 0..5); the branch is cut at seq 3.
+fn seed_orphaned_branch(
+    log: &SegmentedObjectLog<std::sync::Arc<OrphanBranchFaultStore>>,
+    store: &OrphanBranchFaultStore,
+    source: &pqueue_engine::QueueKey,
+    suffix: &str,
+    created_at: i64,
+) -> pqueue_engine::QueueKey {
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(source, &pushes(1), 0, 10).unwrap();
+        log.seal(source, 0, 10).unwrap();
+    }
+    assert_eq!(log.read_all(source).unwrap().len(), 6);
+
+    let branch_def = branch_qdef(suffix);
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+
+    store.arm();
+    let result = log.branch(
+        source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 3),
+        1_000_000_000, // large TTL: the orphan pin stays "live" well past the GC safety window
+        created_at,
+    );
+    store.disarm();
+    assert!(
+        result.is_err(),
+        "the injected marker-put + cleanup failure fails branch creation: {result:?}"
+    );
+    branch
+}
+
+/// (a) A fault-injected failed branch creation leaves a durable orphan (sentinel + partial branch manifest +
+/// a still-live source pin, commit marker ABSENT). GC past the safety window reclaims ALL of it AND releases the
+/// source pin; the source stays fully readable (no missing segment) and becomes fully reclaimable again.
+#[test]
+fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
+    const CREATED_AT: i64 = 1_000;
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-orphan", CREATED_AT);
+
+    let bp = shard_prefix_of(&branch);
+    let sp = shard_prefix_of(&source);
+    // The orphan is durable: sentinel present, partial branch manifest present, commit marker ABSENT, pin live.
+    assert!(
+        store.get(&format!("{bp}branch.pending")).unwrap().is_some(),
+        "leftover sentinel is durable"
+    );
+    assert!(
+        !store.list(&format!("{bp}manifest/")).unwrap().is_empty(),
+        "partial branch manifest objects are durable"
+    );
+    assert!(
+        store.get(&format!("{bp}branch.json")).unwrap().is_none(),
+        "commit marker never landed (uncommitted branch)"
+    );
+    assert!(
+        !store.list(&format!("{sp}branches/")).unwrap().is_empty(),
+        "the source pin is still registered"
+    );
+    // The source is unaffected — the failed branch never touched a source object.
+    assert_eq!(
+        log.read_all(&source).unwrap().len(),
+        6,
+        "source fully readable"
+    );
+    // While the orphan pin is live it BLOCKS reclamation of the branched range (the pin is genuinely held).
+    assert_eq!(
+        log.expire_segments_through(&source, 3, CREATED_AT + 1)
+            .unwrap(),
+        0,
+        "the orphaned source pin blocks reclamation of the branched range"
+    );
+
+    // GC past the safety window reclaims exactly the one orphan.
+    let now = CREATED_AT + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS + 1;
+    assert_eq!(
+        log.gc_orphaned_branches(&source, now).unwrap(),
+        1,
+        "the abandoned uncommitted branch is reclaimed"
+    );
+    // Every orphan object is gone: sentinel, branch manifest, and the source pin.
+    assert!(
+        store.get(&format!("{bp}branch.pending")).unwrap().is_none(),
+        "sentinel reclaimed"
+    );
+    assert!(
+        store.list(&format!("{bp}manifest/")).unwrap().is_empty(),
+        "branch manifest reclaimed"
+    );
+    assert!(
+        store.list(&format!("{sp}branches/")).unwrap().is_empty(),
+        "source pin released"
+    );
+
+    // The source is STILL fully readable — GC deleted NO source segment (no missing segment ever).
+    assert_eq!(
+        log.read_all(&source).unwrap().len(),
+        6,
+        "GC deleted no source segment"
+    );
+    // With the pin released the source's branched range reclaims normally, and the surviving tail is intact.
+    assert_eq!(
+        log.expire_segments_through(&source, 3, now).unwrap(),
+        4,
+        "seq 0..3 reclaim once the orphan pin is released"
+    );
+    assert_eq!(
+        log.read_from(&source, 4).unwrap().len(),
+        2,
+        "the surviving tail (seq 4..5) is intact — no missing segment"
+    );
+
+    // Idempotent: a second GC pass over the now-clean source is a no-op.
+    assert_eq!(
+        log.gc_orphaned_branches(&source, now).unwrap(),
+        0,
+        "re-running GC after a clean pass is a no-op"
+    );
+}
+
+/// (b) A COMMITTED branch (its `branch.json` commit marker present) is NEVER GC'd — its objects, pin, and
+/// readability all survive a GC run long past the safety window.
+#[test]
+fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    log.enqueue(&source, &pushes(4), 0, 10).unwrap();
+    log.seal(&source, 0, 11).unwrap();
+
+    let branch_def = branch_qdef("gc-committed");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 1),
+        1_000_000_000,
+        1_000,
+    )
+    .unwrap();
+    assert!(
+        !log.read_all(&branch).unwrap().is_empty(),
+        "committed branch is readable before GC"
+    );
+
+    // GC far past the window must NOT touch a committed branch.
+    let now = 1_000 + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS * 100;
+    assert_eq!(
+        log.gc_orphaned_branches(&source, now).unwrap(),
+        0,
+        "a committed branch is never an orphan"
+    );
+
+    let bp = shard_prefix_of(&branch);
+    let sp = shard_prefix_of(&source);
+    assert!(
+        store.get(&format!("{bp}branch.json")).unwrap().is_some(),
+        "commit marker survives"
+    );
+    assert!(
+        !store.list(&format!("{sp}branches/")).unwrap().is_empty(),
+        "source pin survives"
+    );
+    assert!(
+        !log.read_all(&branch).unwrap().is_empty(),
+        "committed branch stays readable after GC"
+    );
+}
+
+/// (c) An in-flight creation — an uncommitted branch whose pin/sentinel is still WITHIN the safety window — is
+/// NEVER GC'd. Only when the same orphan ages past the window does GC reclaim it (the clock is the only thing
+/// that changes between the two calls).
+#[test]
+fn gc_orphaned_branches_spares_an_in_flight_creation_within_the_safety_window() {
+    const CREATED_AT: i64 = 1_000;
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-inflight", CREATED_AT);
+
+    let bp = shard_prefix_of(&branch);
+    let sp = shard_prefix_of(&source);
+
+    // WITHIN the window the sentinel/pin look like an in-flight creation — GC must spare it.
+    let within = CREATED_AT + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS - 1;
+    assert_eq!(
+        log.gc_orphaned_branches(&source, within).unwrap(),
+        0,
+        "an in-window uncommitted branch is treated as in-flight and spared"
+    );
+    assert!(
+        store.get(&format!("{bp}branch.pending")).unwrap().is_some(),
+        "the in-flight sentinel survives"
+    );
+    assert!(
+        !store.list(&format!("{sp}branches/")).unwrap().is_empty(),
+        "the in-flight source pin survives"
+    );
+
+    // PAST the window the very same orphan IS reclaimed — only the clock differs.
+    let past = CREATED_AT + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS + 1;
+    assert_eq!(
+        log.gc_orphaned_branches(&source, past).unwrap(),
+        1,
+        "past the window the same orphan is reclaimed"
+    );
+    assert!(
+        store.get(&format!("{bp}branch.pending")).unwrap().is_none(),
+        "the aged-out sentinel is finally reclaimed"
+    );
 }
