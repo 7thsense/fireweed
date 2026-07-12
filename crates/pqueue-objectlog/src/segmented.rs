@@ -629,6 +629,8 @@ struct ManifestEntry {
 struct BranchMetadata {
     source: QueueKey,
     branch: QueueKey,
+    #[serde(default)]
+    source_epoch: u64,
     cut_sequence: u64,
     ttl_ms: u64,
     created_at_ms: i64,
@@ -1684,9 +1686,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // (2) VALIDATE-AFTER-COPY: re-read the AUTHORITATIVE (epoch-fenced manifest) floor after copying and, if
         // it MOVED, roll back and fail cleanly (`Conflict`) so a retry re-reads the advanced floor — NEVER
         // leaving a branch that GETs a reclaimed object.
+        // SOURCE-OWNERSHIP FENCE (cross-instance superseded-owner safety): snapshot the durable source epoch
+        // before copying, then re-read it after the copy and before the final commit marker write. If a newer
+        // owner has taken the source in the meantime, the branch commit must fail cleanly (`Conflict`) and
+        // roll back the partial branch rather than publishing a branch on a source it no longer owns.
+        let (_, _, source_epoch) = self.recover_manifest(source)?;
         let metadata = BranchMetadata {
             source: source.clone(),
             branch: branch.clone(),
+            source_epoch,
             cut_sequence: position.sequence,
             ttl_ms,
             created_at_ms: now_ms,
@@ -1827,6 +1835,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
             // Own lease / epoch: the branch gets its own fence entry without mutating the parent queue.
             let epoch = self.acquire_epoch(&branch, now_ms)?;
+            let (_, _, current_source_epoch) = self.recover_manifest(source)?;
+            if current_source_epoch != source_epoch {
+                return Err(EngineError::Conflict);
+            }
 
             // COMMIT MARKER — the LAST durable write (bead pqueue-b5cc2bc7 atomic branch existence). Only now,
             // after the pin, floor seed, ALL manifest copies + objects, validate-after-copy, and acquire_epoch,
@@ -1935,17 +1947,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// concurrent creation on this instance cannot slip a `branch.json` in between the marker check and the
     /// delete) with a REAL mutual-exclusion argument, not a "should be long enough" window.
     ///
-    /// SCOPE — CROSS INSTANCE (honest limitation, bead pqueue-74f03d0e): the guard is a per-instance field, so
-    /// it does NOT exclude a branch creation running on a DIFFERENT `SegmentedObjectLog` instance sharing the
-    /// same store. GC is therefore only safe when run by the source's CURRENT owner against QUIESCED prior
-    /// owners. NOTE the branch commit is NOT itself epoch-fenced against a superseded source owner: the marker
-    /// write is an unconditional `store_put` (see `branch_attempt`), the only epoch acquired is the BRANCH's own
-    /// (`acquire_epoch(&branch, …)`), and the post-copy validation re-reads only the source RETENTION FLOOR —
-    /// which a new owner's `acquire_epoch(source)` does not move — so a superseded owner that is still ACTIVELY
-    /// creating could commit a branch a new owner's GC concurrently deletes. Closing that requires fencing the
-    /// branch COMMIT on the source ownership epoch (a change to the b5cc2bc7 atomic-creation protocol, out of
-    /// scope for this P3 leak), not a GC-only change; until then this residual cross-instance TOCTOU is gated by
-    /// the ownership model quiescing superseded owners, and is tracked as a follow-up rather than claimed safe.
+    /// SCOPE — CROSS INSTANCE (shared-store owners): the guard is a per-instance field, so it does NOT exclude
+    /// a branch creation running on a DIFFERENT `SegmentedObjectLog` instance sharing the same store. Cross-
+    /// instance safety therefore depends on the creation protocol itself fencing the final commit on the source
+    /// ownership epoch: a superseded owner re-checks the durable source epoch before the `branch.json` marker is
+    /// written, so a newer owner's `acquire_epoch(source)` forces the older creator to roll back cleanly instead
+    /// of committing a branch on a source it no longer owns. GC still reuses the same cleanup routine; the
+    /// commit fence is what closes the residual TOCTOU.
     ///
     /// Reclamation reuses [`Self::cleanup_uncommitted_branch`] (objects first, source pin LAST), so it also
     /// RELEASES the orphaned source pin and the source becomes fully reclaimable again. Store-failure-tolerant +

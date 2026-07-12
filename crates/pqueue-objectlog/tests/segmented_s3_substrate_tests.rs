@@ -2248,6 +2248,153 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
     );
 }
 
+/// A cross-instance fault hook that pauses the creator mid-branch and pauses GC after classification.
+struct CrossInstanceBranchFence {
+    creator_paused: std::sync::mpsc::Sender<()>,
+    creator_resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    gc_paused: std::sync::mpsc::Sender<()>,
+    gc_resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    creator_fired: AtomicBool,
+    gc_fired: AtomicBool,
+}
+
+impl FaultHook for CrossInstanceBranchFence {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        match cut {
+            FaultCutPoint::DuringBranchCopy if !self.creator_fired.swap(true, Ordering::SeqCst) => {
+                self.creator_paused.send(()).unwrap();
+                self.creator_resume.lock().unwrap().recv().unwrap();
+            }
+            FaultCutPoint::GcAfterOrphanClassified
+                if !self.gc_fired.swap(true, Ordering::SeqCst) =>
+            {
+                self.gc_paused.send(()).unwrap();
+                self.gc_resume.lock().unwrap().recv().unwrap();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// Cross-instance handoff: a superseded branch creator must fail cleanly once a newer owner acquires the
+/// source epoch, and the current owner's GC can then reclaim the orphan without corrupting or losing source
+/// segments.
+#[test]
+fn branch_commit_is_fenced_on_the_source_epoch_and_cross_instance_gc_stays_safe() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let creator_log = std::sync::Arc::new(SegmentedObjectLog::open(
+        store.clone(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let owner_log = std::sync::Arc::new(SegmentedObjectLog::open(
+        store.clone(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let source = shard();
+
+    creator_log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        creator_log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        creator_log.seal(&source, 0, 10).unwrap();
+    }
+    owner_log.create_queue(&qdef()).unwrap();
+
+    let (creator_paused_tx, creator_paused_rx) = std::sync::mpsc::channel();
+    let (creator_resume_tx, creator_resume_rx) = std::sync::mpsc::channel();
+    let (gc_paused_tx, gc_paused_rx) = std::sync::mpsc::channel();
+    let (gc_resume_tx, gc_resume_rx) = std::sync::mpsc::channel();
+    let hook = std::sync::Arc::new(CrossInstanceBranchFence {
+        creator_paused: creator_paused_tx,
+        creator_resume: std::sync::Mutex::new(creator_resume_rx),
+        gc_paused: gc_paused_tx,
+        gc_resume: std::sync::Mutex::new(gc_resume_rx),
+        creator_fired: AtomicBool::new(false),
+        gc_fired: AtomicBool::new(false),
+    });
+    creator_log.set_fault_hook(Some(hook.clone()));
+    owner_log.set_fault_hook(Some(hook));
+
+    let branch_def = branch_qdef("gc-xowner");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+
+    let creator = {
+        let log = creator_log.clone();
+        let source = source.clone();
+        std::thread::spawn(move || {
+            log.branch(
+                &source,
+                &branch_def,
+                &CommandPosition::new(source.clone(), 0, 3),
+                1_000_000_000,
+                1_000,
+            )
+        })
+    };
+    creator_paused_rx.recv().unwrap();
+
+    let superseding_epoch = owner_log.acquire_epoch(&source, 2_000).unwrap();
+    assert!(
+        superseding_epoch >= 1,
+        "the newer owner took the source epoch"
+    );
+
+    let gc = {
+        let log = owner_log.clone();
+        let source = source.clone();
+        std::thread::spawn(move || log.gc_orphaned_branches(&source))
+    };
+
+    gc_paused_rx.recv().unwrap();
+
+    creator_resume_tx.send(()).unwrap();
+    let branch_result = creator.join().unwrap();
+    assert_eq!(
+        branch_result.unwrap_err(),
+        EngineError::Conflict,
+        "a superseded creator cannot commit a branch once the source epoch has advanced"
+    );
+
+    gc_resume_tx.send(()).unwrap();
+    let reclaimed = gc.join().unwrap().unwrap();
+    creator_log.set_fault_hook(None);
+    owner_log.set_fault_hook(None);
+
+    assert_eq!(
+        reclaimed, 1,
+        "the current owner's GC reclaims the abandoned orphan once the superseded creator rolls back"
+    );
+
+    let bp = shard_prefix_of(&branch);
+    let sp = shard_prefix_of(&source);
+    assert!(
+        store.get(&format!("{bp}branch.json")).unwrap().is_none(),
+        "the superseded creator never published a commit marker"
+    );
+    assert!(
+        store.list(&format!("{bp}")).unwrap().is_empty(),
+        "the branch prefix is fully cleaned up"
+    );
+    assert!(
+        store.list(&format!("{sp}branches/")).unwrap().is_empty(),
+        "the source pin is released after rollback/GC"
+    );
+    assert_eq!(
+        owner_log.read_all(&source).unwrap().len(),
+        6,
+        "the shared source remains readable after the handoff race"
+    );
+    assert_eq!(
+        owner_log
+            .expire_segments_through(&source, 3, 3_000)
+            .unwrap(),
+        4,
+        "the source stays reclaimable and no segment is missing after the race"
+    );
+    assert_eq!(owner_log.read_from(&source, 4).unwrap().len(), 2);
+}
+
 // ===========================================================================
 // bead pqueue-8928baec — durable read-horizon watermark + range-list (fence untouched)
 // ===========================================================================
