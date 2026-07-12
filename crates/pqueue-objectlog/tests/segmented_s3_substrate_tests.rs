@@ -2099,22 +2099,35 @@ fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
     );
 }
 
-/// A fault hook that PAUSES a branch creation mid-flight (at `DuringBranchCopy` — after the source pin +
-/// `branch.pending` sentinel are written but BEFORE the `branch.json` commit marker), so a test can run a
-/// concurrent GC pass exactly in the window BUG 1 exploits. The paused creation is holding the create/GC guard,
-/// so a correctly-excluded GC must BLOCK until this releases. It fires once: it signals `reached` and then
-/// blocks on `resume`.
-struct PauseBranchBeforeCommit {
-    reached: std::sync::mpsc::Sender<()>,
-    resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-    fired: AtomicBool,
+/// Two-cut-point fault hook that DETERMINISTICALLY interleaves a branch creation committing its marker with a
+/// concurrent GC pass (bead pqueue-74f03d0e, BUG 1). It pauses the CREATOR mid-flight (`DuringBranchCopy` —
+/// after the source pin + `branch.pending` sentinel are written but BEFORE `branch.json`) and pauses GC right
+/// after it classifies the branch marker-ABSENT (`GcAfterOrphanClassified`, before cleanup). The test drives
+/// the exact interleaving via channels — no sleeps in the load-bearing path — so that WITHOUT the guard GC
+/// provably proceeds to delete a branch the creator just committed.
+struct RaceCreateVsGc {
+    creator_paused: std::sync::mpsc::Sender<()>,
+    creator_resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    gc_classified: std::sync::mpsc::Sender<()>,
+    gc_resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    creator_fired: AtomicBool,
+    gc_fired: AtomicBool,
 }
 
-impl FaultHook for PauseBranchBeforeCommit {
+impl FaultHook for RaceCreateVsGc {
     fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
-        if cut == FaultCutPoint::DuringBranchCopy && !self.fired.swap(true, Ordering::SeqCst) {
-            self.reached.send(()).unwrap();
-            self.resume.lock().unwrap().recv().unwrap();
+        match cut {
+            FaultCutPoint::DuringBranchCopy if !self.creator_fired.swap(true, Ordering::SeqCst) => {
+                self.creator_paused.send(()).unwrap();
+                self.creator_resume.lock().unwrap().recv().unwrap();
+            }
+            FaultCutPoint::GcAfterOrphanClassified
+                if !self.gc_fired.swap(true, Ordering::SeqCst) =>
+            {
+                self.gc_classified.send(()).unwrap();
+                self.gc_resume.lock().unwrap().recv().unwrap();
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -2122,11 +2135,17 @@ impl FaultHook for PauseBranchBeforeCommit {
 
 /// (c) CREATE-vs-GC EXCLUSION (bead pqueue-74f03d0e, BUG 1): a branch creation that COMMITS its marker while a
 /// GC pass runs concurrently on the same branch must SURVIVE — GC must never observe the marker-absent instant
-/// and destroy a branch that is about to commit. The creation is paused mid-flight (pin + sentinel written,
-/// marker not yet) on one thread while a GC pass runs on another; under the create/GC guard the GC blocks until
-/// the creation commits, then classifies it as committed and reclaims nothing. WITHOUT the guard the GC would
-/// run in the marker-absent window, delete the branch objects + release the source pin, and return 1 (this test
-/// FAILS without the fix).
+/// and then destroy a branch that committed. DETERMINISTIC (no sleeps in the load-bearing path): the fault seam
+/// pins the creator mid-flight (pin + sentinel written, marker not yet) and pins GC right after it classifies
+/// the branch marker-absent, so the schedule is fully channel-driven.
+///
+/// WITH the guard: GC blocks on the create/GC guard the creator holds, so it never reaches the classify point
+/// while the creator is mid-flight (`gc_classified` never fires — detected by a timeout); the creator commits,
+/// releases the guard, and GC then sees the committed marker and reclaims nothing.
+///
+/// WITHOUT the guard (verified by temporarily removing it): GC reaches the classify point in the marker-absent
+/// window and parks there; the test then lets the creator COMMIT `branch.json` and only afterwards releases GC,
+/// which deletes the just-committed branch and returns 1 — failing the assertions below.
 #[test]
 fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_branch() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
@@ -2141,19 +2160,25 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
         log.seal(&source, 0, 10).unwrap();
     }
 
-    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
-    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
-    log.set_fault_hook(Some(std::sync::Arc::new(PauseBranchBeforeCommit {
-        reached: reached_tx,
-        resume: std::sync::Mutex::new(resume_rx),
-        fired: AtomicBool::new(false),
+    let (creator_paused_tx, creator_paused_rx) = std::sync::mpsc::channel();
+    let (creator_resume_tx, creator_resume_rx) = std::sync::mpsc::channel();
+    let (gc_classified_tx, gc_classified_rx) = std::sync::mpsc::channel();
+    let (gc_resume_tx, gc_resume_rx) = std::sync::mpsc::channel();
+    log.set_fault_hook(Some(std::sync::Arc::new(RaceCreateVsGc {
+        creator_paused: creator_paused_tx,
+        creator_resume: std::sync::Mutex::new(creator_resume_rx),
+        gc_classified: gc_classified_tx,
+        gc_resume: std::sync::Mutex::new(gc_resume_rx),
+        creator_fired: AtomicBool::new(false),
+        gc_fired: AtomicBool::new(false),
     })));
 
     let branch_def = branch_qdef("gc-race");
     let branch =
         pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
 
-    // Thread A: a branch creation that pauses mid-flight holding the create/GC guard.
+    // Thread A: a branch creation that pauses mid-flight (pin + sentinel written, marker NOT yet), holding the
+    // create/GC guard.
     let creator = {
         let log = log.clone();
         let source = source.clone();
@@ -2167,26 +2192,34 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
             )
         })
     };
-    // Wait until creation is mid-flight: pin + sentinel written, marker NOT yet, create/GC guard HELD.
-    reached_rx.recv().unwrap();
+    creator_paused_rx.recv().unwrap();
 
-    // Thread B: a GC pass while the creation is paused. Under the guard it PARKS until the creation commits.
+    // Thread B: a GC pass while the creation is mid-flight.
     let gc = {
         let log = log.clone();
         let source = source.clone();
         std::thread::spawn(move || log.gc_orphaned_branches(&source))
     };
 
-    // Give the GC thread ample wall-clock to (wrongly) run to completion if it were NOT excluded — the
-    // in-memory ops take microseconds, so 200ms is a huge margin. Under the guard it stays parked the whole
-    // time; then we let the creation commit its marker and finish.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    resume_tx.send(()).unwrap();
+    // WITHOUT the guard, GC deterministically reaches the classify point (marker-absent) and signals within
+    // microseconds; we then order commit-BEFORE-cleanup over channels. WITH the guard, GC is parked on the
+    // guard and never signals — a bounded wait for a signal that provably never comes, NOT a race window.
+    let gc_reached_classify = gc_classified_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .is_ok();
 
+    // Let the creator commit `branch.json` and finish (releasing the guard).
+    creator_resume_tx.send(()).unwrap();
     let branch_epoch = creator
         .join()
         .unwrap()
         .expect("the branch creation commits cleanly");
+
+    // If GC got into the marker-absent window (no guard), release it now — AFTER the commit — so it would
+    // delete a committed branch. (With the guard it never parked at the classify point, so nothing to release.)
+    if gc_reached_classify {
+        gc_resume_tx.send(()).unwrap();
+    }
     let reclaimed = gc.join().unwrap().unwrap();
     log.set_fault_hook(None);
 

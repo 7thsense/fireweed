@@ -728,6 +728,12 @@ pub enum FaultCutPoint {
     /// interleave a concurrent peer trim (advance the source floor + reclaim), exercising the pin-first +
     /// validate-after-copy cross-owner guard.
     DuringBranchCopy,
+    /// Struck INSIDE [`SegmentedObjectLog::gc_orphaned_branches`] AFTER a branch has been classified as an
+    /// orphan (its `branch.json` commit marker was observed ABSENT) but BEFORE its objects are deleted — the
+    /// exact instant a concurrent branch creation could commit the marker. A test uses this to deterministically
+    /// prove the create/GC guard excludes a concurrent creation (without the guard, GC struck here would go on
+    /// to delete a branch that committed during the block).
+    GcAfterOrphanClassified,
 }
 
 /// A test-only fault hook: called at each [`FaultCutPoint`] the pipeline passes through. Returning `Err`
@@ -1447,10 +1453,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // every attempt, the commit-marker write, and any rollback — so orphan GC can never run concurrently
         // with (and thus never mis-classify or destroy) an in-flight creation on this log instance. Outermost
         // lock: taken before any `inner` acquisition, so no lock-order inversion.
+        // POISON-TOLERANT: this mutex guards CREATE-vs-GC coordination, not an in-memory invariant, so a panic
+        // that unwinds through a creation (or GC) while it holds the guard must NOT wedge all future GC (and
+        // creation) forever. Recover the guard from a poisoned lock instead of propagating the panic.
         let _create_guard = self
             .create_gc_guard
             .lock()
-            .expect("create/gc guard poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         // A small fixed cap. Each attempt is a FULL clean single-shot creation that rolls back its own
         // partial state before the next runs, so no pin/objects leak across attempts. `?` propagates EVERY
         // EngineError (never retried); only the private `FloorAdvanced` signal loops.
@@ -1753,16 +1762,26 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// `branch.json` commit marker is ABSENT (an uncommitted branch); a COMMITTED branch (marker present) is a
     /// live, readable branch protected by its own TTL/pin and is NEVER touched.
     ///
-    /// CORRECTNESS (why marker-absent is safe to reclaim, not a timing guess): this whole classify+delete runs
-    /// under the [`Self::create_gc_guard`] that branch creation ALSO holds for its whole duration (including the
-    /// commit-marker write and any rollback). So on one log instance (one owner) NO creation can be in flight
-    /// while GC runs — the classification is EXACT: a marker-absent branch is DEFINITIVELY a failed/abandoned
-    /// creation (its creation already released the guard without landing the marker), never a creation that is
-    /// about to write its marker. This closes the classify-then-delete TOCTOU (a concurrent creation cannot
-    /// slip a `branch.json` in between the marker check and the delete) with a real mutual-exclusion argument
-    /// rather than a "should be long enough" window. Cross-owner concurrency (two live owners on one shard) is
-    /// an ownership-model violation fenced elsewhere by the manifest-CAS epoch; a SUPERSEDED (dead) owner cannot
-    /// be creating (its writes are epoch-fenced), so reclaiming its marker-absent orphans is safe too.
+    /// CORRECTNESS — SINGLE INSTANCE (the shipped guarantee, why marker-absent is safe to reclaim, not a timing
+    /// guess): this whole classify+delete runs under the [`Self::create_gc_guard`] that branch creation ALSO
+    /// holds for its whole duration (including the commit-marker write and any rollback). So on ONE log instance
+    /// NO creation can be in flight while GC runs — the classification is EXACT: a marker-absent branch is
+    /// DEFINITIVELY a failed/abandoned creation (its creation already released the guard without landing the
+    /// marker), never a creation about to write its marker. This closes the classify-then-delete TOCTOU (a
+    /// concurrent creation on this instance cannot slip a `branch.json` in between the marker check and the
+    /// delete) with a REAL mutual-exclusion argument, not a "should be long enough" window.
+    ///
+    /// SCOPE — CROSS INSTANCE (honest limitation, bead pqueue-74f03d0e): the guard is a per-instance field, so
+    /// it does NOT exclude a branch creation running on a DIFFERENT `SegmentedObjectLog` instance sharing the
+    /// same store. GC is therefore only safe when run by the source's CURRENT owner against QUIESCED prior
+    /// owners. NOTE the branch commit is NOT itself epoch-fenced against a superseded source owner: the marker
+    /// write is an unconditional `store_put` (see `branch_attempt`), the only epoch acquired is the BRANCH's own
+    /// (`acquire_epoch(&branch, …)`), and the post-copy validation re-reads only the source RETENTION FLOOR —
+    /// which a new owner's `acquire_epoch(source)` does not move — so a superseded owner that is still ACTIVELY
+    /// creating could commit a branch a new owner's GC concurrently deletes. Closing that requires fencing the
+    /// branch COMMIT on the source ownership epoch (a change to the b5cc2bc7 atomic-creation protocol, out of
+    /// scope for this P3 leak), not a GC-only change; until then this residual cross-instance TOCTOU is gated by
+    /// the ownership model quiescing superseded owners, and is tracked as a follow-up rather than claimed safe.
     ///
     /// Reclamation reuses [`Self::cleanup_uncommitted_branch`] (objects first, source pin LAST), so it also
     /// RELEASES the orphaned source pin and the source becomes fully reclaimable again. Store-failure-tolerant +
@@ -1774,10 +1793,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     pub fn gc_orphaned_branches(&self, source: &QueueKey) -> EngineResult<u64> {
         // Exclude concurrent branch creation for the WHOLE classify+delete (see the doc comment + the guard's
         // definition). Outermost lock: taken before any `inner` acquisition, so no lock-order inversion.
+        // POISON-TOLERANT: this mutex guards CREATE-vs-GC coordination, not an in-memory invariant, so a panic
+        // that unwinds through a creation (or GC) while it holds the guard must NOT wedge all future GC (and
+        // creation) forever. Recover the guard from a poisoned lock instead of propagating the panic.
         let _create_guard = self
             .create_gc_guard
             .lock()
-            .expect("create/gc guard poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         let mut reclaimed = 0u64;
         for meta in self.read_branch_registry(source)? {
             let branch = &meta.branch;
@@ -1785,6 +1807,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if self.store_get(&branch_metadata_key(branch))?.is_some() {
                 continue;
             }
+            // Test seam (never armed in production): strike the classify→delete window a concurrent creation's
+            // marker write could race, so the create/GC exclusion can be proven deterministically.
+            self.fault(FaultCutPoint::GcAfterOrphanClassified)?;
             // ORPHAN: marker absent AND — under the create/GC guard — provably not an in-flight creation, so it
             // is a failed/abandoned attempt. Reclaim ALL its objects and release the source pin. A failing
             // delete surfaces here (`?`) and leaves the remainder for the next pass.
