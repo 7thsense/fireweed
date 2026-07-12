@@ -1009,15 +1009,15 @@ fn branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segm
 /// then reclaiming through it. Set `advances_remaining` to a small number for a BOUNDED race (the peer stops,
 /// so a later retry sees a STABLE floor and SUCCEEDS) or a large number for CONTINUOUS trimming (every attempt
 /// races, so the bounded retry gives up cleanly). `next_floor` starts at 1 so the first advance is a real move.
-struct PeerTrimBoundedAdvances {
-    log: std::sync::Weak<SegmentedObjectLog<InMemoryBlobStore>>,
+struct PeerTrimBoundedAdvances<S: BlobStore> {
+    log: std::sync::Weak<SegmentedObjectLog<S>>,
     source: pqueue_engine::QueueKey,
     now_ms: i64,
     advances_remaining: AtomicU64,
     next_floor: AtomicU64,
 }
 
-impl FaultHook for PeerTrimBoundedAdvances {
+impl<S: BlobStore + 'static> FaultHook for PeerTrimBoundedAdvances<S> {
     fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
         if cut != FaultCutPoint::DuringBranchCopy {
             return Ok(());
@@ -1211,6 +1211,117 @@ fn branch_cut_below_advanced_floor_is_rejected_invalid_not_retried() {
     assert!(
         matches!(result, Err(EngineError::Invalid(_))),
         "a cut at/below the advanced floor is rejected cleanly (Invalid), not retried as Conflict, got {result:?}"
+    );
+}
+
+/// A blob store whose `delete` returns `EngineError::Conflict` — the GENERIC `BlobStore` contract PERMITS a
+/// delete to fail with Conflict, even though shipped stores happen to normalize to `Storage` — for any key
+/// containing an armed substring, COUNTING each such fault. Used to prove the branch retry does NOT mistake a
+/// rollback-cleanup Conflict for a concurrent floor advance (bead pqueue-9dcec223, codex round-2 BUG 1).
+#[derive(Default)]
+struct ConflictOnDeleteStore {
+    inner: InMemoryBlobStore,
+    fail_delete: std::sync::Mutex<Option<String>>,
+    delete_conflicts: AtomicU64,
+}
+
+impl ConflictOnDeleteStore {
+    fn arm_delete(&self, substr: &str) {
+        *self.fail_delete.lock().unwrap() = Some(substr.to_string());
+    }
+    fn delete_conflicts(&self) -> u64 {
+        self.delete_conflicts.load(Ordering::SeqCst)
+    }
+}
+
+impl BlobStore for ConflictOnDeleteStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.inner.put(key, body)
+    }
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        if self
+            .fail_delete
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|s| key.contains(s))
+        {
+            self.delete_conflicts.fetch_add(1, Ordering::SeqCst);
+            return Err(EngineError::Conflict);
+        }
+        self.inner.delete(key)
+    }
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+}
+
+/// Bead pqueue-9dcec223 (codex round-2 BUG 1): a rollback-CLEANUP failure that itself returns
+/// `EngineError::Conflict` during a floor-moved attempt must NOT be mistaken for the retryable floor advance.
+/// The retry keys off the PRIVATE `BranchAttempt::FloorAdvanced` signal, so a cleanup Conflict is surfaced
+/// IMMEDIATELY (once) — never retried over the deliberately-RETAINED pin/partial objects. We arm the branch's
+/// rollback branch-object delete to fail with Conflict, race a single concurrent floor advance to force the
+/// floor-moved path, and assert: the branch returns Conflict, the cleanup fault fired EXACTLY ONCE (no retry
+/// over retained state), and the source pin is RETAINED (source not reclaimable — the safe leak is intact).
+#[test]
+fn branch_does_not_retry_a_rollback_cleanup_conflict() {
+    let store = std::sync::Arc::new(ConflictOnDeleteStore::default());
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        std::sync::Arc::clone(&store),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    // Race a SINGLE concurrent floor advance (to 1) so the first attempt takes the floor-moved rollback path.
+    log.set_fault_hook(Some(std::sync::Arc::new(PeerTrimBoundedAdvances {
+        log: std::sync::Arc::downgrade(&log),
+        source: source.clone(),
+        now_ms: 100,
+        advances_remaining: AtomicU64::new(1),
+        next_floor: AtomicU64::new(1),
+    })));
+    // Arm the rollback's branch-object cleanup delete to fail with Conflict (the generic-contract Conflict a
+    // shipped store would normalize away, but the retry MUST NOT depend on that normalization).
+    store.arm_delete("/manifest/");
+
+    let branch_def = branch_qdef("cleanup-conflict-not-retried");
+    let result = log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        1_000_000_000,
+        100,
+    );
+    log.set_fault_hook(None);
+
+    // The cleanup Conflict is surfaced immediately — NOT swallowed as a retryable floor advance.
+    assert!(
+        matches!(result, Err(EngineError::Conflict)),
+        "a rollback-cleanup Conflict surfaces immediately, got {result:?}"
+    );
+    // Fired EXACTLY ONCE: the loop did NOT re-attempt over the retained pin/partial objects.
+    assert_eq!(
+        store.delete_conflicts(),
+        1,
+        "the cleanup-delete Conflict fired exactly once — the retry never looped over the retained state"
+    );
+    // The pin is RETAINED (safe leak): the source is NOT reclaimable, its segments stay protected.
+    *store.fail_delete.lock().unwrap() = None; // disarm so the reclaim attempt can run its deletes
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 200).unwrap(),
+        0,
+        "the retained pin keeps the source fully protected — nothing is reclaimed after the cleanup failure"
     );
 }
 

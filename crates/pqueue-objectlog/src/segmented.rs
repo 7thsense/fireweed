@@ -664,6 +664,21 @@ fn branch_pending_key(branch: &QueueKey) -> String {
     format!("{}branch.pending", shard_prefix(branch))
 }
 
+/// The outcome of a SINGLE branch-creation attempt ([`SegmentedObjectLog::branch_attempt`]). This is a
+/// crate-PRIVATE signal that NEVER escapes: `FloorAdvanced` is the ONLY retryable outcome (a concurrent
+/// source-floor advance detected by validate-after-copy, AFTER a full rollback), so the bounded retry in
+/// [`SegmentedObjectLog::branch_with_emission`] retries on it and ONLY it. Every `EngineError` — a cut<=floor
+/// `Invalid`, an `acquire_epoch` `Conflict`, a rollback-cleanup failure, any store error — is propagated
+/// immediately and can NEVER be mistaken for a floor advance (which the public `EngineError::Conflict`
+/// discriminator previously could be).
+enum BranchAttempt {
+    /// The branch committed; carries its acquired epoch.
+    Committed(u64),
+    /// The source floor advanced concurrently during the copy; the partial branch was fully rolled back
+    /// (objects-first / pin-last), so a re-attempt against the advanced floor starts from a clean slate.
+    FloorAdvanced,
+}
+
 // ---------------------------------------------------------------------------
 // Internal fault-injection seam (TP-003 §3.10 AC-TXN-4)
 // ---------------------------------------------------------------------------
@@ -1399,16 +1414,17 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Same as [`Self::branch`], but allows opting in to change-record emission for the branch metadata.
     ///
-    /// BOUNDED TRANSPARENT RETRY (bead pqueue-9dcec223): a single attempt ([`Self::branch_attempt`]) fails
-    /// cleanly with [`EngineError::Conflict`] when a peer CONCURRENTLY advances the source retention floor
-    /// DURING creation (the validate-after-copy guard). That failure fully rolls back its own partial state
-    /// (branch objects FIRST, source pin LAST — see the rollback in `branch_attempt`), so re-attempting is
-    /// SAFE: the next attempt re-reads the ADVANCED floor and either (a) succeeds against the now-retained
-    /// range, or (b) is cleanly REJECTED with `Invalid` if the cut is now at/below the advanced floor (a
-    /// genuine "whole view reclaimed", NOT retried). Only `Conflict` is retried — every other error (incl.
-    /// the cut<=floor `Invalid` and any rollback/cleanup failure) is surfaced immediately. Bounded to
-    /// `MAX_BRANCH_ATTEMPTS` so CONTINUOUS trimming cannot livelock: after the cap the last (clean, fully
-    /// rolled-back) `Conflict` is surfaced for the caller.
+    /// BOUNDED TRANSPARENT RETRY (bead pqueue-9dcec223): a single attempt ([`Self::branch_attempt`]) reports
+    /// the crate-private [`BranchAttempt::FloorAdvanced`] signal when a peer CONCURRENTLY advances the source
+    /// retention floor DURING creation (the validate-after-copy guard), having FIRST fully rolled back its own
+    /// partial state (branch objects FIRST, source pin LAST). Re-attempting is therefore SAFE: the next
+    /// attempt re-reads the ADVANCED floor and either (a) succeeds against the now-retained range, or (b) is
+    /// cleanly REJECTED with `Invalid` if the cut is now at/below the advanced floor (a genuine "whole view
+    /// reclaimed"). The retry fires ONLY on the private `FloorAdvanced` signal — EVERY `EngineError` (the
+    /// cut<=floor `Invalid`, an `acquire_epoch` `Conflict`, a rollback-cleanup failure, any store error) is
+    /// propagated immediately and is NEVER mistaken for a floor advance. Bounded to `MAX_BRANCH_ATTEMPTS` so
+    /// CONTINUOUS trimming cannot livelock: after the cap a still-`FloorAdvanced` outcome is mapped to a clean
+    /// terminal `EngineError::Conflict` for the caller (its rollback already released the pin).
     pub fn branch_with_emission(
         &self,
         source: &QueueKey,
@@ -1419,7 +1435,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         emit_change_records: bool,
     ) -> EngineResult<u64> {
         // A small fixed cap. Each attempt is a FULL clean single-shot creation that rolls back its own
-        // partial state before the next runs, so no pin/objects leak across attempts.
+        // partial state before the next runs, so no pin/objects leak across attempts. `?` propagates EVERY
+        // EngineError (never retried); only the private `FloorAdvanced` signal loops.
         const MAX_BRANCH_ATTEMPTS: u32 = 5;
         for _ in 1..MAX_BRANCH_ATTEMPTS {
             match self.branch_attempt(
@@ -1429,28 +1446,33 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 ttl_ms,
                 now_ms,
                 emit_change_records,
-            ) {
-                // Concurrent source-floor advance during this attempt: re-read the advanced floor and retry.
-                Err(EngineError::Conflict) => continue,
-                // Success, a genuine cut<=floor `Invalid`, or any other error: surface it as-is (not retried).
-                other => return other,
+            )? {
+                BranchAttempt::Committed(epoch) => return Ok(epoch),
+                // A genuine concurrent source-floor advance (already rolled back): re-read + re-attempt.
+                BranchAttempt::FloorAdvanced => continue,
             }
         }
-        // Final attempt: return its result verbatim — a last `Conflict` here is the bounded give-up (no
-        // livelock), and its rollback has already released the pin so the source stays fully reclaimable.
-        self.branch_attempt(
+        // Final attempt: a still-`FloorAdvanced` outcome is the bounded give-up — map it to a clean terminal
+        // public `Conflict` (no livelock; its rollback already released the pin so the source stays
+        // reclaimable). A `Committed` succeeds; any `EngineError` propagates verbatim.
+        match self.branch_attempt(
             source,
             branch_def,
             position,
             ttl_ms,
             now_ms,
             emit_change_records,
-        )
+        )? {
+            BranchAttempt::Committed(epoch) => Ok(epoch),
+            BranchAttempt::FloorAdvanced => Err(EngineError::Conflict),
+        }
     }
 
-    /// A SINGLE branch-creation attempt (pin-first + validate-after-copy). Returns [`EngineError::Conflict`]
-    /// if the source retention floor MOVED during the copy, having fully rolled back its partial state; the
-    /// bounded retry loop in [`Self::branch_with_emission`] re-attempts against the advanced floor.
+    /// A SINGLE branch-creation attempt (pin-first + validate-after-copy). Reports
+    /// [`BranchAttempt::FloorAdvanced`] (NOT a bare `EngineError::Conflict`) if the source retention floor
+    /// MOVED during the copy, having fully rolled back its partial state; the bounded retry loop in
+    /// [`Self::branch_with_emission`] re-attempts against the advanced floor on that signal ALONE. Every real
+    /// failure is returned as an `Err(EngineError)` and is never retried.
     fn branch_attempt(
         &self,
         source: &QueueKey,
@@ -1459,7 +1481,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         ttl_ms: u64,
         now_ms: i64,
         emit_change_records: bool,
-    ) -> EngineResult<u64> {
+    ) -> EngineResult<BranchAttempt> {
         let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
         if branch == *source {
             return Err(EngineError::Invalid("branch queue must differ from source"));
@@ -1522,7 +1544,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // FAILURE FUNNEL: ALL post-pin work runs here. Any `?`-propagated failure returns from this closure and
         // is routed through `rollback` below, so there is NO early-return between "pin published" and "branch
         // fully committed" that leaves the pin (or an unpinned partial branch) behind.
-        let committed: EngineResult<u64> = (|| {
+        // `Ok(Some(epoch))` = committed; `Ok(None)` = the source floor moved during the copy (a retryable
+        // FloorAdvanced, routed through rollback below); `Err` = a genuine failure (also rolled back).
+        let committed: EngineResult<Option<u64>> = (|| {
             // ATOMIC BRANCH EXISTENCE (bead pqueue-b5cc2bc7): write the `branch.pending` sentinel FIRST so any
             // failure/crash before the `branch.json` commit marker (written LAST, below) leaves an UNCOMMITTED
             // branch that every segment-reading path treats as NON-EXISTENT — never a readable partial branch.
@@ -1613,11 +1637,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
 
             // (2) VALIDATE-AFTER-COPY: re-read the AUTHORITATIVE source floor. If it MOVED during the copy, a
-            // peer concurrently reclaimed part of the branched range — fail cleanly so a retry re-reads the
-            // advanced floor (and either succeeds against the retained range or is cleanly rejected).
+            // peer concurrently reclaimed part of the branched range — signal the RETRYABLE floor-advance (a
+            // private `Ok(None)`, routed through rollback below) so a retry re-reads the advanced floor. This is
+            // NOT a bare `EngineError::Conflict`: it must be distinguishable from a Conflict that a store /
+            // `acquire_epoch` / cleanup could raise, which must NEVER be retried.
             let floor_after = self.read_retention_floor(source)?.map(|p| p.sequence);
             if floor_after != source_floor {
-                return Err(EngineError::Conflict);
+                return Ok(None);
             }
 
             let (next_seq, next_manifest_index, committed_epoch) =
@@ -1643,11 +1669,22 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             // leftover sentinel is harmless because the commit marker wins the readability gate; a leftover is
             // just non-blocking garbage, same GC class as the deferred manifest-tombstone compaction).
             let _ = self.store_delete(&branch_pending_key(&branch));
-            Ok(epoch)
+            Ok(Some(epoch))
         })();
 
         match committed {
-            Ok(epoch) => Ok(epoch),
+            // Committed cleanly — surface the epoch.
+            Ok(Some(epoch)) => Ok(BranchAttempt::Committed(epoch)),
+            // Concurrent floor advance during the copy: roll back the partial branch FIRST, then report the
+            // private `FloorAdvanced` retry signal so the next attempt starts from a clean slate. If the
+            // rollback CLEANUP itself fails, that `EngineError` is surfaced immediately (`?`) and is NEVER
+            // retried over the deliberately-RETAINED pin/objects — the safe-leak invariant is preserved.
+            Ok(None) => {
+                rollback(self)?;
+                Ok(BranchAttempt::FloorAdvanced)
+            }
+            // A genuine failure (cut<=floor `Invalid`, `acquire_epoch` `Conflict`, any store error): roll back
+            // and surface the ORIGINAL error, never retried.
             Err(original) => match rollback(self) {
                 // Clean rollback (branch objects + pin gone) — surface the original failure.
                 Ok(()) => Err(original),
