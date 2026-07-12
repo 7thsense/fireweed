@@ -127,6 +127,21 @@ fn manifest_head_files(root: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+fn legacy_manifest_files(root: &std::path::Path) -> Vec<String> {
+    collect_files(root)
+        .into_iter()
+        .filter(|p| {
+            p.contains("/manifest/") && !p.contains("/manifest_head/") && p.ends_with(".json")
+        })
+        .collect()
+}
+
+fn delete_legacy_manifest_files(root: &std::path::Path) {
+    for rel in legacy_manifest_files(root) {
+        std::fs::remove_file(root.join(rel)).expect("delete legacy manifest");
+    }
+}
+
 struct CrashAt(FaultCutPoint);
 
 impl FaultHook for CrashAt {
@@ -136,6 +151,22 @@ impl FaultHook for CrashAt {
         } else {
             Ok(())
         }
+    }
+}
+
+struct PauseAt {
+    cut: FaultCutPoint,
+    entered: Arc<Barrier>,
+    resume: Arc<Barrier>,
+}
+
+impl FaultHook for PauseAt {
+    fn fault_point(&self, cut: FaultCutPoint) -> pqueue_engine::EngineResult<()> {
+        if cut == self.cut {
+            self.entered.wait();
+            self.resume.wait();
+        }
+        Ok(())
     }
 }
 
@@ -354,6 +385,7 @@ fn unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments() {
         .expect("later commit");
     assert_eq!(later[0].sequence, 1);
 
+    delete_legacy_manifest_files(&root);
     let stale_race = stale.append(&shard, &[push_env("23")], 0);
     assert!(
         matches!(
@@ -383,6 +415,151 @@ fn unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments() {
             .ok(),
         Some(live_len),
         "stale attempt cannot delete or overwrite the branch-pinned source segment"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stale_writer_cannot_false_ack_after_deleted_index() {
+    let root = tmp_root("deleted-index");
+    let shard = shard();
+
+    let mut owner_a = ObjectLog::open(root.clone()).expect("open owner a");
+    owner_a.ensure_shard(&shard).unwrap();
+    let first = owner_a.append(&shard, &[push_env("30")], 0).unwrap();
+    assert_eq!(first[0].sequence, 0);
+
+    let entered = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let mut frozen = ObjectLog::open(root.clone()).expect("open frozen owner");
+    frozen.ensure_shard(&shard).unwrap();
+    frozen.set_fault_hook(Some(Arc::new(PauseAt {
+        cut: FaultCutPoint::AfterSegmentWriteBeforeManifest,
+        entered: Arc::clone(&entered),
+        resume: Arc::clone(&resume),
+    })));
+    let shard_for_thread = shard.clone();
+    let frozen_handle = thread::spawn(move || {
+        let mut frozen = frozen;
+        frozen.append(&shard_for_thread, &[push_env("31")], 0)
+    });
+
+    entered.wait();
+
+    let mut owner_b = ObjectLog::open(root.clone()).expect("open owner b");
+    owner_b.ensure_shard(&shard).unwrap();
+    assert_eq!(
+        owner_b.acquire_epoch(&shard).unwrap(),
+        1,
+        "owner B advances the permanent head"
+    );
+    delete_legacy_manifest_files(&root);
+
+    resume.wait();
+    let frozen_res = frozen_handle.join().expect("frozen owner thread");
+    assert!(
+        matches!(
+            frozen_res,
+            Err(EngineError::EpochFenced | EngineError::Conflict)
+        ),
+        "a stale owner resuming after the head advanced must be fenced, got {frozen_res:?}"
+    );
+
+    let page = owner_b.read_from(&shard, None, 10).unwrap();
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![0],
+        "the stale attempt did not create a phantom acknowledgement"
+    );
+    assert_eq!(owner_b.current_epoch(&shard).unwrap(), 1);
+    assert!(
+        legacy_manifest_files(&root).is_empty(),
+        "the old manifest index objects were deleted"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stale_writer_attempt_garbage_unpublished() {
+    let root = tmp_root("attempt-garbage");
+    let shard = shard();
+
+    let mut stale = ObjectLog::open(root.clone()).expect("open stale owner");
+    stale.ensure_shard(&shard).unwrap();
+    stale.set_fault_hook(Some(Arc::new(CrashAt(
+        FaultCutPoint::AfterSegmentWriteBeforeManifest,
+    ))));
+    assert!(
+        stale.append(&shard, &[push_env("40")], 0).is_err(),
+        "the initial stale attempt should crash after the segment write"
+    );
+    let orphan_key = attempt_segment_files(&root)
+        .into_iter()
+        .find(|k| k.contains("/s00000000000000000000-"))
+        .expect("orphan segment object");
+
+    let mut current = ObjectLog::open(root.clone()).expect("open current owner");
+    current.ensure_shard(&shard).unwrap();
+    let live = current.append(&shard, &[push_env("41")], 0).unwrap();
+    assert_eq!(live[0].sequence, 0);
+    let live_key = attempt_segment_files(&root)
+        .into_iter()
+        .find(|k| k != &orphan_key)
+        .expect("live segment object");
+    let live_len = std::fs::metadata(root.join(&live_key))
+        .expect("live segment exists")
+        .len();
+
+    let branch_def = branch_qdef();
+    current
+        .branch(&shard, &branch_def, &live[0], 60_000, 0)
+        .expect("branch pins the live source segment");
+    assert!(
+        collect_files(&root)
+            .iter()
+            .any(|p| p.contains("/branches/") || p.ends_with("/branch.json")),
+        "branch metadata must be published before the stale peer races"
+    );
+
+    let later = current.append(&shard, &[push_env("42")], 0).unwrap();
+    assert_eq!(later[0].sequence, 1);
+
+    delete_legacy_manifest_files(&root);
+    stale.set_fault_hook(None);
+    let stale_race = stale.append(&shard, &[push_env("43")], 0);
+    assert!(
+        matches!(
+            stale_race,
+            Err(EngineError::Conflict | EngineError::EpochFenced)
+        ),
+        "a stale owner must not ack after the head advances: {stale_race:?}"
+    );
+
+    let keys = attempt_segment_files(&root);
+    let seq0_keys = keys
+        .iter()
+        .filter(|k| k.contains("/s00000000000000000000-"))
+        .count();
+    assert!(
+        seq0_keys >= 3,
+        "orphan, live, and stale attempts at first_seq=0 keep distinct attempt objects: {keys:?}"
+    );
+    assert_eq!(
+        current.read_from(&shard, None, 10).unwrap().entries.len(),
+        2,
+        "the stale attempt stays unreachable from the manifest head"
+    );
+    assert_eq!(
+        std::fs::metadata(root.join(&live_key))
+            .map(|m| m.len())
+            .ok(),
+        Some(live_len),
+        "the stale attempt must not overwrite the live segment"
     );
 
     let _ = std::fs::remove_dir_all(&root);
