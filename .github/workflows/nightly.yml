@@ -25,7 +25,7 @@ jobs:
           df -h /
 
       - name: Checkout pqueue
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           path: pqueue
 
