@@ -664,14 +664,6 @@ fn branch_pending_key(branch: &QueueKey) -> String {
     format!("{}branch.pending", shard_prefix(branch))
 }
 
-/// How long an UNCOMMITTED branch (a `branch.pending` sentinel / source pin WITHOUT a `branch.json` commit
-/// marker) must have existed before [`SegmentedObjectLog::gc_orphaned_branches`] treats it as an abandoned
-/// orphan rather than an in-flight creation (bead pqueue-74f03d0e). Deliberately GENEROUS — a whole branch
-/// creation (pin, floor seed, all manifest copies, validate-after-copy, acquire_epoch, marker) completes in
-/// well under a second, so ten minutes gives an in-flight (or bounded-retrying) attempt an enormous margin
-/// before its objects could ever be eligible for GC.
-pub const ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS: i64 = 10 * 60 * 1000;
-
 /// The outcome of a SINGLE branch-creation attempt ([`SegmentedObjectLog::branch_attempt`]). This is a
 /// crate-PRIVATE signal that NEVER escapes: `FloorAdvanced` is the ONLY retryable outcome (a concurrent
 /// source-floor advance detected by validate-after-copy, AFTER a full rollback), so the bounded retry in
@@ -792,6 +784,14 @@ pub struct SegmentedObjectLog<S: BlobStore> {
     inner: Mutex<Inner>,
     /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-4). `None` in every production path.
     fault_hook: Mutex<Option<Arc<dyn FaultHook>>>,
+    /// CREATE-vs-GC mutual exclusion (bead pqueue-74f03d0e). Branch creation ([`Self::branch_with_emission`])
+    /// holds this for its WHOLE duration — every attempt, the commit-marker write, and any rollback — and
+    /// orphan GC ([`Self::gc_orphaned_branches`]) holds it across its WHOLE classify+delete critical section.
+    /// So on one log instance (one owner) GC can NEVER observe a branch whose creation is concurrently in
+    /// flight: a marker-absent branch seen under this guard is DEFINITIVELY a failed/abandoned creation. This is
+    /// a real exclusion (not a timing heuristic) that closes the classify-then-delete TOCTOU vs a marker write.
+    /// It is ALWAYS the OUTERMOST lock (taken before `inner`), so it introduces no lock-order inversion.
+    create_gc_guard: Mutex<()>,
 }
 
 impl<S: BlobStore> SegmentedObjectLog<S> {
@@ -806,6 +806,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 object_sizes: BTreeMap::new(),
             }),
             fault_hook: Mutex::new(None),
+            create_gc_guard: Mutex::new(()),
         }
     }
 
@@ -1442,6 +1443,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         now_ms: i64,
         emit_change_records: bool,
     ) -> EngineResult<u64> {
+        // CREATE-vs-GC exclusion (bead pqueue-74f03d0e): hold the create/GC guard for the ENTIRE creation —
+        // every attempt, the commit-marker write, and any rollback — so orphan GC can never run concurrently
+        // with (and thus never mis-classify or destroy) an in-flight creation on this log instance. Outermost
+        // lock: taken before any `inner` acquisition, so no lock-order inversion.
+        let _create_guard = self
+            .create_gc_guard
+            .lock()
+            .expect("create/gc guard poisoned");
         // A small fixed cap. Each attempt is a FULL clean single-shot creation that rolls back its own
         // partial state before the next runs, so no pin/objects leak across attempts. `?` propagates EVERY
         // EngineError (never retried); only the private `FloorAdvanced` signal loops.
@@ -1740,13 +1749,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ///
     /// The source's branch registry (`{source}branches/`) is the index of every pin — and a pin is published
     /// FIRST and released LAST, so an orphan ALWAYS still has its registry entry (if the pin is gone, the
-    /// objects it protected are already gone too). For each registered branch this reclaims it IFF:
-    /// 1. the `branch.json` commit marker is ABSENT (an uncommitted branch); a COMMITTED branch (marker present)
-    ///    is a live, readable branch protected by its own TTL/pin and is NEVER touched; and
-    /// 2. the pin's `created_at_ms` is OLDER than [`ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS`]; a still-in-flight
-    ///    creation (its pin/sentinel within the window) is NEVER touched. `created_at_ms` is the pin's OWN
-    ///    creation timestamp (already carried on `BranchMetadata`, written FIRST and refreshed on every attempt),
-    ///    reused here as the sentinel's age so GC can tell an abandoned attempt from a fresh one.
+    /// objects it protected are already gone too). For each registered branch this reclaims it IFF the
+    /// `branch.json` commit marker is ABSENT (an uncommitted branch); a COMMITTED branch (marker present) is a
+    /// live, readable branch protected by its own TTL/pin and is NEVER touched.
+    ///
+    /// CORRECTNESS (why marker-absent is safe to reclaim, not a timing guess): this whole classify+delete runs
+    /// under the [`Self::create_gc_guard`] that branch creation ALSO holds for its whole duration (including the
+    /// commit-marker write and any rollback). So on one log instance (one owner) NO creation can be in flight
+    /// while GC runs — the classification is EXACT: a marker-absent branch is DEFINITIVELY a failed/abandoned
+    /// creation (its creation already released the guard without landing the marker), never a creation that is
+    /// about to write its marker. This closes the classify-then-delete TOCTOU (a concurrent creation cannot
+    /// slip a `branch.json` in between the marker check and the delete) with a real mutual-exclusion argument
+    /// rather than a "should be long enough" window. Cross-owner concurrency (two live owners on one shard) is
+    /// an ownership-model violation fenced elsewhere by the manifest-CAS epoch; a SUPERSEDED (dead) owner cannot
+    /// be creating (its writes are epoch-fenced), so reclaiming its marker-absent orphans is safe too.
     ///
     /// Reclamation reuses [`Self::cleanup_uncommitted_branch`] (objects first, source pin LAST), so it also
     /// RELEASES the orphaned source pin and the source becomes fully reclaimable again. Store-failure-tolerant +
@@ -1755,21 +1771,23 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// own (their manifest entries reference the SOURCE's shared segments via the pin), so no source segment is
     /// ever deleted here — only branch-local manifest/sentinel/queue objects and the source pin. Returns the
     /// number of orphans reclaimed.
-    pub fn gc_orphaned_branches(&self, source: &QueueKey, now_ms: i64) -> EngineResult<u64> {
+    pub fn gc_orphaned_branches(&self, source: &QueueKey) -> EngineResult<u64> {
+        // Exclude concurrent branch creation for the WHOLE classify+delete (see the doc comment + the guard's
+        // definition). Outermost lock: taken before any `inner` acquisition, so no lock-order inversion.
+        let _create_guard = self
+            .create_gc_guard
+            .lock()
+            .expect("create/gc guard poisoned");
         let mut reclaimed = 0u64;
         for meta in self.read_branch_registry(source)? {
             let branch = &meta.branch;
-            // (1) COMMITTED (marker present) => a live, readable branch protected by its own TTL/pin. NEVER GC.
+            // COMMITTED (marker present) => a live, readable branch protected by its own TTL/pin. NEVER GC.
             if self.store_get(&branch_metadata_key(branch))?.is_some() {
                 continue;
             }
-            // (2) IN-FLIGHT: the pin's `created_at_ms` is within the safety window => a creation may still be
-            // running. NEVER GC.
-            if now_ms.saturating_sub(meta.created_at_ms) < ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS {
-                continue;
-            }
-            // ORPHAN: marker absent + pin older than the safety window. Reclaim ALL its objects and release the
-            // source pin. A failing delete surfaces here (`?`) and leaves the remainder for the next pass.
+            // ORPHAN: marker absent AND — under the create/GC guard — provably not an in-flight creation, so it
+            // is a failed/abandoned attempt. Reclaim ALL its objects and release the source pin. A failing
+            // delete surfaces here (`?`) and leaves the remainder for the next pass.
             self.cleanup_uncommitted_branch(source, branch)?;
             reclaimed += 1;
         }

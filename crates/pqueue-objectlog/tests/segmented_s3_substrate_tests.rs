@@ -25,8 +25,8 @@ use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS,
-    ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ObjectStoreStats, S3BlobStore,
+    SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -1960,16 +1960,16 @@ fn seed_orphaned_branch(
     branch
 }
 
-/// (a) A fault-injected failed branch creation leaves a durable orphan (sentinel + partial branch manifest +
-/// a still-live source pin, commit marker ABSENT). GC past the safety window reclaims ALL of it AND releases the
-/// source pin; the source stays fully readable (no missing segment) and becomes fully reclaimable again.
+/// (a) A genuinely-abandoned branch creation (marker ABSENT — the fault seam failed its marker put AND its
+/// rollback cleanup) leaves a durable orphan (sentinel + partial branch manifest + a still-live source pin).
+/// Under the create/GC exclusion GC reclaims ALL of it AND releases the source pin; the source stays fully
+/// readable (no missing segment) and becomes fully reclaimable again.
 #[test]
 fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
-    const CREATED_AT: i64 = 1_000;
     let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
     let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
     let source = shard();
-    let branch = seed_orphaned_branch(&log, &store, &source, "gc-orphan", CREATED_AT);
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-orphan", 1_000);
 
     let bp = shard_prefix_of(&branch);
     let sp = shard_prefix_of(&source);
@@ -1998,16 +1998,14 @@ fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
     );
     // While the orphan pin is live it BLOCKS reclamation of the branched range (the pin is genuinely held).
     assert_eq!(
-        log.expire_segments_through(&source, 3, CREATED_AT + 1)
-            .unwrap(),
+        log.expire_segments_through(&source, 3, 2_000).unwrap(),
         0,
         "the orphaned source pin blocks reclamation of the branched range"
     );
 
-    // GC past the safety window reclaims exactly the one orphan.
-    let now = CREATED_AT + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS + 1;
+    // GC reclaims exactly the one abandoned orphan (marker-absent, provably not in-flight under the guard).
     assert_eq!(
-        log.gc_orphaned_branches(&source, now).unwrap(),
+        log.gc_orphaned_branches(&source).unwrap(),
         1,
         "the abandoned uncommitted branch is reclaimed"
     );
@@ -2033,7 +2031,7 @@ fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
     );
     // With the pin released the source's branched range reclaims normally, and the surviving tail is intact.
     assert_eq!(
-        log.expire_segments_through(&source, 3, now).unwrap(),
+        log.expire_segments_through(&source, 3, 3_000).unwrap(),
         4,
         "seq 0..3 reclaim once the orphan pin is released"
     );
@@ -2045,14 +2043,14 @@ fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
 
     // Idempotent: a second GC pass over the now-clean source is a no-op.
     assert_eq!(
-        log.gc_orphaned_branches(&source, now).unwrap(),
+        log.gc_orphaned_branches(&source).unwrap(),
         0,
         "re-running GC after a clean pass is a no-op"
     );
 }
 
 /// (b) A COMMITTED branch (its `branch.json` commit marker present) is NEVER GC'd — its objects, pin, and
-/// readability all survive a GC run long past the safety window.
+/// readability all survive a GC run.
 #[test]
 fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
@@ -2078,10 +2076,9 @@ fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
         "committed branch is readable before GC"
     );
 
-    // GC far past the window must NOT touch a committed branch.
-    let now = 1_000 + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS * 100;
+    // GC must NOT touch a committed branch.
     assert_eq!(
-        log.gc_orphaned_branches(&source, now).unwrap(),
+        log.gc_orphaned_branches(&source).unwrap(),
         0,
         "a committed branch is never an orphan"
     );
@@ -2102,45 +2099,123 @@ fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
     );
 }
 
-/// (c) An in-flight creation — an uncommitted branch whose pin/sentinel is still WITHIN the safety window — is
-/// NEVER GC'd. Only when the same orphan ages past the window does GC reclaim it (the clock is the only thing
-/// that changes between the two calls).
-#[test]
-fn gc_orphaned_branches_spares_an_in_flight_creation_within_the_safety_window() {
-    const CREATED_AT: i64 = 1_000;
-    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
-    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
-    let source = shard();
-    let branch = seed_orphaned_branch(&log, &store, &source, "gc-inflight", CREATED_AT);
+/// A fault hook that PAUSES a branch creation mid-flight (at `DuringBranchCopy` — after the source pin +
+/// `branch.pending` sentinel are written but BEFORE the `branch.json` commit marker), so a test can run a
+/// concurrent GC pass exactly in the window BUG 1 exploits. The paused creation is holding the create/GC guard,
+/// so a correctly-excluded GC must BLOCK until this releases. It fires once: it signals `reached` and then
+/// blocks on `resume`.
+struct PauseBranchBeforeCommit {
+    reached: std::sync::mpsc::Sender<()>,
+    resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    fired: AtomicBool,
+}
 
+impl FaultHook for PauseBranchBeforeCommit {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == FaultCutPoint::DuringBranchCopy && !self.fired.swap(true, Ordering::SeqCst) {
+            self.reached.send(()).unwrap();
+            self.resume.lock().unwrap().recv().unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// (c) CREATE-vs-GC EXCLUSION (bead pqueue-74f03d0e, BUG 1): a branch creation that COMMITS its marker while a
+/// GC pass runs concurrently on the same branch must SURVIVE — GC must never observe the marker-absent instant
+/// and destroy a branch that is about to commit. The creation is paused mid-flight (pin + sentinel written,
+/// marker not yet) on one thread while a GC pass runs on another; under the create/GC guard the GC blocks until
+/// the creation commits, then classifies it as committed and reclaims nothing. WITHOUT the guard the GC would
+/// run in the marker-absent window, delete the branch objects + release the source pin, and return 1 (this test
+/// FAILS without the fix).
+#[test]
+fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_branch() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        store.clone(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    log.set_fault_hook(Some(std::sync::Arc::new(PauseBranchBeforeCommit {
+        reached: reached_tx,
+        resume: std::sync::Mutex::new(resume_rx),
+        fired: AtomicBool::new(false),
+    })));
+
+    let branch_def = branch_qdef("gc-race");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+
+    // Thread A: a branch creation that pauses mid-flight holding the create/GC guard.
+    let creator = {
+        let log = log.clone();
+        let source = source.clone();
+        std::thread::spawn(move || {
+            log.branch(
+                &source,
+                &branch_def,
+                &CommandPosition::new(source.clone(), 0, 3),
+                1_000_000_000,
+                1_000,
+            )
+        })
+    };
+    // Wait until creation is mid-flight: pin + sentinel written, marker NOT yet, create/GC guard HELD.
+    reached_rx.recv().unwrap();
+
+    // Thread B: a GC pass while the creation is paused. Under the guard it PARKS until the creation commits.
+    let gc = {
+        let log = log.clone();
+        let source = source.clone();
+        std::thread::spawn(move || log.gc_orphaned_branches(&source))
+    };
+
+    // Give the GC thread ample wall-clock to (wrongly) run to completion if it were NOT excluded — the
+    // in-memory ops take microseconds, so 200ms is a huge margin. Under the guard it stays parked the whole
+    // time; then we let the creation commit its marker and finish.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    resume_tx.send(()).unwrap();
+
+    let branch_epoch = creator
+        .join()
+        .unwrap()
+        .expect("the branch creation commits cleanly");
+    let reclaimed = gc.join().unwrap().unwrap();
+    log.set_fault_hook(None);
+
+    // The GC pass, excluded until the creation committed, saw a COMMITTED branch and reclaimed NOTHING.
+    assert_eq!(
+        reclaimed, 0,
+        "GC excluded by the create/GC guard never destroys a concurrently-committing branch"
+    );
+    assert!(branch_epoch >= 1, "the branch acquired its own epoch");
+    // The branch committed and is fully intact: marker + source pin + readability all survive the concurrent GC.
     let bp = shard_prefix_of(&branch);
     let sp = shard_prefix_of(&source);
-
-    // WITHIN the window the sentinel/pin look like an in-flight creation — GC must spare it.
-    let within = CREATED_AT + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS - 1;
-    assert_eq!(
-        log.gc_orphaned_branches(&source, within).unwrap(),
-        0,
-        "an in-window uncommitted branch is treated as in-flight and spared"
-    );
     assert!(
-        store.get(&format!("{bp}branch.pending")).unwrap().is_some(),
-        "the in-flight sentinel survives"
+        store.get(&format!("{bp}branch.json")).unwrap().is_some(),
+        "the commit marker survives the concurrent GC"
     );
     assert!(
         !store.list(&format!("{sp}branches/")).unwrap().is_empty(),
-        "the in-flight source pin survives"
+        "the source pin survives — the branched source segments stay protected"
     );
-
-    // PAST the window the very same orphan IS reclaimed — only the clock differs.
-    let past = CREATED_AT + ORPHAN_BRANCH_GC_SAFETY_WINDOW_MS + 1;
     assert_eq!(
-        log.gc_orphaned_branches(&source, past).unwrap(),
-        1,
-        "past the window the same orphan is reclaimed"
+        log.read_all(&branch).unwrap().len(),
+        4,
+        "the committed branch is readable (cut at seq 3 => 4 commands, seq 0..3)"
     );
-    assert!(
-        store.get(&format!("{bp}branch.pending")).unwrap().is_none(),
-        "the aged-out sentinel is finally reclaimed"
+    // The committing branch's pin protects the source range: a trim through the cut reclaims nothing.
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 2_000).unwrap(),
+        0,
+        "the committed branch's pin protects the source's branched range from reclamation"
     );
 }
