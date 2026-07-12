@@ -2108,7 +2108,6 @@ fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
 struct RaceCreateVsGc {
     creator_paused: std::sync::mpsc::Sender<()>,
     creator_resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-    gc_classified: std::sync::mpsc::Sender<()>,
     gc_resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     creator_fired: AtomicBool,
     gc_fired: AtomicBool,
@@ -2118,13 +2117,16 @@ impl FaultHook for RaceCreateVsGc {
     fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
         match cut {
             FaultCutPoint::DuringBranchCopy if !self.creator_fired.swap(true, Ordering::SeqCst) => {
+                // Creator: signal it is mid-flight (pin + sentinel written, marker NOT yet), then park.
                 self.creator_paused.send(()).unwrap();
                 self.creator_resume.lock().unwrap().recv().unwrap();
             }
             FaultCutPoint::GcAfterOrphanClassified
                 if !self.gc_fired.swap(true, Ordering::SeqCst) =>
             {
-                self.gc_classified.send(()).unwrap();
+                // GC reached the marker-ABSENT classify→delete window (only possible WITHOUT the guard). Park
+                // until main releases it AFTER the creator has committed — main NEVER waits on us, and this
+                // branch simply never runs in the guarded build (GC there sees a committed marker and skips).
                 self.gc_resume.lock().unwrap().recv().unwrap();
             }
             _ => {}
@@ -2135,17 +2137,17 @@ impl FaultHook for RaceCreateVsGc {
 
 /// (c) CREATE-vs-GC EXCLUSION (bead pqueue-74f03d0e, BUG 1): a branch creation that COMMITS its marker while a
 /// GC pass runs concurrently on the same branch must SURVIVE — GC must never observe the marker-absent instant
-/// and then destroy a branch that committed. DETERMINISTIC (no sleeps in the load-bearing path): the fault seam
-/// pins the creator mid-flight (pin + sentinel written, marker not yet) and pins GC right after it classifies
-/// the branch marker-absent, so the schedule is fully channel-driven.
+/// and then destroy a branch that committed. DETERMINISTIC and HANG-FREE: the ONLY ordering main enforces is
+/// `c_paused → c_resume → creator committed → g_resume` (std mpsc is UNBOUNDED, so every `send` is non-blocking
+/// and main NEVER waits on a GC signal — that is what makes both builds terminate).
 ///
-/// WITH the guard: GC blocks on the create/GC guard the creator holds, so it never reaches the classify point
-/// while the creator is mid-flight (`gc_classified` never fires — detected by a timeout); the creator commits,
-/// releases the guard, and GC then sees the committed marker and reclaims nothing.
+/// WITH the guard (shipped): GC parks on the create/GC guard the creator holds until the creator commits and
+/// releases it; GC then sees the committed marker, SKIPS, and never enters the marker-absent path — so it never
+/// waits on `g_resume`, and the `g_resume` send just sits unread in the unbounded channel. reclaimed == 0.
 ///
-/// WITHOUT the guard (verified by temporarily removing it): GC reaches the classify point in the marker-absent
-/// window and parks there; the test then lets the creator COMMIT `branch.json` and only afterwards releases GC,
-/// which deletes the just-committed branch and returns 1 — failing the assertions below.
+/// WITHOUT the guard (verified by temporarily removing it): GC reaches the marker-absent classify point and
+/// parks on `g_resume`; main commits the creator FIRST, then sends `g_resume`, so GC deletes the just-committed
+/// branch and returns 1 — the assertions below then fail. No sleep, no timeout, no scheduling luck.
 #[test]
 fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_branch() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
@@ -2162,12 +2164,10 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
 
     let (creator_paused_tx, creator_paused_rx) = std::sync::mpsc::channel();
     let (creator_resume_tx, creator_resume_rx) = std::sync::mpsc::channel();
-    let (gc_classified_tx, gc_classified_rx) = std::sync::mpsc::channel();
     let (gc_resume_tx, gc_resume_rx) = std::sync::mpsc::channel();
     log.set_fault_hook(Some(std::sync::Arc::new(RaceCreateVsGc {
         creator_paused: creator_paused_tx,
         creator_resume: std::sync::Mutex::new(creator_resume_rx),
-        gc_classified: gc_classified_tx,
         gc_resume: std::sync::Mutex::new(gc_resume_rx),
         creator_fired: AtomicBool::new(false),
         gc_fired: AtomicBool::new(false),
@@ -2177,8 +2177,8 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
     let branch =
         pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
 
-    // Thread A: a branch creation that pauses mid-flight (pin + sentinel written, marker NOT yet), holding the
-    // create/GC guard.
+    // Thread C: a branch creation that pauses mid-flight (pin + sentinel written, marker NOT yet); in the
+    // shipped build it is holding the create/GC guard.
     let creator = {
         let log = log.clone();
         let source = source.clone();
@@ -2192,34 +2192,29 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
             )
         })
     };
+    // (1) wait until the creation is mid-flight (guard held by C in the shipped build).
     creator_paused_rx.recv().unwrap();
 
-    // Thread B: a GC pass while the creation is mid-flight.
+    // (2) Thread G: a GC pass while the creation is mid-flight.
     let gc = {
         let log = log.clone();
         let source = source.clone();
         std::thread::spawn(move || log.gc_orphaned_branches(&source))
     };
 
-    // WITHOUT the guard, GC deterministically reaches the classify point (marker-absent) and signals within
-    // microseconds; we then order commit-BEFORE-cleanup over channels. WITH the guard, GC is parked on the
-    // guard and never signals — a bounded wait for a signal that provably never comes, NOT a race window.
-    let gc_reached_classify = gc_classified_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .is_ok();
-
-    // Let the creator commit `branch.json` and finish (releasing the guard).
+    // (3) resume the creator and JOIN it, so `branch.json` is provably committed and the guard released.
     creator_resume_tx.send(()).unwrap();
     let branch_epoch = creator
         .join()
         .unwrap()
         .expect("the branch creation commits cleanly");
 
-    // If GC got into the marker-absent window (no guard), release it now — AFTER the commit — so it would
-    // delete a committed branch. (With the guard it never parked at the classify point, so nothing to release.)
-    if gc_reached_classify {
-        gc_resume_tx.send(()).unwrap();
-    }
+    // (4) release GC. Non-blocking on the UNBOUNDED channel even in the shipped build where GC never reads it
+    // (there it skipped the committed marker and never parked). Never wait on a GC signal — that is the only
+    // way both builds terminate.
+    gc_resume_tx.send(()).unwrap();
+
+    // (5) join GC.
     let reclaimed = gc.join().unwrap().unwrap();
     log.set_fault_hook(None);
 
