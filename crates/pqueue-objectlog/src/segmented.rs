@@ -71,6 +71,35 @@ pub trait BlobStore: Send + Sync {
     /// List keys under `prefix` (lexical order not required; the caller sorts).
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>>;
 
+    /// Range-LIST: keys under `prefix` that sort strictly AFTER `start_after` (bead pqueue-8928baec). This
+    /// is the read-cost primitive behind the durable read-horizon watermark: manifest keys are fixed-width
+    /// `manifest/{index:020}.json`, so lexicographic order == numeric index order, and
+    /// `start_after = "{prefix}manifest/{W:020}.json"` returns exactly the indices `> W` (the LIVE,
+    /// above-floor manifest entries). The default filters after a full `list`, which is CORRECT for every
+    /// impl but does NOT reduce enumeration cost; [`S3BlobStore`] OVERRIDES it to pass `StartAfter` NATIVELY
+    /// so the real read-cost win lands at scale (only `> W` keys are enumerated/paginated).
+    fn list_from(&self, prefix: &str, start_after: &str) -> EngineResult<Vec<String>> {
+        self.list_from_with_request_count(prefix, start_after)
+            .map(|(keys, _)| keys)
+    }
+
+    /// Range-LIST reporting the number of billable LIST-class API requests consumed (the `list_from`
+    /// counterpart of [`Self::list_with_request_count`]). The default is one request (filter-after-list);
+    /// [`S3BlobStore`] overrides it to report every `ListObjectsV2` page it pages through, so a >1000-live-key
+    /// ranged list bills accurately in the cost ledger.
+    fn list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> EngineResult<(Vec<String>, u64)> {
+        let keys = self
+            .list(prefix)?
+            .into_iter()
+            .filter(|k| k.as_str() > start_after)
+            .collect();
+        Ok((keys, 1))
+    }
+
     /// List keys and report the number of billable LIST-class API requests consumed.
     ///
     /// Most in-process/local implementations satisfy one logical list with one
@@ -111,6 +140,16 @@ impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
     }
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         (**self).list(prefix)
+    }
+    fn list_from(&self, prefix: &str, start_after: &str) -> EngineResult<Vec<String>> {
+        (**self).list_from(prefix, start_after)
+    }
+    fn list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> EngineResult<(Vec<String>, u64)> {
+        (**self).list_from_with_request_count(prefix, start_after)
     }
     fn list_with_request_count(&self, prefix: &str) -> EngineResult<(Vec<String>, u64)> {
         (**self).list_with_request_count(prefix)
@@ -920,6 +959,22 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(out)
     }
 
+    /// Range-LIST wrapper mirroring [`Self::store_list`] (bead pqueue-8928baec): enumerate only the keys
+    /// strictly after `start_after`, and bill EVERY LIST-class request the store paged through (an S3 ranged
+    /// list of >1000 live keys spans several `ListObjectsV2` pages — each is billable, so the cost ledger must
+    /// count them, not a flat 1).
+    fn store_list_from(&self, prefix: &str, start_after: &str) -> EngineResult<Vec<String>> {
+        let (out, request_count) = self
+            .store
+            .list_from_with_request_count(prefix, start_after)?;
+        self.inner
+            .lock()
+            .expect("segmented log poisoned")
+            .counters
+            .list_count += request_count.max(1);
+        Ok(out)
+    }
+
     /// Register a queue and recover its committed position + epoch from the manifest (idempotent).
     pub fn create_queue(&self, def: &QueueDefinition) -> EngineResult<()> {
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
@@ -951,8 +1006,28 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// a seal O(1) manifest reads instead of re-reading + re-parsing the whole O(n) manifest each time
     /// (the previous full scan made a sustained push O(n^2)). `read_all` still does a full scan for recovery.
     fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64)> {
+        // Range-list from the durable read-horizon so recovery enumerates only LIVE (above-floor) entries
+        // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving
+        // the tuple from the MAX ranged key is exact. The +1 GET for the horizon here is off the O(1) seal hot
+        // path (recover_manifest is reached only on open/acquire/CAS-lost/advance-floor/ensure_shard).
         let prefix = format!("{}manifest/", shard_prefix(shard));
-        let Some(tail_key) = self.store_list(&prefix)?.into_iter().max() else {
+        let keys = match self.read_read_horizon(shard)? {
+            Some(w) => {
+                let ranged = self.store_list_from(&prefix, &format!("{prefix}{w:020}.json"))?;
+                // Defensive: a horizon can never legitimately reach/exceed the tail (it is derived strictly
+                // below the floor, which is strictly below the tail), but if a ranged list ever came back
+                // empty for a non-empty manifest, fall back to the full list rather than reset a live tail to
+                // genesis. A genuinely empty manifest (fresh queue) has no horizon object, so this branch is
+                // not even reached for it — no double-list for the common fresh-open case.
+                if ranged.is_empty() {
+                    self.store_list(&prefix)?
+                } else {
+                    ranged
+                }
+            }
+            None => self.store_list(&prefix)?,
+        };
+        let Some(tail_key) = keys.into_iter().max() else {
             return Ok((0, 0, 0));
         };
         let Some(bytes) = self.store_get(&tail_key)? else {
@@ -971,11 +1046,37 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok((next_seq, next_index, tail.epoch))
     }
 
-    /// All manifest entries for `shard`, sorted by index.
-    fn read_manifest(&self, shard: &QueueKey) -> EngineResult<Vec<ManifestEntry>> {
+    /// The LIVE manifest keys for `shard` above a GIVEN `horizon` — indices strictly ABOVE the durable
+    /// read-horizon watermark, so every read/recovery/fold enumerates O(live) entries instead of O(total
+    /// lifetime seals) (bead pqueue-8928baec). Manifest keys are fixed-width `manifest/{index:020}.json`
+    /// (lexicographic order == numeric index order), so `start_after = "{prefix}manifest/{W:020}.json"`
+    /// returns exactly indices `> W`. BACKWARD-COMPATIBLE: `horizon == None` (a queue with NO
+    /// `read_horizon.json` object — never trimmed, or written before this watermark existed) lists the whole
+    /// manifest prefix exactly as before. Callers that also fail-closed on the floor MUST capture `horizon`
+    /// ONCE (before reading the floor) and pass the SAME snapshot here, so a concurrent trim cannot advance
+    /// the watermark between the guard and this enumeration (see [`Self::fail_closed_below_floor`]).
+    fn list_manifest_keys_at(
+        &self,
+        shard: &QueueKey,
+        horizon: Option<u64>,
+    ) -> EngineResult<Vec<String>> {
         let prefix = format!("{}manifest/", shard_prefix(shard));
+        match horizon {
+            Some(w) => self.store_list_from(&prefix, &format!("{prefix}{w:020}.json")),
+            None => self.store_list(&prefix),
+        }
+    }
+
+    /// All LIVE manifest entries for `shard` above a GIVEN `horizon` snapshot, sorted by index. Consumers that
+    /// pair this with the fail-closed floor guard pass a horizon they captured BEFORE reading the floor so the
+    /// guard decision and the enumeration are consistent under a concurrent trim.
+    fn read_manifest_at(
+        &self,
+        shard: &QueueKey,
+        horizon: Option<u64>,
+    ) -> EngineResult<Vec<ManifestEntry>> {
         let mut entries = Vec::new();
-        for key in self.store_list(&prefix)? {
+        for key in self.list_manifest_keys_at(shard, horizon)? {
             if let Some(bytes) = self.store_get(&key)? {
                 let entry: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
                 entries.push(entry);
@@ -983,6 +1084,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         entries.sort_by_key(|e| e.index);
         Ok(entries)
+    }
+
+    /// All LIVE manifest entries for `shard`, sorted by index (range-listed from the CURRENT read-horizon).
+    /// Every consumer (read_all, read_from_limited, read_retention_floor, expire_segments_through,
+    /// lowest_branch_pinned_below, max_trimmable_seq_before, branch copy) folds ONLY live/needed entries:
+    /// below-horizon entries are strictly below the epoch-fenced retention floor (reclaimed data tombstones,
+    /// superseded floor-advance entries, old fences) that none of them needs (reads resume at floor+1; the
+    /// authoritative floor entry and every live/pinned segment are above W). Readers that ALSO fail-closed on
+    /// the floor use [`Self::read_manifest_at`] with a pre-captured horizon instead.
+    fn read_manifest(&self, shard: &QueueKey) -> EngineResult<Vec<ManifestEntry>> {
+        let horizon = self.read_read_horizon(shard)?;
+        self.read_manifest_at(shard, horizon)
     }
 
     /// The queue's current `assignment_epoch` (highest epoch any committed manifest entry records).
@@ -1256,6 +1369,44 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(self.store_get(&branch_metadata_key(shard))?.is_none())
     }
 
+    /// Fail-closed floor guard (bead pqueue-8928baec step 5). Once reads range-list past the durable
+    /// read-horizon, the below-floor tombstones are NO LONGER ENUMERATED, so a read whose `from_seq` dips
+    /// to/below the reclaimed floor would silently return a TRUNCATED prefix instead of the pre-horizon
+    /// "missing segment" Storage error. Reproduce that fail-closed with the SAME `EngineError::Storage`
+    /// class. Boundary: the floor is an EXCLUSIVE lower bound (last-reclaimed seq), so `from_seq == floor+1`
+    /// still SUCCEEDS and `from_seq <= floor` FAILS CLOSED.
+    ///
+    /// GATED on a horizon EXISTING so a branch's legitimate `seq == f` seed (design §5(ii); branch creation
+    /// seeds a floor entry but writes NO horizon) is never suppressed: with no horizon the full manifest list
+    /// still enumerates every entry, so the natural behavior stands — a genuinely-reclaimed range still
+    /// errors organically on the missing-segment GET, while a branch reading its own present seed reads it.
+    /// This is behavior-preserving: a below-floor read errors today (organic missing-segment) exactly when
+    /// `from_seq <= floor`, and every production recovery/idempotency fold resumes at `floor + 1`.
+    ///
+    /// CONCURRENCY: `horizon` is the caller's snapshot captured BEFORE this call, and the SAME snapshot drives
+    /// the subsequent range-list ([`Self::read_manifest_at`]). Reading the horizon before the floor guarantees
+    /// the horizon corresponds to a floor `<= floor_now`, so every below-horizon (hidden) entry is `<= floor`
+    /// here — a concurrent trim that advances the watermark after the snapshot can therefore never hide a
+    /// tombstone this guard would have let slip (it would have raised the floor this guard reads too).
+    fn fail_closed_below_floor(
+        &self,
+        shard: &QueueKey,
+        from_seq: u64,
+        horizon: Option<u64>,
+    ) -> EngineResult<()> {
+        if horizon.is_some()
+            && let Some(floor) = self.read_retention_floor(shard)?
+            && from_seq <= floor.sequence
+        {
+            return Err(EngineError::Storage(format!(
+                "read below retention floor: from_seq {from_seq} <= reclaimed floor {} \
+                 (segments reclaimed; recovery resumes at floor+1)",
+                floor.sequence
+            )));
+        }
+        Ok(())
+    }
+
     pub fn read_all(
         &self,
         shard: &QueueKey,
@@ -1265,8 +1416,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         if self.branch_uncommitted(shard)? {
             return Ok(Vec::new());
         }
+        // Capture the horizon ONCE (before the floor) and reuse it for BOTH the fail-closed guard and the
+        // range-list, so a concurrent trim cannot advance the watermark between the two (bead pqueue-8928baec).
+        let horizon = self.read_read_horizon(shard)?;
+        // Genesis read: from_seq == 0 dips to/below any floor, so this fails closed on a trimmed queue with a
+        // read-horizon (equivalent to today's organic missing-segment error over the reclaimed prefix).
+        self.fail_closed_below_floor(shard, 0, horizon)?;
         let mut out = Vec::new();
-        for entry in self.read_manifest(shard)? {
+        for entry in self.read_manifest_at(shard, horizon)? {
             if entry.fence {
                 continue;
             }
@@ -1323,8 +1480,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         if self.branch_uncommitted(shard)? {
             return Ok(Vec::new());
         }
+        // Capture the horizon ONCE (before the floor) and reuse it for BOTH the fail-closed guard and the
+        // range-list, so a concurrent trim cannot advance the watermark between the two (bead pqueue-8928baec).
+        let horizon = self.read_read_horizon(shard)?;
+        // Fail closed if the requested range dips to/below the reclaimed floor on a range-listed (horizon)
+        // queue — the below-floor tombstones are no longer enumerated, so return the same missing-segment
+        // Storage error today's full-list read produces rather than a silently-truncated prefix.
+        self.fail_closed_below_floor(shard, from_seq, horizon)?;
         let mut out = Vec::new();
-        for entry in self.read_manifest(shard)? {
+        for entry in self.read_manifest_at(shard, horizon)? {
             if entry.fence {
                 continue;
             }
@@ -1853,6 +2017,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 }
             }
         }
+        // Advance the durable read-horizon now that the below-floor segments are reclaimed (bead
+        // pqueue-8928baec). BEST-EFFORT: a transient failure here must NOT fail the completed reclamation — the
+        // horizon is a monotonic read-cost optimization that catches up on the next trim / (re)open expiry, and
+        // reads stay correct via the full-list fallback + fail-closed floor guard. Advancing it here (AFTER the
+        // deletes) — not in `advance_retention_floor` — is required so this same call still enumerated the
+        // below-floor entries it needed to delete, and it is bounded by `through_seq` (what was ACTUALLY
+        // reclaimed) so a partial expire never hides a not-yet-deleted segment from a future trim.
+        let _ = self.advance_read_horizon(source, through_seq, now_ms);
         Ok(deleted)
     }
 
@@ -1951,6 +2123,24 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     // superseded owner either LOSES the CAS (its index is already taken) or is `EpochFenced`, so it can never
     // regress a newer owner's floor and strand recovery at a reclaimed segment.
 
+    /// The durable per-shard read-horizon watermark object key (OUTSIDE the `manifest/` prefix).
+    fn read_horizon_key(shard: &QueueKey) -> String {
+        format!("{}read_horizon.json", shard_prefix(shard))
+    }
+
+    /// Read the durable READ-HORIZON watermark `W` (bead pqueue-8928baec): the highest manifest index below
+    /// which every entry is a below-floor entry no reader needs. `None` when no trim has advanced it yet
+    /// (backward-compatible: reads then fall back to the full manifest list).
+    pub fn read_read_horizon(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+        match self.store_get(&Self::read_horizon_key(shard))? {
+            Some(bytes) => {
+                let blob: ReadHorizonBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
+                Ok(Some(blob.index))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Read the AUTHORITATIVE durable retention floor: the highest `retention_floor_through` recorded across the
     /// manifest (`None` if no trim has advanced it yet). The returned position is the EXCLUSIVE lower bound
     /// (last-trimmed seq), carrying the epoch of the entry that set it; recovery/idempotency folds resume at
@@ -2031,6 +2221,89 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let mut g = self.inner.lock().expect("segmented log poisoned");
         if let Some(buf) = g.shards.get_mut(shard) {
             buf.next_manifest_index = buf.next_manifest_index.max(cur_index + 1);
+        }
+        Ok(())
+    }
+
+    /// Advance the durable READ-HORIZON watermark `W` for `shard` (bead pqueue-8928baec). Folded into the trim
+    /// path at the END of [`Self::expire_segments_through`] — AFTER the below-floor segment objects are
+    /// actually reclaimed — so the horizon advances whenever the floor advances (the trim always runs
+    /// `advance_retention_floor` then `expire_segments_through`, and a (re)open re-runs the expiry up to the
+    /// durable floor). Placing it after the delete is load-bearing: advancing it BEFORE would hide the very
+    /// below-floor entries `expire_segments_through` must enumerate to find the segment keys to delete. Also
+    /// callable standalone (tests / an explicit compaction tick). `now_ms` gates the branch-pin check.
+    ///
+    /// `W` = the highest index of the OLDEST CONTIGUOUS PREFIX of manifest entries that are ALL strictly below
+    /// the durable retention floor AND already RECLAIMED — a reclaimed DATA tombstone
+    /// (`visible_last_seq <= reclaimed_through`, not branch-pinned), a SUPERSEDED floor-advance entry
+    /// (`retention_floor_through == Some(v) && v < floor`), or an old FENCE at/below the floor
+    /// (`first_seq <= floor`). The walk STOPS at the first entry that is NOT provably reclaimed: a LIVE or
+    /// not-yet-reclaimed DATA entry (`visible_last_seq > reclaimed_through`), the AUTHORITATIVE floor entry
+    /// (`retention_floor_through == Some(floor)`), a still-branch-PINNED below-floor data segment (its object
+    /// is NOT yet reclaimed — a future expire once the pin releases must still find it), or the tail — so `W`
+    /// is ALWAYS strictly below every entry any read / read_retention_floor / recover-tail / branch-copy /
+    /// FUTURE-EXPIRE needs. MONOTONIC: a candidate that would lower the stored watermark is a no-op.
+    ///
+    /// `reclaimed_through` is the boundary [`Self::expire_segments_through`] just deleted up to — bounding the
+    /// DATA check by it (not the possibly-higher durable `floor`) is load-bearing: a partial expire
+    /// (`through < floor`) must NOT hide an unpinned, NOT-yet-deleted below-floor segment from a future expire
+    /// (a storage leak). Non-data entries (fences / superseded floor markers) name no segment, so advancing
+    /// past them below the floor leaks nothing. In the production trim path `through == floor`, so `W` advances
+    /// fully; a caller passing `through < floor` simply advances `W` more conservatively.
+    ///
+    /// SAFETY (never hides a live entry, even under races): every writer derives `W` strictly below the value
+    /// it reads for the durable, MONOTONE retention floor (`read_retention_floor` returns the max
+    /// `retention_floor_through` across the authoritative manifest — no writer can observe a floor above the
+    /// true durable floor), and the lowest LIVE entry is above that floor. So the MAX `W` any racing writer
+    /// can persist is still below the lowest live index; a stale writer that regresses `W` to a lower value is
+    /// harmless (it only widens enumeration, never hides live data). It NEVER deletes/renames/marks a manifest
+    /// object — below-`W` addresses stay OCCUPIED, so a stale writer's `put_if_absent` there still COLLIDES and
+    /// the epoch-fence is intact byte-for-byte.
+    pub fn advance_read_horizon(
+        &self,
+        shard: &QueueKey,
+        reclaimed_through: u64,
+        now_ms: i64,
+    ) -> EngineResult<()> {
+        let Some(floor) = self.read_retention_floor(shard)? else {
+            return Ok(()); // no durable floor => no read-horizon
+        };
+        let mut new_w: Option<u64> = None;
+        for entry in self.read_manifest(shard)? {
+            // STOP at the AUTHORITATIVE floor entry — `read_retention_floor` needs it, so W must stay below it.
+            if entry.retention_floor_through == Some(floor.sequence) {
+                break;
+            }
+            let reclaimed = match entry.retention_floor_through {
+                // A SUPERSEDED floor-advance entry (names no segment; strictly below the authoritative floor).
+                Some(v) => v < floor.sequence,
+                // An old epoch FENCE published at/below the floor (names no segment; no reader needs it).
+                None if entry.fence => entry.first_seq <= floor.sequence,
+                // A DATA tombstone whose object is provably reclaimed: its whole visible range is at/below what
+                // this (or a prior) expire actually deleted. Bounded by `reclaimed_through`, NOT the floor.
+                None => Self::visible_last_seq(&entry) <= reclaimed_through,
+            };
+            if !reclaimed {
+                break; // first LIVE / not-yet-reclaimed / needed entry — W must stay STRICTLY below it
+            }
+            // A still-branch-PINNED below-floor DATA segment has NOT been reclaimed (expire_segments_through
+            // skipped its delete): a future trim after the pin releases must still enumerate it, so do NOT
+            // hide it behind the horizon. Stop here (keeps W strictly below the pinned index).
+            if entry.segment_key.is_some()
+                && self.branch_pins_segment(shard, entry.first_seq, now_ms)?
+            {
+                break;
+            }
+            new_w = Some(entry.index);
+        }
+        if let Some(w) = new_w
+            && self.read_read_horizon(shard)?.is_none_or(|cur| w > cur)
+        {
+            // Best-effort monotonic PUT. A candidate is always derived strictly below the durable floor (see
+            // SAFETY above), so even a non-atomic read-check-then-put that a racing writer interleaves can only
+            // regress W to another below-floor value — never above a live entry.
+            let blob = ReadHorizonBlob { index: w };
+            self.store_put(&Self::read_horizon_key(shard), &to_json(&blob)?, false)?;
         }
         Ok(())
     }
@@ -2220,6 +2493,17 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 struct HighWaterBlob {
     epoch: u64,
     seq: u64,
+}
+
+/// Durable per-shard READ-HORIZON watermark blob (bead pqueue-8928baec): the highest manifest `index` below
+/// which every entry is a reclaimed/superseded below-floor entry that no live read, recovery tail,
+/// authoritative-floor read, or branch copy needs. Stored at `{shard_prefix}read_horizon.json` — OUTSIDE the
+/// `manifest/` prefix — so `recover_manifest`/`read_manifest` LISTs never enumerate it. Monotonic (a set that
+/// would lower it is a no-op). It NEVER frees a manifest address: below-horizon objects still EXIST, so a
+/// stale writer's `put_if_absent` at a below-horizon cached index still COLLIDES → the epoch-fence is intact.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadHorizonBlob {
+    index: u64,
 }
 
 /// A projection snapshot blob (payload + the command position it was taken at).
@@ -2474,6 +2758,49 @@ impl BlobStore for S3BlobStore {
             if status != 200 {
                 return Err(EngineError::Storage(format!(
                     "S3 LIST {prefix} failed: HTTP {status}: {}",
+                    String::from_utf8_lossy(&body)
+                )));
+            }
+            let xml = String::from_utf8_lossy(&body);
+            keys.extend(scrape_keys(&xml));
+            match next_continuation_token(&xml) {
+                Some(token) => continuation = Some(token),
+                None => break,
+            }
+        }
+        Ok((keys, request_count))
+    }
+
+    fn list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> EngineResult<(Vec<String>, u64)> {
+        // NATIVE `StartAfter`: ListObjectsV2 begins enumeration strictly AFTER `start_after` (exclusive), so
+        // the server never even scans the below-horizon manifest keys — this is where the read-cost win lands
+        // at scale (the filter-after-list default would still page every key). `start-after` applies only to
+        // the FIRST page; once a `continuation-token` takes over it is ignored (and must be dropped, else some
+        // S3 implementations reject start-after + continuation-token together). Pagination is otherwise
+        // identical to `list_with_request_count`: follow `NextContinuationToken` until no longer truncated,
+        // billing each page as a LIST-class request.
+        let path = format!("/{}", self.bucket);
+        let mut keys = Vec::new();
+        let mut continuation: Option<String> = None;
+        let mut request_count = 0u64;
+        loop {
+            let mut query = vec![
+                ("list-type".to_string(), "2".to_string()),
+                ("prefix".to_string(), prefix.to_string()),
+            ];
+            match &continuation {
+                Some(token) => query.push(("continuation-token".to_string(), token.clone())),
+                None => query.push(("start-after".to_string(), start_after.to_string())),
+            }
+            let (status, body) = self.request("GET", &path, &query, &[], &[])?;
+            request_count += 1;
+            if status != 200 {
+                return Err(EngineError::Storage(format!(
+                    "S3 LIST {prefix} (start-after {start_after}) failed: HTTP {status}: {}",
                     String::from_utf8_lossy(&body)
                 )));
             }
