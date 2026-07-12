@@ -87,10 +87,10 @@ impl BlobStore for CountingBlobStore {
     }
 
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
-        if key.contains("/seg/") {
+        if key.ends_with(".seg") {
             self.segment_gets.fetch_add(1, Ordering::Relaxed);
         }
-        if key.contains("/manifest/") {
+        if key.contains("/manifest/") || key.contains("/manifest_head/") {
             self.manifest_gets.fetch_add(1, Ordering::Relaxed);
         }
         self.inner.get(key)
@@ -200,8 +200,8 @@ fn list_counter_records_billable_list_requests_not_logical_calls() {
 
     assert_eq!(
         log.counters().list_count,
-        3,
-        "one logical manifest recovery list that spans three object-store pages must count as three billable LIST requests"
+        6,
+        "legacy fallback probes manifest_head and then range-lists the legacy manifest, each spanning three billable LIST requests"
     );
 }
 
@@ -276,7 +276,7 @@ fn stale_epoch_writer_is_cas_fenced_with_no_torn_segment() {
     // The stale writer may leave one orphan segment object before losing the manifest CAS. Readers never
     // observe it because only manifest-named segments are committed; avoiding a manifest LIST before every
     // seal keeps the single-writer hot path bounded.
-    assert_eq!(store.object_count(), objects_before + 2);
+    assert_eq!(store.object_count(), objects_before + 3);
 
     // The new owner B commits under epoch 1 successfully and the log extends.
     b.enqueue(&shard(), &pushes(2), 1, 300).unwrap();
@@ -444,11 +444,7 @@ fn branch_shares_segments_and_diverges() {
         "branch view matches the parent at the cut position"
     );
 
-    let source_seg_key = format!(
-        "t/{}/q/{}/seg/00000000000000000000.seg",
-        hex_lower(parent_shard.tenant_id.as_str().as_bytes()),
-        hex_lower(parent_shard.queue_id.as_str().as_bytes())
-    );
+    let source_seg_key = segment_key_for(store.as_ref(), &parent_shard, 0);
     assert!(
         store.get(&source_seg_key).unwrap().is_some(),
         "parent segment remains stored"
@@ -580,11 +576,7 @@ fn branch_pins_parent_segments_against_expiry() {
         "live branch pins parent segments against expiry"
     );
 
-    let parent_seg_key = format!(
-        "t/{}/q/{}/seg/00000000000000000000.seg",
-        hex_lower(parent_shard.tenant_id.as_str().as_bytes()),
-        hex_lower(parent_shard.queue_id.as_str().as_bytes())
-    );
+    let parent_seg_key = segment_key_for(store.as_ref(), &parent_shard, 0);
     assert!(
         store.get(&parent_seg_key).unwrap().is_some(),
         "pinned segment remains present while the branch is live"
@@ -654,13 +646,7 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "the branch-pinned below-floor segment (first_seq 0) is reported while the pin is live"
     );
 
-    let seg_key = |first: u64| {
-        format!(
-            "t/{}/q/{}/seg/{first:020}.seg",
-            hex_lower(parent.tenant_id.as_str().as_bytes()),
-            hex_lower(parent.queue_id.as_str().as_bytes())
-        )
-    };
+    let seg_key = |first: u64| segment_key_for(store.as_ref(), &parent, first);
     assert!(
         store.get(&seg_key(0)).unwrap().is_some(),
         "the branch-pinned below-floor segment survives the trim"
@@ -1463,7 +1449,7 @@ fn check_post_pin_store_failure(
 /// Post-pin store failure at the MANIFEST-COPY stage -> clean rollback, pin released, source reclaimable.
 #[test]
 fn branch_manifest_copy_store_failure_rolls_back_and_releases_the_pin() {
-    check_post_pin_store_failure(|s| s.arm_put("/manifest/"), true);
+    check_post_pin_store_failure(|s| s.arm_put_if_absent("/manifest_head/"), true);
 }
 
 /// Post-pin store failure at the BRANCH.JSON-PUT stage -> clean rollback, pin released, source reclaimable.
@@ -1475,7 +1461,7 @@ fn branch_metadata_put_store_failure_rolls_back_and_releases_the_pin() {
 /// Post-pin store failure at the ACQUIRE-EPOCH stage (a `put_if_absent`) -> clean rollback, pin released.
 #[test]
 fn branch_acquire_epoch_store_failure_rolls_back_and_releases_the_pin() {
-    check_post_pin_store_failure(|s| s.arm_put_if_absent("/manifest/"), true);
+    check_post_pin_store_failure(|s| s.arm_put_if_absent("/manifest_head/"), true);
 }
 
 /// Post-pin failure PLUS a branch-object-CLEANUP failure -> the pin is RETAINED (safe leak); the source is
@@ -1485,7 +1471,7 @@ fn branch_object_cleanup_store_failure_retains_the_pin() {
     check_post_pin_store_failure(
         |s| {
             s.arm_put("branch.json"); // trigger the post-pin failure
-            s.arm_delete("/manifest/"); // and fail the rollback's branch-object cleanup
+            s.arm_delete("/manifest_head/"); // and fail the rollback's branch-object cleanup
         },
         false,
     );
@@ -2373,7 +2359,7 @@ fn branch_commit_is_fenced_on_the_source_epoch_and_cross_instance_gc_stays_safe(
         "the superseded creator never published a commit marker"
     );
     assert!(
-        store.list(&format!("{bp}")).unwrap().is_empty(),
+        store.list(&bp).unwrap().is_empty(),
         "the branch prefix is fully cleaned up"
     );
     assert!(
@@ -2415,8 +2401,29 @@ fn manifest_prefix_s(shard: &QueueKey) -> String {
     format!("{}manifest/", shard_prefix_s(shard))
 }
 
+fn manifest_head_prefix_s(shard: &QueueKey) -> String {
+    format!("{}manifest_head/", shard_prefix_s(shard))
+}
+
 fn manifest_key_s(shard: &QueueKey, index: u64) -> String {
     format!("{}{index:020}.json", manifest_prefix_s(shard))
+}
+
+fn segment_key_for<S: BlobStore>(store: &S, shard: &QueueKey, first_seq: u64) -> String {
+    for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
+        for key in store.list(&prefix).unwrap() {
+            let Some(bytes) = store.get(&key).unwrap() else {
+                continue;
+            };
+            let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if entry.get("first_seq").and_then(|v| v.as_u64()) == Some(first_seq)
+                && let Some(segment_key) = entry.get("segment_key").and_then(|v| v.as_str())
+            {
+                return segment_key.to_string();
+            }
+        }
+    }
+    panic!("no manifest segment for first_seq {first_seq}");
 }
 
 fn read_horizon_key_s(shard: &QueueKey) -> String {
@@ -2851,13 +2858,7 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
          expire still reclaims all 4"
     );
     // Nothing leaked: every data segment object at/below the floor is gone.
-    let seg_key = |first: u64| {
-        format!(
-            "t/{}/q/{}/seg/{first:020}.seg",
-            hex_lower(shard().tenant_id.as_str().as_bytes()),
-            hex_lower(shard().queue_id.as_str().as_bytes())
-        )
-    };
+    let seg_key = |first: u64| segment_key_for(store.as_ref(), &shard(), first);
     for first in [0u64, 2, 4, 6, 8, 10, 12, 14] {
         assert!(
             store.get(&seg_key(first)).unwrap().is_none(),

@@ -9,18 +9,20 @@
 //! 2. **Seal** a segment when EITHER the buffered byte size reaches `target_bytes` OR the oldest
 //!    buffered command's age reaches `max_latency_ms` (whichever fires first — TD-004 step 2).
 //! 3. **Write segment** — one immutable, checksummed object per sealed segment (TD-004 step 3).
-//! 4. **Commit manifest** — append a manifest entry naming the segment via a conditional
+//! 4. **Commit manifest head** — append a manifest-head entry naming the attempt segment via a conditional
 //!    (create-only) object write that is the CAS boundary AND the epoch fence (TD-004 step 4).
 //! 5. **Ack** — a command's positions are returned to the caller ONLY after its segment's manifest
 //!    entry is durably committed (TD-004 step 5). A buffered-but-unsealed command is NOT acked, and a
-//!    segment whose manifest commit was fenced is an orphan that no reader ever observes.
+//!    segment whose manifest-head commit was fenced is an orphan that no reader ever observes.
 //!
 //! **Manifest-CAS epoch fence (reused from the `pqueue-e5c6d6fc` pattern).** Each manifest entry records
 //! the writer's `assignment_epoch`. The manifest is an append-only series of immutable objects
 //! `manifest/{index:020}.json`; a commit is a create-only PUT at the next index (the CAS) gated on the
 //! writer's `expected_epoch` still equalling the queue's current epoch (the highest epoch any committed
-//! manifest entry records). An epoch handoff publishes a **fence entry** (TD-004 implementation (b)) into
-//! the manifest BEFORE the new owner writes data; a stale-epoch writer that tries to seal then observes the
+//! manifest entry records). The durable head namespace is `manifest_head/{index:020}.json`; successful
+//! commits are also mirrored to the legacy `manifest/{index:020}.json` namespace for older readers and
+//! existing tooling. An epoch handoff publishes a **fence entry** (TD-004 implementation (b)) into the
+//! manifest head BEFORE the new owner writes data; a stale-epoch writer that tries to seal then observes the
 //! higher epoch on the manifest tail and is rejected [`EngineError::EpochFenced`] — no torn segment is
 //! committed (the fence is checked before the segment object is written).
 //!
@@ -254,6 +256,7 @@ pub struct LocalFsBlobStore {
 
 /// Monotonic suffix source so concurrent `put`s never collide on the same temp filename.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SEGMENT_ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl LocalFsBlobStore {
     /// Open a store rooted at `root` (created on first write).
@@ -925,6 +928,59 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(created)
     }
 
+    fn manifest_prefix(shard: &QueueKey) -> String {
+        format!("{}manifest/", shard_prefix(shard))
+    }
+
+    fn manifest_head_prefix(shard: &QueueKey) -> String {
+        format!("{}manifest_head/", shard_prefix(shard))
+    }
+
+    fn manifest_key(shard: &QueueKey, index: u64) -> String {
+        format!("{}{index:020}.json", Self::manifest_prefix(shard))
+    }
+
+    fn manifest_head_key(shard: &QueueKey, index: u64) -> String {
+        format!("{}{index:020}.json", Self::manifest_head_prefix(shard))
+    }
+
+    fn list_commit_keys_at(&self, prefix: &str, horizon: Option<u64>) -> EngineResult<Vec<String>> {
+        match horizon {
+            Some(w) => self.store_list_from(prefix, &format!("{prefix}{w:020}.json")),
+            None => self.store_list(prefix),
+        }
+    }
+
+    fn list_authoritative_manifest_keys_at(
+        &self,
+        shard: &QueueKey,
+        horizon: Option<u64>,
+    ) -> EngineResult<Vec<String>> {
+        let head_prefix = Self::manifest_head_prefix(shard);
+        let head_keys = self.list_commit_keys_at(&head_prefix, horizon)?;
+        if head_keys.is_empty() {
+            self.list_commit_keys_at(&Self::manifest_prefix(shard), horizon)
+        } else {
+            Ok(head_keys)
+        }
+    }
+
+    fn commit_manifest_entry(
+        &self,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+        count_object_put: bool,
+    ) -> EngineResult<bool> {
+        let body = to_json(entry)?;
+        let head_key = Self::manifest_head_key(shard, entry.index);
+        let won = self.store_put_if_absent(&head_key, &body, count_object_put)?;
+        if won {
+            let legacy_key = Self::manifest_key(shard, entry.index);
+            let _ = self.store_put_if_absent(&legacy_key, &body, false)?;
+        }
+        Ok(won)
+    }
+
     fn store_get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
         let out = self.store.get(key)?;
         self.inner
@@ -939,13 +995,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let deleted = self.store.delete(key)?;
         let mut g = self.inner.lock().expect("segmented log poisoned");
         g.counters.delete_count += 1;
-        if deleted && let Some(len) = g.object_sizes.remove(key) {
+        if deleted {
             g.counters.object_count = g.counters.object_count.saturating_sub(1);
-            g.counters.total_bytes = g.counters.total_bytes.saturating_sub(len);
-            if g.object_sizes.is_empty() {
-                g.counters.max_object_bytes = 0;
-            } else if len == g.counters.max_object_bytes {
-                g.counters.max_object_bytes = g.object_sizes.values().copied().max().unwrap_or(0);
+            if let Some(len) = g.object_sizes.remove(key) {
+                g.counters.total_bytes = g.counters.total_bytes.saturating_sub(len);
+                if g.object_sizes.is_empty() {
+                    g.counters.max_object_bytes = 0;
+                } else if len == g.counters.max_object_bytes {
+                    g.counters.max_object_bytes =
+                        g.object_sizes.values().copied().max().unwrap_or(0);
+                }
             }
         }
         Ok(deleted)
@@ -1012,22 +1071,21 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving
         // the tuple from the MAX ranged key is exact. The +1 GET for the horizon here is off the O(1) seal hot
         // path (recover_manifest is reached only on open/acquire/CAS-lost/advance-floor/ensure_shard).
-        let prefix = format!("{}manifest/", shard_prefix(shard));
         let keys = match self.read_read_horizon(shard)? {
             Some(w) => {
-                let ranged = self.store_list_from(&prefix, &format!("{prefix}{w:020}.json"))?;
+                let ranged = self.list_authoritative_manifest_keys_at(shard, Some(w))?;
                 // Defensive: a horizon can never legitimately reach/exceed the tail (it is derived strictly
                 // below the floor, which is strictly below the tail), but if a ranged list ever came back
                 // empty for a non-empty manifest, fall back to the full list rather than reset a live tail to
                 // genesis. A genuinely empty manifest (fresh queue) has no horizon object, so this branch is
                 // not even reached for it — no double-list for the common fresh-open case.
                 if ranged.is_empty() {
-                    self.store_list(&prefix)?
+                    self.list_authoritative_manifest_keys_at(shard, None)?
                 } else {
                     ranged
                 }
             }
-            None => self.store_list(&prefix)?,
+            None => self.list_authoritative_manifest_keys_at(shard, None)?,
         };
         let Some(tail_key) = keys.into_iter().max() else {
             return Ok((0, 0, 0));
@@ -1062,11 +1120,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         shard: &QueueKey,
         horizon: Option<u64>,
     ) -> EngineResult<Vec<String>> {
-        let prefix = format!("{}manifest/", shard_prefix(shard));
-        match horizon {
-            Some(w) => self.store_list_from(&prefix, &format!("{prefix}{w:020}.json")),
-            None => self.store_list(&prefix),
-        }
+        self.list_authoritative_manifest_keys_at(shard, horizon)
     }
 
     /// All LIVE manifest entries for `shard` above a GIVEN `horizon` snapshot, sorted by index. Consumers that
@@ -1121,7 +1175,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 return Err(EngineError::NotFound);
             }
         }
-        let prefix = shard_prefix(shard);
         // Bounded retry against concurrent acquirers (no consensus; the store CAS is the only primitive).
         for _ in 0..16 {
             let (next_seq, next_index, cur_epoch) = self.recover_manifest(shard)?;
@@ -1138,8 +1191,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 committed_at_ms: now_ms,
                 retention_floor_through: None,
             };
-            let key = format!("{prefix}manifest/{next_index:020}.json");
-            if self.store_put_if_absent(&key, &to_json(&entry)?, true)? {
+            if self.commit_manifest_entry(shard, &entry, true)? {
                 // The fence entry just won its CAS: the epoch handoff is now durably committed to the
                 // manifest, even though this acquirer's own in-memory bookkeeping has not yet observed it.
                 self.fault(FaultCutPoint::DuringOwnerReassignment)?;
@@ -1278,7 +1330,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let first_seq = cur_seq;
         let last_seq = first_seq + n as u64 - 1;
         let (seg_bytes, seg_checksum) = build_segment_object(cur_epoch, first_seq, &drained_bytes);
-        let seg_key = format!("{prefix}seg/{first_seq:020}.seg");
+        let attempt = SEGMENT_ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let seg_key = format!(
+            "{prefix}seg_attempt/e{cur_epoch:020}/i{cur_index:020}/s{first_seq:020}-{pid}-{attempt}.seg"
+        );
         self.store_put_segment(&seg_key, &seg_bytes)?;
 
         self.fault(FaultCutPoint::AfterSegmentWriteBeforeManifest)?;
@@ -1296,8 +1352,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             committed_at_ms,
             retention_floor_through: None,
         };
-        let manifest_key = format!("{prefix}manifest/{cur_index:020}.json");
-        let won = self.store_put_if_absent(&manifest_key, &to_json(&entry)?, true)?;
+        let won = self.commit_manifest_entry(shard, &entry, true)?;
         if !won {
             // CAS lost: a peer extended the manifest from the same tail. Re-read to learn the new epoch.
             let observed_epoch = self.recover_manifest(shard)?.2;
@@ -1747,7 +1802,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
             self.create_queue(branch_def)?;
 
-            let branch_prefix = shard_prefix(&branch);
             let mut next_index = 0u64;
             // Seed the branch with the INHERITED floor as its FIRST manifest entry, so the branch's effective
             // genesis is `floor + 1`: `read_retention_floor(branch)` returns it and the branch's recovery /
@@ -1765,8 +1819,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     committed_at_ms: 0,
                     retention_floor_through: Some(f),
                 };
-                let key = format!("{branch_prefix}manifest/{next_index:020}.json");
-                self.store_put(&key, &to_json(&floor_entry)?, true)?;
+                self.commit_manifest_entry(&branch, &floor_entry, true)?;
                 next_index += 1;
             }
             let entries = self.read_manifest(source)?;
@@ -1781,8 +1834,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     }
                     let mut copied = entry.clone();
                     copied.index = next_index;
-                    let key = format!("{branch_prefix}manifest/{next_index:020}.json");
-                    self.store_put(&key, &to_json(&copied)?, true)?;
+                    self.commit_manifest_entry(&branch, &copied, true)?;
                     next_index += 1;
                     continue;
                 }
@@ -1805,8 +1857,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 if entry.last_seq > position.sequence {
                     copied.visible_last_seq = Some(position.sequence);
                 }
-                let key = format!("{branch_prefix}manifest/{next_index:020}.json");
-                self.store_put(&key, &to_json(&copied)?, true)?;
+                self.commit_manifest_entry(&branch, &copied, true)?;
                 next_index += 1;
                 if entry.last_seq >= position.sequence {
                     break;
@@ -2186,7 +2237,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         position: CommandPosition,
         expected_epoch: u64,
     ) -> EngineResult<()> {
-        let prefix = shard_prefix(shard);
         let (cur_seq, cur_index, cur_epoch) = self.recover_manifest(shard)?;
         if cur_epoch > expected_epoch {
             return Err(EngineError::EpochFenced);
@@ -2214,8 +2264,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             committed_at_ms: 0, // audit-only; floor entries are skipped by every age/segment scanner
             retention_floor_through: Some(position.sequence),
         };
-        let key = format!("{prefix}manifest/{cur_index:020}.json");
-        let won = self.store_put_if_absent(&key, &to_json(&entry)?, false)?;
+        let won = self.commit_manifest_entry(shard, &entry, false)?;
         if !won {
             // CAS lost: a peer extended the manifest between our read and our write. If a newer epoch is now
             // present we are fenced; otherwise surface a transient conflict (the trim caller skips this tick).
