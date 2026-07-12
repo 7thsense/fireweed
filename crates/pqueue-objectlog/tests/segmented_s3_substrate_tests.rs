@@ -940,7 +940,10 @@ impl FaultHook for PeerTrimDuringBranch {
 /// HOLE B cross-owner (bead pqueue-b5cc2bc7 — branch vs CONCURRENT trim): a peer that advances the source floor
 /// and reclaims WHILE a branch is being created must never yield a corrupt/missing-segment branch. Pin-first
 /// makes the peer's `expire` SKIP the branched range (no data deleted); validate-after-copy detects the floor
-/// movement and FAILS the branch cleanly (`Conflict`) with a full rollback. A retry re-reads the advanced floor.
+/// movement and FAILS the attempt cleanly with a full rollback. The peer here advances the floor to 5 — EQUAL
+/// to the cut (5) — so the bounded transparent retry (bead pqueue-9dcec223) re-reads the advanced floor and
+/// cleanly REJECTS the now cut<=floor view as `Invalid` ("whole view reclaimed"), NOT a bare Conflict. The
+/// safety invariants are unchanged: no data deleted during the race, source fully reclaimable, no leaked pin.
 #[test]
 fn branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segment() {
     let log = std::sync::Arc::new(SegmentedObjectLog::open(
@@ -975,10 +978,11 @@ fn branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segm
     );
     log.set_fault_hook(None);
 
-    // The branch creation FAILS CLEANLY — NEVER a corrupt/missing-segment branch.
+    // The branch creation FAILS CLEANLY — NEVER a corrupt/missing-segment branch. With transparent retry the
+    // peer's floor advance to 5 (== cut) is re-read and the now cut<=floor view is cleanly rejected as Invalid.
     assert!(
-        matches!(result, Err(EngineError::Conflict)),
-        "a branch racing a concurrent source reclaim must fail cleanly (Conflict), got {result:?}"
+        matches!(result, Err(EngineError::Invalid(_))),
+        "a branch whose cut becomes <= the advanced floor is rejected cleanly (Invalid), got {result:?}"
     );
     // NO data loss: the branch pin protected the segments during the peer's expire, so all six source segment
     // objects are intact — read_all(source) GETs them with NO missing segment.
@@ -997,6 +1001,216 @@ fn branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segm
     assert!(
         log.read_retention_floor(&branch).unwrap().is_none(),
         "the failed branch was rolled back (no branch floor / manifest remains)"
+    );
+}
+
+/// A fault hook that runs a concurrent PEER TRIM every time a branch attempt reaches `DuringBranchCopy`, up to
+/// `advances_remaining` times, advancing the source floor by ONE more each fire (monotonically: 1, 2, 3, ...)
+/// then reclaiming through it. Set `advances_remaining` to a small number for a BOUNDED race (the peer stops,
+/// so a later retry sees a STABLE floor and SUCCEEDS) or a large number for CONTINUOUS trimming (every attempt
+/// races, so the bounded retry gives up cleanly). `next_floor` starts at 1 so the first advance is a real move.
+struct PeerTrimBoundedAdvances {
+    log: std::sync::Weak<SegmentedObjectLog<InMemoryBlobStore>>,
+    source: pqueue_engine::QueueKey,
+    now_ms: i64,
+    advances_remaining: AtomicU64,
+    next_floor: AtomicU64,
+}
+
+impl FaultHook for PeerTrimBoundedAdvances {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut != FaultCutPoint::DuringBranchCopy {
+            return Ok(());
+        }
+        // Consume one advance budget (CAS loop); do nothing once the peer has stopped trimming.
+        loop {
+            let rem = self.advances_remaining.load(Ordering::SeqCst);
+            if rem == 0 {
+                return Ok(());
+            }
+            if self
+                .advances_remaining
+                .compare_exchange(rem, rem - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        if let Some(log) = self.log.upgrade() {
+            let floor = self.next_floor.fetch_add(1, Ordering::SeqCst);
+            // Advance the source floor (epoch-fenced manifest CAS) then reclaim. The branch's pin is already
+            // published, so `expire_segments_through` SKIPS the pinned segments — nothing is deleted.
+            log.advance_retention_floor(
+                &self.source,
+                CommandPosition::new(self.source.clone(), 0, floor),
+                0,
+            )
+            .unwrap();
+            log.expire_segments_through(&self.source, floor, self.now_ms)
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// Bead pqueue-9dcec223 (a): a branch racing a BOUNDED concurrent source-floor advance RETRIES and SUCCEEDS.
+/// The peer advances the floor a fixed number of times (to 1, then 2) then stops; the bounded retry re-reads
+/// the advanced floor each attempt and, once the peer stops, commits a valid branch against the retained range
+/// — `read_all(branch)` returns the expected retained commands with NO missing segment.
+#[test]
+fn branch_retries_a_bounded_concurrent_floor_advance_and_succeeds() {
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        InMemoryBlobStore::new(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    // Six single-command segments, seq 0..5.
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    // Peer advances the floor to 1 then 2 (two attempts race), then STOPS — a later retry sees a stable floor=2.
+    log.set_fault_hook(Some(std::sync::Arc::new(PeerTrimBoundedAdvances {
+        log: std::sync::Arc::downgrade(&log),
+        source: source.clone(),
+        now_ms: 100,
+        advances_remaining: AtomicU64::new(2),
+        next_floor: AtomicU64::new(1),
+    })));
+
+    let branch_def = branch_qdef("bounded-trim-retry");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    // Cut at 5 stays ABOVE the peer's final floor (2), so the retry SUCCEEDS (transparently — the caller never
+    // sees the intermediate Conflicts).
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        1_000_000_000,
+        100,
+    )
+    .expect("the bounded concurrent-trim race is retried transparently and succeeds");
+    log.set_fault_hook(None);
+
+    // The committed branch INHERITED the advanced floor (2) and reads ONLY the retained [3,4,5] — no missing
+    // segment, no reclaimed object is ever GET.
+    assert_eq!(
+        log.read_retention_floor(&branch)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(2),
+        "the retried branch inherits the ADVANCED source floor (2), not the pre-race floor"
+    );
+    let seqs: Vec<u64> = log
+        .read_all(&branch)
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![3, 4, 5],
+        "read_all(branch) returns exactly the retained [3,4,5] after retrying against the advanced floor"
+    );
+}
+
+/// Bead pqueue-9dcec223 (b): under CONTINUOUS trimming the branch GIVES UP after the cap and returns `Conflict`
+/// CLEANLY (no livelock, no leaked pin). The peer advances the floor on EVERY attempt, so validate-after-copy
+/// conflicts every time; after the bounded cap the last Conflict is surfaced and the source stays fully
+/// reclaimable (the final attempt rolled back its pin).
+#[test]
+fn branch_gives_up_cleanly_under_continuous_trimming() {
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        InMemoryBlobStore::new(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    // Eight single-command segments, seq 0..7 — headroom so the cut stays above the floor for every attempt.
+    for _ in 0..8 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    // Peer advances the floor on EVERY attempt (budget far exceeds the retry cap) — continuous trimming.
+    log.set_fault_hook(Some(std::sync::Arc::new(PeerTrimBoundedAdvances {
+        log: std::sync::Arc::downgrade(&log),
+        source: source.clone(),
+        now_ms: 100,
+        advances_remaining: AtomicU64::new(1_000),
+        next_floor: AtomicU64::new(1),
+    })));
+
+    let branch_def = branch_qdef("continuous-trim-giveup");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    // Cut at 7 stays above the floor the peer reaches within the cap, so the give-up is a Conflict (not Invalid).
+    let result = log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 7),
+        1_000_000_000,
+        100,
+    );
+    log.set_fault_hook(None);
+
+    assert!(
+        matches!(result, Err(EngineError::Conflict)),
+        "continuous trimming makes the bounded retry give up cleanly with Conflict (no livelock), got {result:?}"
+    );
+    // No leaked pin: the final attempt rolled back, so the source is FULLY reclaimable afterward.
+    assert_eq!(
+        log.expire_segments_through(&source, 7, 200).unwrap(),
+        8,
+        "the given-up branch left no lingering pin — all eight source segments are reclaimable"
+    );
+    assert!(
+        log.read_retention_floor(&branch).unwrap().is_none(),
+        "no partial branch remains after the bounded give-up"
+    );
+}
+
+/// Bead pqueue-9dcec223 (c): a cut that is BELOW the advanced floor is rejected with `Invalid`, NOT retried as
+/// a Conflict. The peer advances the floor to 3 (bounded, then stops); a branch cut at 2 is now at/below the
+/// advanced floor, so it is cleanly rejected ("whole view reclaimed") rather than looping.
+#[test]
+fn branch_cut_below_advanced_floor_is_rejected_invalid_not_retried() {
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        InMemoryBlobStore::new(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    ));
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..6 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    // Peer advances the floor to 1, then 2, then 3, then stops.
+    log.set_fault_hook(Some(std::sync::Arc::new(PeerTrimBoundedAdvances {
+        log: std::sync::Arc::downgrade(&log),
+        source: source.clone(),
+        now_ms: 100,
+        advances_remaining: AtomicU64::new(3),
+        next_floor: AtomicU64::new(1),
+    })));
+
+    // Cut at 2 is at/below the floor the peer advances to (3) — a genuine cut<=floor, rejected as Invalid.
+    let result = log.branch(
+        &source,
+        &branch_qdef("below-advanced-floor"),
+        &CommandPosition::new(source.clone(), 0, 2),
+        1_000_000_000,
+        100,
+    );
+    log.set_fault_hook(None);
+
+    assert!(
+        matches!(result, Err(EngineError::Invalid(_))),
+        "a cut at/below the advanced floor is rejected cleanly (Invalid), not retried as Conflict, got {result:?}"
     );
 }
 

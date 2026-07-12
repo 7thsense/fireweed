@@ -1398,7 +1398,60 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     /// Same as [`Self::branch`], but allows opting in to change-record emission for the branch metadata.
+    ///
+    /// BOUNDED TRANSPARENT RETRY (bead pqueue-9dcec223): a single attempt ([`Self::branch_attempt`]) fails
+    /// cleanly with [`EngineError::Conflict`] when a peer CONCURRENTLY advances the source retention floor
+    /// DURING creation (the validate-after-copy guard). That failure fully rolls back its own partial state
+    /// (branch objects FIRST, source pin LAST — see the rollback in `branch_attempt`), so re-attempting is
+    /// SAFE: the next attempt re-reads the ADVANCED floor and either (a) succeeds against the now-retained
+    /// range, or (b) is cleanly REJECTED with `Invalid` if the cut is now at/below the advanced floor (a
+    /// genuine "whole view reclaimed", NOT retried). Only `Conflict` is retried — every other error (incl.
+    /// the cut<=floor `Invalid` and any rollback/cleanup failure) is surfaced immediately. Bounded to
+    /// `MAX_BRANCH_ATTEMPTS` so CONTINUOUS trimming cannot livelock: after the cap the last (clean, fully
+    /// rolled-back) `Conflict` is surfaced for the caller.
     pub fn branch_with_emission(
+        &self,
+        source: &QueueKey,
+        branch_def: &QueueDefinition,
+        position: &CommandPosition,
+        ttl_ms: u64,
+        now_ms: i64,
+        emit_change_records: bool,
+    ) -> EngineResult<u64> {
+        // A small fixed cap. Each attempt is a FULL clean single-shot creation that rolls back its own
+        // partial state before the next runs, so no pin/objects leak across attempts.
+        const MAX_BRANCH_ATTEMPTS: u32 = 5;
+        for _ in 1..MAX_BRANCH_ATTEMPTS {
+            match self.branch_attempt(
+                source,
+                branch_def,
+                position,
+                ttl_ms,
+                now_ms,
+                emit_change_records,
+            ) {
+                // Concurrent source-floor advance during this attempt: re-read the advanced floor and retry.
+                Err(EngineError::Conflict) => continue,
+                // Success, a genuine cut<=floor `Invalid`, or any other error: surface it as-is (not retried).
+                other => return other,
+            }
+        }
+        // Final attempt: return its result verbatim — a last `Conflict` here is the bounded give-up (no
+        // livelock), and its rollback has already released the pin so the source stays fully reclaimable.
+        self.branch_attempt(
+            source,
+            branch_def,
+            position,
+            ttl_ms,
+            now_ms,
+            emit_change_records,
+        )
+    }
+
+    /// A SINGLE branch-creation attempt (pin-first + validate-after-copy). Returns [`EngineError::Conflict`]
+    /// if the source retention floor MOVED during the copy, having fully rolled back its partial state; the
+    /// bounded retry loop in [`Self::branch_with_emission`] re-attempts against the advanced floor.
+    fn branch_attempt(
         &self,
         source: &QueueKey,
         branch_def: &QueueDefinition,
