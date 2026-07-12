@@ -1168,6 +1168,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Acquire the queue at a NEW, strictly-greater epoch by publishing a **fence entry** to the manifest
     /// via the create-only CAS (TD-003 durable-fence-before-use; TD-004 implementation (b)). After it
     /// commits, a prior-epoch writer's next seal observes the higher epoch and self-fences.
+    ///
+    /// This does not rely on the deferred pqueue-c33c367e owner-fence wiring to bound stale writers inside
+    /// retention; the durable head CAS is the fence, and the code only uses that wiring if a later proof
+    /// establishes the bounded-window invariant there.
     pub fn acquire_epoch(&self, shard: &QueueKey, now_ms: i64) -> EngineResult<u64> {
         {
             let g = self.inner.lock().expect("segmented log poisoned");
