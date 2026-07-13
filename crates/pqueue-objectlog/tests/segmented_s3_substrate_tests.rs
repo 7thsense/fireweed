@@ -2933,7 +2933,8 @@ fn recover_manifest_is_correct_after_horizon_advance() {
 /// Test 3 — live data is byte-identical pre/post horizon, and a below-floor read FAILS CLOSED (read at the
 /// floor errors; read at floor+1 succeeds; read_all from genesis fails closed on a trimmed+horizoned queue).
 #[test]
-fn horizon_read_is_byte_identical_and_below_floor_fails_closed() {
+#[allow(non_snake_case)]
+fn TestBelowFloorReadFailsClosedAfterManifestReclaim() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3181,7 +3182,8 @@ fn stale_writer_below_horizon_is_still_fenced_address_never_freed() {
 /// branch whose seed floor `f` becomes its genesis still reads its own `seq == f` (design §5(ii): the floor is
 /// an exclusive reclamation bound, NOT a seq<=floor read-visibility filter — never suppress a branch's seed).
 #[test]
-fn branch_inherits_floor_reads_its_view_and_seed_seq_is_not_suppressed() {
+#[allow(non_snake_case)]
+fn TestBranchSeedSeqNotSuppressedByFloor() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
