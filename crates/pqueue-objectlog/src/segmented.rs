@@ -1408,10 +1408,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // Reclaim-time fence: if compaction has already advanced the durable read-horizon beyond this
         // cached manifest index, the index was reclaimed and this stale writer must self-fence before any
         // segment PUT. The cached watermark is refreshed on open and after successful trim; the permanent
-        // head CAS remains the stale-writer fence (docs/perf/design/manifest-compaction-hotpath.md:359 and
-        // pqueue-c33c367e). This is intentionally not a tail-validate/delete-rollback substitute: the
-        // rejection happens before the manifest CAS, so a stale writer cannot externally observe an ack
-        // and then be "corrected" later by deleting the entry.
+        // head CAS remains the stale-writer fence (docs/perf/design/manifest-compaction-hotpath.md:359,
+        // :365, and pqueue-c33c367e). This is intentionally not a tail-validate/delete-rollback substitute:
+        // the rejection happens before the manifest CAS, so a stale writer cannot externally observe an ack
+        // and then be "corrected" later by deleting the entry. pqueue-c33c367e is not a dependency here
+        // unless a separate bounded-window proof shows that wiring bounds stale writers independently.
         if let Some(horizon) = self.cached_manifest_deletion_watermark(shard)?
             && cur_index <= horizon
         {

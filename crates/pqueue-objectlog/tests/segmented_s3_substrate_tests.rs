@@ -3154,22 +3154,22 @@ fn assert_reclaimed_cached_writer_rejects_before_ack() {
     );
 }
 
-/// TestNoTailValidateRollbackSubstituteForFenceMarker: a reclaimed cached manifest index is rejected by the
+/// TestNoTailValidateRollbackSubstituteAfterReopen: a reclaimed cached manifest index is rejected by the
 /// durable fence before any successful stale ack can be externally observed. The rejected path does not need
 /// tail-validate/delete rollback; that substitute is explicitly not the fence mechanism (see
 /// docs/perf/design/manifest-compaction-hotpath.md:359 and pqueue-c33c367e).
 #[test]
 #[allow(non_snake_case)]
-fn TestNoTailValidateRollbackSubstituteForFenceMarker() {
+fn TestNoTailValidateRollbackSubstituteAfterReopen() {
     assert_reclaimed_cached_writer_rejects_before_ack();
 }
 
-/// TestFenceMarkerDesignReferences: same reclaimed-index fence, documented here so the hot-path comment and
-/// the test both point at docs/perf/design/manifest-compaction-hotpath.md:359 and pqueue-c33c367e. The
-/// design note rejects tail-validate/delete rollback as the fence mechanism.
+/// TestReopenFenceCommentReferencesDesign: same reclaimed-index fence, documented here so the hot-path
+/// comment and the test both point at docs/perf/design/manifest-compaction-hotpath.md:359 and
+/// pqueue-c33c367e. The design note rejects tail-validate/delete rollback as the fence mechanism.
 #[test]
 #[allow(non_snake_case)]
-fn TestFenceMarkerDesignReferences() {
+fn TestReopenFenceCommentReferencesDesign() {
     assert_reclaimed_cached_writer_rejects_before_ack();
 }
 
