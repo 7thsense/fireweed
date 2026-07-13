@@ -1,0 +1,4 @@
+FAIL	./... [setup failed]
+# ./...
+pattern ./...: directory prefix . does not contain main module or its selected dependencies
+FAIL
