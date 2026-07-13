@@ -3716,7 +3716,8 @@ mod manifest_deletion_watermark_tests {
         envelope, item, qdef as conformance_qdef, shard as conformance_shard,
     };
     use pqueue_engine::PushCommand;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering, Ordering};
 
     fn pushes(n: u64) -> Vec<CommandEnvelope> {
         (0..n)
@@ -3765,6 +3766,49 @@ mod manifest_deletion_watermark_tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingBlobStore {
+        inner: InMemoryBlobStore,
+        list_count: AtomicU64,
+    }
+
+    impl CountingBlobStore {
+        fn list_count(&self) -> u64 {
+            self.list_count.load(Ordering::Relaxed)
+        }
+
+        fn reset_list_count(&self) {
+            self.list_count.store(0, Ordering::Relaxed);
+        }
+    }
+
+    impl BlobStore for CountingBlobStore {
+        fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+            self.inner.put(key, body)
+        }
+
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+            self.inner.put_if_absent(key, body)
+        }
+
+        fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> EngineResult<bool> {
+            self.inner.delete(key)
+        }
+
+        fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+            self.list_count.fetch_add(1, Ordering::Relaxed);
+            self.inner.list(prefix)
+        }
+
+        fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+            self.inner.stats(prefix)
         }
     }
 
@@ -3918,6 +3962,114 @@ mod manifest_deletion_watermark_tests {
             err,
             EngineError::EpochFenced,
             "the stale writer is fenced by the permanent head CAS, not by the watermark"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestPermanentFenceSurvivesReopen() {
+        let store = Arc::new(CountingBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let writer = SegmentedObjectLog::open(store.clone(), cfg);
+        writer.create_queue(&conformance_qdef()).unwrap();
+        writer.enqueue(&shard, &pushes(1), 0, 10).unwrap();
+        writer.seal(&shard, 0, 11).unwrap();
+        writer.enqueue(&shard, &pushes(1), 0, 20).unwrap();
+        writer.seal(&shard, 0, 21).unwrap();
+        writer
+            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 0), 0)
+            .unwrap();
+        assert_eq!(
+            writer.expire_segments_through(&shard, 0, 1_000).unwrap(),
+            1,
+            "the first manifest index is reclaimed and the live tail remains available"
+        );
+        assert_eq!(writer.read_read_horizon(&shard).unwrap(), Some(0));
+
+        let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+        reopened.create_queue(&conformance_qdef()).unwrap();
+        {
+            let mut g = reopened.inner.lock().expect("segmented log poisoned");
+            let buf = g.shards.get_mut(&shard).expect("reopened shard");
+            assert_eq!(
+                buf.manifest_deletion_watermark,
+                Some(0),
+                "the reopened shard reloads the reclaimed-index fence before the stale owner tries to seal"
+            );
+            buf.next_manifest_index = 0;
+        }
+        reopened.enqueue(&shard, &pushes(1), 0, 30).unwrap();
+        let object_count = store.inner.object_count();
+        store.reset_list_count();
+
+        let err = reopened.seal(&shard, 0, 31).unwrap_err();
+        assert!(
+            matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+            "a stale reopened owner must not seal against the reclaimed index"
+        );
+        assert_eq!(
+            store.inner.object_count(),
+            object_count,
+            "the stale reopened writer is rejected before any new segment or manifest object is written"
+        );
+        assert_eq!(
+            store.list_count(),
+            0,
+            "the normal seal path does not introduce a manifest LIST once the fence is reloaded"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestReopenFenceReloadsBeforeSeal() {
+        let store = Arc::new(CountingBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let writer = SegmentedObjectLog::open(store.clone(), cfg);
+        writer.create_queue(&conformance_qdef()).unwrap();
+        writer.enqueue(&shard, &pushes(1), 0, 10).unwrap();
+        writer.seal(&shard, 0, 11).unwrap();
+        writer.enqueue(&shard, &pushes(1), 0, 20).unwrap();
+        writer.seal(&shard, 0, 21).unwrap();
+        writer
+            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 0), 0)
+            .unwrap();
+        writer.expire_segments_through(&shard, 0, 1_000).unwrap();
+
+        let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+        reopened.create_queue(&conformance_qdef()).unwrap();
+        {
+            let mut g = reopened.inner.lock().expect("segmented log poisoned");
+            let buf = g.shards.get_mut(&shard).expect("reopened shard");
+            assert_eq!(
+                buf.manifest_deletion_watermark,
+                Some(0),
+                "open/recovery reloads the durable reclaimed-index fence into the shard cache"
+            );
+            buf.next_manifest_index = 0;
+        }
+
+        reopened.enqueue(&shard, &pushes(1), 0, 30).unwrap();
+        let object_count = store.inner.object_count();
+        store.reset_list_count();
+
+        let err = reopened.seal(&shard, 0, 31).unwrap_err();
+        assert!(
+            matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+            "the recovered fence is consulted before seal can commit against the cached next_manifest_index"
+        );
+        assert_eq!(
+            store.inner.object_count(),
+            object_count,
+            "seal returns before writing a segment or manifest object"
+        );
+        assert_eq!(
+            store.list_count(),
+            0,
+            "seal does not introduce a manifest LIST on the normal hot path"
         );
     }
 
