@@ -2338,6 +2338,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             now_ms,
             &entries,
         )?;
+        let advance_entries = match horizon_snapshot {
+            // Capture the scan input before this pass rewrites reclaimed entries. The no-horizon case can
+            // reuse the pre-delete snapshot directly; later passes need one entry before the current
+            // watermark so the already-reclaimed prefix remains visible to the fold.
+            None | Some(0) => entries.clone(),
+            Some(w) => self.read_manifest_at(source, Some(w - 1))?,
+        };
         let mut deleted = 0u64;
         let mut reclaimed_through: Option<u64> = None;
         let mut error: Option<EngineError> = None;
@@ -2377,15 +2384,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 reclaimed_through = Some(Self::visible_last_seq(entry));
             }
         }
-        // The pass-level watermark advance must still be able to inspect the reclaimed prefix that may sit at
-        // or below the current durable watermark. A later pass can only advance across a gap once the prefix
-        // becomes contiguous again, so the advance scan starts one entry before the current watermark when
-        // one exists.
-        let advance_entries = match horizon_snapshot {
-            None => self.read_manifest_at(source, None)?,
-            Some(0) => self.read_manifest_at(source, None)?,
-            Some(w) => self.read_manifest_at(source, Some(w - 1))?,
-        };
         // Advance the durable read-horizon only for the longest contiguous prefix we fully reclaimed. A later
         // delete failure must not let the watermark leap over an undeleted manifest entry; at the same time, a
         // partial failure after some successful reclaim work should still durably record the safe prefix so a
