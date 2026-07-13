@@ -3407,6 +3407,149 @@ fn TestManifestWatermarkPartialExpireVisibility() {
     }
 }
 
+/// Test 9 — after successful below-floor manifest cleanup, the durable read-horizon advances
+/// monotonically and survives reopen/recovery, while staying below the durable floor.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkAdvancesAfterCleanup() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..8u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    assert!(
+        log.read_read_horizon(&shard()).unwrap().is_none(),
+        "no watermark exists before cleanup"
+    );
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 3), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&shard(), 3, 1_000).unwrap(),
+        2,
+        "the first cleanup pass reclaims the below-floor segments"
+    );
+    let w1 = log
+        .read_read_horizon(&shard())
+        .unwrap()
+        .expect("watermark after first cleanup");
+    let floor1 = log.read_retention_floor(&shard()).unwrap().unwrap();
+    assert!(
+        w1 < floor1.sequence,
+        "the read-horizon must remain below the durable floor"
+    );
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 7), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&shard(), 7, 2_000).unwrap(),
+        2,
+        "the second cleanup pass advances the durable watermark again"
+    );
+    let w2 = log
+        .read_read_horizon(&shard())
+        .unwrap()
+        .expect("watermark after second cleanup");
+    let floor2 = log.read_retention_floor(&shard()).unwrap().unwrap();
+    assert!(
+        w2 > w1,
+        "the persisted read-horizon advances monotonically: {w1} -> {w2}"
+    );
+    assert!(
+        w2 < floor2.sequence,
+        "the read-horizon never overtakes the durable floor"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard()).unwrap(),
+        Some(w2),
+        "the durable watermark survives reopen/recovery"
+    );
+    assert_eq!(
+        reopened
+            .read_retention_floor(&shard())
+            .unwrap()
+            .unwrap()
+            .sequence,
+        floor2.sequence,
+        "the durable floor survives reopen/recovery too"
+    );
+}
+
+/// Test 10 — when below-floor manifest cleanup fails partway through, the durable watermark does not skip
+/// the remaining undeleted manifest objects and a retry resumes from the last committed watermark.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkPartialExpiryRetry() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..3u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
+        .unwrap();
+    store.arm_delete(&manifest_head_key_s(&shard(), 1));
+
+    let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected delete failure must surface as a storage error, got {err:?}"
+    );
+    assert!(
+        store
+            .inner
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_some(),
+        "the not-yet-fully-deleted manifest object remains present after the partial failure"
+    );
+    assert!(
+        log.read_read_horizon(&shard()).unwrap().is_none(),
+        "the watermark must not advance on a partial cleanup failure"
+    );
+
+    store.disarm();
+    assert_eq!(
+        log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
+        1,
+        "the retry resumes from the last durable watermark and finishes the remaining cleanup"
+    );
+    assert!(
+        log.read_read_horizon(&shard()).unwrap().is_some(),
+        "the watermark is persisted once cleanup completes"
+    );
+    assert!(
+        store
+            .inner
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_none(),
+        "the retry removes the manifest object that survived the partial failure"
+    );
+    assert!(
+        store
+            .inner
+            .get(&manifest_head_key_s(&shard(), 2))
+            .unwrap()
+            .is_none(),
+        "the retry also removes the remaining below-floor manifest object"
+    );
+}
+
 /// Test 7 — backward compat: a queue/store with NO `read_horizon.json` object behaves EXACTLY as before (full
 /// manifest list). Proven two ways: (i) a never-trimmed queue has no horizon and reads normally; (ii) DELETING
 /// the horizon object off a trimmed queue falls back to the full list and the ORGANIC missing-segment
