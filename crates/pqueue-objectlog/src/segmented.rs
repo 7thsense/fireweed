@@ -1116,14 +1116,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Read the manifest from the store and derive `(next_seq, next_manifest_index, current_epoch)`.
     ///
-    /// HOT PATH: every seal (and epoch fence) calls this to read the authoritative tail. Manifest objects
-    /// are an append-only, contiguous series keyed `manifest/{index:020}.json`, so the zero-padded name sorts
-    /// lexicographically by index — the LAST key is the tail. Deriving the tuple from only that one entry is
-    /// exact (indices are contiguous so `tail.index + 1` is the next index; epoch is monotonically
-    /// non-decreasing so the tail carries the max; `next_seq` is the tail's `last_seq + 1`, or for a fence
-    /// entry — which names no segment — its `first_seq`, which already records the live next seq). This makes
-    /// a seal O(1) manifest reads instead of re-reading + re-parsing the whole O(n) manifest each time
-    /// (the previous full scan made a sustained push O(n^2)). `read_all` still does a full scan for recovery.
+    /// HOT PATH: every seal (and epoch fence) calls this to read the authoritative tail. New queues recover
+    /// from the permanent `manifest_head/{index:020}.json` namespace when it exists; legacy append-only
+    /// queues bootstrap from `manifest/{index:020}.json` when the head is absent. The recovered namespace is
+    /// still an append-only, contiguous series keyed by zero-padded index, so the lexicographically-last key
+    /// is the tail. Deriving the tuple from only that one entry is exact (indices are contiguous so
+    /// `tail.index + 1` is the next index; epoch is monotonically non-decreasing so the tail carries the max;
+    /// `next_seq` is the tail's `last_seq + 1`, or for a fence entry — which names no segment — its
+    /// `first_seq`, which already records the live next seq). This makes a seal O(1) manifest reads instead
+    /// of re-reading + re-parsing the whole O(n) manifest each time (the previous full scan made a sustained
+    /// push O(n^2)). `read_all` still does a full scan for recovery.
     fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64, Option<u64>)> {
         // Range-list from the durable read-horizon so recovery enumerates only LIVE (above-floor) entries
         // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving

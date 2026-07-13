@@ -33,7 +33,6 @@
 //!   - The true 10M-item-in-S3 snapshot+tail rebuild within a stated recovery-window budget is the live run
 //!     (pqueue-2f9ebac3); here the local genesis-replay rate is REPORTED only.
 
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pqueue_conformance::{envelope, item};
@@ -138,8 +137,60 @@ fn manifest_head_prefix_s(shard: &pqueue_engine::QueueKey) -> String {
     format!("{}manifest_head/", shard_prefix_s(shard))
 }
 
+fn manifest_head_key_s(shard: &pqueue_engine::QueueKey, index: u64) -> String {
+    format!("{}{index:020}.json", manifest_head_prefix_s(shard))
+}
+
+fn manifest_key_s(shard: &pqueue_engine::QueueKey, index: u64) -> String {
+    format!("{}{index:020}.json", manifest_prefix_s(shard))
+}
+
 fn read_horizon_key_s(shard: &pqueue_engine::QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
+}
+
+fn legacy_manifest_entry_bytes(
+    index: u64,
+    epoch: u64,
+    first_seq: u64,
+    last_seq: u64,
+    fence: bool,
+) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "index": index,
+        "epoch": epoch,
+        "fence": fence,
+        "segment_key": if fence {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(format!("seg-{index}.seg"))
+        },
+        "first_seq": first_seq,
+        "last_seq": last_seq,
+        "visible_last_seq": serde_json::Value::Null,
+        "checksum": 0u64,
+        "committed_at_ms": 1_000_i64 + index as i64,
+        "retention_floor_through": serde_json::Value::Null,
+        "compacted_through_index": serde_json::Value::Null,
+    }))
+    .unwrap()
+}
+
+fn write_legacy_manifest_entry<S: BlobStore>(
+    store: &S,
+    shard: &pqueue_engine::QueueKey,
+    index: u64,
+    epoch: u64,
+    first_seq: u64,
+    last_seq: u64,
+    fence: bool,
+) {
+    store
+        .put(
+            &manifest_key_s(shard, index),
+            &legacy_manifest_entry_bytes(index, epoch, first_seq, last_seq, fence),
+        )
+        .unwrap();
 }
 
 fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
@@ -763,6 +814,101 @@ fn TestLegacyManifestBootstrapWithoutDeletionWatermarkMetadata() {
         reopened.current_epoch(&shard).unwrap(),
         0,
         "legacy bootstrap preserves the permanent-head fence"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestRecoverManifestPrefersHeadWithLegacyBootstrap() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("recover", "prefers-head");
+    let qdef = big_qdef("recover", "prefers-head");
+
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef).unwrap();
+    log.enqueue(&shard, &segmented_pushes(1), 0, 10).unwrap();
+    log.seal(&shard, 0, 11).unwrap();
+
+    write_legacy_manifest_entry(store.as_ref(), &shard, 1, 99, 100, 100, false);
+    let objects_before = store.object_count();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert_eq!(
+        reopened.current_epoch(&shard).unwrap(),
+        0,
+        "the permanent head wins over a divergent legacy manifest tail"
+    );
+    assert_eq!(
+        store.object_count(),
+        objects_before,
+        "recovery does not delete or rewrite any manifest object"
+    );
+
+    reopened
+        .enqueue(&shard, &segmented_pushes(1), 0, 20)
+        .unwrap();
+    let positions = reopened.seal(&shard, 0, 21).unwrap();
+    assert_eq!(
+        positions[0].sequence, 1,
+        "the recovered permanent head tuple keeps the next sequence contiguous"
+    );
+    assert!(
+        store
+            .get(&manifest_head_key_s(&shard, 1))
+            .unwrap()
+            .is_some(),
+        "the next sealed entry lands at the recovered head index"
+    );
+    assert!(
+        store
+            .get(&manifest_head_key_s(&shard, 2))
+            .unwrap()
+            .is_none(),
+        "the stale legacy tail was ignored instead of advancing the head twice"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestLegacyAppendOnlyRecoveryBootstrapsWithoutHeadDeletion() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("recover", "legacy-only");
+    let qdef = big_qdef("recover", "legacy-only");
+
+    write_legacy_manifest_entry(store.as_ref(), &shard, 0, 7, 0, 0, false);
+    write_legacy_manifest_entry(store.as_ref(), &shard, 1, 7, 1, 1, false);
+    let objects_before = store.object_count();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert_eq!(
+        reopened.current_epoch(&shard).unwrap(),
+        7,
+        "legacy append-only manifests bootstrap the same recovered epoch"
+    );
+    assert_eq!(
+        store.object_count(),
+        objects_before,
+        "bootstrap recovery does not delete any manifest object"
+    );
+
+    reopened
+        .enqueue(&shard, &segmented_pushes(1), 7, 20)
+        .unwrap();
+    let positions = reopened.seal(&shard, 7, 21).unwrap();
+    assert_eq!(
+        positions[0].sequence, 2,
+        "the recovered legacy tail keeps the next sequence at the legacy tail + 1"
+    );
+    assert!(
+        store
+            .get(&manifest_head_key_s(&shard, 2))
+            .unwrap()
+            .is_some(),
+        "the recovered manifest head advances from the legacy append-only tail"
     );
 }
 
