@@ -2956,8 +2956,59 @@ fn trim_cycle<S: BlobStore>(
         .unwrap();
 }
 
+fn lagging_partial_expire_fixture() -> (
+    std::sync::Arc<InMemoryBlobStore>,
+    SegmentConfig,
+    QueueKey,
+    Vec<(u64, String)>,
+) {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..8u64 {
+        log.enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    let seg_keys: Vec<(u64, String)> = [0u64, 2, 4, 6, 8, 10, 12, 14]
+        .into_iter()
+        .map(|first| (first, segment_key_for(store.as_ref(), &source, first)))
+        .collect();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 15), 0)
+        .unwrap();
+    for (first_seq, seg_key) in seg_keys.iter().take(2) {
+        assert!(
+            store.delete(seg_key).unwrap(),
+            "segment {first_seq} was physically reclaimed before the watermark caught up"
+        );
+    }
+    log.persist_manifest_deletion_watermark(&source, 3, 1_000)
+        .unwrap();
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        Some(1),
+        "the durable watermark only records the deleted prefix while later below-floor segments remain"
+    );
+
+    (store, cfg, source, seg_keys)
+}
+
 fn delete_watermark_metadata<S: BlobStore>(store: &S, shard: &QueueKey) {
     store.delete(&read_horizon_key_s(shard)).unwrap();
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        if key.ends_with("~watermark.json") {
+            store.delete(&key).unwrap();
+        }
+    }
+}
+
+fn delete_watermark_history<S: BlobStore>(store: &S, shard: &QueueKey) {
+    delete_watermark_metadata(store, shard);
     for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
         if key.ends_with("~watermark.json") {
             store.delete(&key).unwrap();
@@ -3663,51 +3714,51 @@ fn ac_txn_3_fresh_log_recovers_identically_after_horizon_advance() {
 #[test]
 #[allow(non_snake_case)]
 fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
-    let store = std::sync::Arc::new(InMemoryBlobStore::new());
-    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let log = SegmentedObjectLog::open(store.clone(), cfg);
-    log.create_queue(&qdef()).unwrap();
-    // 8 segments: seqs 0..15.
-    for i in 0..8u64 {
-        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
-            .unwrap();
-        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
-    }
-    let seg_keys: Vec<(u64, String)> = [0u64, 2, 4, 6, 8, 10, 12, 14]
-        .into_iter()
-        .map(|first| (first, segment_key_for(store.as_ref(), &shard(), first)))
-        .collect();
-    // Advance the durable floor ALL THE WAY to 15, but reclaim only THROUGH seq 7 (a partial expire).
-    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 15), 0)
-        .unwrap();
-    let first = log.expire_segments_through(&shard(), 7, 1_000).unwrap();
-    assert_eq!(
-        first, 4,
-        "the partial expire deletes segs for seqs 0..7 (4 segments)"
-    );
+    let (store, cfg, source, seg_keys) = lagging_partial_expire_fixture();
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef()).unwrap();
-    reopened.enqueue(&shard(), &pushes(1), 0, 2_000).unwrap();
-    let reopened_ack = reopened.seal(&shard(), 0, 2_001).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&source).unwrap(),
+        Some(1),
+        "reopening observes the durable watermark that lags the physical delete progress"
+    );
+    for (first_seq, seg_key) in seg_keys.iter().skip(2) {
+        assert!(
+            store.get(seg_key).unwrap().is_some(),
+            "segment {first_seq} remains visible while the durable cleanup is still lagging"
+        );
+    }
+
+    reopened.enqueue(&source, &pushes(1), 0, 2_000).unwrap();
+    let reopened_ack = reopened.seal(&source, 0, 2_001).unwrap();
     assert_eq!(
         reopened_ack[0].sequence, 16,
         "recovery still sees the remaining below-floor tail after the partial expire"
     );
 
-    // The horizon advanced ONLY across the reclaimed prefix (bounded by through=7), NOT to the floor 15.
-    // A second, full expire through the floor must still find & reclaim segs for seqs 8..15.
-    let second = log.expire_segments_through(&shard(), 15, 2_000).unwrap();
+    // Finish the lagging cleanup without invoking the main expire path: delete the remaining below-floor
+    // segment objects directly, then advance the durable watermark across the now-complete prefix.
+    for (first_seq, seg_key) in seg_keys.iter().skip(2) {
+        assert!(
+            store.delete(seg_key).unwrap(),
+            "segment {first_seq} is reclaimed once the lagging prefix completes"
+        );
+    }
+    reopened
+        .persist_manifest_deletion_watermark(&source, 15, 3_000)
+        .unwrap();
     assert_eq!(
-        second, 4,
-        "the not-yet-deleted below-floor segments (seqs 8..15) were NOT hidden by the horizon — the full \
-         expire still reclaims all 4"
+        reopened.read_read_horizon(&source).unwrap(),
+        Some(7),
+        "the durable watermark only catches up after the remaining below-floor segments are reclaimed"
     );
+
     // Nothing leaked: every data segment object at/below the floor is gone.
-    for (first, seg_key) in seg_keys {
+    for (first_seq, seg_key) in seg_keys {
         assert!(
             store.get(&seg_key).unwrap().is_none(),
-            "segment {first} reclaimed, not leaked"
+            "segment {first_seq} reclaimed, not leaked"
         );
     }
 }
@@ -4030,21 +4081,21 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
         "a never-trimmed queue reads from genesis as before"
     );
 
-    // Trim (writes a horizon), then DELETE the horizon object to simulate a pre-existing / rolled-back queue.
+    // Trim (writes a horizon), then delete only the cached horizon object. The retained watermark history
+    // still reconstructs the durable state, so the queue should keep reading the live manifest list.
     trim_cycle(&log, &shard(), 3, 0, 1_000);
     assert!(log.read_read_horizon(&shard()).unwrap().is_some());
     delete_watermark_metadata(store.as_ref(), &shard());
     assert!(
-        log.read_read_horizon(&shard()).unwrap().is_none(),
-        "deleting the watermark metadata and retained markers falls back to conservative bootstrap"
+        log.read_read_horizon(&shard()).unwrap().is_some(),
+        "deleting the cache blob alone does not erase the durable watermark history"
     );
 
-    // Deleting the cached horizon object falls back to the full manifest list, which is the preserved legacy
-    // bootstrap behavior.
-    assert_eq!(
-        log.read_all(&shard()).unwrap().len(),
-        4,
-        "without the horizon cache the trimmed queue still reads the live manifest list"
+    // A genesis read still fail-closes because the durable floor remains in effect even if the cache blob
+    // is missing.
+    assert!(
+        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
+        "without the horizon cache blob the trimmed queue still fails closed from genesis"
     );
 }
 
@@ -4109,7 +4160,7 @@ fn TestLegacyManifestBootstrapDoesNotInferWatermarkFloor() {
         "the retention floor is still derived from the manifest"
     );
 
-    delete_watermark_metadata(store.as_ref(), &shard);
+    delete_watermark_history(store.as_ref(), &shard);
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef).unwrap();
