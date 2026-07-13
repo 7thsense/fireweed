@@ -45,7 +45,10 @@ use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandEnvelope, ControlPlaneStore,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead, PushCommand, QueueCommand,
 };
-use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig};
+use pqueue_objectlog::{
+    LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig,
+    segmented::{BlobStore, InMemoryBlobStore, SegmentConfig, SegmentedObjectLog},
+};
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -56,6 +59,83 @@ fn tmp_root(tag: &str) -> std::path::PathBuf {
 
 fn sk(tenant: &str, queue: &str) -> pqueue_engine::QueueKey {
     pqueue_engine::QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn shard_prefix_s(shard: &pqueue_engine::QueueKey) -> String {
+    format!(
+        "t/{}/q/{}/",
+        hex(shard.tenant_id.as_str().as_bytes()),
+        hex(shard.queue_id.as_str().as_bytes())
+    )
+}
+
+fn manifest_prefix_s(shard: &pqueue_engine::QueueKey) -> String {
+    format!("{}manifest/", shard_prefix_s(shard))
+}
+
+fn manifest_head_prefix_s(shard: &pqueue_engine::QueueKey) -> String {
+    format!("{}manifest_head/", shard_prefix_s(shard))
+}
+
+fn read_horizon_key_s(shard: &pqueue_engine::QueueKey) -> String {
+    format!("{}read_horizon.json", shard_prefix_s(shard))
+}
+
+fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
+    for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
+        for key in store.list(&prefix).unwrap() {
+            let Some(bytes) = store.get(&key).unwrap() else {
+                continue;
+            };
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if parsed
+                .get("compacted_through_index")
+                .and_then(|v| v.as_u64())
+                .is_some()
+            {
+                store.delete(&key).unwrap();
+            }
+        }
+    }
+    let _ = store.delete(&read_horizon_key_s(shard));
+}
+
+fn seg_pushes(n: u64) -> Vec<pqueue_engine::CommandEnvelope> {
+    (0..n)
+        .map(|i| {
+            envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![item(&format!("{i}"), &format!("k{i}"), (i % 10) as i64)],
+                }),
+                vec![],
+            )
+        })
+        .collect()
+}
+
+fn seg_trim_cycle<S: BlobStore>(
+    log: &SegmentedObjectLog<S>,
+    shard: &pqueue_engine::QueueKey,
+    through_seq: u64,
+    epoch: u64,
+    now_ms: i64,
+) {
+    log.advance_retention_floor(
+        shard,
+        pqueue_engine::CommandPosition::new(shard.clone(), epoch, through_seq),
+        epoch,
+    )
+    .unwrap();
+    log.expire_segments_through(shard, through_seq, now_ms)
+        .unwrap();
 }
 
 fn big_qdef(tenant: &str, queue: &str) -> QueueDefinition {
@@ -403,6 +483,106 @@ async fn segment_counters_are_reported_for_release_rows() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkRecoveryRoundTrip() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("watermark", "roundtrip");
+    let def = big_qdef("watermark", "roundtrip");
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&def).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&shard, &seg_pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+    seg_trim_cycle(&log, &shard, 3, 0, 1_000);
+
+    let recovered = log.read_read_horizon(&shard).unwrap().unwrap();
+    let marker_keys: Vec<String> = store
+        .list(&manifest_head_prefix_s(&shard))
+        .unwrap()
+        .into_iter()
+        .filter(|key| {
+            store
+                .get(key)
+                .unwrap()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|obj| obj.get("compacted_through_index").cloned())
+                .is_some()
+        })
+        .collect();
+    assert!(
+        !marker_keys.is_empty(),
+        "trim writes a manifest watermark marker that recovery can read back"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&def).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        Some(recovered),
+        "reopen restores the same manifest deletion watermark"
+    );
+    assert_eq!(
+        reopened
+            .read_from(&shard, 4)
+            .unwrap()
+            .iter()
+            .map(|(pos, _)| pos.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "reopen still replays the live tail above the reclaimed prefix"
+    );
+
+    let reopened_again = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened_again.create_queue(&def).unwrap();
+    assert_eq!(
+        reopened_again.read_read_horizon(&shard).unwrap(),
+        Some(recovered),
+        "a second reopen preserves the same recovered watermark"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkLegacyBootstrap() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("watermark", "legacy");
+    let def = big_qdef("watermark", "legacy");
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&def).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&shard, &seg_pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+    seg_trim_cycle(&log, &shard, 3, 0, 1_000);
+
+    delete_watermark_marker(store.as_ref(), &shard);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&def).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "legacy manifests without the watermark marker bootstrap conservatively"
+    );
+    assert_eq!(
+        reopened
+            .read_all(&shard)
+            .unwrap()
+            .iter()
+            .map(|(pos, _)| pos.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "legacy bootstrap still reads the live tail after the reclaimed prefix"
+    );
 }
 
 /// Heavier FULL-GENESIS rebuild measurement (NOT the production snapshot+tail path — `rebuild_all` replays
