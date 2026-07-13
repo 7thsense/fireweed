@@ -1335,6 +1335,21 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             (buf.next_seq, buf.next_manifest_index, buf.committed_epoch)
         };
 
+        // Reclaim-time fence: if compaction has already advanced the durable read-horizon beyond this
+        // cached manifest index, the index was reclaimed and this stale writer must self-fence before any
+        // segment PUT. This stays on the O(1) seal hot path: one GET of `read_horizon.json`, not a manifest
+        // LIST or post-CAS rollback substitute (docs/perf/design/manifest-compaction-hotpath.md:359 and
+        // pqueue-c33c367e).
+        if let Some(horizon) = self.read_read_horizon(shard)?
+            && cur_index <= horizon
+        {
+            let mut g = self.inner.lock().expect("segmented log poisoned");
+            let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
+            buf.buffered_bytes = 0;
+            buf.oldest_buffered_ms = None;
+            return Err(EngineError::EpochFenced);
+        }
+
         self.fault(FaultCutPoint::BeforeSegmentWrite)?;
 
         // 3. Write the immutable, checksummed segment object (idempotent at its first-seq key). The segment

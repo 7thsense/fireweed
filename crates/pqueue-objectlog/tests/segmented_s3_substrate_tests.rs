@@ -2560,6 +2560,38 @@ fn trim_cycle<S: BlobStore>(
         .unwrap();
 }
 
+fn reclaimed_cached_writer_fixture() -> (
+    std::sync::Arc<CountingBlobStore>,
+    SegmentedObjectLog<std::sync::Arc<CountingBlobStore>>,
+    SegmentedObjectLog<std::sync::Arc<CountingBlobStore>>,
+) {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+
+    let stale_owner = SegmentedObjectLog::open(store.clone(), cfg);
+    stale_owner.create_queue(&qdef()).unwrap();
+    for i in 0..3u64 {
+        stale_owner
+            .enqueue(&shard(), &pushes(1), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        stale_owner
+            .seal(&shard(), 0, (i as i64 + 1) * 10 + 1)
+            .unwrap();
+    }
+
+    let live_owner = SegmentedObjectLog::open(store.clone(), cfg);
+    live_owner.create_queue(&qdef()).unwrap();
+    for i in 0..3u64 {
+        live_owner
+            .enqueue(&shard(), &pushes(1), 0, 200 + i as i64 * 10)
+            .unwrap();
+        live_owner.seal(&shard(), 0, 201 + i as i64 * 10).unwrap();
+    }
+    trim_cycle(&live_owner, &shard(), 3, 0, 1_000);
+
+    (store, stale_owner, live_owner)
+}
+
 /// Test 1 — read/recovery enumeration is bounded to LIVE (above-horizon) entries after repeated
 /// trim+advance-horizon cycles, and the watermark is monotonic. Below-floor manifest entries are now
 /// physically removed once they are no longer branch-pinned, so the remaining manifest object count drops
@@ -2748,7 +2780,88 @@ fn horizon_read_is_byte_identical_and_below_floor_fails_closed() {
     );
 }
 
-/// Test 4 — THE FENCE IS UNTOUCHED. A stale-epoch writer whose cached `next_manifest_index` points BELOW the
+/// Test 4 — a stale cached writer whose next index was reclaimed by manifest trimming cannot ack. The
+/// reclaimed manifest slot stays absent, and the stale seal returns `EpochFenced` or `Conflict` rather than
+/// creating a fresh durable entry at the freed address.
+#[test]
+#[allow(non_snake_case)]
+fn TestPermanentFenceSurvivesManifestReclaim() {
+    let (store, stale_owner, _live_owner) = reclaimed_cached_writer_fixture();
+
+    stale_owner.enqueue(&shard(), &pushes(1), 0, 5_000).unwrap();
+    let objects_before = store.inner.object_count();
+    let err = stale_owner.seal(&shard(), 0, 5_001).unwrap_err();
+    assert!(
+        matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+        "a reclaimed cached manifest index must not ack, got {err:?}"
+    );
+    assert!(
+        store.get(&manifest_key_s(&shard(), 3)).unwrap().is_none(),
+        "the reclaimed manifest slot stays absent after the stale seal"
+    );
+    assert!(
+        store
+            .get(&manifest_head_key_s(&shard(), 3))
+            .unwrap()
+            .is_none(),
+        "the authoritative manifest-head slot stays absent after the stale seal"
+    );
+    assert_eq!(
+        store.inner.object_count(),
+        objects_before,
+        "the stale seal must not write a fresh manifest or segment object"
+    );
+}
+
+/// Test 5 — the reclaim-fence rejection path keeps the seal hot path free of manifest LISTs. The seal
+/// returns from the durable read-horizon check without listing the manifest before every seal.
+#[test]
+#[allow(non_snake_case)]
+fn TestSealPathDoesNotListBeforeEveryFenceCheck() {
+    let (store, stale_owner, _live_owner) = reclaimed_cached_writer_fixture();
+
+    stale_owner.enqueue(&shard(), &pushes(1), 0, 5_000).unwrap();
+    store.reset_reads();
+    let err = stale_owner.seal(&shard(), 0, 5_001).unwrap_err();
+    assert!(
+        matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+        "the stale reclaimed index should fence cleanly, got {err:?}"
+    );
+    assert_eq!(
+        store.list_count.load(Ordering::Relaxed),
+        0,
+        "the reclaim fence path must not LIST the manifest"
+    );
+}
+
+/// Test 6 — correctness comes from the durable read-horizon fence, not a post-CAS tail-validate rollback
+/// substitute. The stale seal rejects before any manifest LIST / tail revalidation, and the code comments
+/// point at the hot-path design note and the deferred pqueue-c33c367e fence wiring.
+#[test]
+#[allow(non_snake_case)]
+fn TestNoTailValidateRollbackSubstituteForCachedWriter() {
+    let (store, stale_owner, _live_owner) = reclaimed_cached_writer_fixture();
+
+    stale_owner.enqueue(&shard(), &pushes(1), 0, 5_000).unwrap();
+    store.reset_reads();
+    let err = stale_owner.seal(&shard(), 0, 5_001).unwrap_err();
+    assert!(
+        matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+        "the stale reclaimed writer must fail on the durable fence, got {err:?}"
+    );
+    assert_eq!(
+        store.manifest_gets.load(Ordering::Relaxed),
+        0,
+        "no tail-validate rollback substitute should read the manifest after the CAS"
+    );
+    assert_eq!(
+        store.list_count.load(Ordering::Relaxed),
+        0,
+        "no rollback substitute should LIST the manifest either"
+    );
+}
+
+/// Test 7 — THE FENCE IS UNTOUCHED. A stale-epoch writer whose cached `next_manifest_index` points BELOW the
 /// advanced read-horizon is STILL fenced: the below-horizon manifest object was NEVER freed, so its
 /// `put_if_absent` still COLLIDES → CAS-lost → recover_manifest → EpochFenced. This is the whole safety
 /// argument — advancing the horizon must NOT free the address.
