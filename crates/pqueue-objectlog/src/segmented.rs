@@ -2111,10 +2111,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // same manifest snapshot used for deletion, so physical reclamation can happen without losing sight of
         // the reclaimed prefix before the watermark is persisted.
         //
-        // Protocol note: the deferred pqueue-c33c367e owner-fence wiring does not make the current index-CAS
-        // manifest protocol safe for delete-only compaction. We keep below-floor manifest addresses occupied so
-        // the collision fence stays intact; a cheaper delete-only variant would need the post-head-CAS protocol
-        // redesign, not this code path.
+        // Protocol note: the deferred pqueue-c33c367e owner-fence wiring was evaluated here and it does not
+        // buy a cheaper delete-only reclamation path on the current index-CAS protocol. Below-floor manifest
+        // addresses must stay occupied so the collision fence remains intact; freeing them would re-open the
+        // stale-writer false-ack risk. Any delete-only variant therefore waits on the post-head-CAS redesign,
+        // not this code path.
         let _ = self.advance_read_horizon_from_entries(source, through_seq, now_ms, &entries);
         Ok(deleted)
     }
