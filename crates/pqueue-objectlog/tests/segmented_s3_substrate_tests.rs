@@ -19,7 +19,6 @@
 //! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -107,6 +106,53 @@ impl BlobStore for CountingBlobStore {
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         self.list_count.fetch_add(1, Ordering::Relaxed);
+        self.inner.list(prefix)
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(prefix)
+    }
+}
+
+#[derive(Default)]
+struct MissingGetBlobStore {
+    inner: InMemoryBlobStore,
+    missing_get: Mutex<Option<String>>,
+}
+
+impl MissingGetBlobStore {
+    fn arm_missing_get(&self, key: &str) {
+        *self.missing_get.lock().unwrap() = Some(key.to_owned());
+    }
+}
+
+impl BlobStore for MissingGetBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        if self
+            .missing_get
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|missing| missing == key)
+        {
+            return Ok(None);
+        }
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         self.inner.list(prefix)
     }
 
@@ -4025,6 +4071,134 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
         log.read_all(&shard()).unwrap().len(),
         4,
         "without the horizon cache the trimmed queue still reads the live manifest list"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestLegacyManifestBootstrapWithoutDeletionWatermark() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let qdef = qdef();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef).unwrap();
+    for i in 0..2u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "legacy manifests without a deletion watermark bootstrap through the manifest path"
+    );
+    assert_eq!(
+        reopened.read_all(&shard).unwrap().len(),
+        4,
+        "the reopened queue still reads the committed legacy manifest tail"
+    );
+    assert_eq!(
+        reopened.current_epoch(&shard).unwrap(),
+        0,
+        "bootstrap without a deletion watermark preserves the permanent-head fence"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestLegacyManifestBootstrapDoesNotInferWatermarkFloor() {
+    let store = std::sync::Arc::new(MissingGetBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let qdef = qdef();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&shard, 3, 1_000).unwrap(),
+        2,
+        "the durable watermark is produced by the reclaim path before the cache is removed"
+    );
+    let floor_before = log.read_retention_floor(&shard).unwrap().unwrap();
+    assert_eq!(
+        floor_before.sequence, 3,
+        "the retention floor is still derived from the manifest"
+    );
+
+    delete_watermark_metadata(store.as_ref(), &shard);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "with no deletion watermark present, reopening falls back to the legacy manifest bootstrap"
+    );
+    assert_eq!(
+        reopened.read_retention_floor(&shard).unwrap().unwrap(),
+        floor_before,
+        "absent watermark state does not change the authoritative retention floor"
+    );
+
+    store.arm_missing_get(&manifest_head_key_s(&shard, 2));
+    let err = reopened.read_all(&shard).unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::Conflict,
+        "a listed-but-missing manifest entry is still treated as corruption, not intentional reclamation"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestLegacyManifestBootstrapPreservesPermanentFenceProtocol() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let qdef = qdef();
+
+    let owner_a = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_a.create_queue(&qdef).unwrap();
+    owner_a.enqueue(&shard, &pushes(2), 0, 10).unwrap();
+    owner_a.seal(&shard, 0, 11).unwrap();
+
+    delete_watermark_metadata(store.as_ref(), &shard);
+
+    let owner_b = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_b.create_queue(&qdef).unwrap();
+    assert_eq!(owner_b.acquire_epoch(&shard, 100).unwrap(), 1);
+    assert!(
+        owner_b.read_read_horizon(&shard).unwrap().is_none(),
+        "legacy bootstrap remains valid even with no deletion watermark state"
+    );
+    assert_eq!(
+        owner_b.current_epoch(&shard).unwrap(),
+        1,
+        "the permanent head object still carries the ownership fence"
+    );
+    assert!(
+        store
+            .get(&manifest_head_key_s(&shard, 1))
+            .unwrap()
+            .is_some(),
+        "the durable head object remains present after watermark absence"
+    );
+
+    owner_a.enqueue(&shard, &pushes(3), 0, 5_000).unwrap();
+    let err = owner_a.seal(&shard, 0, 5_001).unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::EpochFenced,
+        "the stale writer is still fenced by the permanent head CAS"
     );
 }
 
