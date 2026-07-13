@@ -3452,6 +3452,74 @@ fn TestPermanentFenceMarkerBlocksReclaimedIndex() {
     );
 }
 
+/// TestPermanentFenceSurvivesReopen: reopening the store reconstructs the durable reclaimed-index fence
+/// from recovery-visible marker history, even if the compatibility cache blob was removed.
+#[test]
+#[allow(non_snake_case)]
+fn TestPermanentFenceSurvivesReopen() {
+    let (store, stale_owner, live_owner) = reclaimed_cached_writer_fixture();
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let expected_watermark = live_owner.read_read_horizon(&shard).unwrap();
+
+    store.delete(&read_horizon_key_s(&shard)).unwrap();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        expected_watermark,
+        "the reopened log reconstructs the durable reclaimed-index fence from marker history"
+    );
+
+    stale_owner.enqueue(&shard, &pushes(1), 0, 5_000).unwrap();
+    let objects_before = store.inner.object_count();
+    let err = stale_owner.seal(&shard, 0, 5_001).unwrap_err();
+    assert!(
+        matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+        "the stale writer remains fenced after reopen, got {err:?}"
+    );
+    assert_eq!(
+        store.inner.object_count(),
+        objects_before,
+        "the stale seal must not publish a fresh segment or manifest object"
+    );
+}
+
+/// TestReopenFenceReloadsBeforeSeal: a fresh open reloads the reclaimed-index fence before the stale
+/// writer reaches seal, so the seal still self-fences instead of acking a reclaimed historical index.
+#[test]
+#[allow(non_snake_case)]
+fn TestReopenFenceReloadsBeforeSeal() {
+    let (store, stale_owner, live_owner) = reclaimed_cached_writer_fixture();
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let expected_watermark = live_owner.read_read_horizon(&shard).unwrap();
+
+    store.delete(&read_horizon_key_s(&shard)).unwrap();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        expected_watermark,
+        "open/recovery reloads the durable reclaimed-index fence before any seal runs"
+    );
+
+    stale_owner.enqueue(&shard, &pushes(1), 0, 5_000).unwrap();
+    let objects_before = store.inner.object_count();
+    let err = stale_owner.seal(&shard, 0, 5_001).unwrap_err();
+    assert!(
+        matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+        "seal fences before ack after the reopen reload, got {err:?}"
+    );
+    assert_eq!(
+        store.inner.object_count(),
+        objects_before,
+        "the stale writer must not emit a new durable object before it is fenced"
+    );
+}
+
 fn assert_reclaimed_cached_writer_rejects_before_ack() {
     let (store, stale_owner, _live_owner) = reclaimed_cached_writer_fixture();
 
