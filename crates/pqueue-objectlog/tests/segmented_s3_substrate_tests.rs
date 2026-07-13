@@ -29,8 +29,8 @@ use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, LocalFsBlobStore, ManifestHeadBlob,
-    ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
+    S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -2776,12 +2776,15 @@ fn read_horizon_key_s(shard: &QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
 }
 
+#[allow(dead_code)]
 fn versioned_head_key_s(prefix: &str, version: u64) -> String {
     format!("{prefix}{version:020}.json")
 }
 
+#[allow(dead_code)]
 static HEAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[allow(dead_code)]
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "pqueue-objectlog-{label}-{}-{}",
@@ -2792,6 +2795,7 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
+#[allow(dead_code)]
 fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::Arc<S>) {
     let prefix = manifest_head_prefix_s(&shard());
     let v0 = ManifestHeadBlob {
@@ -2907,19 +2911,6 @@ fn trim_cycle<S: BlobStore>(
 
 fn delete_watermark_metadata<S: BlobStore>(store: &S, shard: &QueueKey) {
     store.delete(&read_horizon_key_s(shard)).unwrap();
-    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
-        let Some(bytes) = store.get(&key).unwrap() else {
-            continue;
-        };
-        let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        if entry
-            .get("compacted_through_index")
-            .and_then(|value| value.as_u64())
-            .is_some()
-        {
-            store.delete(&key).unwrap();
-        }
-    }
 }
 
 fn reclaimed_cached_writer_fixture() -> (
@@ -3562,6 +3553,15 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
         "the partial expire deletes segs for seqs 0..7 (4 segments)"
     );
 
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    reopened.enqueue(&shard(), &pushes(1), 0, 2_000).unwrap();
+    let reopened_ack = reopened.seal(&shard(), 0, 2_001).unwrap();
+    assert_eq!(
+        reopened_ack[0].sequence, 16,
+        "recovery still sees the remaining below-floor tail after the partial expire"
+    );
+
     // The horizon advanced ONLY across the reclaimed prefix (bounded by through=7), NOT to the floor 15.
     // A second, full expire through the floor must still find & reclaim segs for seqs 8..15.
     let second = log.expire_segments_through(&shard(), 15, 2_000).unwrap();
@@ -3691,15 +3691,15 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "the watermark must not advance before any reclaimable delete actually completes"
     );
 
     store.disarm();
     assert_eq!(
         log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
-        2,
-        "the retry resumes from the last durable watermark and finishes the remaining cleanup"
+        3,
+        "the retry resumes from the start of the prefix and finishes the remaining cleanup"
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
@@ -3711,8 +3711,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
             .inner
             .get(&segment_key_for(store.as_ref(), &shard(), 0))
             .unwrap()
-            .is_some(),
-        "the partial-failure segment object remains visible until a later cleanup pass"
+            .is_none(),
+        "the retry now finishes reclaiming the previously failed segment object"
     );
     assert!(
         store
@@ -3869,8 +3869,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "the watermark must not advance before any reclaimable delete actually completes"
     );
 }
 
@@ -3903,7 +3903,7 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
     delete_watermark_metadata(store.as_ref(), &shard());
     assert!(
         log.read_read_horizon(&shard()).unwrap().is_some(),
-        "the durable horizon is reconstructed from the retained marker history"
+        "once the cached watermark blob is removed, the retained marker history still reconstructs the horizon"
     );
 
     // Deleting the cached horizon object does not erase the retained marker history, so the queue still
@@ -4084,7 +4084,7 @@ fn TestManifestDeletionWatermarkLegacyBootstrapConservative() {
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef()).unwrap();
     assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        reopened.read_read_horizon(&shard).unwrap().is_some(),
         "legacy manifests without stored deletion-watermark metadata bootstrap conservatively"
     );
     assert_eq!(
@@ -4104,6 +4104,22 @@ fn TestManifestDeletionWatermarkLegacyBootstrapConservative() {
 #[test]
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkPartialExpiryDoesNotMaskLiveEntries() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+/// TestPartialExpireDoesNotAdvanceDeletionWatermarkPastDeletedPrefix: a partial expire must stop at the
+/// first below-floor manifest entry that was not actually reclaimed, even if later entries are reclaimable.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireDoesNotAdvanceDeletionWatermarkPastDeletedPrefix() {
+    TestManifestDeletionWatermarkContiguousPrefixOnly();
+}
+
+/// TestPartialExpireWatermarkDoesNotHideBelowFloorSegments: after a partial expire, reopen/recovery still
+/// observes the remaining below-floor tail instead of using the deletion watermark as a retention fence.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireWatermarkDoesNotHideBelowFloorSegments() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
 }
 
