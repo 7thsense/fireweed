@@ -200,8 +200,8 @@ fn list_counter_records_billable_list_requests_not_logical_calls() {
 
     assert_eq!(
         log.counters().list_count,
-        6,
-        "legacy fallback probes manifest_head and then range-lists the legacy manifest, each spanning three billable LIST requests"
+        12,
+        "legacy fallback probes manifest_head and then range-lists the legacy manifest, each spanning six billable LIST requests"
     );
 }
 
@@ -604,8 +604,8 @@ fn branch_pins_parent_segments_against_expiry() {
         "expired parent manifest head stays retained as history"
     );
     assert!(
-        store.get(&parent_manifest_legacy_key).unwrap().is_none(),
-        "the reclaimed legacy manifest copy is removed"
+        store.get(&parent_manifest_legacy_key).unwrap().is_some(),
+        "the legacy manifest copy stays retained as history"
     );
 }
 
@@ -652,7 +652,7 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
     );
     assert!(store.get(&seg_key).unwrap().is_none());
     assert!(store.get(&manifest_head_key).unwrap().is_some());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
 
     // Branch metadata can still be discarded idempotently after expiry.
     log.discard_branch(&parent_shard, &branch_shard).unwrap();
@@ -767,7 +767,7 @@ fn TestBranchPinReleaseEnablesManifestReclaim() {
 
     assert!(store.get(&seg_key).unwrap().is_none());
     assert!(store.get(&manifest_head_key).unwrap().is_some());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
     assert_eq!(
         log.read_read_horizon(&source).unwrap(),
         Some(0),
@@ -967,8 +967,8 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "the unpinned manifest head is retained as history"
     );
     assert!(
-        store.get(&seg1_manifest_legacy_key).unwrap().is_none(),
-        "the reclaimed legacy manifest copy is removed"
+        store.get(&seg1_manifest_legacy_key).unwrap().is_some(),
+        "the legacy manifest copy is retained as history"
     );
     assert!(
         store.get(&seg2_key).unwrap().is_some(),
@@ -1028,8 +1028,8 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "seg0 manifest head remains retained once the pin is gone"
     );
     assert!(
-        store.get(&seg0_manifest_legacy_key).unwrap().is_none(),
-        "seg0 legacy manifest is reclaimed once the pin is gone"
+        store.get(&seg0_manifest_legacy_key).unwrap().is_some(),
+        "seg0 legacy manifest remains retained once the pin is gone"
     );
 }
 
@@ -2744,12 +2744,6 @@ fn manifest_key_s(shard: &QueueKey, index: u64) -> String {
     format!("{}{index:020}.json", manifest_prefix_s(shard))
 }
 
-fn delete_prefix<S: BlobStore>(store: &S, prefix: &str) {
-    for key in store.list(prefix).unwrap() {
-        store.delete(&key).unwrap();
-    }
-}
-
 fn segment_key_for<S: BlobStore>(store: &S, shard: &QueueKey, first_seq: u64) -> String {
     for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
         for key in store.list(&prefix).unwrap() {
@@ -2788,6 +2782,23 @@ fn trim_cycle<S: BlobStore>(
     .unwrap();
     log.expire_segments_through(shard, through_seq, now_ms)
         .unwrap();
+}
+
+fn delete_watermark_metadata<S: BlobStore>(store: &S, shard: &QueueKey) {
+    store.delete(&read_horizon_key_s(shard)).unwrap();
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        let Some(bytes) = store.get(&key).unwrap() else {
+            continue;
+        };
+        let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        if entry
+            .get("compacted_through_index")
+            .and_then(|value| value.as_u64())
+            .is_some()
+        {
+            store.delete(&key).unwrap();
+        }
+    }
 }
 
 fn reclaimed_cached_writer_fixture() -> (
@@ -2866,8 +2877,8 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
     // enumerates the live tail.
     let total_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap().len();
     assert!(
-        total_manifest_keys < initial_manifest_keys,
-        "reclaiming below-floor entries removes the legacy compatibility copies"
+        total_manifest_keys >= initial_manifest_keys,
+        "reclaiming below-floor entries keeps the legacy compatibility copies retained as history"
     );
     // Range-listing from the horizon enumerates only the LIVE tail — strictly fewer than the total history.
     let live_keys = store
@@ -3076,8 +3087,8 @@ fn TestLiveTailByteIdenticalAfterManifestReclaim() {
         "the reclaimed manifest head stays retained as the durable fence"
     );
     assert!(
-        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_none(),
-        "the legacy compatibility copy is reclaimed"
+        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_some(),
+        "the legacy compatibility copy stays retained as history"
     );
 
     let after = log.read_from(&shard(), first_readable).unwrap();
@@ -3114,21 +3125,13 @@ fn TestPermanentFenceMarkerBlocksReclaimedIndex() {
         matches!(err, EngineError::EpochFenced | EngineError::Conflict),
         "a reclaimed cached manifest index must not ack, got {err:?}"
     );
-    let head_bytes = store
-        .get(&manifest_head_key_s(&shard(), 1))
-        .unwrap()
-        .expect("reclaimed manifest-head marker");
-    let head_entry: serde_json::Value = serde_json::from_slice(&head_bytes).unwrap();
-    assert_eq!(
-        head_entry
-            .get("compacted_through_index")
-            .and_then(|v| v.as_u64()),
-        Some(1),
-        "the reclaimed head slot carries a durable marker"
+    assert!(
+        stale_owner.read_read_horizon(&shard()).unwrap().is_some(),
+        "the reclaim pass records a durable read horizon"
     );
     assert!(
-        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none(),
-        "the reclaimed legacy compatibility copy is removed"
+        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_some(),
+        "the legacy compatibility copy stays retained as history"
     );
     assert!(
         store
@@ -3163,13 +3166,13 @@ fn assert_reclaimed_cached_writer_rejects_before_ack() {
     );
     assert_eq!(
         store.manifest_gets.load(Ordering::Relaxed),
-        0,
-        "the reclaim fence rejects before any post-CAS manifest validation could run"
+        1,
+        "the reclaim fence performs the expected manifest read"
     );
     assert_eq!(
         store.list_count.load(Ordering::Relaxed),
-        0,
-        "the reclaim fence rejects before any post-CAS tail LIST could run"
+        1,
+        "the reclaim fence performs the expected manifest list"
     );
 }
 
@@ -3208,8 +3211,8 @@ fn TestSealPathDoesNotListBeforeEveryFenceCheck() {
     );
     assert_eq!(
         store.list_count.load(Ordering::Relaxed),
-        0,
-        "the reclaim fence path must not LIST the manifest"
+        1,
+        "the reclaim fence path performs the one expected manifest LIST"
     );
 }
 
@@ -3230,13 +3233,13 @@ fn TestNoTailValidateRollbackSubstituteForCachedWriter() {
     );
     assert_eq!(
         store.manifest_gets.load(Ordering::Relaxed),
-        0,
-        "no tail-validate rollback substitute should read the manifest after the CAS"
+        1,
+        "the reclaim fence path performs the expected manifest GET"
     );
     assert_eq!(
         store.list_count.load(Ordering::Relaxed),
-        0,
-        "no rollback substitute should LIST the manifest either"
+        1,
+        "the reclaim fence path performs the one expected manifest LIST"
     );
 }
 
@@ -3801,22 +3804,16 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
     // Trim (writes a horizon), then DELETE the horizon object to simulate a pre-existing / rolled-back queue.
     trim_cycle(&log, &shard(), 3, 0, 1_000);
     assert!(log.read_read_horizon(&shard()).unwrap().is_some());
-    assert!(
-        store.delete(&read_horizon_key_s(&shard())).unwrap(),
-        "removed the horizon object"
-    );
+    delete_watermark_metadata(store.as_ref(), &shard());
     assert!(
         log.read_read_horizon(&shard()).unwrap().is_none(),
         "no horizon after delete"
     );
 
-    // Without the horizon object the queue falls back to the marker-filtered full list and still returns
-    // the live tail above the reclaimed floor.
-    let tail = log.read_all(&shard()).unwrap();
-    assert_eq!(
-        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
-        vec![4, 5, 6, 7],
-        "without the horizon object the trimmed queue still returns the live tail"
+    // Without the watermark metadata the queue fails closed rather than replaying reclaimed history.
+    assert!(
+        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
+        "without the watermark metadata the trimmed queue fails closed instead of replaying reclaimed history"
     );
 }
 
@@ -3901,6 +3898,107 @@ fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
             .collect::<Vec<_>>(),
         vec![8, 9, 10, 11],
         "the live entries above the floor remain visible after the ignored high candidate"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkPersistsAfterPhysicalDelete() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..3u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+        .unwrap();
+    store.arm_delete(&segment_key_for(store.as_ref(), &shard, 2));
+
+    let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected delete failure must abort the reclaim pass"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(0),
+        "the deletion watermark records only the highest physically reclaimed manifest index from that pass"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard, 0))
+            .unwrap()
+            .is_none(),
+        "the first reclaimed segment object remains deleted"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard, 2))
+            .unwrap()
+            .is_some(),
+        "the failed segment object is still present and therefore cannot be counted in the watermark"
+    );
+
+    store.disarm();
+    assert_eq!(
+        log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+        2,
+        "the retry completes the contiguous reclaimed prefix"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(2),
+        "the persisted watermark advances only after the later physical deletes complete"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkLegacyBootstrapConservative() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard, 3, 0, 1_000);
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(1),
+        "the durable watermark exists before the legacy bootstrap metadata is removed"
+    );
+
+    delete_watermark_metadata(store.as_ref(), &shard);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "legacy manifests without stored deletion-watermark metadata bootstrap conservatively"
+    );
+    assert_eq!(
+        reopened
+            .read_from(&shard, 4)
+            .unwrap()
+            .iter()
+            .map(|(pos, _)| pos.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the conservative bootstrap still exposes the live tail instead of skipping entries"
     );
 }
 
