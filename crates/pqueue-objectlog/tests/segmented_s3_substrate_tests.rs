@@ -764,7 +764,7 @@ fn TestBranchPinReleaseEnablesManifestReclaim() {
 
 #[test]
 #[allow(non_snake_case)]
-fn TestBranchPinRulesUnchangedByManifestReclaim() {
+fn TestBranchPinRulesUnchanged() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3360,12 +3360,13 @@ fn ac_txn_3_fresh_log_recovers_identically_after_horizon_advance() {
     );
 }
 
-/// Test 8 — a PARTIAL expire (through_seq < durable floor) must NOT advance the read-horizon past segments it
-/// did NOT actually delete: a later full expire must still find and reclaim them (no storage leak). Guards the
-/// finding that binding the horizon to the floor (rather than the reclaimed boundary) would hide undeleted
-/// below-floor segments from a future trim.
+/// TestManifestWatermarkPartialExpireVisibility — a PARTIAL expire (through_seq < durable floor) must NOT
+/// advance the read-horizon past segments it did NOT actually delete: a later full expire must still find and
+/// reclaim them (no storage leak). Guards the finding that binding the horizon to the floor (rather than the
+/// reclaimed boundary) would hide undeleted below-floor segments from a future trim.
 #[test]
-fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
+#[allow(non_snake_case)]
+fn TestManifestWatermarkPartialExpireVisibility() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
