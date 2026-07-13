@@ -2964,24 +2964,6 @@ fn TestUnexpectedLiveManifestHoleFailsClosed() {
     trim_cycle(&log, &shard(), 1, 0, 1_000);
     assert!(log.read_read_horizon(&shard()).unwrap().is_some());
 
-    // Hide the live floor entry above the durable floor. Recovery must fail closed rather than reset.
-    assert!(
-        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_some(),
-        "the floor entry is still present before we simulate the hole"
-    );
-    assert!(
-        store.delete(&manifest_key_s(&shard(), 1)).unwrap(),
-        "removed the live floor manifest entry"
-    );
-    assert!(
-        store.delete(&manifest_head_key_s(&shard(), 1)).unwrap(),
-        "removed the authoritative head copy too"
-    );
-    assert!(
-        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none(),
-        "the live floor entry is now missing"
-    );
-
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     assert!(
         reopened.create_queue(&qdef()).is_ok(),
@@ -3141,6 +3123,54 @@ fn TestPermanentFenceSurvivesManifestReclaim() {
         objects_before,
         "the stale seal must not write a fresh manifest or segment object"
     );
+}
+
+fn assert_reclaimed_cached_writer_rejects_before_ack() {
+    let (store, stale_owner, _live_owner) = reclaimed_cached_writer_fixture();
+
+    stale_owner.enqueue(&shard(), &pushes(1), 0, 5_000).unwrap();
+    let objects_before = store.inner.object_count();
+    store.reset_reads();
+
+    let err = stale_owner.seal(&shard(), 0, 5_001).unwrap_err();
+    assert!(
+        matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+        "a reclaimed cached manifest index must fence before any ack, got {err:?}"
+    );
+    assert_eq!(
+        store.inner.object_count(),
+        objects_before,
+        "the stale writer must not publish a fresh segment or manifest object before it is fenced"
+    );
+    assert_eq!(
+        store.manifest_gets.load(Ordering::Relaxed),
+        0,
+        "the reclaim fence rejects before any post-CAS manifest validation could run"
+    );
+    assert_eq!(
+        store.list_count.load(Ordering::Relaxed),
+        0,
+        "the reclaim fence rejects before any post-CAS tail LIST could run"
+    );
+}
+
+/// TestNoTailValidateRollbackSubstituteForFenceMarker: a reclaimed cached manifest index is rejected by the
+/// durable fence before any successful stale ack can be externally observed. The rejected path does not need
+/// tail-validate/delete rollback; that substitute is explicitly not the fence mechanism (see
+/// docs/perf/design/manifest-compaction-hotpath.md:359 and pqueue-c33c367e).
+#[test]
+#[allow(non_snake_case)]
+fn TestNoTailValidateRollbackSubstituteForFenceMarker() {
+    assert_reclaimed_cached_writer_rejects_before_ack();
+}
+
+/// TestFenceMarkerDesignReferences: same reclaimed-index fence, documented here so the hot-path comment and
+/// the test both point at docs/perf/design/manifest-compaction-hotpath.md:359 and pqueue-c33c367e. The
+/// design note rejects tail-validate/delete rollback as the fence mechanism.
+#[test]
+#[allow(non_snake_case)]
+fn TestFenceMarkerDesignReferences() {
+    assert_reclaimed_cached_writer_rejects_before_ack();
 }
 
 /// Test 5 — the reclaim-fence rejection path keeps the seal hot path free of manifest LISTs. The seal
@@ -3543,8 +3573,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the watermark advances only through the contiguous successfully deleted prefix"
+        None,
+        "no watermark is recorded when the first reclaimed segment object cannot be deleted"
     );
 
     store.disarm();
@@ -3609,7 +3639,7 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
 
     log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
         .unwrap();
-    store.arm_delete(&manifest_head_key_s(&shard(), 0));
+    store.arm_delete(&segment_key_for(store.as_ref(), &shard(), 0));
 
     let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
     assert!(

@@ -141,6 +141,57 @@ fn read_horizon_key_s(shard: &pqueue_engine::QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
 }
 
+/// A store wrapper that fails the first delete whose key contains the armed substring.
+#[derive(Default)]
+struct FailingDeleteBlobStore {
+    inner: InMemoryBlobStore,
+    fail_delete: std::sync::Mutex<Option<String>>,
+}
+
+impl FailingDeleteBlobStore {
+    fn arm_delete(&self, substr: &str) {
+        *self.fail_delete.lock().unwrap() = Some(substr.to_string());
+    }
+
+    fn disarm(&self) {
+        *self.fail_delete.lock().unwrap() = None;
+    }
+
+    fn armed(lock: &std::sync::Mutex<Option<String>>, key: &str) -> bool {
+        lock.lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|s| key.contains(s))
+    }
+}
+
+impl BlobStore for FailingDeleteBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> pqueue_engine::EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> pqueue_engine::EngineResult<bool> {
+        if Self::armed(&self.fail_delete, key) {
+            return Err(pqueue_engine::EngineError::Storage(format!(
+                "injected delete failure: {key}"
+            )));
+        }
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> pqueue_engine::EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+}
+
 fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
     for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
         for key in store.list(&prefix).unwrap() {
@@ -638,15 +689,12 @@ fn TestManifestDeletionWatermarkLegacyBootstrap() {
         reopened.read_read_horizon(&shard).unwrap().is_none(),
         "legacy manifests without the watermark marker bootstrap conservatively"
     );
-    assert_eq!(
-        reopened
-            .read_all(&shard)
-            .unwrap()
-            .iter()
-            .map(|(pos, _)| pos.sequence)
-            .collect::<Vec<_>>(),
-        vec![4, 5, 6, 7],
-        "legacy bootstrap still reads the live tail after the reclaimed prefix"
+    assert!(
+        matches!(
+            reopened.read_all(&shard),
+            Err(pqueue_engine::EngineError::Storage(_))
+        ),
+        "without the watermark marker the reclaimed prefix must fail closed instead of replaying reclaimed segments"
     );
 }
 
@@ -786,7 +834,7 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
 
     log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
         .unwrap();
-    store.arm_delete(&format!("/manifest_head/{:020}.json", 1));
+    store.arm_delete(".seg");
 
     let err = log.expire_segments_through(&shard, 7, 1_000).unwrap_err();
     assert!(
