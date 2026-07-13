@@ -1,0 +1,124 @@
+   Compiling pqueue-engine v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.27s
+     Running unittests src/lib.rs (target/debug/deps/pqueue_engine-c2dd85ce6095d9c5)
+
+running 94 tests
+test active_scope::tests::empty_queue_id_defaults_to_group_then_is_rejected ... ok
+test active_scope::tests::default_granularity_depends_on_queue_presence ... ok
+test active_scope::tests::group_discovery_requires_queue_and_nonzero_max ... ok
+test active_scope::tests::empty_rollup_is_empty ... ok
+test active_scope::tests::group_projection_is_identity ... ok
+test active_scope::tests::sum_optional_treats_none_as_no_signal_not_zero ... ok
+test active_scope::tests::queue_rollup_takes_max_age_and_sums_counts ... ok
+test auth::tests::authorize_operator_requires_operator_prefix ... ok
+test auth::tests::authorize_tenant_allows_member_denies_others ... ok
+test auth::tests::lease_token_is_hashed_and_redacted ... ok
+test claim_validation::tests::default_is_item_unit ... ok
+test claim_validation::tests::bad_group_key_charset_rejected ... ok
+test claim_validation::tests::group_batching_requires_max_group_size ... ok
+test claim_validation::tests::group_batching_rejects_zero_max_groups_and_combinations ... ok
+test claim_validation::tests::same_group_key_unit ... ok
+test claim_validation::tests::whole_cohort_extra_rejections_and_valid_group_key ... ok
+test claim_validation::tests::whole_cohort_requires_enabled_and_bound ... ok
+test command::serde_tests::cohort_expired_synthesizes_per_member_terminal_records ... ok
+test command::serde_tests::change_record_synthesis_cohort_variants ... ok
+test command::serde_tests::cohort_finalize_synthesizes_per_member_terminal_records ... ok
+test command::serde_tests::finalize_retry_exhaustion_synthesizes_terminal_failed_record ... ok
+test command::serde_tests::hybrid_request_id_envelopes_require_replay_metadata ... ok
+test command::serde_tests::intake_blocking_pause_round_trips_through_json ... ok
+test command::serde_tests::legacy_envelope_defaults_request_replay_metadata ... ok
+test command::serde_tests::test_change_record_batch_preserves_command_position_order ... ok
+test command::serde_tests::every_command_variant_round_trips_through_json ... ok
+test command::serde_tests::test_change_record_idempotency_key_includes_tenant_queue_item_backend_epoch_sequence ... ok
+test command::serde_tests::payload_bytes_and_priority_survive_round_trip ... ok
+test compose::ordered_tests::change_record_cursor_advances_only_after_successful_emit ... ok
+test compose::ordered_tests::composed_terminal_reap_on_reclaim_loop ... ok
+test compose::ordered_tests::change_record_tail_is_emitted_in_command_position_order ... ok
+test compose::ordered_tests::composed_terminal_reap_waits_for_durable_emission_cursor ... ok
+test compose::ordered_tests::emission_cursor_failover_keeps_stable_dedup_key ... ok
+test compose::ordered_tests::pause_blocks_claims_and_optionally_intake ... ok
+test compose::poison_tests::hard_backpressure_without_poison_replays_from_genesis_not_the_lagging_high_water ... ok
+test compose::poison_tests::healthy_empty_projection_replays_from_genesis ... ok
+test compose::ordered_tests::ordered_hybrid_async_barrier_force_seals_before_claims_and_applies_before_release ... ok
+test compose::poison_tests::healthy_projection_trusts_its_recovery_high_water ... ok
+test compose::poison_tests::poison_high_water_never_advances_past_the_poison_point ... ok
+test compose::ordered_tests::emission_cursor_recovers_from_crash_without_skipping ... ok
+test control_plane::tests::a_different_owners_live_lease_blocks_acquire ... ok
+test compose::poison_tests::poison_stops_recovery_by_failing_closed ... ok
+test control_plane::tests::a_superseded_owner_is_fenced_on_renew_after_handoff ... ok
+test control_plane::tests::acquire_records_the_new_epoch_before_returning ... ok
+test compose::poison_tests::poison_takes_precedence_over_hard_backpressure ... ok
+test control_plane::tests::expired_lease_is_reclaimable_at_a_strictly_greater_epoch ... ok
+test control_plane::tests::full_lifecycle_acquire_renew_drain_release_reacquire ... ok
+test control_plane::tests::hrw_spreads_queues_and_moves_only_a_fraction_when_an_owner_leaves ... ok
+test control_plane::tests::renew_fails_closed_on_stale_epoch_wrong_owner_or_expiry ... ok
+test compose::ordered_tests::pause_does_not_alter_lease_clock ... ok
+test control_plane::tests::no_live_owner_resolves_to_no_target ... ok
+test control_plane::tests::unregistered_or_dead_owner_cannot_acquire ... ok
+test density::tests::admit_evicts_the_least_recently_used ... ok
+test control_plane::tests::the_same_owner_reacquiring_its_lapsed_lease_preserves_the_epoch ... ok
+test control_plane::tests::resolve_is_a_deterministic_pure_function_of_queue_and_live_set ... ok
+test control_plane::tests::epoch_strictly_increases_across_every_ownership_change ... ok
+test density::tests::batched_renewal_renews_all_resident_leases_in_one_pass ... ok
+test control_plane::tests::the_same_owner_reaffirming_its_live_lease_preserves_the_epoch ... ok
+test density::tests::batched_renewal_sheds_a_fenced_queue ... ok
+test density::tests::eviction_surfaces_the_lease_for_release_so_resources_are_actually_bounded ... ok
+test density::tests::re_admitting_a_resident_queue_evicts_nothing ... ok
+test finalize_validation::tests::rearm_missing_not_before_wins_over_until ... ok
+test error::commit_rejection_tests::commit_rejections_round_trip_identically ... ok
+test finalize_validation::tests::rearm_past_until_is_terminal ... ok
+test idempotency::tests::same_request_different_body_conflicts ... ok
+test finalize_validation::tests::finalize_targeting_requires_target_and_lease ... ok
+test idempotency::tests::replay_rebuilds_from_the_retained_window ... ok
+test idempotency::tests::same_request_same_body_replays_cached_outcome ... ok
+test operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact ... ok
+test operator::tests::dedup_is_permanent_no_retention_window ... ok
+test operator::tests::check_then_record_flow_never_starts_a_second_operation ... ok
+test finalize_validation::tests::purge_targeting_and_force_gate ... ok
+test operator::tests::get_returns_recorded_operation_and_none_for_unknown ... ok
+test operator::tests::new_create_is_not_yet_anchored ... ok
+test operator::tests::different_body_same_request_is_conflict ... ok
+test operator::tests::replay_same_request_returns_same_operation ... ok
+test operator::tests::store_is_reconstructable_by_replaying_the_record_log ... ok
+test finalize_validation::tests::rearm_requires_recurring_and_not_before ... ok
+test ownership::tests::an_assigned_owner_serving_is_not_an_ownership_violation ... ok
+test ownership::tests::no_eligible_work_is_never_a_violation ... ok
+test ownership::tests::unowned_or_draining_past_the_bound_is_a_violation ... ok
+test ownership::tests::unowned_within_the_bound_is_not_yet_a_violation ... ok
+test tests::canonical_resp_tokens_match_td006 ... ok
+test tests::command_position_is_shard_local_monotonic ... ok
+test finalize_validation::tests::finalize_target_and_lease_families_are_independent ... ok
+test idempotency::tests::check_then_record_flow_never_overwrites_a_live_outcome ... ok
+test tests::durability_class_gates_upsert ... ok
+test tests::gate_validation_rejects_when_capability_absent ... ok
+test idempotency::tests::new_request_proceeds ... ok
+test tests::pause_error_is_structured ... ok
+test idempotency::tests::expired_entry_reports_expired_then_compacts ... ok
+test operator::tests::advance_progresses_until_terminal_then_is_frozen ... ok
+test control_plane::tests::concurrent_acquires_linearize_to_distinct_strictly_increasing_epochs ... ok
+test density::tests::resident_set_stays_bounded_as_queue_count_grows_to_1000 ... ok
+
+test result: ok. 94 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/dependency_direction.rs (target/debug/deps/dependency_direction-d703e4e8dfa0bbba)
+
+running 1 test
+test domain_crates_do_not_depend_on_adapters ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/read_as_of.rs (target/debug/deps/read_as_of-5486a8f5df7a3fb0)
+
+running 1 test
+test read_as_of_reconstructs_prior_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pqueue_engine
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+__EXIT_CODE__=0
