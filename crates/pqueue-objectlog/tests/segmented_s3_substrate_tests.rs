@@ -660,7 +660,7 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
 
 #[test]
 #[allow(non_snake_case)]
-fn TestBranchPinnedManifestNotDeleted() {
+fn TestManifestReclamationWatermarkStopsAtPinnedBranches() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3367,13 +3367,13 @@ fn ac_txn_3_fresh_log_recovers_identically_after_horizon_advance() {
     );
 }
 
-/// TestManifestWatermarkPartialExpireVisibility — a PARTIAL expire (through_seq < durable floor) must NOT
+/// partial_expire_does_not_hide_undeleted_below_floor_segments — a PARTIAL expire (through_seq < durable floor) must NOT
 /// advance the read-horizon past segments it did NOT actually delete: a later full expire must still find and
 /// reclaim them (no storage leak). Guards the finding that binding the horizon to the floor (rather than the
 /// reclaimed boundary) would hide undeleted below-floor segments from a future trim.
 #[test]
 #[allow(non_snake_case)]
-fn TestManifestWatermarkPartialExpireVisibility() {
+fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3418,7 +3418,7 @@ fn TestManifestWatermarkPartialExpireVisibility() {
 /// monotonically and survives reopen/recovery, while staying below the durable floor.
 #[test]
 #[allow(non_snake_case)]
-fn TestManifestDeletionWatermarkAdvancesAfterCleanup() {
+fn TestManifestReclamationAdvancesWatermarkAfterDeleteProgress() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3491,11 +3491,11 @@ fn TestManifestDeletionWatermarkAdvancesAfterCleanup() {
     );
 }
 
-/// Test 10 — when below-floor manifest cleanup fails partway through, the durable watermark does not skip
-/// the remaining undeleted manifest objects and a retry resumes from the last committed watermark.
+/// Test 10 — when below-floor manifest cleanup fails partway through, the durable watermark advances only
+/// through the contiguous successfully deleted range and a retry resumes from the last committed watermark.
 #[test]
 #[allow(non_snake_case)]
-fn TestManifestDeletionWatermarkPartialExpiryRetry() {
+fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     let store = std::sync::Arc::new(FailingBlobStore::default());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3524,9 +3524,10 @@ fn TestManifestDeletionWatermarkPartialExpiryRetry() {
             .is_some(),
         "the not-yet-fully-deleted manifest object remains present after the partial failure"
     );
-    assert!(
-        log.read_read_horizon(&shard()).unwrap().is_none(),
-        "the watermark must not advance on a partial cleanup failure"
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        Some(0),
+        "the watermark advances only through the contiguous successfully deleted prefix"
     );
 
     store.disarm();
@@ -3535,8 +3536,9 @@ fn TestManifestDeletionWatermarkPartialExpiryRetry() {
         1,
         "the retry resumes from the last durable watermark and finishes the remaining cleanup"
     );
-    assert!(
-        log.read_read_horizon(&shard()).unwrap().is_some(),
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        Some(2),
         "the watermark is persisted once cleanup completes"
     );
     assert!(
@@ -3554,6 +3556,37 @@ fn TestManifestDeletionWatermarkPartialExpiryRetry() {
             .unwrap()
             .is_none(),
         "the retry also removes the remaining below-floor manifest object"
+    );
+}
+
+/// Test 11 — if the first reclaimable delete fails, the durable watermark stays unchanged.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..3u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
+        .unwrap();
+    store.arm_delete(&manifest_head_key_s(&shard(), 0));
+
+    let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected delete failure must surface as a storage error, got {err:?}"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        None,
+        "the watermark stays unchanged when no safe contiguous progress exists"
     );
 }
 
