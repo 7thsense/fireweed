@@ -325,6 +325,218 @@ fn seal_head_cas_ack_boundary_preserves_replay_semantics() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `TestReplayAcrossRestartWithHeadAndDeletion`: restart after object-log crashes around the manifest head
+/// and segment deletion must replay committed commands exactly once and keep orphan/stale attempts rejected.
+#[test]
+fn replay_across_restart_with_head_and_deletion() {
+    // Crash after the segment object is written but before the manifest head CAS. The orphan must stay
+    // unreachable across restart, and a clean retry must not be confused by it.
+    {
+        let root = tmp_root("restart-orphan");
+        let shard = shard();
+        let mut log = ObjectLog::open(root.clone()).expect("open");
+        log.ensure_shard(&shard).unwrap();
+        log.set_fault_hook(Some(Arc::new(CrashAt(
+            FaultCutPoint::AfterSegmentWriteBeforeManifest,
+        ))));
+        assert!(
+            log.append(&shard, &[push_env("20")], 0).is_err(),
+            "the orphaned segment must not ack"
+        );
+        assert!(
+            log.read_from(&shard, None, 10).unwrap().entries.is_empty(),
+            "the orphan segment must stay invisible before restart"
+        );
+        drop(log);
+
+        let mut reopened = ObjectLog::open(root.clone()).expect("reopen");
+        reopened.ensure_shard(&shard).unwrap();
+        assert!(
+            reopened
+                .read_from(&shard, None, 10)
+                .unwrap()
+                .entries
+                .is_empty(),
+            "restart must not surface the orphan segment"
+        );
+        reopened
+            .append(&shard, &[push_env("21")], 0)
+            .expect("retry after orphan");
+        let entries = reopened.read_from(&shard, None, 10).unwrap().entries;
+        assert_eq!(
+            entries.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+            vec![0],
+            "the retried command is committed exactly once after restart"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Crash after the manifest head CAS but before the caller sees the ack. Restart must replay the
+    // committed command exactly once and keep the next append contiguous.
+    {
+        let root = tmp_root("restart-head-cas");
+        let shard = shard();
+        let mut log = ObjectLog::open(root.clone()).expect("open");
+        log.ensure_shard(&shard).unwrap();
+        log.set_fault_hook(Some(Arc::new(CrashAt(
+            FaultCutPoint::AfterManifestBeforeAck,
+        ))));
+        assert!(
+            log.append(&shard, &[push_env("30")], 0).is_err(),
+            "the post-head/pre-ack fault must withhold the ack"
+        );
+        drop(log);
+
+        let mut reopened = ObjectLog::open(root.clone()).expect("reopen");
+        reopened.ensure_shard(&shard).unwrap();
+        let replayed = reopened.read_from(&shard, None, 10).unwrap().entries;
+        assert_eq!(
+            replayed.len(),
+            1,
+            "the committed command must replay exactly once after restart"
+        );
+        assert_eq!(replayed[0].0.sequence, 0);
+        let next = reopened
+            .append(&shard, &[push_env("31")], 0)
+            .expect("append after replay");
+        assert_eq!(next[0].sequence, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Crash during owner reassignment. The fence survives restart and stale-epoch writes remain rejected.
+    {
+        let root = tmp_root("restart-owner-reassignment");
+        let shard = shard();
+        let mut log = ObjectLog::open(root.clone()).expect("open");
+        log.ensure_shard(&shard).unwrap();
+        log.set_fault_hook(Some(Arc::new(CrashAt(
+            FaultCutPoint::DuringOwnerReassignment,
+        ))));
+        assert!(
+            log.acquire_epoch(&shard).is_err(),
+            "the owner-reassignment fault must abort acquire_epoch"
+        );
+        drop(log);
+
+        let mut reopened = ObjectLog::open(root.clone()).expect("reopen");
+        reopened.ensure_shard(&shard).unwrap();
+        assert_eq!(reopened.current_epoch(&shard).unwrap(), 1);
+        let stale = reopened.append(&shard, &[push_env("40")], 0);
+        assert!(
+            matches!(
+                stale,
+                Err(EngineError::EpochFenced) | Err(EngineError::Conflict)
+            ),
+            "a stale writer must stay fenced after restart; got {stale:?}"
+        );
+        assert!(
+            reopened.append(&shard, &[push_env("41")], 1).is_ok(),
+            "the current owner must still be able to append after restart"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Crash during snapshot write. Restart must preserve the log and not publish a snapshot ref.
+    {
+        let root = tmp_root("restart-snapshot-write");
+        let shard = shard();
+        let mut log = ObjectLog::open(root.clone()).expect("open");
+        log.ensure_shard(&shard).unwrap();
+        let positions = log
+            .append(&shard, &[push_env("50")], 0)
+            .expect("append before snapshot");
+        log.set_fault_hook(Some(Arc::new(CrashAt(FaultCutPoint::DuringSnapshotWrite))));
+        assert!(
+            log.write_snapshot(
+                &shard,
+                positions[0].clone(),
+                pqueue_engine::ProjectionSnapshot {
+                    payload: vec![1, 2, 3],
+                },
+            )
+            .is_err(),
+            "the snapshot write fault must abort the snapshot"
+        );
+        drop(log);
+
+        let mut reopened = ObjectLog::open(root.clone()).expect("reopen");
+        reopened.ensure_shard(&shard).unwrap();
+        assert!(
+            reopened.latest_snapshot(&shard).unwrap().is_none(),
+            "a failed snapshot write must not leave a committed snapshot ref"
+        );
+        assert_eq!(
+            reopened.read_from(&shard, None, 10).unwrap().entries.len(),
+            1,
+            "the command log must remain intact after a lost snapshot write"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Crash during segment reclamation. Restart must still replay the committed tail exactly once, and a
+    // second trim must finish the interrupted deletion.
+    {
+        let root = tmp_root("restart-deletion");
+        let shard = shard();
+        let mut log = ObjectLog::open(root.clone()).expect("open");
+        log.ensure_shard(&shard).unwrap();
+        for i in 0..4 {
+            log.append(&shard, &[push_env(&format!("60{i}"))], 0)
+                .expect("seed old segment");
+        }
+        let _tail = log
+            .append(&shard, &[push_env("64")], 0)
+            .expect("append live tail");
+        log.advance_retention_floor(
+            &shard,
+            pqueue_engine::CommandPosition::new(shard.clone(), 0, 3),
+            0,
+        )
+        .expect("advance floor");
+        log.set_fault_hook(Some(Arc::new(CrashAt(FaultCutPoint::DuringSegmentExpiry))));
+        assert!(
+            log.expire_segments_through(&shard, 3, 1_000).is_err(),
+            "the deletion fault must abort the trim"
+        );
+        drop(log);
+
+        let mut reopened = ObjectLog::open(root.clone()).expect("reopen");
+        reopened.ensure_shard(&shard).unwrap();
+        let floor = reopened.retention_floor(&shard).unwrap().unwrap();
+        assert_eq!(floor.sequence, 3);
+        let tail_entries = reopened
+            .read_from(&shard, Some(floor.clone()), 10)
+            .unwrap()
+            .entries;
+        assert_eq!(
+            tail_entries
+                .iter()
+                .map(|(p, _)| p.sequence)
+                .collect::<Vec<_>>(),
+            vec![4],
+            "restart must replay the committed tail exactly once after interrupted deletion"
+        );
+        let deletes_before = reopened.counters().delete_count;
+        reopened
+            .expire_segments_through(&shard, 3, 1_000)
+            .expect("retry trim after restart");
+        assert!(
+            reopened.counters().delete_count > deletes_before,
+            "the retry must finish the interrupted deletion"
+        );
+        assert_eq!(
+            reopened
+                .read_from(&shard, Some(floor), 10)
+                .unwrap()
+                .entries
+                .len(),
+            1,
+            "the tail remains readable after the compaction deletion retry"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 #[test]
 fn unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments() {
     let root = tmp_root("attempt-keys");
