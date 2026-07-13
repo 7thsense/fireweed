@@ -1293,7 +1293,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving
         // the tuple from the MAX ranged key is exact. The +1 GET for the horizon here is off the O(1) seal hot
         // path (recover_manifest is reached only on open/acquire/CAS-lost/advance-floor/ensure_shard).
-        let horizon = self.read_read_horizon(shard)?;
+        let horizon = self.visible_manifest_deletion_watermark(shard)?;
         let has_horizon = horizon.is_some();
         let keys = match horizon {
             Some(w) => {
@@ -1366,7 +1366,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// authoritative floor entry and every live/pinned segment are above W). Readers that ALSO fail-closed on
     /// the floor use [`Self::read_manifest_at`] with a pre-captured horizon instead.
     fn read_manifest(&self, shard: &QueueKey) -> EngineResult<Vec<ManifestEntry>> {
-        let horizon = self.read_read_horizon(shard)?;
+        let horizon = self.visible_manifest_deletion_watermark(shard)?;
         self.read_manifest_at(shard, horizon)
     }
 
@@ -1412,6 +1412,35 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
         }
         Ok(durable)
+    }
+
+    /// The manifest-deletion watermark used by read/recovery visibility. If durable watermark markers
+    /// exist, they alone define the visible horizon; the cached `read_horizon.json` blob only bootstraps
+    /// legacy queues that have no marker history yet.
+    fn visible_manifest_deletion_watermark(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+        let blob = match self.store_get(&Self::read_horizon_key(shard))? {
+            Some(bytes) => {
+                let blob: ReadHorizonBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
+                Some(blob.index)
+            }
+            None => None,
+        };
+        let mut durable: Option<u64> = None;
+        let mut saw_marker = false;
+        for key in self.store_list(&Self::manifest_head_prefix(shard))? {
+            if !key.ends_with("~watermark.json") {
+                continue;
+            }
+            let Some(bytes) = self.store_get(&key)? else {
+                continue;
+            };
+            let marker: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+            if let Some(index) = marker.compacted_through_index {
+                saw_marker = true;
+                durable = Some(durable.map_or(index, |cur| cur.max(index)));
+            }
+        }
+        if saw_marker { Ok(durable) } else { Ok(blob) }
     }
 
     /// Acquire the queue at a NEW, strictly-greater epoch by publishing a **fence entry** to the manifest
@@ -1748,7 +1777,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         // Capture the horizon ONCE (before the floor) and reuse it for BOTH the fail-closed guard and the
         // range-list, so a concurrent trim cannot advance the watermark between the two (bead pqueue-8928baec).
-        let horizon = self.read_read_horizon(shard)?;
+        let horizon = self.visible_manifest_deletion_watermark(shard)?;
         // Genesis read: from_seq == 0 dips to/below any floor, so this fails closed on a trimmed queue with a
         // read-horizon (equivalent to today's organic missing-segment error over the reclaimed prefix).
         self.fail_closed_below_floor(shard, 0, horizon)?;
@@ -1812,7 +1841,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         // Capture the horizon ONCE (before the floor) and reuse it for BOTH the fail-closed guard and the
         // range-list, so a concurrent trim cannot advance the watermark between the two (bead pqueue-8928baec).
-        let horizon = self.read_read_horizon(shard)?;
+        let horizon = self.visible_manifest_deletion_watermark(shard)?;
         // Fail closed if the requested range dips to/below the reclaimed floor on a range-listed (horizon)
         // queue — the below-floor tombstones are no longer enumerated, so return the same missing-segment
         // Storage error today's full-list read produces rather than a silently-truncated prefix.
@@ -2332,7 +2361,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         through_seq: u64,
         now_ms: i64,
     ) -> EngineResult<u64> {
-        let horizon_snapshot = self.read_read_horizon(source)?;
+        let horizon_snapshot = self.visible_manifest_deletion_watermark(source)?;
         let entries = self.read_manifest_at(source, horizon_snapshot)?;
         let (_candidates, _) = self.manifest_reclamation_candidates_from_entries(
             source,
@@ -2418,10 +2447,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             );
         }
         for index in reclaimed_indices {
-            if let Err(err) = self.delete_manifest_entry(source, index) {
-                if error.is_none() {
-                    error = Some(err);
-                }
+            if let Err(err) = self.delete_manifest_entry(source, index)
+                && error.is_none()
+            {
+                error = Some(err);
             }
         }
         match error {

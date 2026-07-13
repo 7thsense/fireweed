@@ -3016,6 +3016,15 @@ fn delete_watermark_history<S: BlobStore>(store: &S, shard: &QueueKey) {
     }
 }
 
+fn write_read_horizon_cache_only<S: BlobStore>(store: &S, shard: &QueueKey, index: u64) {
+    store
+        .put(
+            &read_horizon_key_s(shard),
+            &serde_json::to_vec(&serde_json::json!({ "index": index })).unwrap(),
+        )
+        .unwrap();
+}
+
 fn reclaimed_cached_writer_fixture() -> (
     std::sync::Arc<CountingBlobStore>,
     SegmentedObjectLog<std::sync::Arc<CountingBlobStore>>,
@@ -3763,6 +3772,62 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
     }
 }
 
+/// TestPartialExpireReadHorizonAloneDoesNotHideBelowFloorEntries: a cache-only advance of the read-horizon
+/// must not outrun the durable watermark history and hide below-floor entries before reclamation is
+/// confirmed durably.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireReadHorizonAloneDoesNotHideBelowFloorEntries() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..10u64 {
+        log.enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 7), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 1_000).unwrap(),
+        2,
+        "the partial expire reclaims only the leading below-floor prefix"
+    );
+
+    let before = log.read_from(&source, 8).unwrap();
+    write_read_horizon_cache_only(store.as_ref(), &source, 15);
+    let after = log.read_from(&source, 8).unwrap();
+
+    let fingerprint = |v: &Vec<(CommandPosition, pqueue_engine::CommandEnvelope)>| {
+        v.iter()
+            .map(|(p, e)| (p.sequence, p.backend_epoch, serde_json::to_vec(e).unwrap()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        fingerprint(&before),
+        fingerprint(&after),
+        "a cache-only horizon bump does not hide live entries from the durable read path"
+    );
+}
+
+/// TestPartialExpireVisibilityUsesDurableManifestDeletionWatermark: once the remaining below-floor
+/// segments are physically reclaimed, the durable watermark may advance and the recovered queue sees only
+/// the live tail.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityUsesDurableManifestDeletionWatermark() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+#[test]
+fn partial_expire_visibility_uses_durable_manifest_deletion_watermark() {
+    TestPartialExpireVisibilityUsesDurableManifestDeletionWatermark();
+}
+
 /// Test 9 — after successful below-floor manifest cleanup, the durable read-horizon advances
 /// monotonically and survives reopen/recovery, while staying below the durable floor.
 #[test]
@@ -4085,7 +4150,7 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
     // still reconstructs the durable state, so the queue should keep reading the live manifest list.
     trim_cycle(&log, &shard(), 3, 0, 1_000);
     assert!(log.read_read_horizon(&shard()).unwrap().is_some());
-    delete_watermark_metadata(store.as_ref(), &shard());
+    store.delete(&read_horizon_key_s(&shard())).unwrap();
     assert!(
         log.read_read_horizon(&shard()).unwrap().is_some(),
         "deleting the cache blob alone does not erase the durable watermark history"
