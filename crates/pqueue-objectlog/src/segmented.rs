@@ -1020,6 +1020,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.store_put_if_absent(&head_key, &body, true)
     }
 
+    #[allow(dead_code)]
     fn delete_manifest_entry(&self, shard: &QueueKey, index: u64) -> EngineResult<()> {
         // Delete the legacy key first so a partial failure leaves the authoritative head entry visible.
         let legacy_key = Self::manifest_key(shard, index);
@@ -1210,8 +1211,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     fn load_shard_buf(&self, shard: &QueueKey) -> EngineResult<ShardBuf> {
-        let (next_seq, next_index, epoch) = self.recover_manifest(shard)?;
-        let manifest_deletion_watermark = self.read_read_horizon(shard)?;
+        let (next_seq, next_index, epoch, manifest_deletion_watermark) =
+            self.recover_manifest(shard)?;
         Ok(ShardBuf {
             buffered: Vec::new(),
             buffered_bytes: 0,
@@ -1408,7 +1409,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // cached manifest index, the index was reclaimed and this stale writer must self-fence before any
         // segment PUT. The cached watermark is refreshed on open and after successful trim; the permanent
         // head CAS remains the stale-writer fence (docs/perf/design/manifest-compaction-hotpath.md:359 and
-        // pqueue-c33c367e).
+        // pqueue-c33c367e). This is intentionally not a tail-validate/delete-rollback substitute: the
+        // rejection happens before the manifest CAS, so a stale writer cannot externally observe an ack
+        // and then be "corrected" later by deleting the entry.
         if let Some(horizon) = self.cached_manifest_deletion_watermark(shard)?
             && cur_index <= horizon
         {
@@ -2154,7 +2157,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         now_ms: i64,
     ) -> EngineResult<u64> {
         let entries = self.read_manifest(source)?;
-        let (candidates, _) = self.manifest_reclamation_candidates_from_entries(
+        let (_candidates, _) = self.manifest_reclamation_candidates_from_entries(
             source,
             through_seq,
             now_ms,
@@ -2189,10 +2192,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 };
                 if deleted_now {
                     deleted += 1;
-                }
-                if let Err(err) = self.delete_manifest_entry(source, entry.index) {
-                    error = Some(err);
-                    break;
                 }
                 reclaimed_through = Some(Self::visible_last_seq(entry));
             }

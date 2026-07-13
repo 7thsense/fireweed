@@ -241,11 +241,11 @@ async fn test1_segment_reclamation_trims_expired_checkpointed_segments() {
         "the durable retention floor advanced through the trimmed prefix"
     );
     // The old segment deletes may be offset by newly-written floor/read-horizon/head metadata, but the trim
-    // must not grow the counted durable footprint.
+    // must only grow the counted durable footprint by the single retained watermark object.
     let objects_after = object_count(&backend);
     assert!(
-        objects_after <= objects_before,
-        "durable object count did not grow while old segment objects were reclaimed; before={objects_before} after={objects_after}"
+        objects_after <= objects_before + 1,
+        "durable object count grew by more than one while old segment objects were reclaimed; before={objects_before} after={objects_after}"
     );
 
     // The old segment objects are GENUINELY gone: reading from GENESIS now hits a missing (trimmed) segment...
