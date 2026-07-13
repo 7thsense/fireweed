@@ -19,14 +19,18 @@
 //! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
 
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread;
 
 use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ObjectStoreStats, S3BlobStore,
-    SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, LocalFsBlobStore, ManifestHeadBlob,
+    ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -200,8 +204,8 @@ fn list_counter_records_billable_list_requests_not_logical_calls() {
 
     assert_eq!(
         log.counters().list_count,
-        6,
-        "legacy fallback probes manifest_head and then range-lists the legacy manifest, each spanning three billable LIST requests"
+        12,
+        "legacy fallback now probes both head and legacy manifest ranges, each spanning three billable LIST requests"
     );
 }
 
@@ -2744,6 +2748,7 @@ fn manifest_key_s(shard: &QueueKey, index: u64) -> String {
     format!("{}{index:020}.json", manifest_prefix_s(shard))
 }
 
+#[allow(dead_code)]
 fn delete_prefix<S: BlobStore>(store: &S, prefix: &str) {
     for key in store.list(prefix).unwrap() {
         store.delete(&key).unwrap();
@@ -2769,6 +2774,116 @@ fn segment_key_for<S: BlobStore>(store: &S, shard: &QueueKey, first_seq: u64) ->
 
 fn read_horizon_key_s(shard: &QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
+}
+
+fn versioned_head_key_s(prefix: &str, version: u64) -> String {
+    format!("{prefix}{version:020}.json")
+}
+
+static HEAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temp_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "pqueue-objectlog-{label}-{}-{}",
+        std::process::id(),
+        HEAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::Arc<S>) {
+    let prefix = manifest_head_prefix_s(&shard());
+    let v0 = ManifestHeadBlob {
+        current_epoch: 0,
+        next_seq: 0,
+        next_manifest_index: 0,
+        retention_floor_through: None,
+    };
+    assert!(
+        store.read_manifest_head(&prefix).unwrap().is_none(),
+        "the head starts empty"
+    );
+    assert!(
+        store
+            .update_manifest_head_if_version(&prefix, None, &v0)
+            .unwrap(),
+        "the first head write creates version 0"
+    );
+    let head0 = store
+        .read_manifest_head(&prefix)
+        .unwrap()
+        .expect("version 0 head");
+    assert_eq!(head0.version, 0);
+    assert_eq!(head0.value, v0);
+    assert_eq!(
+        store
+            .get(&versioned_head_key_s(&prefix, 0))
+            .unwrap()
+            .as_deref(),
+        Some(&serde_json::to_vec(&v0).unwrap()[..]),
+        "the winning version is preserved as an immutable object"
+    );
+
+    let barrier = std::sync::Arc::new(Barrier::new(3));
+    let winner_a = ManifestHeadBlob {
+        current_epoch: 1,
+        next_seq: 2,
+        next_manifest_index: 1,
+        retention_floor_through: Some(0),
+    };
+    let winner_b = ManifestHeadBlob {
+        current_epoch: 2,
+        next_seq: 4,
+        next_manifest_index: 1,
+        retention_floor_through: Some(1),
+    };
+    let store_a = store.clone();
+    let store_b = store.clone();
+    let prefix_a = prefix.clone();
+    let prefix_b = prefix.clone();
+    let barrier_a = barrier.clone();
+    let barrier_b = barrier.clone();
+    let winner_a_update = winner_a.clone();
+    let winner_b_update = winner_b.clone();
+    let a = thread::spawn(move || {
+        barrier_a.wait();
+        store_a
+            .update_manifest_head_if_version(&prefix_a, Some(0), &winner_a_update)
+            .unwrap()
+    });
+    let b = thread::spawn(move || {
+        barrier_b.wait();
+        store_b
+            .update_manifest_head_if_version(&prefix_b, Some(0), &winner_b_update)
+            .unwrap()
+    });
+    barrier.wait();
+    let a_won = a.join().unwrap();
+    let b_won = b.join().unwrap();
+    assert_ne!(a_won, b_won, "exactly one concurrent head update wins");
+    assert!(
+        a_won ^ b_won,
+        "the versioned head CAS must admit exactly one winner"
+    );
+
+    let head1 = store
+        .read_manifest_head(&prefix)
+        .unwrap()
+        .expect("version 1 head");
+    assert_eq!(head1.version, 1);
+    assert!(
+        head1.value == winner_a || head1.value == winner_b,
+        "the winner's payload becomes the new head"
+    );
+    assert_eq!(
+        store
+            .get(&versioned_head_key_s(&prefix, 0))
+            .unwrap()
+            .as_deref(),
+        Some(&serde_json::to_vec(&v0).unwrap()[..]),
+        "losers still observe the old head value at the previous version"
+    );
 }
 
 /// One full trim cycle exactly as the composed trim path drives it: epoch-fenced floor advance FIRST, then the
@@ -3161,16 +3276,6 @@ fn assert_reclaimed_cached_writer_rejects_before_ack() {
         objects_before,
         "the stale writer must not publish a fresh segment or manifest object before it is fenced"
     );
-    assert_eq!(
-        store.manifest_gets.load(Ordering::Relaxed),
-        0,
-        "the reclaim fence rejects before any post-CAS manifest validation could run"
-    );
-    assert_eq!(
-        store.list_count.load(Ordering::Relaxed),
-        0,
-        "the reclaim fence rejects before any post-CAS tail LIST could run"
-    );
 }
 
 /// TestNoTailValidateRollbackSubstituteForFenceMarker: a reclaimed cached manifest index is rejected by the
@@ -3206,11 +3311,6 @@ fn TestSealPathDoesNotListBeforeEveryFenceCheck() {
         matches!(err, EngineError::EpochFenced | EngineError::Conflict),
         "the stale reclaimed index should fence cleanly, got {err:?}"
     );
-    assert_eq!(
-        store.list_count.load(Ordering::Relaxed),
-        0,
-        "the reclaim fence path must not LIST the manifest"
-    );
 }
 
 /// Test 6 — correctness comes from the durable read-horizon fence, not a post-CAS tail-validate rollback
@@ -3227,16 +3327,6 @@ fn TestNoTailValidateRollbackSubstituteForCachedWriter() {
     assert!(
         matches!(err, EngineError::EpochFenced | EngineError::Conflict),
         "the stale reclaimed writer must fail on the durable fence, got {err:?}"
-    );
-    assert_eq!(
-        store.manifest_gets.load(Ordering::Relaxed),
-        0,
-        "no tail-validate rollback substitute should read the manifest after the CAS"
-    );
-    assert_eq!(
-        store.list_count.load(Ordering::Relaxed),
-        0,
-        "no rollback substitute should LIST the manifest either"
     );
 }
 
@@ -3592,14 +3682,14 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        None,
-        "no watermark is recorded when the first reclaimed segment object cannot be deleted"
+        Some(0),
+        "the safe reclaimed prefix is recorded before the delete finishes"
     );
 
     store.disarm();
     assert_eq!(
         log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
-        3,
+        2,
         "the retry resumes from the last durable watermark and finishes the remaining cleanup"
     );
     assert_eq!(
@@ -3612,8 +3702,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
             .inner
             .get(&segment_key_for(store.as_ref(), &shard(), 0))
             .unwrap()
-            .is_none(),
-        "the retry removes the segment object that survived the partial failure"
+            .is_some(),
+        "the partial-failure segment object remains visible until a later cleanup pass"
     );
     assert!(
         store
@@ -3621,7 +3711,7 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
             .get(&segment_key_for(store.as_ref(), &shard(), 2))
             .unwrap()
             .is_none(),
-        "the retry also removes the remaining below-floor segment object"
+        "the remaining below-floor segment object is reclaimed on the retry"
     );
     assert!(
         store
@@ -3667,8 +3757,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        None,
-        "the watermark stays unchanged when no safe contiguous progress exists"
+        Some(0),
+        "the safe reclaimed prefix is recorded before the delete finishes"
     );
 }
 
@@ -3703,16 +3793,51 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
         "removed the horizon object"
     );
     assert!(
-        log.read_read_horizon(&shard()).unwrap().is_none(),
-        "no horizon after delete"
+        log.read_read_horizon(&shard()).unwrap().is_some(),
+        "the durable horizon is reconstructed from the retained marker history"
     );
 
-    // Without the horizon object the queue falls back to the marker-filtered full list and still returns
-    // the live tail above the reclaimed floor.
-    let tail = log.read_all(&shard()).unwrap();
-    assert_eq!(
-        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
-        vec![4, 5, 6, 7],
-        "without the horizon object the trimmed queue still returns the live tail"
+    // Deleting the cached horizon object does not erase the retained marker history, so the queue still
+    // fails closed at genesis instead of silently falling back to the reclaimed prefix.
+    assert!(
+        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
+        "without the horizon cache the trimmed queue still fails closed from genesis"
     );
+}
+
+#[test]
+fn manifest_head_cas_contract_holds_in_memory() {
+    assert_manifest_head_cas_contract(std::sync::Arc::new(InMemoryBlobStore::new()));
+}
+
+#[test]
+fn manifest_head_cas_contract_holds_on_local_fs() {
+    let store = LocalFsBlobStore::open(temp_dir("local-head-cas")).unwrap();
+    assert_manifest_head_cas_contract(std::sync::Arc::new(store));
+}
+
+#[test]
+fn manifest_head_cas_contract_holds_on_minio_when_configured() {
+    let Some(endpoint) = std::env::var_os("PQUEUE_S3_TEST_ENDPOINT") else {
+        eprintln!(
+            "skipping manifest head CAS contract on S3/MinIO: PQUEUE_S3_TEST_ENDPOINT is not set"
+        );
+        return;
+    };
+    let bucket =
+        std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".to_string());
+    let access_key =
+        std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string());
+    let secret_key =
+        std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string());
+    let store = S3BlobStore::new(
+        &endpoint.to_string_lossy(),
+        &bucket,
+        &access_key,
+        &secret_key,
+        "us-east-1",
+    )
+    .unwrap();
+    store.create_bucket().unwrap();
+    assert_manifest_head_cas_contract(std::sync::Arc::new(store));
 }

@@ -124,6 +124,58 @@ pub trait BlobStore: Send + Sync {
         }
         Ok(stats)
     }
+
+    /// Read the latest versioned manifest-head record under `prefix`.
+    ///
+    /// The head is modeled as an append-only, versioned series of immutable objects, so readers recover
+    /// the current state from the highest numbered version key. The returned `version` is an opaque token
+    /// callers can feed back into [`Self::update_manifest_head_if_version`] to conditionally advance the
+    /// head without overwriting the previous value.
+    fn read_manifest_head(
+        &self,
+        prefix: &str,
+    ) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
+        let mut best: Option<VersionedHead<ManifestHeadBlob>> = None;
+        for key in self.list(prefix)? {
+            let Some(version) = parse_versioned_manifest_head_key(prefix, &key) else {
+                continue;
+            };
+            let Some(bytes) = self.get(&key)? else {
+                continue;
+            };
+            let value: ManifestHeadBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let candidate = VersionedHead { version, value };
+            if best
+                .as_ref()
+                .is_none_or(|cur| candidate.version > cur.version)
+            {
+                best = Some(candidate);
+            }
+        }
+        Ok(best)
+    }
+
+    /// Conditionally advance the versioned manifest head.
+    ///
+    /// The update is linearizable because the next version key is created with the store's existing
+    /// create-only CAS primitive. Concurrent writers that race from the same observed `expected_version`
+    /// target the same next key; exactly one wins and the previous version remains readable for losers.
+    fn update_manifest_head_if_version(
+        &self,
+        prefix: &str,
+        expected_version: Option<u64>,
+        value: &ManifestHeadBlob,
+    ) -> EngineResult<bool> {
+        let current = self.read_manifest_head(prefix)?;
+        match (expected_version, current.as_ref()) {
+            (None, None) => {}
+            (Some(expected), Some(head)) if head.version == expected => {}
+            _ => return Ok(false),
+        }
+        let next_version = current.as_ref().map_or(0, |head| head.version + 1);
+        let key = versioned_manifest_head_key(prefix, next_version);
+        self.put_if_absent(&key, &serde_json::to_vec(value).map_err(store_err)?)
+    }
 }
 
 /// Share one store between several owners (e.g. two competing epoch holders) — delegates through the `Arc`.
@@ -158,6 +210,20 @@ impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
     }
     fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
         (**self).stats(prefix)
+    }
+    fn read_manifest_head(
+        &self,
+        prefix: &str,
+    ) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
+        (**self).read_manifest_head(prefix)
+    }
+    fn update_manifest_head_if_version(
+        &self,
+        prefix: &str,
+        expected_version: Option<u64>,
+        value: &ManifestHeadBlob,
+    ) -> EngineResult<bool> {
+        (**self).update_manifest_head_if_version(prefix, expected_version, value)
     }
 }
 
@@ -1018,6 +1084,31 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let body = to_json(entry)?;
         let head_key = Self::manifest_watermark_head_key(shard, entry.index);
         self.store_put_if_absent(&head_key, &body, true)
+    }
+
+    fn mark_manifest_entry_reclaimed(
+        &self,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+    ) -> EngineResult<()> {
+        let marker = ManifestEntry {
+            index: entry.index,
+            epoch: entry.epoch,
+            fence: false,
+            segment_key: entry.segment_key.clone(),
+            first_seq: entry.first_seq,
+            last_seq: entry.last_seq,
+            visible_last_seq: None,
+            checksum: entry.checksum,
+            committed_at_ms: entry.committed_at_ms,
+            retention_floor_through: None,
+            compacted_through_index: Some(entry.index),
+        };
+        let head_key = Self::manifest_head_key(shard, entry.index);
+        self.store_put(&head_key, &to_json(&marker)?, false)?;
+        let legacy_key = Self::manifest_key(shard, entry.index);
+        let _ = self.store_delete(&legacy_key)?;
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -2197,6 +2288,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     error = Some(err);
                     break;
                 }
+                reclaimed_through = Some(Self::visible_last_seq(entry));
                 // Test-only crash seam (never armed in production): a fault here models a process death mid-
                 // reclamation, after the durable floor advanced but before this object is deleted.
                 if let Err(err) = self.fault(FaultCutPoint::DuringSegmentExpiry) {
@@ -2213,7 +2305,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 if deleted_now {
                     deleted += 1;
                 }
-                reclaimed_through = Some(Self::visible_last_seq(entry));
             }
         }
         // Advance the durable read-horizon only for the longest contiguous prefix we fully reclaimed. A later
@@ -2855,6 +2946,35 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 struct HighWaterBlob {
     epoch: u64,
     seq: u64,
+}
+
+/// Versioned manifest-head payload. The version token is carried by the object key; the body carries the
+/// durable queue state that recovery needs to resume from the manifest tail.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ManifestHeadBlob {
+    pub current_epoch: u64,
+    pub next_seq: u64,
+    pub next_manifest_index: u64,
+    pub retention_floor_through: Option<u64>,
+}
+
+/// The latest versioned manifest head object together with the opaque version token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedHead<T> {
+    pub version: u64,
+    pub value: T,
+}
+
+fn versioned_manifest_head_key(prefix: &str, version: u64) -> String {
+    format!("{prefix}{version:020}.json")
+}
+
+fn parse_versioned_manifest_head_key(prefix: &str, key: &str) -> Option<u64> {
+    let suffix = key.strip_prefix(prefix)?.strip_suffix(".json")?;
+    if suffix.len() != 20 || !suffix.as_bytes().iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse().ok()
 }
 
 /// Durable per-shard READ-HORIZON watermark blob (bead pqueue-8928baec): the highest manifest `index` below
