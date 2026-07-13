@@ -3557,6 +3557,55 @@ fn TestManifestDeletionWatermarkPartialExpiryRetry() {
     );
 }
 
+#[test]
+#[allow(non_snake_case)]
+fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let shard = shard();
+    let qdef = qdef();
+
+    log.create_queue(&qdef).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
+        .unwrap();
+    store.arm_delete(&manifest_head_key_s(&shard, 1));
+
+    let err = log.expire_segments_through(&shard, 7, 1_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected delete failure must abort the partial expire"
+    );
+    assert!(
+        log.read_read_horizon(&shard).unwrap().is_none(),
+        "the deletion watermark must stay absent when reclamation did not complete"
+    );
+
+    drop(log);
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "reopen still has no durable watermark after the interrupted expire"
+    );
+
+    let live_tail = reopened.read_from(&shard, 4).unwrap();
+    assert_eq!(
+        live_tail
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the not-yet-deleted below-floor segments stay visible after reopen"
+    );
+}
+
 /// Test 7 — backward compat: a queue/store with NO `read_horizon.json` object behaves EXACTLY as before (full
 /// manifest list). Proven two ways: (i) a never-trimmed queue has no horizon and reads normally; (ii) DELETING
 /// the horizon object off a trimmed queue falls back to the full list and the ORGANIC missing-segment
