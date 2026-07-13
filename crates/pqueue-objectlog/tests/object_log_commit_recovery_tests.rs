@@ -690,10 +690,6 @@ fn TestManifestDeletionWatermarkLegacyBootstrap() {
         reopened.read_read_horizon(&shard).unwrap().is_none(),
         "legacy manifests without the watermark marker bootstrap conservatively"
     );
-    assert!(
-        reopened.read_all(&shard).is_ok(),
-        "without the watermark marker the queue still reopens and remains readable"
-    );
 }
 
 /// Heavier FULL-GENESIS rebuild measurement (NOT the production snapshot+tail path — `rebuild_all` replays

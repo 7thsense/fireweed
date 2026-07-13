@@ -29,8 +29,8 @@ use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, LocalFsBlobStore, ManifestHeadBlob,
-    ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
+    S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -2776,12 +2776,15 @@ fn read_horizon_key_s(shard: &QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
 }
 
+#[allow(dead_code)]
 fn versioned_head_key_s(prefix: &str, version: u64) -> String {
     format!("{prefix}{version:020}.json")
 }
 
+#[allow(dead_code)]
 static HEAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[allow(dead_code)]
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "pqueue-objectlog-{label}-{}-{}",
@@ -2792,6 +2795,7 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
+#[allow(dead_code)]
 fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::Arc<S>) {
     let prefix = manifest_head_prefix_s(&shard());
     let v0 = ManifestHeadBlob {
@@ -3674,15 +3678,15 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "the watermark stays unchanged until the delete succeeds"
     );
 
     store.disarm();
     assert_eq!(
         log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
-        2,
-        "the retry resumes from the last durable watermark and finishes the remaining cleanup"
+        3,
+        "the retry restarts from the unchanged watermark and reclaims the full below-floor prefix"
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
@@ -3694,8 +3698,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
             .inner
             .get(&segment_key_for(store.as_ref(), &shard(), 0))
             .unwrap()
-            .is_some(),
-        "the partial-failure segment object remains visible until a later cleanup pass"
+            .is_none(),
+        "the retry reclaims the previously failed segment object"
     );
     assert!(
         store
@@ -3852,8 +3856,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "the watermark stays unchanged until the delete succeeds"
     );
 }
 
@@ -3981,6 +3985,150 @@ fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
             .collect::<Vec<_>>(),
         vec![8, 9, 10, 11],
         "the live entries above the floor remain visible after the ignored high candidate"
+    );
+}
+
+/// TestManifestDeletionWatermarkContiguousDeletedPrefix: the watermark records only the reclaimed contiguous
+/// prefix and stops at the first non-reclaimed below-floor manifest entry.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkContiguousDeletedPrefix() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 7), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&shard(), 3, 1_000).unwrap(),
+        2,
+        "the reclaim pass deletes only the contiguous prefix below the floor"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        Some(1),
+        "the deletion watermark records only the reclaimed contiguous prefix"
+    );
+    assert_eq!(
+        log.expire_segments_through(&shard(), 7, 2_000).unwrap(),
+        2,
+        "a later pass can still reclaim the remaining below-floor manifest entries"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        Some(3),
+        "the watermark advances once the remaining reclaimed prefix becomes contiguous"
+    );
+}
+
+/// TestManifestDeletionWatermarkPreservesBranchPinnedSources: a branch-pinned source segment is not deleted
+/// and blocks the watermark until the pin is released.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkPreservesBranchPinnedSources() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..3u64 {
+        log.enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    let branch_def = branch_qdef("pinned-source");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 1),
+        60_000,
+        30,
+    )
+    .unwrap();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 31).unwrap(),
+        2,
+        "the unpinned below-floor segments are reclaimed"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        None,
+        "the pinned source segment blocks watermark advancement"
+    );
+    assert!(
+        store
+            .get(&segment_key_for(store.as_ref(), &source, 0))
+            .unwrap()
+            .is_some(),
+        "the branch-pinned source segment is not deleted"
+    );
+
+    log.discard_branch(&source, &branch).unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 32).unwrap(),
+        1,
+        "once the pin clears, the formerly pinned source segment can be reclaimed"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        Some(2),
+        "the watermark advances only after the branch-pinned source segment is reclaimed"
+    );
+}
+
+/// TestManifestDeletionWatermarkNotRetentionFloorAuthority: the retention floor advances independently of
+/// any persisted deletion watermark.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkNotRetentionFloorAuthority() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..2u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    store
+        .put(&read_horizon_key_s(&shard()), br#"{"index":99}"#)
+        .unwrap();
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 3), 0)
+        .unwrap();
+    let floor_entry: serde_json::Value = serde_json::from_slice(
+        &store
+            .get(&manifest_head_key_s(&shard(), 2))
+            .unwrap()
+            .expect("retention-floor entry"),
+    )
+    .unwrap();
+    assert_eq!(
+        floor_entry
+            .get("retention_floor_through")
+            .and_then(|v| v.as_u64()),
+        Some(3),
+        "retention floor advancement ignores the persisted deletion watermark as an authority"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        Some(99),
+        "the deletion watermark remains an independent cache entry"
     );
 }
 

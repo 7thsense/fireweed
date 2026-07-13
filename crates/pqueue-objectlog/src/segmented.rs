@@ -1086,31 +1086,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.store_put_if_absent(&head_key, &body, true)
     }
 
-    fn mark_manifest_entry_reclaimed(
-        &self,
-        shard: &QueueKey,
-        entry: &ManifestEntry,
-    ) -> EngineResult<()> {
-        let marker = ManifestEntry {
-            index: entry.index,
-            epoch: entry.epoch,
-            fence: false,
-            segment_key: entry.segment_key.clone(),
-            first_seq: entry.first_seq,
-            last_seq: entry.last_seq,
-            visible_last_seq: None,
-            checksum: entry.checksum,
-            committed_at_ms: entry.committed_at_ms,
-            retention_floor_through: None,
-            compacted_through_index: Some(entry.index),
-        };
-        let head_key = Self::manifest_head_key(shard, entry.index);
-        self.store_put(&head_key, &to_json(&marker)?, false)?;
-        let legacy_key = Self::manifest_key(shard, entry.index);
-        let _ = self.store_delete(&legacy_key)?;
-        Ok(())
-    }
-
     #[allow(dead_code)]
     fn delete_manifest_entry(&self, shard: &QueueKey, index: u64) -> EngineResult<()> {
         // Delete the legacy key first so a partial failure leaves the authoritative head entry visible.
@@ -1205,6 +1180,50 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         entry.compacted_through_index.is_some()
     }
 
+    fn contiguous_manifest_deletion_watermark_from_entries(
+        &self,
+        shard: &QueueKey,
+        reclaimed_through: u64,
+        now_ms: i64,
+        entries: &[ManifestEntry],
+    ) -> EngineResult<Option<u64>> {
+        let Some(floor) = self.read_retention_floor(shard)? else {
+            return Ok(None); // no durable floor => no read-horizon
+        };
+        let mut new_w: Option<u64> = None;
+        for entry in entries {
+            if entry.compacted_through_index.is_some() {
+                continue;
+            }
+            // STOP at the AUTHORITATIVE floor entry — `read_retention_floor` needs it, so W must stay below it.
+            if entry.retention_floor_through == Some(floor.sequence) {
+                break;
+            }
+            let reclaimed = match entry.retention_floor_through {
+                // A SUPERSEDED floor-advance entry (names no segment; strictly below the authoritative floor).
+                Some(v) => v < floor.sequence,
+                // An old epoch FENCE published at/below the floor (names no segment; no reader needs it).
+                None if entry.fence => entry.first_seq <= floor.sequence,
+                // A DATA tombstone whose object is provably reclaimed: its whole visible range is at/below what
+                // this (or a prior) expire actually deleted. Bounded by `reclaimed_through`, NOT the floor.
+                None => Self::visible_last_seq(entry) <= reclaimed_through,
+            };
+            if !reclaimed {
+                break; // first LIVE / not-yet-reclaimed / needed entry — W must stay STRICTLY below it
+            }
+            // A still-branch-PINNED below-floor DATA segment has NOT been reclaimed (expire_segments_through
+            // skipped its delete): a future trim after the pin releases must still enumerate it, so do NOT
+            // hide it behind the horizon. Stop here (keeps W strictly below the pinned index).
+            if entry.segment_key.is_some()
+                && self.branch_pins_segment(shard, entry.first_seq, now_ms)?
+            {
+                break;
+            }
+            new_w = Some(entry.index);
+        }
+        Ok(new_w)
+    }
+
     /// Read the manifest from the store and derive `(next_seq, next_manifest_index, current_epoch)`.
     ///
     /// HOT PATH: every seal (and epoch fence) calls this to read the authoritative tail. New queues recover
@@ -1217,27 +1236,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// `first_seq`, which already records the live next seq). This makes a seal O(1) manifest reads instead
     /// of re-reading + re-parsing the whole O(n) manifest each time (the previous full scan made a sustained
     /// push O(n^2)). `read_all` still does a full scan for recovery.
-    fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64, Option<u64>)> {
-        // Range-list from the durable read-horizon so recovery enumerates only LIVE (above-floor) entries
-        // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving
-        // the tuple from the MAX ranged key is exact. The +1 GET for the horizon here is off the O(1) seal hot
-        // path (recover_manifest is reached only on open/acquire/CAS-lost/advance-floor/ensure_shard).
-        let horizon = self.read_read_horizon(shard)?;
-        let has_horizon = horizon.is_some();
-        let mut keys = match horizon {
-            Some(w) => {
-                let ranged = self.list_authoritative_manifest_keys_at(shard, Some(w))?;
-                // A trimmed queue must still have at least the authoritative floor entry above the horizon.
-                // If the live range is unexpectedly empty, a manifest hole was deleted or hidden above the
-                // durable floor. Fail closed instead of silently falling back to the reclaimed prefix and
-                // treating it as genesis.
-                if ranged.is_empty() {
-                    return Err(EngineError::Conflict);
-                }
-                ranged
-            }
-            None => self.list_authoritative_manifest_keys_at(shard, None)?,
-        };
+    fn recover_manifest_from_keys(
+        &self,
+        keys: Vec<String>,
+        has_horizon: bool,
+    ) -> EngineResult<(u64, u64, u64, Option<u64>)> {
+        let mut keys = keys;
         keys.sort();
         for tail_key in keys.into_iter().rev() {
             let Some(bytes) = self.store_get(&tail_key)? else {
@@ -1268,6 +1272,38 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         } else {
             Ok((0, 0, 0, None))
         }
+    }
+
+    fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64, Option<u64>)> {
+        // Range-list from the durable read-horizon so recovery enumerates only LIVE (above-floor) entries
+        // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving
+        // the tuple from the MAX ranged key is exact. The +1 GET for the horizon here is off the O(1) seal hot
+        // path (recover_manifest is reached only on open/acquire/CAS-lost/advance-floor/ensure_shard).
+        let horizon = self.read_read_horizon(shard)?;
+        let has_horizon = horizon.is_some();
+        let keys = match horizon {
+            Some(w) => {
+                let ranged = self.list_authoritative_manifest_keys_at(shard, Some(w))?;
+                // A trimmed queue must still have at least the authoritative floor entry above the horizon.
+                // If the live range is unexpectedly empty, a manifest hole was deleted or hidden above the
+                // durable floor. Fail closed instead of silently falling back to the reclaimed prefix and
+                // treating it as genesis.
+                if ranged.is_empty() {
+                    return Err(EngineError::Conflict);
+                }
+                ranged
+            }
+            None => self.list_authoritative_manifest_keys_at(shard, None)?,
+        };
+        self.recover_manifest_from_keys(keys, has_horizon)
+    }
+
+    fn recover_manifest_without_horizon(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<(u64, u64, u64, Option<u64>)> {
+        let keys = self.list_authoritative_manifest_keys_at(shard, None)?;
+        self.recover_manifest_from_keys(keys, false)
     }
 
     /// The LIVE manifest keys for `shard` above a GIVEN `horizon` — indices strictly ABOVE the durable
@@ -2540,7 +2576,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         position: CommandPosition,
         expected_epoch: u64,
     ) -> EngineResult<()> {
-        let (cur_seq, cur_index, cur_epoch, _) = self.recover_manifest(shard)?;
+        // Floor advancement is not allowed to treat the deletion watermark as an authority. It still prefers
+        // the ranged recovery path for the current tail, but if that range is unexpectedly empty it falls
+        // back to a full manifest scan so a stale/corrupt read-horizon cannot block progress.
+        let (cur_seq, cur_index, cur_epoch, _) = match self.recover_manifest(shard) {
+            Ok(tuple) => tuple,
+            Err(EngineError::Conflict) => self.recover_manifest_without_horizon(shard)?,
+            Err(err) => return Err(err),
+        };
         if cur_epoch > expected_epoch {
             return Err(EngineError::EpochFenced);
         }
@@ -2695,40 +2738,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         now_ms: i64,
         entries: &[ManifestEntry],
     ) -> EngineResult<()> {
-        let Some(floor) = self.read_retention_floor(shard)? else {
-            return Ok(()); // no durable floor => no read-horizon
-        };
-        let mut new_w: Option<u64> = None;
-        for entry in entries {
-            if entry.compacted_through_index.is_some() {
-                continue;
-            }
-            // STOP at the AUTHORITATIVE floor entry — `read_retention_floor` needs it, so W must stay below it.
-            if entry.retention_floor_through == Some(floor.sequence) {
-                break;
-            }
-            let reclaimed = match entry.retention_floor_through {
-                // A SUPERSEDED floor-advance entry (names no segment; strictly below the authoritative floor).
-                Some(v) => v < floor.sequence,
-                // An old epoch FENCE published at/below the floor (names no segment; no reader needs it).
-                None if entry.fence => entry.first_seq <= floor.sequence,
-                // A DATA tombstone whose object is provably reclaimed: its whole visible range is at/below what
-                // this (or a prior) expire actually deleted. Bounded by `reclaimed_through`, NOT the floor.
-                None => Self::visible_last_seq(entry) <= reclaimed_through,
-            };
-            if !reclaimed {
-                break; // first LIVE / not-yet-reclaimed / needed entry — W must stay STRICTLY below it
-            }
-            // A still-branch-PINNED below-floor DATA segment has NOT been reclaimed (expire_segments_through
-            // skipped its delete): a future trim after the pin releases must still enumerate it, so do NOT
-            // hide it behind the horizon. Stop here (keeps W strictly below the pinned index).
-            if entry.segment_key.is_some()
-                && self.branch_pins_segment(shard, entry.first_seq, now_ms)?
-            {
-                break;
-            }
-            new_w = Some(entry.index);
-        }
+        let new_w = self.contiguous_manifest_deletion_watermark_from_entries(
+            shard,
+            reclaimed_through,
+            now_ms,
+            entries,
+        )?;
         if let Some(w) = new_w
             && self.read_read_horizon(shard)?.is_none_or(|cur| w > cur)
         {
