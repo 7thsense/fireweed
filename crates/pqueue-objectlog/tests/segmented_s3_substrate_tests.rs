@@ -3016,6 +3016,14 @@ fn delete_watermark_history<S: BlobStore>(store: &S, shard: &QueueKey) {
     }
 }
 
+fn delete_watermark_markers_only<S: BlobStore>(store: &S, shard: &QueueKey) {
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        if key.ends_with("~watermark.json") {
+            store.delete(&key).unwrap();
+        }
+    }
+}
+
 fn write_read_horizon_cache_only<S: BlobStore>(store: &S, shard: &QueueKey, index: u64) {
     store
         .put(
@@ -4194,6 +4202,110 @@ fn TestLegacyManifestBootstrapWithoutDeletionWatermark() {
         reopened.current_epoch(&shard).unwrap(),
         0,
         "bootstrap without a deletion watermark preserves the permanent-head fence"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageLegacyBootstrap() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard, 3, 0, 1_000);
+    let durable = log.read_manifest_deletion_watermark(&shard).unwrap();
+    let cached = log.read_read_horizon(&shard).unwrap();
+    assert_eq!(durable, cached);
+    let cached = cached.expect("legacy cache bootstrap horizon");
+    assert!(cached > 0, "the fixture needs a non-zero bootstrap horizon");
+
+    delete_watermark_markers_only(store.as_ref(), &shard);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
+        None,
+        "without durable watermark markers the history helper reports no marker state"
+    );
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        Some(cached),
+        "existing shards without deletion-watermark state still bootstrap from the legacy read-horizon cache"
+    );
+    assert_eq!(
+        reopened
+            .read_retention_floor(&shard)
+            .unwrap()
+            .unwrap()
+            .sequence,
+        3,
+        "the durable floor remains independently derived from the manifest"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageEncodingRoundTrip() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..8u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard, 7, 0, 1_000);
+    let durable = log
+        .read_manifest_deletion_watermark(&shard)
+        .unwrap()
+        .expect("durable deletion watermark");
+    let legacy = log.read_read_horizon(&shard).unwrap().unwrap();
+    assert_eq!(
+        durable, legacy,
+        "the durable marker history matches the cached watermark"
+    );
+
+    let marker_key = store
+        .list(&manifest_head_prefix_s(&shard))
+        .unwrap()
+        .into_iter()
+        .find(|key| key.ends_with("~watermark.json"))
+        .expect("durable watermark marker");
+    let marker_bytes = store.get(&marker_key).unwrap().unwrap();
+    let marker_json: serde_json::Value = serde_json::from_slice(&marker_bytes).unwrap();
+    assert_eq!(
+        marker_json
+            .get("compacted_through_index")
+            .and_then(|value| value.as_u64()),
+        Some(durable),
+        "the durable encoding round-trips the highest contiguous reclaimed manifest index"
+    );
+
+    write_read_horizon_cache_only(store.as_ref(), &shard, durable - 1);
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
+        Some(durable),
+        "the durable deletion watermark is reconstructed from marker history, not the cache blob"
+    );
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        Some(durable),
+        "a stale read-horizon cache cannot regress the durable deletion watermark"
     );
 }
 
