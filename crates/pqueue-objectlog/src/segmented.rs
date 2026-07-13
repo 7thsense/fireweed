@@ -1418,29 +1418,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// exist, they alone define the visible horizon; the cached `read_horizon.json` blob only bootstraps
     /// legacy queues that have no marker history yet.
     fn visible_manifest_deletion_watermark(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
-        let blob = match self.store_get(&Self::read_horizon_key(shard))? {
-            Some(bytes) => {
-                let blob: ReadHorizonBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
-                Some(blob.index)
-            }
-            None => None,
-        };
-        let mut durable: Option<u64> = None;
-        let mut saw_marker = false;
-        for key in self.store_list(&Self::manifest_head_prefix(shard))? {
-            if !key.ends_with("~watermark.json") {
-                continue;
-            }
-            let Some(bytes) = self.store_get(&key)? else {
-                continue;
-            };
-            let marker: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
-            if let Some(index) = marker.compacted_through_index {
-                saw_marker = true;
-                durable = Some(durable.map_or(index, |cur| cur.max(index)));
-            }
+        let durable = self.read_manifest_deletion_watermark(shard)?;
+        if durable.is_some() {
+            Ok(durable)
+        } else {
+            self.read_horizon_cache(shard)
         }
-        if saw_marker { Ok(durable) } else { Ok(blob) }
     }
 
     /// Acquire the queue at a NEW, strictly-greater epoch by publishing a **fence entry** to the manifest
@@ -2585,6 +2568,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         format!("{}read_horizon.json", shard_prefix(shard))
     }
 
+    fn read_horizon_cache(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+        match self.store_get(&Self::read_horizon_key(shard))? {
+            Some(bytes) => {
+                let blob: ReadHorizonBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
+                Ok(Some(blob.index))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Read the durable READ-HORIZON watermark `W` (bead pqueue-8928baec): the highest manifest index below
     /// which every entry is a below-floor entry no reader needs. `None` when no trim has advanced it yet
     /// (backward-compatible: reads then fall back to the full manifest list).
@@ -2593,14 +2586,22 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// `manifest_head/*~watermark.json` marker history. Reconstructing from both makes stale/blob-regressing
     /// writers harmless without relying on any owner-fence wiring.
     pub fn read_read_horizon(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
-        let blob = match self.store_get(&Self::read_horizon_key(shard))? {
-            Some(bytes) => {
-                let blob: ReadHorizonBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
-                Some(blob.index)
-            }
-            None => None,
-        };
-        let mut durable = blob;
+        let blob = self.read_horizon_cache(shard)?;
+        let durable = self.read_manifest_deletion_watermark(shard)?;
+        Ok(match (durable, blob) {
+            (Some(durable), Some(blob)) => Some(durable.max(blob)),
+            (Some(durable), None) => Some(durable),
+            (None, Some(blob)) => Some(blob),
+            (None, None) => None,
+        })
+    }
+
+    /// Read the durable manifest-deletion watermark history only. This is the append-only source of truth
+    /// for the highest contiguous reclaimed manifest index; the `read_horizon.json` blob is only the
+    /// compatibility cache used to bootstrap legacy shards that do not yet have marker history.
+    pub fn read_manifest_deletion_watermark(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+        let mut durable: Option<u64> = None;
+        let mut saw_marker = false;
         for key in self.store_list(&Self::manifest_head_prefix(shard))? {
             if !key.ends_with("~watermark.json") {
                 continue;
@@ -2610,10 +2611,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             };
             let marker: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
             if let Some(index) = marker.compacted_through_index {
+                saw_marker = true;
                 durable = Some(durable.map_or(index, |cur| cur.max(index)));
             }
         }
-        Ok(durable)
+        Ok(if saw_marker { durable } else { None })
     }
 
     /// Read the AUTHORITATIVE durable retention floor: the highest `retention_floor_through` recorded across the
