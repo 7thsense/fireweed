@@ -2501,11 +2501,38 @@ pub fn evidence_dir() -> PathBuf {
         })
 }
 
+fn recorded_at_stamp(body: &str) -> Option<&str> {
+    const PREFIX: &str = "\"recorded_at\":\"";
+    let start = body.find(PREFIX)? + PREFIX.len();
+    let rest = &body[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
 /// Write the evidence file, overwriting any prior run so the JSONL reflects exactly THIS run.
 pub fn write_evidence(file_name: &str, records: &[AcEvidence]) -> std::io::Result<PathBuf> {
     let dir = evidence_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(file_name);
+
+    // Evidence is tracked in git and the workspace gate executes this test on every run. Preserve
+    // the previous observation time when the newly observed records are byte-for-byte identical;
+    // otherwise a successful `cargo test --workspace` dirties the worktree solely because the
+    // clock advanced, which makes DDx reject an otherwise valid implementation commit.
+    if let Ok(existing) = std::fs::read_to_string(&path)
+        && let Some(stamp) = recorded_at_stamp(&existing)
+    {
+        let unchanged = records
+            .iter()
+            .map(|r| r.to_json_line(stamp))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        if unchanged == existing {
+            return Ok(path);
+        }
+    }
+
     // A coarse recorded_at without pulling a time crate: seconds since the epoch, ISO-ish.
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2519,4 +2546,22 @@ pub fn write_evidence(file_name: &str, records: &[AcEvidence]) -> std::io::Resul
         .join("\n");
     std::fs::write(&path, format!("{body}\n"))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod evidence_jsonl_tests {
+    use super::recorded_at_stamp;
+
+    #[test]
+    fn extracts_recorded_at_stamp() {
+        let body = r#"{"suite":"test","recorded_at":"epoch:123"}
+"#;
+        assert_eq!(recorded_at_stamp(body), Some("epoch:123"));
+    }
+
+    #[test]
+    fn rejects_missing_or_unterminated_recorded_at_stamp() {
+        assert_eq!(recorded_at_stamp("{}\n"), None);
+        assert_eq!(recorded_at_stamp(r#"{"recorded_at":"epoch:123}"#), None);
+    }
 }
