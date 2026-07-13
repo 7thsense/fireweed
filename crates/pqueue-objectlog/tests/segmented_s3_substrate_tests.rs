@@ -2883,10 +2883,10 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
     );
 }
 
-/// Test 2 — recover_manifest tail + epoch + next-seq are correct after the horizon advances (the tail is
-/// always above the floor above the horizon, so ranging never hides it).
+/// Test 2 — recover_manifest tail + epoch + next-seq are correct after manifest reclamation and reopen.
 #[test]
-fn recover_manifest_is_correct_after_horizon_advance() {
+#[allow(non_snake_case)]
+fn TestRecoverTailAfterManifestReclaimAndReopen() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -2928,6 +2928,48 @@ fn recover_manifest_is_correct_after_horizon_advance() {
         "next-seq recovered exactly from the ranged tail"
     );
     assert_eq!(pos[0].backend_epoch, 1);
+}
+
+/// Test 2b — deleting or hiding the only remaining live manifest entry above the durable floor fails
+/// closed instead of being mistaken for an empty history.
+#[test]
+#[allow(non_snake_case)]
+fn TestUnexpectedLiveManifestHoleFailsClosed() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+    log.enqueue(&shard(), &pushes(2), 0, 10).unwrap();
+    log.seal(&shard(), 0, 11).unwrap();
+
+    // Reclaim the only data segment. The remaining live manifest entry is the authoritative floor entry.
+    trim_cycle(&log, &shard(), 1, 0, 1_000);
+    assert!(log.read_read_horizon(&shard()).unwrap().is_some());
+
+    // Hide the live floor entry above the durable floor. Recovery must fail closed rather than reset.
+    assert!(
+        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_some(),
+        "the floor entry is still present before we simulate the hole"
+    );
+    assert!(
+        store.delete(&manifest_key_s(&shard(), 1)).unwrap(),
+        "removed the live floor manifest entry"
+    );
+    assert!(
+        store.delete(&manifest_head_key_s(&shard(), 1)).unwrap(),
+        "removed the authoritative head copy too"
+    );
+    assert!(
+        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none(),
+        "the live floor entry is now missing"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    let err = reopened.create_queue(&qdef()).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Conflict | EngineError::Invalid(_)),
+        "missing live manifest above the floor must fail closed, got {err:?}"
+    );
 }
 
 /// Test 3 — live data is byte-identical pre/post horizon, and a below-floor read FAILS CLOSED (read at the
