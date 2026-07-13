@@ -48,7 +48,7 @@ use pqueue_engine::{
 };
 use pqueue_objectlog::{
     LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig, SegmentConfig,
-    segmented::{InMemoryBlobStore, SegmentedObjectLog},
+    segmented::{BlobStore, InMemoryBlobStore, ObjectStoreStats, SegmentedObjectLog},
 };
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
@@ -714,5 +714,53 @@ fn TestLegacyManifestBootstrapWithoutDeletionWatermarkMetadata() {
         reopened.current_epoch(&shard).unwrap(),
         0,
         "legacy bootstrap preserves the permanent-head fence"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
+    let store = Arc::new(FailingDeleteBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("partial", "expire");
+    let qdef = big_qdef("partial", "expire");
+
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&shard, &segmented_pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
+        .unwrap();
+    store.arm_delete(&format!("/manifest_head/{:020}.json", 1));
+
+    let err = log.expire_segments_through(&shard, 7, 1_000).unwrap_err();
+    assert!(
+        matches!(err, pqueue_engine::EngineError::Storage(_)),
+        "the injected delete failure must abort the partial expire"
+    );
+    assert!(
+        log.read_read_horizon(&shard).unwrap().is_none(),
+        "no durable manifest-deletion watermark should be recorded on failure"
+    );
+
+    drop(log);
+    store.disarm();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "reopen must not invent a watermark after interrupted reclamation"
+    );
+
+    let tail = reopened.read_from(&shard, 4).unwrap();
+    assert_eq!(
+        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the undeleted below-floor segments remain visible after reopen"
     );
 }
