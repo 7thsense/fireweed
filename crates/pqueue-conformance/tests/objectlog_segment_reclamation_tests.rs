@@ -69,6 +69,34 @@ fn open_hybrid(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend 
         .expect("recover objectlog/hybrid-async")
 }
 
+/// Open the REAL hybrid-strict composed backend at `root`: the same group-commit object-log substrate, but
+/// with the SQLite-first strict projection ordering and no async-apply debt monitor.
+fn open_hybrid_strict(root: &Path) -> HybridBackend {
+    std::fs::create_dir_all(root).ok();
+    let sqlite = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_strict_apply(true);
+    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover()
+        .expect("recover objectlog/hybrid-strict")
+}
+
+#[derive(Clone, Copy)]
+enum ProjectionMode {
+    HybridAsync,
+    HybridStrict,
+}
+
+fn open_mode(root: &Path, mode: ProjectionMode) -> HybridBackend {
+    match mode {
+        ProjectionMode::HybridAsync => open_hybrid(root, clear_thresholds()),
+        ProjectionMode::HybridStrict => open_hybrid_strict(root),
+    }
+}
+
 /// Open the hybrid-async backend on the RAW / synchronous append path (`ObjectLog::open`, NOT group-commit):
 /// every write force-seals its own segment through `LogStore::append`, whose `committed_at_ms` is stamped from
 /// the batch's max `created_at` (bead pqueue-b5cc2bc7 bug 1). Used to prove the retention-floor trim preserves
@@ -643,6 +671,85 @@ async fn test_bug3_projection_behind_floor_fails_closed() {
         msg.contains("retention floor") && msg.contains("behind"),
         "the fail-closed error must name the behind-floor inconsistency; got {msg}"
     );
+}
+
+#[tokio::test]
+async fn test_behind_image_fail_closed_with_deleted_manifests() {
+    for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
+        let mode_name = match mode {
+            ProjectionMode::HybridAsync => "hybrid-async",
+            ProjectionMode::HybridStrict => "hybrid-strict",
+        };
+        let root = base_dir(mode_name);
+        let backend = open_mode(&root, mode);
+        backend.create_queue(qdef_short_retention()).await.unwrap();
+
+        // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+        for i in 0..3 {
+            push(&backend, &format!("old-{i}"), 10).await;
+        }
+        drain(&backend);
+        push(&backend, "fresh", 10_000).await;
+        drain(&backend);
+        backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+        assert_eq!(
+            floor_seq(&backend),
+            Some(2),
+            "{mode_name}: the old prefix is trimmed; floor at seq 2"
+        );
+        drop(backend);
+
+        // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
+        let reopened = open_mode(&root, mode);
+        let floor = floor_pos(&reopened).expect("retained floor after reopen");
+        let page = reopened
+            .read_from(&shard(), Some(floor), 100)
+            .await
+            .unwrap_or_else(|e| panic!("{mode_name}: read_from retained floor errored: {e:?}"));
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|(p, _)| p.sequence)
+                .collect::<Vec<_>>(),
+            vec![3],
+            "{mode_name}: replay resumes at the retained floor/head, not from genesis"
+        );
+        drop(reopened);
+
+        // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen
+        // starts with a behind image (high-water None < floor 2) while the object-log floor blob + trimmed
+        // segments persist.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+        }
+
+        // Recovery must FAIL CLOSED (does not silently drop the reclaimed commands 0..2).
+        let sqlite = root.join("projection.sqlite");
+        let log =
+            ObjectLog::open_group_commit(&root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+        let hybrid = match mode {
+            ProjectionMode::HybridAsync => HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .expect("hybrid")
+                .with_deferred_flush_chunk(1)
+                .with_async_monitor(clear_thresholds()),
+            ProjectionMode::HybridStrict => HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .expect("hybrid")
+                .with_strict_apply(true),
+        };
+        let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+            .with_group_commit(true)
+            .recover();
+        let err = result.err().unwrap_or_else(|| {
+            panic!("{mode_name}: recovery over a projection image behind the retention floor must fail closed")
+        });
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("retention floor") && msg.contains("behind"),
+            "{mode_name}: the fail-closed error must name the behind-floor inconsistency; got {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[tokio::test]
