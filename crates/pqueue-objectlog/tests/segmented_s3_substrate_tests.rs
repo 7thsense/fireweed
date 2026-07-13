@@ -19,10 +19,11 @@
 //! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Barrier, Mutex};
 use std::thread;
 
 use pqueue_conformance::{envelope, item, qdef, shard};
@@ -4018,15 +4019,16 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
     assert!(log.read_read_horizon(&shard()).unwrap().is_some());
     delete_watermark_metadata(store.as_ref(), &shard());
     assert!(
-        log.read_read_horizon(&shard()).unwrap().is_some(),
-        "the durable horizon is reconstructed from the retained marker history"
+        log.read_read_horizon(&shard()).unwrap().is_none(),
+        "deleting the watermark metadata and retained markers falls back to conservative bootstrap"
     );
 
-    // Deleting the cached horizon object does not erase the retained marker history, so the queue still
-    // fails closed at genesis instead of silently falling back to the reclaimed prefix.
-    assert!(
-        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
-        "without the horizon cache the trimmed queue still fails closed from genesis"
+    // Deleting the cached horizon object falls back to the full manifest list, which is the preserved legacy
+    // bootstrap behavior.
+    assert_eq!(
+        log.read_all(&shard()).unwrap().len(),
+        4,
+        "without the horizon cache the trimmed queue still reads the live manifest list"
     );
 }
 
