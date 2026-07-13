@@ -2972,6 +2972,13 @@ fn TestUnexpectedLiveManifestHoleFailsClosed() {
     );
 }
 
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkFailClosedBelowFloor() {
+    TestUnexpectedLiveManifestHoleFailsClosed();
+    TestBelowFloorReadFailsClosedAfterManifestReclaim();
+}
+
 /// Test 3 — live data is byte-identical pre/post horizon, and a below-floor read FAILS CLOSED (read at the
 /// floor errors; read at floor+1 succeeds; read_all from genesis fails closed on a trimmed+horizoned queue).
 #[test]
