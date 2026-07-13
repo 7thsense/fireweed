@@ -1091,9 +1091,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         shard: &QueueKey,
         entry: &ManifestEntry,
     ) -> EngineResult<()> {
-        // Retain the legacy manifest copy so backward-compat bootstrap and range-list recovery can still
-        // reconstruct retained history from the manifest namespace. The reclaimed marker lives in the head
-        // namespace; the legacy object remains as the compatibility copy.
+        // Overwrite the authoritative head entry with a reclaimed marker so range-list recovery can still
+        // reconstruct the live tail from the head namespace after a trim. The legacy compatibility copy is
+        // deleted separately once the segment reclaim has fully succeeded.
         let marker = ManifestEntry {
             index: entry.index,
             epoch: entry.epoch,
@@ -1114,7 +1114,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     #[allow(dead_code)]
     fn delete_manifest_entry(&self, shard: &QueueKey, index: u64) -> EngineResult<()> {
-        // Delete the legacy key first so a partial failure leaves the authoritative head entry visible.
+        // Delete the legacy compatibility copy after the authoritative head entry has already been updated
+        // to a reclaimed marker. A partial failure here only leaves the compatibility object behind for the
+        // next trim pass; it never frees the authoritative head slot.
         let legacy_key = Self::manifest_key(shard, index);
         let _ = self.store_delete(&legacy_key)?;
         Ok(())
@@ -1752,7 +1754,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.fail_closed_below_floor(shard, 0, horizon)?;
         let mut out = Vec::new();
         for entry in self.read_manifest_at(shard, horizon)? {
-            if entry.fence || (horizon.is_some() && Self::is_reclaimed_manifest_marker(&entry)) {
+            if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
                 continue;
             }
             let Some(seg_key) = entry.segment_key.as_ref() else {
@@ -1817,7 +1819,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.fail_closed_below_floor(shard, from_seq, horizon)?;
         let mut out = Vec::new();
         for entry in self.read_manifest_at(shard, horizon)? {
-            if entry.fence || (horizon.is_some() && Self::is_reclaimed_manifest_marker(&entry)) {
+            if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
                 continue;
             }
             // The bounded-tail saving: a fully-applied segment is skipped without a GET/parse of its object.
@@ -2340,6 +2342,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         )?;
         let mut deleted = 0u64;
         let mut reclaimed_through: Option<u64> = None;
+        let mut reclaimed_indices = Vec::new();
         let mut error: Option<EngineError> = None;
         for entry in &entries {
             if entry.fence {
@@ -2374,6 +2377,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     error = Some(err);
                     break;
                 }
+                reclaimed_indices.push(entry.index);
                 reclaimed_through = Some(Self::visible_last_seq(entry));
             }
         }
@@ -2397,12 +2401,30 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // delete-only compaction safely; a cheaper delete-only variant would need the post-head-CAS protocol
         // redesign, not this code path.
         if let Some(reclaimed_through) = reclaimed_through {
+            let mut advance_entry_map = BTreeMap::new();
+            for entry in advance_entries {
+                advance_entry_map.insert(entry.index, entry);
+            }
+            for entry in entries
+                .iter()
+                .filter(|entry| reclaimed_indices.contains(&entry.index))
+            {
+                advance_entry_map.insert(entry.index, entry.clone());
+            }
+            let advance_entries: Vec<_> = advance_entry_map.into_values().collect();
             let _ = self.advance_read_horizon_from_entries(
                 source,
                 reclaimed_through,
                 now_ms,
                 &advance_entries,
             );
+        }
+        for index in reclaimed_indices {
+            if let Err(err) = self.delete_manifest_entry(source, index) {
+                if error.is_none() {
+                    error = Some(err);
+                }
+            }
         }
         match error {
             Some(err) => Err(err),
@@ -3862,7 +3884,7 @@ mod manifest_deletion_watermark_tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn TestPartialExpireDoesNotHideUndeletedManifestEntries() {
+    fn TestManifestReclamationDoesNotHidePartialExpirySegments() {
         let store = std::sync::Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
         let shard = conformance_shard();
@@ -3874,6 +3896,9 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
         }
+        let seg0_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 0);
+        let seg1_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 1);
+        let seg2_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 2);
         log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
             .unwrap();
 
@@ -3881,10 +3906,9 @@ mod manifest_deletion_watermark_tests {
         let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
         assert_eq!(err, EngineError::Conflict);
 
-        assert_eq!(
-            log.read_read_horizon(&shard).unwrap(),
-            Some(0),
-            "the watermark stops at the last physically deleted prefix entry"
+        assert!(
+            store.get(&seg1_legacy_key).unwrap().is_some(),
+            "the not-yet-reclaimed below-floor legacy manifest entry stays visible until reclamation completes"
         );
 
         log.set_fault_hook(None);
@@ -3893,10 +3917,17 @@ mod manifest_deletion_watermark_tests {
             2,
             "a later full expiry still finds the remaining below-floor entries"
         );
-        assert_eq!(
-            log.read_read_horizon(&shard).unwrap(),
-            Some(2),
-            "the watermark advances through the full reclaimed prefix once the later pass completes"
+        assert!(
+            store.get(&seg0_legacy_key).unwrap().is_none(),
+            "the first reclaimed legacy manifest copy is physically deleted after the full pass"
+        );
+        assert!(
+            store.get(&seg1_legacy_key).unwrap().is_none(),
+            "the second reclaimed legacy manifest copy is physically deleted after the full pass"
+        );
+        assert!(
+            store.get(&seg2_legacy_key).unwrap().is_none(),
+            "the fully reclaimed below-floor legacy manifest copy is physically deleted after the full pass"
         );
     }
 }

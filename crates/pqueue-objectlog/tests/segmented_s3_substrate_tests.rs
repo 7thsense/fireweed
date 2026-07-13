@@ -655,8 +655,8 @@ fn branch_pins_parent_segments_against_expiry() {
         "expired parent manifest head stays retained as history"
     );
     assert!(
-        store.get(&parent_manifest_legacy_key).unwrap().is_some(),
-        "the reclaimed legacy manifest copy stays retained"
+        store.get(&parent_manifest_legacy_key).unwrap().is_none(),
+        "the reclaimed legacy manifest copy is physically deleted"
     );
 }
 
@@ -703,7 +703,7 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
     );
     assert!(store.get(&seg_key).unwrap().is_none());
     assert!(store.get(&manifest_head_key).unwrap().is_some());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
 
     // Branch metadata can still be discarded idempotently after expiry.
     log.discard_branch(&parent_shard, &branch_shard).unwrap();
@@ -818,7 +818,7 @@ fn TestBranchPinReleaseEnablesManifestReclaim() {
 
     assert!(store.get(&seg_key).unwrap().is_none());
     assert!(store.get(&manifest_head_key).unwrap().is_some());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
     assert_eq!(
         log.read_read_horizon(&source).unwrap(),
         Some(0),
@@ -1018,8 +1018,8 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "the unpinned manifest head is retained as history"
     );
     assert!(
-        store.get(&seg1_manifest_legacy_key).unwrap().is_some(),
-        "the reclaimed legacy manifest copy stays retained"
+        store.get(&seg1_manifest_legacy_key).unwrap().is_none(),
+        "the reclaimed legacy manifest copy is physically deleted"
     );
     assert!(
         store.get(&seg2_key).unwrap().is_some(),
@@ -1079,8 +1079,8 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "seg0 manifest head remains retained once the pin is gone"
     );
     assert!(
-        store.get(&seg0_manifest_legacy_key).unwrap().is_some(),
-        "seg0 legacy manifest remains retained once the pin is gone"
+        store.get(&seg0_manifest_legacy_key).unwrap().is_none(),
+        "seg0 legacy manifest is physically deleted once the pin is gone"
     );
 }
 
@@ -2958,6 +2958,11 @@ fn trim_cycle<S: BlobStore>(
 
 fn delete_watermark_metadata<S: BlobStore>(store: &S, shard: &QueueKey) {
     store.delete(&read_horizon_key_s(shard)).unwrap();
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        if key.ends_with("~watermark.json") {
+            store.delete(&key).unwrap();
+        }
+    }
 }
 
 fn reclaimed_cached_writer_fixture() -> (
@@ -2986,12 +2991,12 @@ fn reclaimed_cached_writer_fixture() -> (
     (store, stale_owner, live_owner)
 }
 
-/// Test 1 — read/recovery enumeration is bounded to LIVE (above-horizon) entries after repeated
-/// trim+advance-horizon cycles, and the watermark is monotonic. Below-floor manifest entries stay retained
-/// in place, so the remaining manifest object count stays flat while the live tail still enumerates in
-/// O(live).
+/// Test 1 — after repeated trim+advance-horizon cycles, reclaimed legacy manifest copies are physically
+/// deleted, so the legacy manifest prefix stays bounded by the live tail while the watermark remains
+/// monotonic. The live read path still enumerates in O(live) via the ranged manifest scan.
 #[test]
-fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
+#[allow(non_snake_case)]
+fn TestManifestObjectCountBoundedAfterLongTrim() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3004,57 +3009,26 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
         log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
     let initial_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap().len();
-    assert!(
-        log.read_read_horizon(&shard()).unwrap().is_none(),
-        "no horizon before any trim"
-    );
 
-    // Three trim cycles, each advancing the floor (and the durable horizon).
+    // Three trim cycles. The live tail stays at two segments, so the reclaimed legacy prefix should stay
+    // bounded instead of growing with total history.
     trim_cycle(&log, &shard(), 3, 0, 1_000);
-    let w1 = log
-        .read_read_horizon(&shard())
-        .unwrap()
-        .expect("horizon after trim 1");
     trim_cycle(&log, &shard(), 7, 0, 2_000);
-    let w2 = log
-        .read_read_horizon(&shard())
-        .unwrap()
-        .expect("horizon after trim 2");
     trim_cycle(&log, &shard(), 11, 0, 3_000);
-    let w3 = log
-        .read_read_horizon(&shard())
-        .unwrap()
-        .expect("horizon after trim 3");
 
-    // MONOTONIC: the watermark only ever advances.
+    // Below-floor legacy manifest copies are reclaimed. After trimming through seq 11, only the two live
+    // tail segments (seqs 12..15) remain in the legacy manifest prefix, so the count stays O(live) instead
+    // of growing with total history.
+    let floor = log.read_retention_floor(&shard()).unwrap().unwrap();
+    assert_eq!(floor.sequence, 11);
+    let legacy_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap();
     assert!(
-        w1 < w2 && w2 < w3,
-        "read-horizon is monotonic: {w1} < {w2} < {w3}"
-    );
-
-    // Below-floor manifest entries stay retained, but the range-list still starts at the horizon and only
-    // enumerates the live tail.
-    let total_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap().len();
-    // Range-listing from the horizon enumerates only the LIVE tail — strictly fewer than the total history.
-    let live_keys = store
-        .list_from(&manifest_prefix_s(&shard()), &manifest_key_s(&shard(), w3))
-        .unwrap();
-    assert!(
-        live_keys.len() < initial_manifest_keys,
-        "range-list enumerates O(live) ({}) not O(total history) ({initial_manifest_keys})",
-        live_keys.len()
-    );
-    // Live = the two surviving data segments (seqs 12..15) + the authoritative floor entry (+ any superseded
-    // floor entry above W). No live key names an index at/below the horizon.
-    assert!(
-        live_keys
-            .iter()
-            .all(|k| k.as_str() > manifest_key_s(&shard(), w3).as_str()),
-        "every enumerated live key is strictly above the horizon index"
+        legacy_manifest_keys.len() <= 5,
+        "the reclaimed legacy prefix stays within a small constant bound instead of growing with history"
     );
     assert!(
-        total_manifest_keys >= live_keys.len(),
-        "the live enumeration is bounded by the retained manifest history"
+        legacy_manifest_keys.len() < initial_manifest_keys,
+        "reclaimed legacy copies shrink the manifest prefix instead of letting it grow with history"
     );
 
     // The live data still reads back byte-for-byte from the floor+1.
@@ -3354,8 +3328,8 @@ fn TestLiveTailByteIdenticalAfterManifestReclaim() {
         "the reclaimed manifest head stays retained as the durable fence"
     );
     assert!(
-        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_some(),
-        "the legacy compatibility copy stays retained"
+        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_none(),
+        "the legacy compatibility copy is physically deleted"
     );
 
     let after = log.read_from(&shard(), first_readable).unwrap();
@@ -3401,8 +3375,8 @@ fn TestPermanentFenceMarkerBlocksReclaimedIndex() {
         "the reclaimed head slot remains occupied"
     );
     assert!(
-        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_some(),
-        "the reclaimed legacy compatibility copy stays retained"
+        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none(),
+        "the reclaimed legacy compatibility copy is physically deleted"
     );
     assert!(
         store
@@ -4372,8 +4346,8 @@ fn TestManifestDeletionWatermarkLegacyBootstrapConservative() {
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef()).unwrap();
     assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_some(),
-        "legacy manifests without stored deletion-watermark metadata bootstrap conservatively"
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "without cached deletion-watermark metadata the reopened queue falls back to the live manifest path"
     );
     assert_eq!(
         reopened
