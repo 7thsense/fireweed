@@ -42,10 +42,14 @@ use pqueue_core::{
     TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandEnvelope, ControlPlaneStore,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead, PushCommand, QueueCommand,
+    Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandEnvelope, CommandPosition,
+    ControlPlaneStore, FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead, PushCommand,
+    QueueCommand,
 };
-use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig};
+use pqueue_objectlog::{
+    LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig, SegmentConfig,
+    segmented::{InMemoryBlobStore, SegmentedObjectLog},
+};
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -149,6 +153,19 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
         .saturating_sub(1)
         .min(sorted.len() - 1);
     sorted[idx]
+}
+
+fn segmented_pushes(n: u64) -> Vec<CommandEnvelope> {
+    (0..n)
+        .map(|i| {
+            envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![item(&format!("{i}"), &format!("k{i}"), i as i64)],
+                }),
+                vec![],
+            )
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -443,4 +460,82 @@ async fn object_log_e3_recovery_at_scale() {
         items as f64 / recovery.as_secs_f64()
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("meta", "persist");
+    let qdef = big_qdef("meta", "persist");
+
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef).unwrap();
+    log.enqueue(&shard, &segmented_pushes(2), 0, 10).unwrap();
+    log.seal(&shard, 0, 11).unwrap();
+    log.enqueue(&shard, &segmented_pushes(2), 0, 20).unwrap();
+    log.seal(&shard, 0, 21).unwrap();
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
+        .unwrap();
+    log.expire_segments_through(&shard, 1, 1_000).unwrap();
+
+    let persisted = log
+        .read_read_horizon(&shard)
+        .unwrap()
+        .expect("watermark persisted after reclamation");
+    assert_eq!(
+        persisted, 0,
+        "the durable floor is recovered from persisted metadata"
+    );
+    assert_eq!(
+        log.current_epoch(&shard).unwrap(),
+        0,
+        "persisting the deletion watermark does not change the permanent-head fence"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        Some(persisted),
+        "reopening recovers the same durable manifest deletion watermark"
+    );
+    assert_eq!(
+        reopened.current_epoch(&shard).unwrap(),
+        0,
+        "reopening preserves the permanent-head stale-writer fence"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestLegacyManifestBootstrapWithoutDeletionWatermarkMetadata() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("legacy", "bootstrap");
+    let qdef = big_qdef("legacy", "bootstrap");
+
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef).unwrap();
+    log.enqueue(&shard, &segmented_pushes(2), 0, 10).unwrap();
+    log.seal(&shard, 0, 11).unwrap();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "legacy manifests without a deletion watermark bootstrap as pre-reclamation state"
+    );
+    assert_eq!(
+        reopened.read_all(&shard).unwrap().len(),
+        2,
+        "legacy bootstrap still reads the committed manifest tail"
+    );
+    assert_eq!(
+        reopened.current_epoch(&shard).unwrap(),
+        0,
+        "legacy bootstrap preserves the permanent-head fence"
+    );
 }
