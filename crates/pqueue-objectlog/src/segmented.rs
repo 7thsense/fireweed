@@ -1083,16 +1083,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let keys = match self.read_read_horizon(shard)? {
             Some(w) => {
                 let ranged = self.list_authoritative_manifest_keys_at(shard, Some(w))?;
-                // Defensive: a horizon can never legitimately reach/exceed the tail (it is derived strictly
-                // below the floor, which is strictly below the tail), but if a ranged list ever came back
-                // empty for a non-empty manifest, fall back to the full list rather than reset a live tail to
-                // genesis. A genuinely empty manifest (fresh queue) has no horizon object, so this branch is
-                // not even reached for it — no double-list for the common fresh-open case.
+                // A trimmed queue must still have at least the authoritative floor entry above the horizon.
+                // If the live range is unexpectedly empty, a manifest hole was deleted or hidden above the
+                // durable floor. Fail closed instead of silently falling back to the reclaimed prefix and
+                // treating it as genesis.
                 if ranged.is_empty() {
-                    self.list_authoritative_manifest_keys_at(shard, None)?
-                } else {
-                    ranged
+                    return Err(EngineError::Conflict);
                 }
+                ranged
             }
             None => self.list_authoritative_manifest_keys_at(shard, None)?,
         };
@@ -1100,7 +1098,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Ok((0, 0, 0));
         };
         let Some(bytes) = self.store_get(&tail_key)? else {
-            return Ok((0, 0, 0));
+            return Err(EngineError::Conflict);
         };
         let tail: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
         let next_index = tail.index + 1;
