@@ -1091,6 +1091,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         shard: &QueueKey,
         entry: &ManifestEntry,
     ) -> EngineResult<()> {
+        // Retain the legacy manifest copy so backward-compat bootstrap and range-list recovery can still
+        // reconstruct retained history from the manifest namespace. The reclaimed marker lives in the head
+        // namespace; the legacy object remains as the compatibility copy.
         let marker = ManifestEntry {
             index: entry.index,
             epoch: entry.epoch,
@@ -1106,8 +1109,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         };
         let head_key = Self::manifest_head_key(shard, entry.index);
         self.store_put(&head_key, &to_json(&marker)?, false)?;
-        let legacy_key = Self::manifest_key(shard, entry.index);
-        let _ = self.store_delete(&legacy_key)?;
         Ok(())
     }
 
@@ -1172,20 +1173,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .counters
             .list_count += request_count.max(1);
         Ok(out)
-    }
-
-    /// Record that `entry`'s segment object was physically reclaimed.
-    ///
-    /// The durable watermark is still consolidated by the pass-level update at the end of
-    /// [`Self::expire_segments_through`]; this hook exists so the trim loop can keep the delete/bookkeeping
-    /// ordering explicit without advancing past an undeleted entry.
-    fn mark_manifest_entry_reclaimed(
-        &self,
-        _shard: &QueueKey,
-        _entry: &ManifestEntry,
-        _now_ms: i64,
-    ) -> EngineResult<()> {
-        Ok(())
     }
 
     /// Register a queue and recover its committed position + epoch from the manifest (idempotent).
@@ -1289,7 +1276,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// All LIVE manifest entries for `shard` above a GIVEN `horizon` snapshot, sorted by index. Consumers that
     /// pair this with the fail-closed floor guard pass a horizon they captured BEFORE reading the floor so the
-    /// guard decision and the enumeration are consistent under a concurrent trim.
+    /// guard decision and the enumeration are consistent under a concurrent trim. A key that is listed but can
+    /// no longer be fetched is treated as corruption, not reclaimed history.
     fn read_manifest_at(
         &self,
         shard: &QueueKey,
@@ -1297,10 +1285,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ) -> EngineResult<Vec<ManifestEntry>> {
         let mut entries = Vec::new();
         for key in self.list_manifest_keys_at(shard, horizon)? {
-            if let Some(bytes) = self.store_get(&key)? {
-                let entry: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
-                entries.push(entry);
-            }
+            let Some(bytes) = self.store_get(&key)? else {
+                return Err(EngineError::Conflict);
+            };
+            let entry: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+            entries.push(entry);
         }
         entries.sort_by_key(|e| e.index);
         Ok(entries)
@@ -2319,7 +2308,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 }
                 // Record reclaimed progress only after the object delete succeeds, so a fault can never
                 // advance the watermark past an undeleted below-floor entry.
-                if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry, now_ms) {
+                if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry) {
                     error = Some(err);
                     break;
                 }

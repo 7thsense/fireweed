@@ -881,8 +881,8 @@ async fn test5_crash_between_floor_write_and_delete_is_recoverable_and_idempoten
     );
     assert_eq!(
         count_seg_files(&root),
-        2,
-        "after the re-run the fresh tail plus one reclaimed segment object remain"
+        1,
+        "after the re-run only the fresh tail remains"
     );
     let page = reopened
         .read_from(&shard(), floor_pos(&reopened), 100)
@@ -937,8 +937,8 @@ async fn test5_crash_mid_delete_is_recoverable_and_idempotent() {
     );
     assert_eq!(
         count_seg_files(&root),
-        2,
-        "after the re-run the fresh tail plus one reclaimed segment object remain"
+        1,
+        "after the re-run only the fresh tail remains"
     );
     let page = reopened
         .read_from(&shard(), floor_pos(&reopened), 100)
@@ -1013,8 +1013,8 @@ async fn test_bug2a_floor_zero_crash_is_finished_on_reopen() {
     );
     assert_eq!(
         count_seg_files(&root),
-        2,
-        "the floor-0 crash currently leaves the reclaimed segment object present after the retry"
+        1,
+        "the floor-0 retry now finishes reclaiming the interrupted segment"
     );
 }
 

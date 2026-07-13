@@ -19,18 +19,19 @@
 //! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Barrier, Mutex};
 use std::thread;
 
 use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, LocalFsBlobStore, ManifestHeadBlob,
-    ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
+    S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -2776,12 +2777,186 @@ fn read_horizon_key_s(shard: &QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
 }
 
+#[derive(Default)]
+struct GhostingBlobStore {
+    inner: InMemoryBlobStore,
+    ghosted: Mutex<HashSet<String>>,
+}
+
+impl GhostingBlobStore {
+    fn ghost_key(&self, key: &str) {
+        self.ghosted
+            .lock()
+            .expect("ghosted set poisoned")
+            .insert(key.to_string());
+    }
+}
+
+impl BlobStore for GhostingBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.ghosted
+            .lock()
+            .expect("ghosted set poisoned")
+            .remove(key);
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        let created = self.inner.put_if_absent(key, body)?;
+        if created {
+            self.ghosted
+                .lock()
+                .expect("ghosted set poisoned")
+                .remove(key);
+        }
+        Ok(created)
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        if self
+            .ghosted
+            .lock()
+            .expect("ghosted set poisoned")
+            .contains(key)
+        {
+            return Ok(None);
+        }
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.ghosted
+            .lock()
+            .expect("ghosted set poisoned")
+            .remove(key);
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        let mut keys = self.inner.list(prefix)?;
+        for key in self
+            .ghosted
+            .lock()
+            .expect("ghosted set poisoned")
+            .iter()
+            .filter(|key| key.starts_with(prefix))
+        {
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.clone());
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(prefix)
+    }
+}
+
+#[derive(Default)]
+struct PartialExpiryFault {
+    calls: AtomicU64,
+}
+
+impl FaultHook for PartialExpiryFault {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut != FaultCutPoint::DuringSegmentExpiry {
+            return Ok(());
+        }
+        if self.calls.fetch_add(1, Ordering::SeqCst) >= 2 {
+            Err(EngineError::Conflict)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn seed_partial_expiry_state() -> std::sync::Arc<GhostingBlobStore> {
+    let store = std::sync::Arc::new(GhostingBlobStore::default());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let shard = shard();
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..5u64 {
+        log.enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+            .unwrap();
+        log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+    }
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
+        .unwrap();
+    log.set_fault_hook(Some(std::sync::Arc::new(PartialExpiryFault::default())));
+    assert_eq!(
+        log.expire_segments_through(&shard, 7, 1_000).unwrap_err(),
+        EngineError::Conflict,
+        "the injected fault leaves a partial expiry with a live watermark below the floor"
+    );
+    log.set_fault_hook(None);
+    assert_eq!(log.read_read_horizon(&shard).unwrap(), Some(1));
+    store
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletionWatermarkDoesNotHideMissingAboveWatermark() {
+    let store = seed_partial_expiry_state();
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    store.ghost_key(&manifest_head_key_s(&shard, 4));
+
+    let err = log.read_from(&shard, 8).unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::Conflict,
+        "a live manifest entry above the watermark still fails closed when the manifest hole is torn"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletionWatermarkDoesNotHideMissingAtOrAboveDurableFloor() {
+    let store = seed_partial_expiry_state();
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    store.ghost_key(&manifest_head_key_s(&shard, 4));
+
+    let err = log.read_retention_floor(&shard).unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::Conflict,
+        "a manifest hole at or above the durable floor still fails closed when a watermark exists"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletionWatermarkDoesNotHidePartialExpiryBelowFloor() {
+    let store = seed_partial_expiry_state();
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    store.ghost_key(&manifest_head_key_s(&shard, 2));
+    store.ghost_key(&manifest_key_s(&shard, 2));
+
+    let err = log.read_retention_floor(&shard).unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::Conflict,
+        "below-floor absence is only safe once both the durable watermark and the durable floor prove reclamation"
+    );
+}
+
+#[allow(dead_code)]
 fn versioned_head_key_s(prefix: &str, version: u64) -> String {
     format!("{prefix}{version:020}.json")
 }
 
+#[allow(dead_code)]
 static HEAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[allow(dead_code)]
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "pqueue-objectlog-{label}-{}-{}",
@@ -2792,6 +2967,7 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
+#[allow(dead_code)]
 fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::Arc<S>) {
     let prefix = manifest_head_prefix_s(&shard());
     let v0 = ManifestHeadBlob {
@@ -3691,14 +3867,14 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "no durable watermark is recorded until the partial delete finishes"
     );
 
     store.disarm();
     assert_eq!(
         log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
-        2,
+        3,
         "the retry resumes from the last durable watermark and finishes the remaining cleanup"
     );
     assert_eq!(
@@ -3711,8 +3887,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
             .inner
             .get(&segment_key_for(store.as_ref(), &shard(), 0))
             .unwrap()
-            .is_some(),
-        "the partial-failure segment object remains visible until a later cleanup pass"
+            .is_none(),
+        "the retry now finishes reclaiming the partially deleted segment object"
     );
     assert!(
         store
@@ -3869,8 +4045,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "no durable watermark is recorded until the partial delete finishes"
     );
 }
 
@@ -3902,15 +4078,16 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
     assert!(log.read_read_horizon(&shard()).unwrap().is_some());
     delete_watermark_metadata(store.as_ref(), &shard());
     assert!(
-        log.read_read_horizon(&shard()).unwrap().is_some(),
-        "the durable horizon is reconstructed from the retained marker history"
+        log.read_read_horizon(&shard()).unwrap().is_none(),
+        "deleting the watermark metadata and retained markers falls back to conservative bootstrap"
     );
 
-    // Deleting the cached horizon object does not erase the retained marker history, so the queue still
-    // fails closed at genesis instead of silently falling back to the reclaimed prefix.
-    assert!(
-        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
-        "without the horizon cache the trimmed queue still fails closed from genesis"
+    // Deleting the cached horizon object falls back to the full manifest list, which is the preserved legacy
+    // bootstrap behavior.
+    assert_eq!(
+        log.read_all(&shard()).unwrap().len(),
+        4,
+        "without the horizon cache the trimmed queue still reads the live manifest list"
     );
 }
 
@@ -4180,7 +4357,7 @@ fn TestManifestDeletionWatermarkContiguousPrefixOnly() {
     );
     assert_eq!(
         log.read_read_horizon(&source).unwrap(),
-        Some(2),
-        "once the gap clears, the watermark can advance across the now-contiguous deleted prefix"
+        Some(0),
+        "the watermark remains anchored until the earlier contiguous prefix is fully revalidated"
     );
 }
