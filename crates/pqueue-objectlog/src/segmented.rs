@@ -2365,14 +2365,32 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Read the durable READ-HORIZON watermark `W` (bead pqueue-8928baec): the highest manifest index below
     /// which every entry is a below-floor entry no reader needs. `None` when no trim has advanced it yet
     /// (backward-compatible: reads then fall back to the full manifest list).
+    ///
+    /// The `read_horizon.json` blob is a cache; the durable source of truth is the append-only
+    /// `manifest_head/*~watermark.json` marker history. Reconstructing from both makes stale/blob-regressing
+    /// writers harmless without relying on any owner-fence wiring.
     pub fn read_read_horizon(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
-        match self.store_get(&Self::read_horizon_key(shard))? {
+        let blob = match self.store_get(&Self::read_horizon_key(shard))? {
             Some(bytes) => {
                 let blob: ReadHorizonBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
-                Ok(Some(blob.index))
+                Some(blob.index)
             }
-            None => Ok(None),
+            None => None,
+        };
+        let mut durable = blob;
+        for key in self.store_list(&Self::manifest_head_prefix(shard))? {
+            if !key.ends_with("~watermark.json") {
+                continue;
+            }
+            let Some(bytes) = self.store_get(&key)? else {
+                continue;
+            };
+            let marker: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+            if let Some(index) = marker.compacted_through_index {
+                durable = Some(durable.map_or(index, |cur| cur.max(index)));
+            }
         }
+        Ok(durable)
     }
 
     /// Read the AUTHORITATIVE durable retention floor: the highest `retention_floor_through` recorded across the
@@ -2605,8 +2623,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             && self.read_read_horizon(shard)?.is_none_or(|cur| w > cur)
         {
             // Best-effort monotonic PUT. A candidate is always derived strictly below the durable floor (see
-            // SAFETY above), so even a non-atomic read-check-then-put that a racing writer interleaves can only
-            // regress W to another below-floor value — never above a live entry.
+            // SAFETY above), and the append-only watermark marker history makes stale blob writes harmless.
             let (cur_seq, cur_index, cur_epoch, _) = self.recover_manifest(shard)?;
             let marker = ManifestEntry {
                 index: cur_index.saturating_sub(1),
@@ -3475,7 +3492,7 @@ mod manifest_deletion_watermark_tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn TestManifestDeletionWatermarkStateMonotonic() {
+    fn TestManifestDeletionWatermarkRestartPersistsHighestContiguous() {
         let store = std::sync::Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
         let shard = conformance_shard();
@@ -3487,21 +3504,16 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
         }
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
             .unwrap();
-
-        let entries = log.read_manifest(&shard).unwrap();
-        log.advance_read_horizon_from_entries(&shard, 3, 1_000, &entries)
-            .unwrap();
-
-        let floor = log.read_retention_floor(&shard).unwrap().unwrap();
+        assert_eq!(log.expire_segments_through(&shard, 7, 1_000).unwrap(), 4);
         let first = log
             .read_read_horizon(&shard)
             .unwrap()
-            .expect("watermark after first advance");
-        assert!(
-            first < floor.sequence,
-            "the manifest-deletion watermark must stay below the durable floor"
+            .expect("watermark after trim/reclaim");
+        assert_eq!(
+            first, 3,
+            "the highest contiguous reclaimed manifest index is retained"
         );
 
         let reopened = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3509,23 +3521,64 @@ mod manifest_deletion_watermark_tests {
         assert_eq!(
             reopened.read_read_horizon(&shard).unwrap(),
             Some(first),
-            "the persisted watermark survives a close/reopen cycle"
-        );
-
-        let entries = reopened.read_manifest(&shard).unwrap();
-        reopened
-            .advance_read_horizon_from_entries(&shard, 1, 2_000, &entries)
-            .unwrap();
-        assert_eq!(
-            reopened.read_read_horizon(&shard).unwrap(),
-            Some(first),
-            "a lower candidate is clamped and does not regress the persisted watermark"
+            "the persisted watermark survives a close/reopen cycle without advancing the read horizon"
         );
     }
 
     #[test]
     #[allow(non_snake_case)]
-    fn TestManifestDeletionWatermarkOwnerFenceNonUse() {
+    fn TestManifestDeletionWatermarkRacingWritersNeverRegress() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let writer_a = SegmentedObjectLog::open(store.clone(), cfg);
+        writer_a.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..4u64 {
+            writer_a
+                .enqueue(&shard, &pushes(2), 0, 200 + i as i64 * 10)
+                .unwrap();
+            writer_a.seal(&shard, 0, 201 + i as i64 * 10).unwrap();
+        }
+        writer_a
+            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
+            .unwrap();
+        writer_a.expire_segments_through(&shard, 7, 1_000).unwrap();
+
+        let writer_b = SegmentedObjectLog::open(store.clone(), cfg);
+        writer_b.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(
+            writer_b.read_read_horizon(&shard).unwrap(),
+            Some(3),
+            "restart reconstructs the durable watermark"
+        );
+        writer_b
+            .persist_manifest_deletion_watermark(&shard, 1, 2_000)
+            .unwrap();
+        assert_eq!(
+            writer_b.read_read_horizon(&shard).unwrap(),
+            Some(3),
+            "a stale lower candidate is ignored by the monotonic durable watermark"
+        );
+
+        let stale_blob = ReadHorizonBlob { index: 1 };
+        writer_b
+            .store
+            .put(
+                &SegmentedObjectLog::<InMemoryBlobStore>::read_horizon_key(&shard),
+                &serde_json::to_vec(&stale_blob).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            writer_b.read_read_horizon(&shard).unwrap(),
+            Some(3),
+            "a late lower blob write cannot regress the durable watermark"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestDeletionWatermarkOwnerFenceIndependenceDocumented() {
         let store = std::sync::Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
         let shard = conformance_shard();
