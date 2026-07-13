@@ -633,6 +633,20 @@ struct ManifestEntry {
     compacted_through_index: Option<u64>,
 }
 
+/// A manifest entry that is eligible for below-floor reclamation bookkeeping.
+///
+/// The candidate set is intentionally narrow: only entries strictly below the current durable floor,
+/// whose data segment is already reclaimed for the requested pass, and that are not still branch-pinned
+/// at the time of enumeration. That gives compaction callers a stable, bounded surface to consume
+/// without freeing the manifest address that the write-once CAS fence depends on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestReclamationCandidate {
+    pub index: u64,
+    pub first_seq: u64,
+    pub segment_key: Option<String>,
+    pub retention_floor_through: Option<u64>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct BranchMetadata {
     source: QueueKey,
@@ -2129,10 +2143,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.
     ///
-    /// This deletes the expired segment OBJECT and its manifest entry pair once the branch-pin check says the
-    /// source segment is no longer needed. While a live branch still pins the source segment, reclamation
-    /// leaves both objects in place so the pin remains effective; after the pin is released, the next pass
-    /// reclaims the previously pinned segment and its manifest records together.
+    /// This deletes the expired segment OBJECT only. The manifest entry remains as retained history so the
+    /// durable manifest address stays occupied and the write-once CAS fence is preserved byte-for-byte. The
+    /// candidate set is still enumerated explicitly so follow-up deletion / watermark beads can consume it
+    /// without re-deriving eligibility.
     pub fn expire_segments_through(
         &self,
         source: &QueueKey,
@@ -2140,6 +2154,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         now_ms: i64,
     ) -> EngineResult<u64> {
         let entries = self.read_manifest(source)?;
+        let (candidates, _) = self.manifest_reclamation_candidates_from_entries(
+            source,
+            through_seq,
+            now_ms,
+            &entries,
+        )?;
         let mut deleted = 0u64;
         let mut reclaimed_through: Option<u64> = None;
         let mut error: Option<EngineError> = None;
@@ -2195,6 +2215,29 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             Some(err) => Err(err),
             None => Ok(deleted),
         }
+    }
+
+    /// Enumerate the manifest entries that are currently eligible for below-floor reclamation bookkeeping.
+    ///
+    /// The pass is intentionally bounded to the current live manifest snapshot plus the recent retained
+    /// history needed to identify already-reclaimed entries: it only inspects the current manifest range,
+    /// then filters to entries that are strictly below the durable floor, already reclaimed by the requested
+    /// pass, and not branch-pinned. That keeps the candidate set usable for deletion/watermark follow-up
+    /// beads without weakening the write-once manifest fence.
+    pub fn manifest_reclamation_candidates(
+        &self,
+        shard: &QueueKey,
+        through_seq: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<ManifestReclamationCandidate>> {
+        let entries = self.read_manifest(shard)?;
+        let (candidates, _) = self.manifest_reclamation_candidates_from_entries(
+            shard,
+            through_seq,
+            now_ms,
+            &entries,
+        )?;
+        Ok(candidates)
     }
 
     /// The LOWEST `first_seq` among data segments at or below `through_seq` that `expire_segments_through`
@@ -2427,6 +2470,74 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// harmless (it only widens enumeration, never hides live data). It NEVER deletes/renames/marks a manifest
     /// object — below-`W` addresses stay OCCUPIED, so a stale writer's `put_if_absent` there still COLLIDES and
     /// the epoch-fence is intact byte-for-byte.
+    fn manifest_reclamation_candidates_from_entries(
+        &self,
+        shard: &QueueKey,
+        reclaimed_through: u64,
+        now_ms: i64,
+        entries: &[ManifestEntry],
+    ) -> EngineResult<(Vec<ManifestReclamationCandidate>, Option<u64>)> {
+        let floor = self.read_retention_floor(shard)?;
+        let floor_seq = floor.as_ref().map(|f| f.sequence);
+        let mut new_w: Option<u64> = None;
+        let mut pinned_prefix = false;
+        let mut candidates = Vec::new();
+        for entry in entries {
+            // STOP at the AUTHORITATIVE floor entry — `read_retention_floor` needs it, so W must stay below it.
+            if let Some(floor_seq) = floor_seq
+                && entry.retention_floor_through == Some(floor_seq)
+            {
+                break;
+            }
+            let reclaimed = match floor_seq {
+                // A SUPERSEDED floor-advance entry (names no segment; strictly below the authoritative floor).
+                Some(floor_seq) => match entry.retention_floor_through {
+                    Some(v) => v < floor_seq,
+                    // An old epoch FENCE published at/below the floor (names no segment; no reader needs it).
+                    None if entry.fence => entry.first_seq <= floor_seq,
+                    // A DATA tombstone whose object is provably reclaimed: its whole visible range is at/below
+                    // what this (or a prior) expire actually deleted. Bounded by `reclaimed_through`, NOT the
+                    // floor.
+                    None => Self::visible_last_seq(entry) <= reclaimed_through,
+                },
+                // No durable floor yet: only reclaimed data segments are eligible.
+                None => {
+                    !entry.fence
+                        && entry.segment_key.is_some()
+                        && Self::visible_last_seq(entry) <= reclaimed_through
+                }
+            };
+            if !reclaimed {
+                if floor_seq.is_some() {
+                    break; // first LIVE / not-yet-reclaimed / needed entry — W must stay STRICTLY below it
+                }
+                continue;
+            }
+            // A still-branch-PINNED below-floor DATA segment has NOT been reclaimed (expire_segments_through
+            // skipped its delete): a future trim after the pin releases must still enumerate it, so do NOT
+            // include it in the candidate set. The pinned entry blocks the watermark, but later reclaimed
+            // entries remain eligible for deletion within the same pass.
+            if entry.segment_key.is_some()
+                && self.branch_pins_segment(shard, entry.first_seq, now_ms)?
+            {
+                pinned_prefix = true;
+                continue;
+            }
+            if floor_seq.is_some() && !pinned_prefix {
+                new_w = Some(entry.index);
+            }
+            if entry.segment_key.is_some() {
+                candidates.push(ManifestReclamationCandidate {
+                    index: entry.index,
+                    first_seq: entry.first_seq,
+                    segment_key: entry.segment_key.clone(),
+                    retention_floor_through: entry.retention_floor_through,
+                });
+            }
+        }
+        Ok((candidates, new_w))
+    }
+
     fn advance_read_horizon_from_entries(
         &self,
         shard: &QueueKey,

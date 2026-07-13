@@ -600,12 +600,12 @@ fn branch_pins_parent_segments_against_expiry() {
         "expired parent segment is removed once no branch references it"
     );
     assert!(
-        store.get(&parent_manifest_head_key).unwrap().is_none(),
-        "expired parent manifest head is removed once no branch references it"
+        store.get(&parent_manifest_head_key).unwrap().is_some(),
+        "expired parent manifest head stays retained as history"
     );
     assert!(
-        store.get(&parent_manifest_legacy_key).unwrap().is_none(),
-        "expired parent legacy manifest is removed once no branch references it"
+        store.get(&parent_manifest_legacy_key).unwrap().is_some(),
+        "expired parent legacy manifest stays retained as history"
     );
 }
 
@@ -651,8 +651,8 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
         "after TTL expiry the branch pin no longer protects the source segment"
     );
     assert!(store.get(&seg_key).unwrap().is_none());
-    assert!(store.get(&manifest_head_key).unwrap().is_none());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
+    assert!(store.get(&manifest_head_key).unwrap().is_some());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
 
     // Branch metadata can still be discarded idempotently after expiry.
     log.discard_branch(&parent_shard, &branch_shard).unwrap();
@@ -711,6 +711,12 @@ fn TestManifestReclamationWatermarkStopsAtPinnedBranches() {
         None,
         "the watermark does not advance past the pinned below-floor entry"
     );
+    assert!(
+        log.manifest_reclamation_candidates(&source, 1, 31)
+            .unwrap()
+            .is_empty(),
+        "pinned below-floor entries are excluded from the eligible candidate set"
+    );
 }
 
 #[test]
@@ -745,16 +751,23 @@ fn TestBranchPinReleaseEnablesManifestReclaim() {
         .unwrap();
     assert_eq!(log.expire_segments_through(&source, 1, 31).unwrap(), 0);
     log.discard_branch(&source, &branch).unwrap();
+    assert_eq!(
+        log.manifest_reclamation_candidates(&source, 1, 32)
+            .unwrap()
+            .len(),
+        1,
+        "once the branch pin is released the below-floor entry becomes eligible"
+    );
 
     assert_eq!(
         log.expire_segments_through(&source, 1, 32).unwrap(),
         1,
-        "once the branch pin is released, the formerly pinned manifest can be reclaimed"
+        "once the branch pin is released, the formerly pinned segment can be reclaimed"
     );
 
     assert!(store.get(&seg_key).unwrap().is_none());
-    assert!(store.get(&manifest_head_key).unwrap().is_none());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
+    assert!(store.get(&manifest_head_key).unwrap().is_some());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
     assert_eq!(
         log.read_read_horizon(&source).unwrap(),
         Some(0),
@@ -950,12 +963,12 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "the unpinned below-floor segment is reclaimed"
     );
     assert!(
-        store.get(&seg1_manifest_head_key).unwrap().is_none(),
-        "the unpinned manifest head is reclaimed"
+        store.get(&seg1_manifest_head_key).unwrap().is_some(),
+        "the unpinned manifest head is retained as history"
     );
     assert!(
-        store.get(&seg1_manifest_legacy_key).unwrap().is_none(),
-        "the unpinned legacy manifest is reclaimed"
+        store.get(&seg1_manifest_legacy_key).unwrap().is_some(),
+        "the unpinned legacy manifest is retained as history"
     );
     assert!(
         store.get(&seg2_key).unwrap().is_some(),
@@ -1011,12 +1024,12 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "seg0 is reclaimed once the pin is gone"
     );
     assert!(
-        store.get(&seg0_manifest_head_key).unwrap().is_none(),
-        "seg0 manifest head is reclaimed once the pin is gone"
+        store.get(&seg0_manifest_head_key).unwrap().is_some(),
+        "seg0 manifest head remains retained once the pin is gone"
     );
     assert!(
-        store.get(&seg0_manifest_legacy_key).unwrap().is_none(),
-        "seg0 legacy manifest is reclaimed once the pin is gone"
+        store.get(&seg0_manifest_legacy_key).unwrap().is_some(),
+        "seg0 legacy manifest remains retained once the pin is gone"
     );
 }
 
@@ -2804,9 +2817,9 @@ fn reclaimed_cached_writer_fixture() -> (
 }
 
 /// Test 1 — read/recovery enumeration is bounded to LIVE (above-horizon) entries after repeated
-/// trim+advance-horizon cycles, and the watermark is monotonic. Below-floor manifest entries are now
-/// physically removed once they are no longer branch-pinned, so the remaining manifest object count drops
-/// while the live tail still enumerates in O(live).
+/// trim+advance-horizon cycles, and the watermark is monotonic. Below-floor manifest entries stay retained
+/// in place, so the remaining manifest object count stays flat while the live tail still enumerates in
+/// O(live).
 #[test]
 fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
@@ -2849,11 +2862,12 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
         "read-horizon is monotonic: {w1} < {w2} < {w3}"
     );
 
-    // The compacted below-floor entries are gone, so the manifest object count is lower than before trim.
+    // Below-floor manifest entries stay retained, but the range-list still starts at the horizon and only
+    // enumerates the live tail.
     let total_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap().len();
     assert!(
-        total_manifest_keys < initial_manifest_keys,
-        "trimmed below-floor manifest entries were physically deleted"
+        total_manifest_keys >= initial_manifest_keys,
+        "trimmed below-floor manifest entries stay retained in-place"
     );
     // Range-listing from the horizon enumerates only the LIVE tail — strictly fewer than the total history.
     let live_keys = store
@@ -2871,6 +2885,10 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
             .iter()
             .all(|k| k.as_str() > manifest_key_s(&shard(), w3).as_str()),
         "every enumerated live key is strictly above the horizon index"
+    );
+    assert!(
+        total_manifest_keys >= live_keys.len(),
+        "the live enumeration is bounded by the retained manifest history"
     );
 
     // The live data still reads back byte-for-byte from the floor+1.
@@ -3068,10 +3086,10 @@ fn TestLiveTailByteIdenticalAfterManifestReclaim() {
 
     trim_cycle(&log, &shard(), floor, 0, 1_000);
 
-    // Prove the manifest reclamation happened, but keep the focus on the live tail above the floor.
+    // Prove the live tail stayed byte-identical while the below-floor manifest history remained retained.
     assert!(
-        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_none(),
-        "below-floor manifest entries are physically reclaimed"
+        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_some(),
+        "below-floor manifest entries stay retained in-place"
     );
 
     let after = log.read_from(&shard(), first_readable).unwrap();
@@ -3093,9 +3111,9 @@ fn TestLiveTailByteIdenticalAfterManifestReclaim() {
     );
 }
 
-/// Test 4 — a stale cached writer whose next index was reclaimed by manifest trimming cannot ack. The
-/// reclaimed manifest slot stays absent, and the stale seal returns `EpochFenced` or `Conflict` rather than
-/// creating a fresh durable entry at the freed address.
+/// Test 4 — a stale cached writer whose next index points below the durable read-horizon still cannot ack.
+/// The retained manifest slot stays occupied, and the stale seal returns `EpochFenced` or `Conflict` rather
+/// than creating a fresh durable entry at the occupied address.
 #[test]
 #[allow(non_snake_case)]
 fn TestPermanentFenceSurvivesManifestReclaim() {
@@ -3109,15 +3127,15 @@ fn TestPermanentFenceSurvivesManifestReclaim() {
         "a reclaimed cached manifest index must not ack, got {err:?}"
     );
     assert!(
-        store.get(&manifest_key_s(&shard(), 3)).unwrap().is_none(),
-        "the reclaimed manifest slot stays absent after the stale seal"
+        store.get(&manifest_key_s(&shard(), 3)).unwrap().is_some(),
+        "the retained manifest slot stays occupied after the stale seal"
     );
     assert!(
         store
             .get(&manifest_head_key_s(&shard(), 3))
             .unwrap()
-            .is_none(),
-        "the authoritative manifest-head slot stays absent after the stale seal"
+            .is_some(),
+        "the authoritative manifest-head slot stays occupied after the stale seal"
     );
     assert_eq!(
         store.inner.object_count(),
@@ -3509,7 +3527,7 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
 
     log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
         .unwrap();
-    store.arm_delete(&manifest_head_key_s(&shard(), 1));
+    store.arm_delete(&segment_key_for(store.as_ref(), &shard(), 0));
 
     let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
     assert!(
@@ -3519,10 +3537,10 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     assert!(
         store
             .inner
-            .get(&manifest_head_key_s(&shard(), 1))
+            .get(&segment_key_for(store.as_ref(), &shard(), 0))
             .unwrap()
             .is_some(),
-        "the not-yet-fully-deleted manifest object remains present after the partial failure"
+        "the not-yet-deleted segment object remains present after the partial failure"
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
@@ -3533,7 +3551,7 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     store.disarm();
     assert_eq!(
         log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
-        1,
+        3,
         "the retry resumes from the last durable watermark and finishes the remaining cleanup"
     );
     assert_eq!(
@@ -3544,18 +3562,34 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     assert!(
         store
             .inner
-            .get(&manifest_head_key_s(&shard(), 1))
+            .get(&segment_key_for(store.as_ref(), &shard(), 0))
             .unwrap()
             .is_none(),
-        "the retry removes the manifest object that survived the partial failure"
+        "the retry removes the segment object that survived the partial failure"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard(), 2))
+            .unwrap()
+            .is_none(),
+        "the retry also removes the remaining below-floor segment object"
+    );
+    assert!(
+        store
+            .inner
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_some(),
+        "the retained manifest history remains available after cleanup"
     );
     assert!(
         store
             .inner
             .get(&manifest_head_key_s(&shard(), 2))
             .unwrap()
-            .is_none(),
-        "the retry also removes the remaining below-floor manifest object"
+            .is_some(),
+        "all below-floor manifest entries stay retained in place"
     );
 }
 
@@ -3625,17 +3659,10 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
         "no horizon after delete"
     );
 
-    // Fallback to the FULL manifest list still works, but the physically deleted below-floor entries are no
-    // longer present to trigger a missing-segment error. The live tail above the floor still reads cleanly.
-    let all = log.read_all(&shard()).unwrap();
-    assert_eq!(
-        all.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
-        vec![4, 5, 6, 7],
-        "with no horizon object the queue still reads the remaining live tail"
-    );
-    let tail = log.read_from(&shard(), 4).unwrap();
-    assert_eq!(
-        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
-        vec![4, 5, 6, 7]
+    // The retained below-floor entries are still present, so deleting the horizon object now fails closed
+    // rather than pretending the reclaimed prefix is live.
+    assert!(
+        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
+        "without the horizon object the trimmed queue fails closed on the retained prefix"
     );
 }
