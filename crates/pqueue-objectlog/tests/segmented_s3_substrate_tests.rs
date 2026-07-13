@@ -658,6 +658,217 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
     log.discard_branch(&parent_shard, &branch_shard).unwrap();
 }
 
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchPinnedManifestNotDeleted() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    log.enqueue(&source, &pushes(2), 0, 10).unwrap();
+    log.seal(&source, 0, 11).unwrap();
+    log.enqueue(&source, &pushes(2), 0, 20).unwrap();
+    log.seal(&source, 0, 21).unwrap();
+
+    let branch_def = branch_qdef("manifest-live");
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 1),
+        60_000,
+        30,
+    )
+    .unwrap();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 1), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 1, 31).unwrap(),
+        0,
+        "the live branch pin keeps the below-floor segment from being reclaimed"
+    );
+
+    let seg_key = segment_key_for(store.as_ref(), &source, 0);
+    let manifest_head_key = manifest_head_key_s(&source, 0);
+    let manifest_legacy_key = manifest_key_s(&source, 0);
+
+    assert!(
+        store.get(&seg_key).unwrap().is_some(),
+        "the pinned source segment stays present while the branch is live"
+    );
+    assert!(
+        store.get(&manifest_head_key).unwrap().is_some(),
+        "the pinned manifest-head entry stays present while the branch is live"
+    );
+    assert!(
+        store.get(&manifest_legacy_key).unwrap().is_some(),
+        "the pinned legacy manifest entry stays present while the branch is live"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        None,
+        "the watermark does not advance past the pinned below-floor entry"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchPinReleaseEnablesManifestReclaim() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    log.enqueue(&source, &pushes(2), 0, 10).unwrap();
+    log.seal(&source, 0, 11).unwrap();
+    log.enqueue(&source, &pushes(2), 0, 20).unwrap();
+    log.seal(&source, 0, 21).unwrap();
+
+    let branch_def = branch_qdef("manifest-release");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 1),
+        60_000,
+        30,
+    )
+    .unwrap();
+    let seg_key = segment_key_for(store.as_ref(), &source, 0);
+    let manifest_head_key = manifest_head_key_s(&source, 0);
+    let manifest_legacy_key = manifest_key_s(&source, 0);
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 1), 0)
+        .unwrap();
+    assert_eq!(log.expire_segments_through(&source, 1, 31).unwrap(), 0);
+    log.discard_branch(&source, &branch).unwrap();
+
+    assert_eq!(
+        log.expire_segments_through(&source, 1, 32).unwrap(),
+        1,
+        "once the branch pin is released, the formerly pinned manifest can be reclaimed"
+    );
+
+    assert!(store.get(&seg_key).unwrap().is_none());
+    assert!(store.get(&manifest_head_key).unwrap().is_none());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        Some(0),
+        "the watermark advances only after the unpinned entry is reclaimed"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchPinRulesUnchangedByManifestReclaim() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+    trim_cycle(&log, &source, 3, 0, 1_000);
+
+    let branch_def = branch_qdef("rules");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    let branch_epoch = log
+        .branch(
+            &source,
+            &branch_def,
+            &CommandPosition::new(source.clone(), 0, 5),
+            60_000,
+            2_000,
+        )
+        .unwrap();
+
+    assert_eq!(
+        log.read_retention_floor(&branch).unwrap().unwrap().sequence,
+        3,
+        "the branch still inherits the source floor"
+    );
+    assert_eq!(branch_epoch, 1);
+    assert_eq!(
+        log.read_all(&branch)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5],
+        "branch creation and read visibility stay unchanged"
+    );
+
+    log.discard_branch(&source, &branch).unwrap();
+    assert_eq!(
+        log.read_from(&source, 4)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "discarding the branch does not perturb the source's live tail"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletionWatermarkStopsBeforePinnedManifest() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    log.enqueue(&source, &pushes(2), 0, 10).unwrap();
+    log.seal(&source, 0, 11).unwrap();
+    log.enqueue(&source, &pushes(2), 0, 20).unwrap();
+    log.seal(&source, 0, 21).unwrap();
+
+    let branch_def = branch_qdef("watermark");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 1),
+        60_000,
+        30,
+    )
+    .unwrap();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 1), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 1, 31).unwrap(),
+        0,
+        "the pinned below-floor entry is skipped on the first pass"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        None,
+        "the deletion watermark does not advance past the pinned entry"
+    );
+
+    log.discard_branch(&source, &branch).unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 1, 32).unwrap(),
+        1,
+        "after the pin releases, the same entry is reclaimed"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        Some(0),
+        "the watermark advances only after the entry is reclaimed"
+    );
+}
+
 /// Test 7 (bead pqueue-b5cc2bc7 — branch-pin safety of segment reclamation): a live branch pinning a
 /// below-floor segment keeps that segment object alive through a trim (`expire_segments_through` skips it via
 /// `branch_pins_segment`), while an unpinned below-floor segment IS reclaimed. Separately, a NEW branch cut at
