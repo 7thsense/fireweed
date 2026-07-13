@@ -141,57 +141,6 @@ fn read_horizon_key_s(shard: &pqueue_engine::QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
 }
 
-/// A store wrapper that fails the first delete whose key contains the armed substring.
-#[derive(Default)]
-struct FailingDeleteBlobStore {
-    inner: InMemoryBlobStore,
-    fail_delete: std::sync::Mutex<Option<String>>,
-}
-
-impl FailingDeleteBlobStore {
-    fn arm_delete(&self, substr: &str) {
-        *self.fail_delete.lock().unwrap() = Some(substr.to_string());
-    }
-
-    fn disarm(&self) {
-        *self.fail_delete.lock().unwrap() = None;
-    }
-
-    fn armed(lock: &std::sync::Mutex<Option<String>>, key: &str) -> bool {
-        lock.lock()
-            .unwrap()
-            .as_deref()
-            .is_some_and(|s| key.contains(s))
-    }
-}
-
-impl BlobStore for FailingDeleteBlobStore {
-    fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
-        self.inner.put(key, body)
-    }
-
-    fn put_if_absent(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<bool> {
-        self.inner.put_if_absent(key, body)
-    }
-
-    fn get(&self, key: &str) -> pqueue_engine::EngineResult<Option<Vec<u8>>> {
-        self.inner.get(key)
-    }
-
-    fn delete(&self, key: &str) -> pqueue_engine::EngineResult<bool> {
-        if Self::armed(&self.fail_delete, key) {
-            return Err(pqueue_engine::EngineError::Storage(format!(
-                "injected delete failure: {key}"
-            )));
-        }
-        self.inner.delete(key)
-    }
-
-    fn list(&self, prefix: &str) -> pqueue_engine::EngineResult<Vec<String>> {
-        self.inner.list(prefix)
-    }
-}
-
 fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
     for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
         for key in store.list(&prefix).unwrap() {
@@ -843,8 +792,8 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
     );
     assert_eq!(
         log.read_read_horizon(&shard).unwrap(),
-        Some(0),
-        "the live log records the safe reclaimed prefix while the failure is still in flight"
+        None,
+        "no safe reclaimed prefix is recorded when the first reclaim delete fails"
     );
 
     drop(log);
@@ -854,8 +803,8 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
     reopened.create_queue(&qdef).unwrap();
     assert_eq!(
         reopened.read_read_horizon(&shard).unwrap(),
-        Some(0),
-        "reopen preserves the manifest-deletion watermark from the interrupted reclaim"
+        None,
+        "reopen preserves the absence of a manifest-deletion watermark from the interrupted reclaim"
     );
 
     let floor = reopened.read_retention_floor(&shard).unwrap().unwrap();
@@ -863,13 +812,18 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
         floor.sequence, 7,
         "reopen reconstructs the authoritative floor from the durable manifest tail"
     );
-    let err = reopened.read_from(&shard, 4).unwrap_err();
-    assert!(
-        matches!(err, pqueue_engine::EngineError::Storage(_)),
-        "reads below the recovered floor must fail closed, got {err:?}"
+    assert_eq!(
+        reopened
+            .read_from(&shard, 4)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "reopen keeps the undeleted tail visible at the partial-expiry boundary"
     );
     assert!(
         reopened.read_from(&shard, 8).unwrap().is_empty(),
-        "reopen still exposes no live tail above the recovered floor"
+        "reopen keeps the partial-expiry boundary above the undeleted tail"
     );
 }

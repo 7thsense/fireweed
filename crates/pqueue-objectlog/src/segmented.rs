@@ -2625,12 +2625,21 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// This is the bounded state-transition surface future reclamation code should use: the caller must
     /// perform the manifest-object deletion work first, then call this helper to durably record the
     /// reclaimed prefix. If no below-floor manifest deletion made progress, the monotonic update is a no-op.
+    /// Correctness here does not depend on the deferred pqueue-c33c367e owner-fence wiring; the permanent
+    /// head CAS remains the stale-writer fence, and this helper only records already-reclaimed manifest
+    /// history.
     pub fn persist_manifest_deletion_watermark(
         &self,
         shard: &QueueKey,
         reclaimed_through: u64,
         now_ms: i64,
     ) -> EngineResult<()> {
+        if self
+            .read_retention_floor(shard)?
+            .is_some_and(|floor| reclaimed_through > floor.sequence)
+        {
+            return Ok(()); // ignore a stale candidate that would overrun the authoritative floor
+        }
         self.advance_read_horizon(shard, reclaimed_through, now_ms)
     }
 

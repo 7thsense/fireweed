@@ -3695,3 +3695,95 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
         "without the horizon object the trimmed queue fails closed on the retained prefix"
     );
 }
+
+/// TestManifestDeletionWatermarkReclaimCyclesMonotonic: repeated trim/reclaim cycles only advance the
+/// persisted deletion watermark, and the live tail remains readable after each step.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkReclaimCyclesMonotonic() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..8u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard(), 3, 0, 1_000);
+    let w1 = log.read_read_horizon(&shard()).unwrap().unwrap();
+    trim_cycle(&log, &shard(), 7, 0, 2_000);
+    let w2 = log.read_read_horizon(&shard()).unwrap().unwrap();
+    trim_cycle(&log, &shard(), 11, 0, 3_000);
+    let w3 = log.read_read_horizon(&shard()).unwrap().unwrap();
+    trim_cycle(&log, &shard(), 11, 0, 4_000);
+    let w4 = log.read_read_horizon(&shard()).unwrap().unwrap();
+
+    assert!(
+        w1 < w2 && w2 < w3,
+        "the deletion watermark only advances across successful reclaim cycles: {w1} < {w2} < {w3}"
+    );
+    assert_eq!(
+        w3, w4,
+        "repeating the same reclaim cycle does not regress or advance the persisted watermark"
+    );
+    assert_eq!(
+        log.read_from(&shard(), 12)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![12, 13, 14, 15],
+        "the live tail stays readable above the reclaimed prefix"
+    );
+}
+
+/// TestManifestDeletionWatermarkReclaimNeverExceedsFloor: a too-high deletion candidate is ignored by the
+/// bounded watermark path and does not hide the live manifest tail.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..6u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard(), 3, 0, 1_000);
+    let before = log.read_read_horizon(&shard()).unwrap().unwrap();
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 7), 0)
+        .unwrap();
+    log.persist_manifest_deletion_watermark(&shard(), 11, 2_000)
+        .unwrap();
+
+    let after = log.read_read_horizon(&shard()).unwrap().unwrap();
+    assert_eq!(
+        after, before,
+        "the deletion watermark ignores a candidate above the durable floor"
+    );
+    assert_eq!(
+        log.read_from(&shard(), 8)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![8, 9, 10, 11],
+        "the live entries above the floor remain visible after the ignored high candidate"
+    );
+}
+
+/// TestManifestDeletionWatermarkPartialExpiryDoesNotMaskLiveEntries: a partial reclaim leaves the remaining
+/// below-floor history visible for the next pass; the watermark is not treated as a retention authority.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkPartialExpiryDoesNotMaskLiveEntries() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
