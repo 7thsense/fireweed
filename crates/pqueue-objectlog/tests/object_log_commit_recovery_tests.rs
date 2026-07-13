@@ -33,19 +33,24 @@
 //!   - The true 10M-item-in-S3 snapshot+tail rebuild within a stated recovery-window budget is the live run
 //!     (pqueue-2f9ebac3); here the local genesis-replay rate is REPORTED only.
 
+use std::sync::Arc;
 use std::time::Instant;
 
-use pqueue_conformance::{envelope, item};
+use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::{
     EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
     TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandEnvelope, ControlPlaneStore,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead, PushCommand, QueueCommand,
+    Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandEnvelope, CommandPosition,
+    ControlPlaneStore, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionRead,
+    PushCommand, QueueCommand,
 };
-use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig};
+use pqueue_objectlog::{
+    LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig,
+    segmented::{FaultCutPoint, FaultHook, InMemoryBlobStore, SegmentConfig, SegmentedObjectLog},
+};
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -88,6 +93,19 @@ fn big_qdef(tenant: &str, queue: &str) -> QueueDefinition {
         typed_indexes: vec![],
         emit_change_records: true,
     }
+}
+
+fn pushes(n: u64) -> Vec<CommandEnvelope> {
+    (0..n)
+        .map(|i| {
+            envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![item(&format!("{i}"), &format!("k{i}"), i as i64)],
+                }),
+                vec![],
+            )
+        })
+        .collect()
 }
 
 /// Apply one command through the atomic unit of work (append + apply) on `shard`, stamping the queue's
@@ -149,6 +167,156 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
         .saturating_sub(1)
         .min(sorted.len() - 1);
     sorted[idx]
+}
+
+struct FailOnSegmentExpiry;
+
+impl FaultHook for FailOnSegmentExpiry {
+    fn fault_point(&self, cut: FaultCutPoint) -> pqueue_engine::EngineResult<()> {
+        if cut == FaultCutPoint::DuringSegmentExpiry {
+            return Err(EngineError::Storage(
+                "injected manifest-deletion progress failure".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkAdvancesOnlyAfterDeletionProgress() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store, cfg);
+    let shard = shard();
+
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+        .unwrap();
+    assert!(
+        log.read_read_horizon(&shard).unwrap().is_none(),
+        "no manifest-deletion watermark exists before any reclamation progress"
+    );
+
+    assert_eq!(
+        log.expire_segments_through(&shard, 3, 1_000).unwrap(),
+        2,
+        "the first successful reclamation pass deletes the below-floor manifest entries"
+    );
+    let w1 = log
+        .read_read_horizon(&shard)
+        .unwrap()
+        .expect("watermark after successful deletion progress");
+    let floor1 = log.read_retention_floor(&shard).unwrap().unwrap();
+    assert!(
+        w1 < floor1.sequence,
+        "the persisted watermark stays below the durable floor"
+    );
+
+    log.set_fault_hook(Some(Arc::new(FailOnSegmentExpiry)));
+    let err = log.expire_segments_through(&shard, 7, 2_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected deletion failure must surface as storage error, got {err:?}"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(w1),
+        "failed deletion progress leaves the previous durable watermark unchanged"
+    );
+
+    log.set_fault_hook(None);
+    assert_eq!(
+        log.expire_segments_through(&shard, 7, 3_000).unwrap(),
+        2,
+        "the retry resumes from the last committed watermark and deletes the remaining below-floor entries"
+    );
+    let w2 = log
+        .read_read_horizon(&shard)
+        .unwrap()
+        .expect("watermark after the retry completes");
+    assert!(
+        w2 > w1,
+        "successful manifest-deletion progress advances the durable watermark monotonically"
+    );
+
+    assert_eq!(
+        log.expire_segments_through(&shard, 7, 4_000).unwrap(),
+        0,
+        "a no-op cleanup pass makes no deletion progress"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(w2),
+        "absent deletion progress leaves the durable watermark unchanged"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkMonotonicAndFencePreserved() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let source = shard();
+
+    let owner_a = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_a.create_queue(&qdef()).unwrap();
+    for i in 0..4u64 {
+        owner_a
+            .enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        owner_a.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    let owner_b = SegmentedObjectLog::open(store, cfg);
+    owner_b.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        owner_b.acquire_epoch(&source, 100).unwrap(),
+        1,
+        "the second owner advances the permanent head epoch"
+    );
+    owner_b
+        .advance_retention_floor(&source, CommandPosition::new(source.clone(), 1, 3), 1)
+        .unwrap();
+    assert_eq!(
+        owner_b.expire_segments_through(&source, 3, 1_000).unwrap(),
+        2,
+        "the first trim pass reclaims the below-floor manifest entries"
+    );
+    let w1 = owner_b
+        .read_read_horizon(&source)
+        .unwrap()
+        .expect("watermark after the first trim");
+
+    assert_eq!(
+        owner_b.expire_segments_through(&source, 1, 2_000).unwrap(),
+        0,
+        "attempts to move the manifest-deletion watermark backward are ignored"
+    );
+    assert_eq!(
+        owner_b.read_read_horizon(&source).unwrap(),
+        Some(w1),
+        "the durable manifest-deletion watermark remains monotonic"
+    );
+    assert_eq!(
+        owner_b.current_epoch(&source).unwrap(),
+        1,
+        "permanent head remains the stale-writer fence"
+    );
+
+    owner_a.enqueue(&source, &pushes(1), 0, 5_000).unwrap();
+    let err = owner_a.seal(&source, 0, 5_001).unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::EpochFenced,
+        "the stale writer is fenced by the permanent head CAS, not by the watermark"
+    );
 }
 
 #[tokio::test]

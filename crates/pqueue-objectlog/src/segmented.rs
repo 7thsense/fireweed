@@ -2441,6 +2441,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.advance_read_horizon_from_entries(shard, reclaimed_through, now_ms, &entries)
     }
 
+    /// Persist the manifest-deletion watermark after a caller has already confirmed deletion progress.
+    ///
+    /// This is the bounded state-transition surface future reclamation code should use: the caller must
+    /// perform the manifest-object deletion work first, then call this helper to durably record the
+    /// reclaimed prefix. If no below-floor manifest deletion made progress, the monotonic update is a no-op.
+    pub fn persist_manifest_deletion_watermark(
+        &self,
+        shard: &QueueKey,
+        reclaimed_through: u64,
+        now_ms: i64,
+    ) -> EngineResult<()> {
+        self.advance_read_horizon(shard, reclaimed_through, now_ms)
+    }
+
     /// The highest `visible_last_seq` over the CONTIGUOUS PREFIX of DATA manifest segments whose
     /// `committed_at_ms <= cutoff_ms` (bead pqueue-b5cc2bc7). This is the "all request_ids in these segments
     /// are past retention" horizon: `created_at <= committed_at_ms` by causality, so a segment committed at or
