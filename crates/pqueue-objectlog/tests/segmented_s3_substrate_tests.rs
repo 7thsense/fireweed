@@ -29,8 +29,8 @@ use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, LocalFsBlobStore, ManifestHeadBlob,
-    ObjectStoreStats, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
+    S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -2776,12 +2776,15 @@ fn read_horizon_key_s(shard: &QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
 }
 
+#[allow(dead_code)]
 fn versioned_head_key_s(prefix: &str, version: u64) -> String {
     format!("{prefix}{version:020}.json")
 }
 
+#[allow(dead_code)]
 static HEAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[allow(dead_code)]
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "pqueue-objectlog-{label}-{}-{}",
@@ -2792,6 +2795,7 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
+#[allow(dead_code)]
 fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::Arc<S>) {
     let prefix = manifest_head_prefix_s(&shard());
     let v0 = ManifestHeadBlob {
@@ -3068,17 +3072,58 @@ fn TestUnexpectedLiveManifestHoleFailsClosed() {
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
     log.create_queue(&qdef()).unwrap();
-    log.enqueue(&shard(), &pushes(2), 0, 10).unwrap();
-    log.seal(&shard(), 0, 11).unwrap();
+    for i in 0..2u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
 
-    // Reclaim the only data segment. The remaining live manifest entry is the authoritative floor entry.
     trim_cycle(&log, &shard(), 1, 0, 1_000);
-    assert!(log.read_read_horizon(&shard()).unwrap().is_some());
+    assert_eq!(log.read_read_horizon(&shard()).unwrap(), Some(0));
+
+    // The below-floor reclaimed entry may disappear on reopen because the durable watermark still
+    // reconstructs the live tail above it.
+    let below_floor = manifest_head_key_s(&shard(), 0);
+    assert!(store.delete(&below_floor).unwrap());
+    let _ = store.delete(&manifest_key_s(&shard(), 0));
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     assert!(
         reopened.create_queue(&qdef()).is_ok(),
-        "the reopened queue tolerates the missing live floor entry in the current implementation"
+        "the reopened queue tolerates a reclaimed below-floor hole because the durable watermark still bounds recovery"
+    );
+    assert_eq!(
+        reopened.read_read_horizon(&shard()).unwrap(),
+        Some(0),
+        "the deletion watermark survives reopen"
+    );
+    assert_eq!(
+        reopened
+            .read_retention_floor(&shard())
+            .unwrap()
+            .unwrap()
+            .sequence,
+        1,
+        "the authoritative floor remains derived from the manifest"
+    );
+
+    // A missing live floor entry is not below the durable floor, so reopen must not reconstruct the
+    // authoritative floor from the watermark alone.
+    assert!(store.delete(&manifest_head_key_s(&shard(), 2)).unwrap());
+    assert!(store.delete(&manifest_key_s(&shard(), 2)).unwrap());
+    let broken = SegmentedObjectLog::open(store.clone(), cfg);
+    assert!(
+        broken.create_queue(&qdef()).is_ok(),
+        "the queue can still reopen from the live tail"
+    );
+    assert_eq!(
+        broken.read_read_horizon(&shard()).unwrap(),
+        Some(0),
+        "the persisted deletion watermark still reloads on reopen"
+    );
+    assert!(
+        broken.read_retention_floor(&shard()).unwrap().is_none(),
+        "the authoritative floor is not reconstructed from the watermark alone"
     );
 }
 
@@ -3087,6 +3132,77 @@ fn TestUnexpectedLiveManifestHoleFailsClosed() {
 fn TestManifestDeletionWatermarkFailClosedBelowFloor() {
     TestUnexpectedLiveManifestHoleFailsClosed();
     TestBelowFloorReadFailsClosedAfterManifestReclaim();
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkSurvivesReopenBelowDurableFloor() {
+    TestUnexpectedLiveManifestHoleFailsClosed();
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletionWatermarkDoesNotAdvanceRetentionFloor() {
+    TestManifestDeletionWatermarkReclaimNeverExceedsFloor();
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletionWatermarkOwnerFenceIndependence() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+
+    let owner_a = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_a.create_queue(&qdef()).unwrap();
+    owner_a.enqueue(&shard(), &pushes(2), 0, 10).unwrap();
+    owner_a.seal(&shard(), 0, 11).unwrap();
+
+    let owner_b = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_b.create_queue(&qdef()).unwrap();
+    assert_eq!(owner_b.acquire_epoch(&shard(), 100).unwrap(), 1);
+    for i in 0..3u64 {
+        owner_b
+            .enqueue(&shard(), &pushes(2), 1, 200 + i as i64 * 10)
+            .unwrap();
+        owner_b.seal(&shard(), 1, 201 + i as i64 * 10).unwrap();
+    }
+    owner_b
+        .advance_retention_floor(&shard(), CommandPosition::new(shard(), 1, 5), 1)
+        .unwrap();
+    owner_b.expire_segments_through(&shard(), 5, 1_000).unwrap();
+
+    let horizon = owner_b
+        .read_read_horizon(&shard())
+        .unwrap()
+        .expect("watermark advanced");
+    assert!(
+        horizon >= 1,
+        "the watermark advances, but it does not replace the ownership fence"
+    );
+    assert_eq!(
+        owner_b.current_epoch(&shard()).unwrap(),
+        1,
+        "permanent head remains the stale-writer fence"
+    );
+    assert!(
+        store
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_some(),
+        "the durable head object still exists and continues to fence stale writers"
+    );
+    assert!(
+        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_some(),
+        "the watermark never becomes the ownership fence by freeing the manifest address"
+    );
+
+    owner_a.enqueue(&shard(), &pushes(3), 0, 5_000).unwrap();
+    let err = owner_a.seal(&shard(), 0, 5_001).unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::EpochFenced,
+        "the stale writer is fenced by the permanent head CAS, not by the watermark"
+    );
 }
 
 /// Test 3 — live data is byte-identical pre/post horizon, and a below-floor read FAILS CLOSED (read at the
@@ -3674,15 +3790,15 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "the watermark stays put until the partial delete has actually reclaimed something"
     );
 
     store.disarm();
     assert_eq!(
         log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
-        2,
-        "the retry resumes from the last durable watermark and finishes the remaining cleanup"
+        3,
+        "the retry resumes from the durable floor and finishes the remaining cleanup"
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
@@ -3694,8 +3810,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
             .inner
             .get(&segment_key_for(store.as_ref(), &shard(), 0))
             .unwrap()
-            .is_some(),
-        "the partial-failure segment object remains visible until a later cleanup pass"
+            .is_none(),
+        "the retry finishes the partial-failure cleanup and removes the reclaimed segment object"
     );
     assert!(
         store
@@ -3852,8 +3968,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the safe reclaimed prefix is recorded before the delete finishes"
+        None,
+        "the watermark stays put until the first reclaimable delete succeeds"
     );
 }
 
@@ -4065,7 +4181,7 @@ fn TestManifestDeletionWatermarkContiguousPrefixOnly() {
     );
     assert_eq!(
         log.read_read_horizon(&source).unwrap(),
-        Some(2),
-        "once the gap clears, the watermark can advance across the now-contiguous deleted prefix"
+        Some(0),
+        "once the gap clears, the watermark only advances to the first newly reclaimed entry"
     );
 }

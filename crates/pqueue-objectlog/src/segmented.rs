@@ -1106,8 +1106,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         };
         let head_key = Self::manifest_head_key(shard, entry.index);
         self.store_put(&head_key, &to_json(&marker)?, false)?;
-        let legacy_key = Self::manifest_key(shard, entry.index);
-        let _ = self.store_delete(&legacy_key)?;
         Ok(())
     }
 
@@ -1172,20 +1170,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .counters
             .list_count += request_count.max(1);
         Ok(out)
-    }
-
-    /// Record that `entry`'s segment object was physically reclaimed.
-    ///
-    /// The durable watermark is still consolidated by the pass-level update at the end of
-    /// [`Self::expire_segments_through`]; this hook exists so the trim loop can keep the delete/bookkeeping
-    /// ordering explicit without advancing past an undeleted entry.
-    fn mark_manifest_entry_reclaimed(
-        &self,
-        _shard: &QueueKey,
-        _entry: &ManifestEntry,
-        _now_ms: i64,
-    ) -> EngineResult<()> {
-        Ok(())
     }
 
     /// Register a queue and recover its committed position + epoch from the manifest (idempotent).
@@ -2319,7 +2303,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 }
                 // Record reclaimed progress only after the object delete succeeds, so a fault can never
                 // advance the watermark past an undeleted below-floor entry.
-                if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry, now_ms) {
+                if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry) {
                     error = Some(err);
                     break;
                 }
