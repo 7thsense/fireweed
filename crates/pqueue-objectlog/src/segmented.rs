@@ -809,6 +809,9 @@ struct ShardBuf {
     next_manifest_index: u64,
     /// Highest epoch any committed manifest entry records (the queue's current epoch).
     committed_epoch: u64,
+    /// Cached durable manifest-deletion watermark (read-horizon). This is a conservative local copy of
+    /// the persisted object; the permanent head CAS remains the stale-writer fence.
+    manifest_deletion_watermark: Option<u64>,
 }
 
 struct Inner {
@@ -1048,16 +1051,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Register a queue and recover its committed position + epoch from the manifest (idempotent).
     pub fn create_queue(&self, def: &QueueDefinition) -> EngineResult<()> {
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-        let (next_seq, next_index, epoch) = self.recover_manifest(&shard)?;
+        let buf = self.load_shard_buf(&shard)?;
         let mut g = self.inner.lock().expect("segmented log poisoned");
-        g.shards.entry(shard).or_insert(ShardBuf {
-            buffered: Vec::new(),
-            buffered_bytes: 0,
-            oldest_buffered_ms: None,
-            next_seq,
-            next_manifest_index: next_index,
-            committed_epoch: epoch,
-        });
+        g.shards.entry(shard).or_insert(buf);
         Ok(())
     }
 
@@ -1170,6 +1166,39 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .get(shard)
             .map(|buf| buf.committed_epoch)
             .ok_or(EngineError::NotFound)
+    }
+
+    fn load_shard_buf(&self, shard: &QueueKey) -> EngineResult<ShardBuf> {
+        let (next_seq, next_index, epoch) = self.recover_manifest(shard)?;
+        let manifest_deletion_watermark = self.read_read_horizon(shard)?;
+        Ok(ShardBuf {
+            buffered: Vec::new(),
+            buffered_bytes: 0,
+            oldest_buffered_ms: None,
+            next_seq,
+            next_manifest_index: next_index,
+            committed_epoch: epoch,
+            manifest_deletion_watermark,
+        })
+    }
+
+    fn cached_manifest_deletion_watermark(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
+        let cached = {
+            let g = self.inner.lock().expect("segmented log poisoned");
+            let buf = g.shards.get(shard).ok_or(EngineError::NotFound)?;
+            buf.manifest_deletion_watermark
+        };
+        if cached.is_some() {
+            return Ok(cached);
+        }
+        let durable = self.read_read_horizon(shard)?;
+        if let Some(w) = durable {
+            let mut g = self.inner.lock().expect("segmented log poisoned");
+            if let Some(buf) = g.shards.get_mut(shard) {
+                buf.manifest_deletion_watermark = Some(w);
+            }
+        }
+        Ok(durable)
     }
 
     /// Acquire the queue at a NEW, strictly-greater epoch by publishing a **fence entry** to the manifest
@@ -1335,10 +1364,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
         // Reclaim-time fence: if compaction has already advanced the durable read-horizon beyond this
         // cached manifest index, the index was reclaimed and this stale writer must self-fence before any
-        // segment PUT. This stays on the O(1) seal hot path: one GET of `read_horizon.json`, not a manifest
-        // LIST or post-CAS rollback substitute (docs/perf/design/manifest-compaction-hotpath.md:359 and
+        // segment PUT. The cached watermark is refreshed on open and after successful trim; the permanent
+        // head CAS remains the stale-writer fence (docs/perf/design/manifest-compaction-hotpath.md:359 and
         // pqueue-c33c367e).
-        if let Some(horizon) = self.read_read_horizon(shard)?
+        if let Some(horizon) = self.cached_manifest_deletion_watermark(shard)?
             && cur_index <= horizon
         {
             let mut g = self.inner.lock().expect("segmented log poisoned");
@@ -2393,6 +2422,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             // regress W to another below-floor value — never above a live entry.
             let blob = ReadHorizonBlob { index: w };
             self.store_put(&Self::read_horizon_key(shard), &to_json(&blob)?, false)?;
+            let mut g = self.inner.lock().expect("segmented log poisoned");
+            if let Some(buf) = g.shards.get_mut(shard) {
+                buf.manifest_deletion_watermark =
+                    Some(buf.manifest_deletion_watermark.map_or(w, |cur| cur.max(w)));
+            }
         }
         Ok(())
     }
@@ -2548,16 +2582,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Register a shard by key alone (the ADR-012 `LogStore::ensure_shard` seam — the control plane owns the
     /// queue DEFINITION, so the log axis only needs the key to recover its manifest tail). Idempotent.
     pub fn ensure_shard(&self, shard: &QueueKey) -> EngineResult<()> {
-        let (next_seq, next_index, epoch) = self.recover_manifest(shard)?;
+        let buf = self.load_shard_buf(shard)?;
         let mut g = self.inner.lock().expect("segmented log poisoned");
-        g.shards.entry(shard.clone()).or_insert(ShardBuf {
-            buffered: Vec::new(),
-            buffered_bytes: 0,
-            oldest_buffered_ms: None,
-            next_seq,
-            next_manifest_index: next_index,
-            committed_epoch: epoch,
-        });
+        g.shards.entry(shard.clone()).or_insert(buf);
         Ok(())
     }
 
@@ -3203,5 +3230,144 @@ mod list_pagination_tests {
         assert_eq!(next_continuation_token(complete), None);
         let empty = "<ListBucketResult></ListBucketResult>";
         assert_eq!(next_continuation_token(empty), None);
+    }
+}
+
+#[cfg(test)]
+mod manifest_deletion_watermark_tests {
+    use super::*;
+    use pqueue_conformance::{
+        envelope, item, qdef as conformance_qdef, shard as conformance_shard,
+    };
+    use pqueue_engine::PushCommand;
+
+    fn pushes(n: u64) -> Vec<CommandEnvelope> {
+        (0..n)
+            .map(|i| {
+                envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item(&format!("{i}"), &format!("k{i}"), i as i64)],
+                    }),
+                    vec![],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestDeletionWatermarkStateMonotonic() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..4u64 {
+            log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+                .unwrap();
+            log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+        }
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+            .unwrap();
+
+        let entries = log.read_manifest(&shard).unwrap();
+        log.advance_read_horizon_from_entries(&shard, 3, 1_000, &entries)
+            .unwrap();
+
+        let floor = log.read_retention_floor(&shard).unwrap().unwrap();
+        let first = log
+            .read_read_horizon(&shard)
+            .unwrap()
+            .expect("watermark after first advance");
+        assert!(
+            first < floor.sequence,
+            "the manifest-deletion watermark must stay below the durable floor"
+        );
+
+        let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+        reopened.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(
+            reopened.read_read_horizon(&shard).unwrap(),
+            Some(first),
+            "the persisted watermark survives a close/reopen cycle"
+        );
+
+        let entries = reopened.read_manifest(&shard).unwrap();
+        reopened
+            .advance_read_horizon_from_entries(&shard, 1, 2_000, &entries)
+            .unwrap();
+        assert_eq!(
+            reopened.read_read_horizon(&shard).unwrap(),
+            Some(first),
+            "a lower candidate is clamped and does not regress the persisted watermark"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestDeletionWatermarkOwnerFenceNonUse() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let owner_a = SegmentedObjectLog::open(store.clone(), cfg);
+        owner_a.create_queue(&conformance_qdef()).unwrap();
+        owner_a.enqueue(&shard, &pushes(2), 0, 10).unwrap();
+        owner_a.seal(&shard, 0, 11).unwrap();
+
+        let owner_b = SegmentedObjectLog::open(store.clone(), cfg);
+        owner_b.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(owner_b.acquire_epoch(&shard, 100).unwrap(), 1);
+        for i in 0..3u64 {
+            owner_b
+                .enqueue(&shard, &pushes(2), 1, 200 + i as i64 * 10)
+                .unwrap();
+            owner_b.seal(&shard, 1, 201 + i as i64 * 10).unwrap();
+        }
+        owner_b
+            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 1, 5), 1)
+            .unwrap();
+        owner_b.expire_segments_through(&shard, 5, 1_000).unwrap();
+
+        let horizon = owner_b
+            .read_read_horizon(&shard)
+            .unwrap()
+            .expect("watermark advanced");
+        assert!(
+            horizon >= 1,
+            "the watermark advances, but it does not replace the ownership fence"
+        );
+        assert_eq!(
+            owner_b.current_epoch(&shard).unwrap(),
+            1,
+            "permanent head remains the stale-writer fence"
+        );
+        assert!(
+            store
+                .get(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_key(
+                    &shard, 1
+                ))
+                .unwrap()
+                .is_some(),
+            "the durable head object still exists and continues to fence stale writers"
+        );
+        assert!(
+            store
+                .get(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(
+                    &shard, 1
+                ))
+                .unwrap()
+                .is_some(),
+            "the watermark never becomes the ownership fence by freeing the manifest address"
+        );
+
+        owner_a.enqueue(&shard, &pushes(3), 0, 5_000).unwrap();
+        let err = owner_a.seal(&shard, 0, 5_001).unwrap_err();
+        assert_eq!(
+            err,
+            EngineError::EpochFenced,
+            "the stale writer is fenced by the permanent head CAS, not by the watermark"
+        );
     }
 }
