@@ -1083,6 +1083,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(out)
     }
 
+    /// Record that `entry`'s segment object was physically reclaimed.
+    ///
+    /// The durable watermark is still consolidated by the pass-level update at the end of
+    /// [`Self::expire_segments_through`]; this hook exists so the trim loop can keep the delete/bookkeeping
+    /// ordering explicit without advancing past an undeleted entry.
+    fn mark_manifest_entry_reclaimed(
+        &self,
+        _shard: &QueueKey,
+        _entry: &ManifestEntry,
+        _now_ms: i64,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
     /// Register a queue and recover its committed position + epoch from the manifest (idempotent).
     pub fn create_queue(&self, def: &QueueDefinition) -> EngineResult<()> {
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
@@ -2162,11 +2176,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.
     ///
-    /// This first overwrites the authoritative manifest head slot with a durable reclaim marker, then deletes
-    /// the expired segment OBJECT. The legacy compatibility copy remains available, the historical address
-    /// stays occupied, and the write-once CAS fence is preserved byte-for-byte. The candidate set is still
-    /// enumerated explicitly so follow-up deletion / watermark beads can consume it without re-deriving
-    /// eligibility.
+    /// The segment object is deleted first; once that succeeds, the reclaimed-prefix watermark is advanced
+    /// through the newly deleted entry. The legacy compatibility copy remains available, the historical
+    /// manifest address stays occupied, and the write-once CAS fence is preserved byte-for-byte. The
+    /// candidate set is still enumerated explicitly so follow-up deletion / watermark beads can consume it
+    /// without re-deriving eligibility.
     pub fn expire_segments_through(
         &self,
         source: &QueueKey,
@@ -2194,10 +2208,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 continue;
             }
             if let Some(seg_key) = entry.segment_key.as_ref() {
-                if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry) {
-                    error = Some(err);
-                    break;
-                }
                 // Test-only crash seam (never armed in production): a fault here models a process death mid-
                 // reclamation, after the durable floor advanced but before this object is deleted.
                 if let Err(err) = self.fault(FaultCutPoint::DuringSegmentExpiry) {
@@ -2213,6 +2223,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 };
                 if deleted_now {
                     deleted += 1;
+                }
+                // Record reclaimed progress only after the object delete succeeds, so a fault can never
+                // advance the watermark past an undeleted below-floor entry.
+                if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry, now_ms) {
+                    error = Some(err);
+                    break;
                 }
                 reclaimed_through = Some(Self::visible_last_seq(entry));
             }
@@ -3486,6 +3502,7 @@ mod manifest_deletion_watermark_tests {
         envelope, item, qdef as conformance_qdef, shard as conformance_shard,
     };
     use pqueue_engine::PushCommand;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn pushes(n: u64) -> Vec<CommandEnvelope> {
         (0..n)
@@ -3498,6 +3515,31 @@ mod manifest_deletion_watermark_tests {
                 )
             })
             .collect()
+    }
+
+    struct PartialExpireFault {
+        calls: AtomicUsize,
+    }
+
+    impl PartialExpireFault {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl FaultHook for PartialExpireFault {
+        fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+            if cut != FaultCutPoint::DuringSegmentExpiry {
+                return Ok(());
+            }
+            if self.calls.fetch_add(1, AtomicOrdering::SeqCst) >= 1 {
+                Err(EngineError::Conflict)
+            } else {
+                Ok(())
+            }
+        }
     }
 
     #[test]
@@ -3650,6 +3692,46 @@ mod manifest_deletion_watermark_tests {
             err,
             EngineError::EpochFenced,
             "the stale writer is fenced by the permanent head CAS, not by the watermark"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestPartialExpireDoesNotHideUndeletedManifestEntries() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+        }
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+            .unwrap();
+
+        log.set_fault_hook(Some(std::sync::Arc::new(PartialExpireFault::new())));
+        let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+        assert_eq!(err, EngineError::Conflict);
+
+        assert_eq!(
+            log.read_read_horizon(&shard).unwrap(),
+            Some(0),
+            "the watermark stops at the last physically deleted prefix entry"
+        );
+
+        log.set_fault_hook(None);
+        assert_eq!(
+            log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+            2,
+            "a later full expiry still finds the remaining below-floor entries"
+        );
+        assert_eq!(
+            log.read_read_horizon(&shard).unwrap(),
+            Some(2),
+            "the watermark advances through the full reclaimed prefix once the later pass completes"
         );
     }
 }
