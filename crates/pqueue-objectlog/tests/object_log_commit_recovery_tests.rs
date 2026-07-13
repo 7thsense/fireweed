@@ -33,10 +33,9 @@
 //!   - The true 10M-item-in-S3 snapshot+tail rebuild within a stated recovery-window budget is the live run
 //!     (pqueue-2f9ebac3); here the local genesis-replay rate is REPORTED only.
 
-use std::sync::Arc;
 use std::time::Instant;
 
-use pqueue_conformance::{envelope, item, qdef, shard};
+use pqueue_conformance::{envelope, item};
 use pqueue_core::{
     EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
@@ -93,19 +92,6 @@ fn big_qdef(tenant: &str, queue: &str) -> QueueDefinition {
         typed_indexes: vec![],
         emit_change_records: true,
     }
-}
-
-fn pushes(n: u64) -> Vec<CommandEnvelope> {
-    (0..n)
-        .map(|i| {
-            envelope(
-                QueueCommand::Push(PushCommand {
-                    items: vec![item(&format!("{i}"), &format!("k{i}"), i as i64)],
-                }),
-                vec![],
-            )
-        })
-        .collect()
 }
 
 /// Apply one command through the atomic unit of work (append + apply) on `shard`, stamping the queue's

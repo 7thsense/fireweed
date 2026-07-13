@@ -2111,6 +2111,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ) -> EngineResult<u64> {
         let entries = self.read_manifest(source)?;
         let mut deleted = 0u64;
+        let mut reclaimed_through: Option<u64> = None;
+        let mut error: Option<EngineError> = None;
         for entry in &entries {
             if entry.fence {
                 continue;
@@ -2124,27 +2126,45 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if let Some(seg_key) = entry.segment_key.as_ref() {
                 // Test-only crash seam (never armed in production): a fault here models a process death mid-
                 // reclamation, after the durable floor advanced but before this object is deleted.
-                self.fault(FaultCutPoint::DuringSegmentExpiry)?;
-                if self.store_delete(seg_key)? {
+                if let Err(err) = self.fault(FaultCutPoint::DuringSegmentExpiry) {
+                    error = Some(err);
+                    break;
+                }
+                let deleted_now = match self.store_delete(seg_key) {
+                    Ok(deleted_now) => deleted_now,
+                    Err(err) => {
+                        error = Some(err);
+                        break;
+                    }
+                };
+                if deleted_now {
                     deleted += 1;
                 }
-                self.delete_manifest_entry(source, entry.index)?;
+                if let Err(err) = self.delete_manifest_entry(source, entry.index) {
+                    error = Some(err);
+                    break;
+                }
+                reclaimed_through = Some(Self::visible_last_seq(entry));
             }
         }
-        // Advance the durable read-horizon now that the below-floor segments are reclaimed (bead
-        // pqueue-8928baec). BEST-EFFORT: a transient failure here must NOT fail the completed reclamation — the
-        // horizon is a monotonic read-cost optimization that catches up on the next trim / (re)open expiry, and
-        // reads stay correct via the full-list fallback + fail-closed floor guard. The updater consumes the
-        // same manifest snapshot used for deletion, so physical reclamation can happen without losing sight of
-        // the reclaimed prefix before the watermark is persisted.
+        // Advance the durable read-horizon only for the longest contiguous prefix we fully reclaimed. A later
+        // delete failure must not let the watermark leap over an undeleted manifest entry; at the same time, a
+        // partial failure after some successful reclaim work should still durably record the safe prefix so a
+        // retry can resume from the last committed boundary.
         //
         // Protocol note: the deferred pqueue-c33c367e owner-fence wiring does not change this watermark path.
         // The permanent head CAS stays the stale-writer fence; we keep below-floor manifest addresses occupied
         // so the collision fence stays intact. The current index-CAS manifest protocol still cannot support
         // delete-only compaction safely; a cheaper delete-only variant would need the post-head-CAS protocol
         // redesign, not this code path.
-        let _ = self.advance_read_horizon_from_entries(source, through_seq, now_ms, &entries);
-        Ok(deleted)
+        if let Some(reclaimed_through) = reclaimed_through {
+            let _ =
+                self.advance_read_horizon_from_entries(source, reclaimed_through, now_ms, &entries);
+        }
+        match error {
+            Some(err) => Err(err),
+            None => Ok(deleted),
+        }
     }
 
     /// The LOWEST `first_seq` among data segments at or below `through_seq` that `expire_segments_through`
