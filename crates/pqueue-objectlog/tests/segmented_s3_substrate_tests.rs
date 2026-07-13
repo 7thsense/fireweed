@@ -3641,6 +3641,109 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
 }
 
+/// TestInterruptedManifestReclaimRecovery: if a reclaim pass deletes part of the below-floor prefix and then
+/// fails, reopening the log preserves the undeleted manifest history and the next reclaim resumes from the
+/// durable watermark, not from genesis.
+#[test]
+#[allow(non_snake_case)]
+fn TestInterruptedManifestReclaimRecovery() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..3u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
+        .unwrap();
+    store.arm_delete(&segment_key_for(store.as_ref(), &shard(), 2));
+
+    let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected delete failure must abort the reclaim pass"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        Some(0),
+        "the durable watermark records only the confirmed deleted prefix"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard(), 0))
+            .unwrap()
+            .is_none(),
+        "the first below-floor segment was deleted before the failure"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard(), 2))
+            .unwrap()
+            .is_some(),
+        "the interrupted segment stays present"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard(), 4))
+            .unwrap()
+            .is_some(),
+        "the undeleted below-floor tail stays present"
+    );
+    assert!(
+        store
+            .inner
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_some(),
+        "the undeleted below-floor manifest entry remains durable"
+    );
+    assert!(
+        store
+            .inner
+            .get(&manifest_head_key_s(&shard(), 2))
+            .unwrap()
+            .is_some(),
+        "the later undeleted below-floor manifest entry remains durable"
+    );
+
+    drop(log);
+    store.disarm();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard()).unwrap(),
+        Some(0),
+        "reopen reconstructs the durable watermark from the interrupted reclaim"
+    );
+    assert!(
+        reopened
+            .read_read_horizon(&shard())
+            .unwrap()
+            .is_some_and(|w| w == 0),
+        "the recovery pass resumes at the committed watermark"
+    );
+    assert_eq!(
+        reopened
+            .expire_segments_through(&shard(), 5, 2_000)
+            .unwrap(),
+        2,
+        "the next reclaim finishes from the durable watermark"
+    );
+    assert_eq!(
+        reopened.read_read_horizon(&shard()).unwrap(),
+        Some(2),
+        "the watermark advances only after the remaining deleted prefix is completed"
+    );
+}
+
 /// Test 11 — if the first reclaimable delete fails, the durable watermark stays unchanged.
 #[test]
 #[allow(non_snake_case)]
@@ -3807,4 +3910,82 @@ fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkPartialExpiryDoesNotMaskLiveEntries() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+/// TestManifestDeletionWatermarkContiguousPrefixOnly: a pinned gap blocks the watermark even when later
+/// below-floor segments are reclaimed in the same pass.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkContiguousPrefixOnly() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    // Three segments: seg0[0..1], seg1[2..3], seg2[4..5].
+    for i in 0..3u64 {
+        log.enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    // Branch at seq 1 so seg0 is pinned, but seg1 and seg2 are still below-floor candidates. The gap must
+    // block the watermark from advancing past the pinned prefix even though later entries get reclaimed.
+    let branch_def = branch_qdef("contiguous-prefix");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 1),
+        60_000,
+        30,
+    )
+    .unwrap();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 31).unwrap(),
+        2,
+        "the pass reclaims only the unpinned below-floor segments"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        None,
+        "the pinned gap prevents the watermark from skipping to later reclaimed entries"
+    );
+    assert!(
+        store
+            .get(&segment_key_for(store.as_ref(), &source, 0))
+            .unwrap()
+            .is_some(),
+        "the pinned prefix remains present while the branch is live"
+    );
+    assert!(
+        store
+            .get(&segment_key_for(store.as_ref(), &source, 2))
+            .unwrap()
+            .is_none(),
+        "the first unpinned below-floor segment is reclaimed"
+    );
+    assert!(
+        store
+            .get(&segment_key_for(store.as_ref(), &source, 4))
+            .unwrap()
+            .is_none(),
+        "the later unpinned below-floor segment is also reclaimed"
+    );
+
+    log.discard_branch(&source, &branch).unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 32).unwrap(),
+        1,
+        "once the gap clears, the previously pinned segment becomes reclaimable"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        Some(2),
+        "once the gap clears, the watermark can advance across the now-contiguous deleted prefix"
+    );
 }
