@@ -366,6 +366,7 @@ codex noted S3 LIST natively supports `StartAfter` — the `BlobStore` trait sim
 - Maintain a durable monotonic **`compacted_through_index` watermark**, advanced by compaction only up to the highest index fully below the **epoch-fenced retention floor** (so W < lowest LIVE index always; a stale/low W only costs a few extra enumerated keys, never skips live data; W can never exceed the floor so it can never hide a live entry).
 - `recover_manifest` and `read_manifest` call `list_from(manifest/, {W})` ⇒ enumerate **only indices > W** ⇒ **O(live) LIST + O(live) GET**. Recovery tail is still `max` of the ranged list (the tail is always > floor > W, so it is never skipped).
 - Optional **mark-dead** overwrite of below-W entries shrinks per-entry storage BYTES (not count).
+- Owner-fence evaluation for `pqueue-c33c367e`: the current index-CAS protocol still must keep below-floor manifest addresses occupied, so it cannot support delete-only compaction safely. Any cheaper delete-only variant is therefore gated on the post-head-CAS redesign above, not on the current protocol.
 
 **Residual:** object COUNT still grows (addresses are never freed — the price of the write-once fence), but as tiny, never-read, never-listed markers ⇒ a slow, modest storage cost. Fully bounding object COUNT requires the redesigned fencing/commit protocol above (Option 2), a much larger change.
 
