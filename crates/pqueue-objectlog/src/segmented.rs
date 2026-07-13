@@ -2111,9 +2111,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // same manifest snapshot used for deletion, so physical reclamation can happen without losing sight of
         // the reclaimed prefix before the watermark is persisted.
         //
-        // Protocol note: the deferred pqueue-c33c367e owner-fence wiring does not make the current index-CAS
-        // manifest protocol safe for delete-only compaction. We keep below-floor manifest addresses occupied so
-        // the collision fence stays intact; a cheaper delete-only variant would need the post-head-CAS protocol
+        // Protocol note: the deferred pqueue-c33c367e owner-fence wiring does not change this watermark path.
+        // The permanent head CAS stays the stale-writer fence; we keep below-floor manifest addresses occupied
+        // so the collision fence stays intact. The current index-CAS manifest protocol still cannot support
+        // delete-only compaction safely; a cheaper delete-only variant would need the post-head-CAS protocol
         // redesign, not this code path.
         let _ = self.advance_read_horizon_from_entries(source, through_seq, now_ms, &entries);
         Ok(deleted)
@@ -2599,8 +2600,9 @@ struct HighWaterBlob {
 /// which every entry is a reclaimed/superseded below-floor entry that no live read, recovery tail,
 /// authoritative-floor read, or branch copy needs. Stored at `{shard_prefix}read_horizon.json` — OUTSIDE the
 /// `manifest/` prefix — so `recover_manifest`/`read_manifest` LISTs never enumerate it. Monotonic (a set that
-/// would lower it is a no-op). It NEVER frees a manifest address: below-horizon objects still EXIST, so a
-/// stale writer's `put_if_absent` at a below-horizon cached index still COLLIDES → the epoch-fence is intact.
+/// would lower it is a no-op). It NEVER frees a manifest address or becomes an ownership fence: below-horizon
+/// objects still EXIST, so a stale writer's `put_if_absent` at a below-horizon cached index still COLLIDES →
+/// the permanent head CAS stays the stale-writer fence.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ReadHorizonBlob {
     index: u64,
