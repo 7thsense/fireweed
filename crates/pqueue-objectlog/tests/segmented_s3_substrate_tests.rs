@@ -2991,6 +2991,58 @@ fn horizon_read_is_byte_identical_and_below_floor_fails_closed() {
     );
 }
 
+/// Test 3b — manifest reclamation below the floor does not perturb the live tail above it.
+/// The first readable entry at `floor + 1` and every later live entry must remain byte-identical
+/// before and after reclaiming the below-floor manifest entries.
+#[test]
+#[allow(non_snake_case)]
+fn TestLiveTailByteIdenticalAfterManifestReclaim() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..6u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    let floor = 7;
+    let first_readable = floor + 1;
+    let before = log.read_from(&shard(), first_readable).unwrap();
+    assert_eq!(
+        before.first().unwrap().0.sequence,
+        first_readable,
+        "the first readable entry starts at floor + 1 before reclaim"
+    );
+
+    trim_cycle(&log, &shard(), floor, 0, 1_000);
+
+    // Prove the manifest reclamation happened, but keep the focus on the live tail above the floor.
+    assert!(
+        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_none(),
+        "below-floor manifest entries are physically reclaimed"
+    );
+
+    let after = log.read_from(&shard(), first_readable).unwrap();
+    assert_eq!(
+        after.first().unwrap().0.sequence,
+        first_readable,
+        "the first readable entry remains floor + 1 after reclaim"
+    );
+
+    let fingerprint = |v: &Vec<(CommandPosition, pqueue_engine::CommandEnvelope)>| {
+        v.iter()
+            .map(|(p, e)| (p.sequence, p.backend_epoch, serde_json::to_vec(e).unwrap()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        fingerprint(&before),
+        fingerprint(&after),
+        "live entries above the floor are byte-identical before and after manifest reclaim"
+    );
+}
+
 /// Test 4 — a stale cached writer whose next index was reclaimed by manifest trimming cannot ack. The
 /// reclaimed manifest slot stays absent, and the stale seal returns `EpochFenced` or `Conflict` rather than
 /// creating a fresh durable entry at the freed address.
