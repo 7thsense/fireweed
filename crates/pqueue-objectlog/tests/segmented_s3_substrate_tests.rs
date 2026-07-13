@@ -569,6 +569,9 @@ fn branch_pins_parent_segments_against_expiry() {
         20,
     )
     .unwrap();
+    let parent_seg_key = segment_key_for(store.as_ref(), &parent_shard, 0);
+    let parent_manifest_head_key = manifest_head_key_s(&parent_shard, 0);
+    let parent_manifest_legacy_key = manifest_key_s(&parent_shard, 0);
 
     let deleted = log.expire_segments_through(&parent_shard, 3, 21).unwrap();
     assert_eq!(
@@ -576,10 +579,17 @@ fn branch_pins_parent_segments_against_expiry() {
         "live branch pins parent segments against expiry"
     );
 
-    let parent_seg_key = segment_key_for(store.as_ref(), &parent_shard, 0);
     assert!(
         store.get(&parent_seg_key).unwrap().is_some(),
         "pinned segment remains present while the branch is live"
+    );
+    assert!(
+        store.get(&parent_manifest_head_key).unwrap().is_some(),
+        "pinned manifest head remains present while the branch is live"
+    );
+    assert!(
+        store.get(&parent_manifest_legacy_key).unwrap().is_some(),
+        "pinned legacy manifest remains present while the branch is live"
     );
 
     log.discard_branch(&parent_shard, &branch_shard).unwrap();
@@ -589,6 +599,63 @@ fn branch_pins_parent_segments_against_expiry() {
         store.get(&parent_seg_key).unwrap().is_none(),
         "expired parent segment is removed once no branch references it"
     );
+    assert!(
+        store.get(&parent_manifest_head_key).unwrap().is_none(),
+        "expired parent manifest head is removed once no branch references it"
+    );
+    assert!(
+        store.get(&parent_manifest_legacy_key).unwrap().is_none(),
+        "expired parent legacy manifest is removed once no branch references it"
+    );
+}
+
+#[test]
+fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let parent_def = qdef();
+    let parent_shard = shard();
+    log.create_queue(&parent_def).unwrap();
+    log.enqueue(&parent_shard, &pushes(4), 0, 10).unwrap();
+    log.seal(&parent_shard, 0, 11).unwrap();
+
+    let branch_def = branch_qdef("ttl-expiry");
+    let branch_shard =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &parent_shard,
+        &branch_def,
+        &CommandPosition::new(parent_shard.clone(), 0, 1),
+        1,
+        20,
+    )
+    .unwrap();
+
+    let seg_key = segment_key_for(store.as_ref(), &parent_shard, 0);
+    let manifest_head_key = manifest_head_key_s(&parent_shard, 0);
+    let manifest_legacy_key = manifest_key_s(&parent_shard, 0);
+
+    assert_eq!(
+        log.expire_segments_through(&parent_shard, 3, 20).unwrap(),
+        0,
+        "the live branch pin still blocks reclamation before TTL expiry"
+    );
+    assert!(store.get(&seg_key).unwrap().is_some());
+    assert!(store.get(&manifest_head_key).unwrap().is_some());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
+
+    assert_eq!(
+        log.expire_segments_through(&parent_shard, 3, 22).unwrap(),
+        1,
+        "after TTL expiry the branch pin no longer protects the source segment"
+    );
+    assert!(store.get(&seg_key).unwrap().is_none());
+    assert!(store.get(&manifest_head_key).unwrap().is_none());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
+
+    // Branch metadata can still be discarded idempotently after expiry.
+    log.discard_branch(&parent_shard, &branch_shard).unwrap();
 }
 
 /// Test 7 (bead pqueue-b5cc2bc7 — branch-pin safety of segment reclamation): a live branch pinning a
@@ -611,6 +678,15 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
     log.seal(&parent, 0, 20).unwrap();
     log.enqueue(&parent, &pushes(2), 0, 1000).unwrap();
     log.seal(&parent, 0, 1000).unwrap();
+    let seg0_key = segment_key_for(store.as_ref(), &parent, 0);
+    let seg1_key = segment_key_for(store.as_ref(), &parent, 2);
+    let seg2_key = segment_key_for(store.as_ref(), &parent, 4);
+    let seg0_manifest_head_key = manifest_head_key_s(&parent, 0);
+    let seg0_manifest_legacy_key = manifest_key_s(&parent, 0);
+    let seg1_manifest_head_key = manifest_head_key_s(&parent, 1);
+    let seg1_manifest_legacy_key = manifest_key_s(&parent, 1);
+    let seg2_manifest_head_key = manifest_head_key_s(&parent, 2);
+    let seg2_manifest_legacy_key = manifest_key_s(&parent, 2);
 
     // A live branch cut inside seg0 (position seq 1) pins seg0 (first_seq 0 <= cut 1).
     let branch_def = branch_qdef("floor-pin");
@@ -646,18 +722,41 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "the branch-pinned below-floor segment (first_seq 0) is reported while the pin is live"
     );
 
-    let seg_key = |first: u64| segment_key_for(store.as_ref(), &parent, first);
     assert!(
-        store.get(&seg_key(0)).unwrap().is_some(),
+        store.get(&seg0_key).unwrap().is_some(),
         "the branch-pinned below-floor segment survives the trim"
     );
     assert!(
-        store.get(&seg_key(2)).unwrap().is_none(),
+        store.get(&seg0_manifest_head_key).unwrap().is_some(),
+        "the branch-pinned manifest head survives the trim"
+    );
+    assert!(
+        store.get(&seg0_manifest_legacy_key).unwrap().is_some(),
+        "the branch-pinned legacy manifest survives the trim"
+    );
+    assert!(
+        store.get(&seg1_key).unwrap().is_none(),
         "the unpinned below-floor segment is reclaimed"
     );
     assert!(
-        store.get(&seg_key(4)).unwrap().is_some(),
+        store.get(&seg1_manifest_head_key).unwrap().is_none(),
+        "the unpinned manifest head is reclaimed"
+    );
+    assert!(
+        store.get(&seg1_manifest_legacy_key).unwrap().is_none(),
+        "the unpinned legacy manifest is reclaimed"
+    );
+    assert!(
+        store.get(&seg2_key).unwrap().is_some(),
         "the fresh (above-floor) tail segment survives"
+    );
+    assert!(
+        store.get(&seg2_manifest_head_key).unwrap().is_some(),
+        "the fresh manifest head survives"
+    );
+    assert!(
+        store.get(&seg2_manifest_legacy_key).unwrap().is_some(),
+        "the fresh legacy manifest survives"
     );
 
     // Reading from the floor (seq 3 -> from_seq 4) is contiguous with NO missing-segment error.
@@ -697,8 +796,16 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "discarding the branch releases seg0 to be reclaimed"
     );
     assert!(
-        store.get(&seg_key(0)).unwrap().is_none(),
+        store.get(&seg0_key).unwrap().is_none(),
         "seg0 is reclaimed once the pin is gone"
+    );
+    assert!(
+        store.get(&seg0_manifest_head_key).unwrap().is_none(),
+        "seg0 manifest head is reclaimed once the pin is gone"
+    );
+    assert!(
+        store.get(&seg0_manifest_legacy_key).unwrap().is_none(),
+        "seg0 legacy manifest is reclaimed once the pin is gone"
     );
 }
 
@@ -2405,6 +2512,10 @@ fn manifest_head_prefix_s(shard: &QueueKey) -> String {
     format!("{}manifest_head/", shard_prefix_s(shard))
 }
 
+fn manifest_head_key_s(shard: &QueueKey, index: u64) -> String {
+    format!("{}{index:020}.json", manifest_head_prefix_s(shard))
+}
+
 fn manifest_key_s(shard: &QueueKey, index: u64) -> String {
     format!("{}{index:020}.json", manifest_prefix_s(shard))
 }
@@ -2450,9 +2561,9 @@ fn trim_cycle<S: BlobStore>(
 }
 
 /// Test 1 — read/recovery enumeration is bounded to LIVE (above-horizon) entries after repeated
-/// trim+advance-horizon cycles, and the watermark is monotonic. The write-once manifest object COUNT is
-/// allowed to keep growing (tombstones are never freed — that is what keeps the fence intact); only the
-/// per-read ENUMERATION shrinks to O(live).
+/// trim+advance-horizon cycles, and the watermark is monotonic. Below-floor manifest entries are now
+/// physically removed once they are no longer branch-pinned, so the remaining manifest object count drops
+/// while the live tail still enumerates in O(live).
 #[test]
 fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
@@ -2466,6 +2577,7 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
             .unwrap();
         log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
+    let initial_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap().len();
     assert!(
         log.read_read_horizon(&shard()).unwrap().is_none(),
         "no horizon before any trim"
@@ -2494,15 +2606,19 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
         "read-horizon is monotonic: {w1} < {w2} < {w3}"
     );
 
-    // The write-once manifest object COUNT keeps growing (tombstones + floor entries never freed).
+    // The compacted below-floor entries are gone, so the manifest object count is lower than before trim.
     let total_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap().len();
+    assert!(
+        total_manifest_keys < initial_manifest_keys,
+        "trimmed below-floor manifest entries were physically deleted"
+    );
     // Range-listing from the horizon enumerates only the LIVE tail — strictly fewer than the total history.
     let live_keys = store
         .list_from(&manifest_prefix_s(&shard()), &manifest_key_s(&shard(), w3))
         .unwrap();
     assert!(
-        live_keys.len() < total_manifest_keys,
-        "range-list enumerates O(live) ({}) not O(total) ({total_manifest_keys})",
+        live_keys.len() < initial_manifest_keys,
+        "range-list enumerates O(live) ({}) not O(total history) ({initial_manifest_keys})",
         live_keys.len()
     );
     // Live = the two surviving data segments (seqs 12..15) + the authoritative floor entry (+ any superseded
@@ -2840,6 +2956,10 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
             .unwrap();
         log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
+    let seg_keys: Vec<(u64, String)> = [0u64, 2, 4, 6, 8, 10, 12, 14]
+        .into_iter()
+        .map(|first| (first, segment_key_for(store.as_ref(), &shard(), first)))
+        .collect();
     // Advance the durable floor ALL THE WAY to 15, but reclaim only THROUGH seq 7 (a partial expire).
     log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 15), 0)
         .unwrap();
@@ -2858,10 +2978,9 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
          expire still reclaims all 4"
     );
     // Nothing leaked: every data segment object at/below the floor is gone.
-    let seg_key = |first: u64| segment_key_for(store.as_ref(), &shard(), first);
-    for first in [0u64, 2, 4, 6, 8, 10, 12, 14] {
+    for (first, seg_key) in seg_keys {
         assert!(
-            store.get(&seg_key(first)).unwrap().is_none(),
+            store.get(&seg_key).unwrap().is_none(),
             "segment {first} reclaimed, not leaked"
         );
     }
@@ -2902,13 +3021,14 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
         "no horizon after delete"
     );
 
-    // Fallback to the FULL manifest list: the reclaimed below-floor tombstones are enumerated again, so the
-    // organic missing-segment error stands — identical to pre-horizon fail-closed behavior.
-    assert!(
-        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
-        "with no horizon object, the full-list read hits the reclaimed segment and fails closed as before"
+    // Fallback to the FULL manifest list still works, but the physically deleted below-floor entries are no
+    // longer present to trigger a missing-segment error. The live tail above the floor still reads cleanly.
+    let all = log.read_all(&shard()).unwrap();
+    assert_eq!(
+        all.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "with no horizon object the queue still reads the remaining live tail"
     );
-    // And the live tail above the floor still reads back cleanly on the full-list path.
     let tail = log.read_from(&shard(), 4).unwrap();
     assert_eq!(
         tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),

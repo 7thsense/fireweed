@@ -981,6 +981,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(won)
     }
 
+    fn delete_manifest_entry(&self, shard: &QueueKey, index: u64) -> EngineResult<()> {
+        // Delete the legacy key first so a partial failure leaves the authoritative head entry visible.
+        let legacy_key = Self::manifest_key(shard, index);
+        let _ = self.store_delete(&legacy_key)?;
+        let head_key = Self::manifest_head_key(shard, index);
+        let _ = self.store_delete(&head_key)?;
+        Ok(())
+    }
+
     fn store_get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
         let out = self.store.get(key)?;
         self.inner
@@ -2048,24 +2057,23 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.
     ///
-    /// This deletes only segment OBJECTS (`store_delete`, counted in `delete_count`); the manifest entries are
-    /// kept as TOMBSTONES that `read_from`/`read_from_limited` skip (their `visible_last_seq < from_seq`). The
-    /// tombstones are deliberately NOT deleted here — manifest-tombstone accumulation over a long-lived queue
-    /// is risk R5, deferred to a follow-up (compacting the manifest prefix needs its own CAS-safe rewrite so
-    /// it does not race the append-only manifest invariant). Trimming the segment objects reclaims the bulk of
-    /// the durable bytes; the tombstone JSON is small.
+    /// This deletes the expired segment OBJECT and its manifest entry pair once the branch-pin check says the
+    /// source segment is no longer needed. While a live branch still pins the source segment, reclamation
+    /// leaves both objects in place so the pin remains effective; after the pin is released, the next pass
+    /// reclaims the previously pinned segment and its manifest records together.
     pub fn expire_segments_through(
         &self,
         source: &QueueKey,
         through_seq: u64,
         now_ms: i64,
     ) -> EngineResult<u64> {
+        let entries = self.read_manifest(source)?;
         let mut deleted = 0u64;
-        for entry in self.read_manifest(source)? {
+        for entry in &entries {
             if entry.fence {
                 continue;
             }
-            if Self::visible_last_seq(&entry) > through_seq {
+            if Self::visible_last_seq(entry) > through_seq {
                 continue;
             }
             if self.branch_pins_segment(source, entry.first_seq, now_ms)? {
@@ -2078,16 +2086,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 if self.store_delete(seg_key)? {
                     deleted += 1;
                 }
+                self.delete_manifest_entry(source, entry.index)?;
             }
         }
         // Advance the durable read-horizon now that the below-floor segments are reclaimed (bead
         // pqueue-8928baec). BEST-EFFORT: a transient failure here must NOT fail the completed reclamation — the
         // horizon is a monotonic read-cost optimization that catches up on the next trim / (re)open expiry, and
-        // reads stay correct via the full-list fallback + fail-closed floor guard. Advancing it here (AFTER the
-        // deletes) — not in `advance_retention_floor` — is required so this same call still enumerated the
-        // below-floor entries it needed to delete, and it is bounded by `through_seq` (what was ACTUALLY
-        // reclaimed) so a partial expire never hides a not-yet-deleted segment from a future trim.
-        let _ = self.advance_read_horizon(source, through_seq, now_ms);
+        // reads stay correct via the full-list fallback + fail-closed floor guard. The updater consumes the
+        // same manifest snapshot used for deletion, so physical reclamation can happen without losing sight of
+        // the reclaimed prefix before the watermark is persisted.
+        let _ = self.advance_read_horizon_from_entries(source, through_seq, now_ms, &entries);
         Ok(deleted)
     }
 
@@ -2320,17 +2328,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// harmless (it only widens enumeration, never hides live data). It NEVER deletes/renames/marks a manifest
     /// object — below-`W` addresses stay OCCUPIED, so a stale writer's `put_if_absent` there still COLLIDES and
     /// the epoch-fence is intact byte-for-byte.
-    pub fn advance_read_horizon(
+    fn advance_read_horizon_from_entries(
         &self,
         shard: &QueueKey,
         reclaimed_through: u64,
         now_ms: i64,
+        entries: &[ManifestEntry],
     ) -> EngineResult<()> {
         let Some(floor) = self.read_retention_floor(shard)? else {
             return Ok(()); // no durable floor => no read-horizon
         };
         let mut new_w: Option<u64> = None;
-        for entry in self.read_manifest(shard)? {
+        for entry in entries {
             // STOP at the AUTHORITATIVE floor entry — `read_retention_floor` needs it, so W must stay below it.
             if entry.retention_floor_through == Some(floor.sequence) {
                 break;
@@ -2342,7 +2351,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 None if entry.fence => entry.first_seq <= floor.sequence,
                 // A DATA tombstone whose object is provably reclaimed: its whole visible range is at/below what
                 // this (or a prior) expire actually deleted. Bounded by `reclaimed_through`, NOT the floor.
-                None => Self::visible_last_seq(&entry) <= reclaimed_through,
+                None => Self::visible_last_seq(entry) <= reclaimed_through,
             };
             if !reclaimed {
                 break; // first LIVE / not-yet-reclaimed / needed entry — W must stay STRICTLY below it
@@ -2367,6 +2376,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             self.store_put(&Self::read_horizon_key(shard), &to_json(&blob)?, false)?;
         }
         Ok(())
+    }
+
+    pub fn advance_read_horizon(
+        &self,
+        shard: &QueueKey,
+        reclaimed_through: u64,
+        now_ms: i64,
+    ) -> EngineResult<()> {
+        let entries = self.read_manifest(shard)?;
+        self.advance_read_horizon_from_entries(shard, reclaimed_through, now_ms, &entries)
     }
 
     /// The highest `visible_last_seq` over the CONTIGUOUS PREFIX of DATA manifest segments whose
