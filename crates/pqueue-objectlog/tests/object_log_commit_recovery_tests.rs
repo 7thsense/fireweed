@@ -33,6 +33,7 @@
 //!   - The true 10M-item-in-S3 snapshot+tail rebuild within a stated recovery-window budget is the live run
 //!     (pqueue-2f9ebac3); here the local genesis-replay rate is REPORTED only.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pqueue_conformance::{envelope, item};

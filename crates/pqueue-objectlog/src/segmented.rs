@@ -626,9 +626,9 @@ struct ManifestEntry {
     /// pre-existing manifest (written before this field existed) defaults every entry to `None`.
     #[serde(default)]
     retention_floor_through: Option<u64>,
-    /// Durable manifest deletion watermark marker. Current manifests can carry it as an append-only,
-    /// read-only marker entry; legacy manifests deserialize it as `None` and continue to bootstrap from
-    /// the compatibility `read_horizon.json` cache.
+    /// Durable manifest reclamation marker / deletion watermark marker. Current manifests can carry it as an
+    /// append-only, read-only marker entry; legacy manifests deserialize it as `None` and continue to
+    /// bootstrap from the compatibility `read_horizon.json` cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compacted_through_index: Option<u64>,
 }
@@ -1025,8 +1025,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // Delete the legacy key first so a partial failure leaves the authoritative head entry visible.
         let legacy_key = Self::manifest_key(shard, index);
         let _ = self.store_delete(&legacy_key)?;
-        let head_key = Self::manifest_head_key(shard, index);
-        let _ = self.store_delete(&head_key)?;
         Ok(())
     }
 
@@ -1098,6 +1096,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         entry.visible_last_seq.unwrap_or(entry.last_seq)
     }
 
+    fn is_reclaimed_manifest_marker(entry: &ManifestEntry) -> bool {
+        entry.compacted_through_index.is_some()
+    }
+
     /// Read the manifest from the store and derive `(next_seq, next_manifest_index, current_epoch)`.
     ///
     /// HOT PATH: every seal (and epoch fence) calls this to read the authoritative tail. Manifest objects
@@ -1113,7 +1115,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving
         // the tuple from the MAX ranged key is exact. The +1 GET for the horizon here is off the O(1) seal hot
         // path (recover_manifest is reached only on open/acquire/CAS-lost/advance-floor/ensure_shard).
-        let keys = match self.read_read_horizon(shard)? {
+        let horizon = self.read_read_horizon(shard)?;
+        let has_horizon = horizon.is_some();
+        let mut keys = match horizon {
             Some(w) => {
                 let ranged = self.list_authoritative_manifest_keys_at(shard, Some(w))?;
                 // A trimmed queue must still have at least the authoritative floor entry above the horizon.
@@ -1127,28 +1131,36 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
             None => self.list_authoritative_manifest_keys_at(shard, None)?,
         };
-        let Some(tail_key) = keys.into_iter().max() else {
-            return Ok((0, 0, 0, None));
-        };
-        let Some(bytes) = self.store_get(&tail_key)? else {
-            return Err(EngineError::Conflict);
-        };
-        let tail: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
-        let next_index = tail.index + 1;
-        // A fence entry AND a retention-floor-advance entry both name no segment and carry the LIVE next-seq in
-        // `first_seq` (they don't add commands), so the tail's next-seq is `first_seq`; a data entry's is
-        // `visible_last_seq + 1`.
-        let next_seq = if tail.fence || tail.retention_floor_through.is_some() {
-            tail.first_seq
+        keys.sort();
+        for tail_key in keys.into_iter().rev() {
+            let Some(bytes) = self.store_get(&tail_key)? else {
+                return Err(EngineError::Conflict);
+            };
+            let tail: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+            if Self::is_reclaimed_manifest_marker(&tail) {
+                continue;
+            }
+            let next_index = tail.index + 1;
+            // A fence entry AND a retention-floor-advance entry both name no segment and carry the LIVE
+            // next-seq in `first_seq` (they don't add commands), so the tail's next-seq is `first_seq`; a
+            // data entry's is `visible_last_seq + 1`.
+            let next_seq = if tail.fence || tail.retention_floor_through.is_some() {
+                tail.first_seq
+            } else {
+                Self::visible_last_seq(&tail) + 1
+            };
+            return Ok((
+                next_seq,
+                next_index,
+                tail.epoch,
+                tail.compacted_through_index,
+            ));
+        }
+        if has_horizon {
+            Err(EngineError::Conflict)
         } else {
-            Self::visible_last_seq(&tail) + 1
-        };
-        Ok((
-            next_seq,
-            next_index,
-            tail.epoch,
-            tail.compacted_through_index,
-        ))
+            Ok((0, 0, 0, None))
+        }
     }
 
     /// The LIVE manifest keys for `shard` above a GIVEN `horizon` — indices strictly ABOVE the durable
@@ -1582,7 +1594,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.fail_closed_below_floor(shard, 0, horizon)?;
         let mut out = Vec::new();
         for entry in self.read_manifest_at(shard, horizon)? {
-            if entry.fence {
+            if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
                 continue;
             }
             let Some(seg_key) = entry.segment_key.as_ref() else {
@@ -1647,7 +1659,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.fail_closed_below_floor(shard, from_seq, horizon)?;
         let mut out = Vec::new();
         for entry in self.read_manifest_at(shard, horizon)? {
-            if entry.fence {
+            if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
                 continue;
             }
             // The bounded-tail saving: a fully-applied segment is skipped without a GET/parse of its object.
@@ -1926,6 +1938,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
             let entries = self.read_manifest(source)?;
             for entry in entries {
+                if Self::is_reclaimed_manifest_marker(&entry) {
+                    continue;
+                }
                 // Do NOT copy the source's own retention-floor-advance entries verbatim.
                 if entry.retention_floor_through.is_some() {
                     continue;
@@ -2146,10 +2161,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.
     ///
-    /// This deletes the expired segment OBJECT only. The manifest entry remains as retained history so the
-    /// durable manifest address stays occupied and the write-once CAS fence is preserved byte-for-byte. The
-    /// candidate set is still enumerated explicitly so follow-up deletion / watermark beads can consume it
-    /// without re-deriving eligibility.
+    /// This first overwrites the authoritative manifest head slot with a durable reclaim marker, then deletes
+    /// the expired segment OBJECT. The legacy compatibility copy remains available, the historical address
+    /// stays occupied, and the write-once CAS fence is preserved byte-for-byte. The candidate set is still
+    /// enumerated explicitly so follow-up deletion / watermark beads can consume it without re-deriving
+    /// eligibility.
     pub fn expire_segments_through(
         &self,
         source: &QueueKey,
@@ -2177,6 +2193,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 continue;
             }
             if let Some(seg_key) = entry.segment_key.as_ref() {
+                if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry) {
+                    error = Some(err);
+                    break;
+                }
                 // Test-only crash seam (never armed in production): a fault here models a process death mid-
                 // reclamation, after the durable floor advanced but before this object is deleted.
                 if let Err(err) = self.fault(FaultCutPoint::DuringSegmentExpiry) {
@@ -2252,7 +2272,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ) -> EngineResult<Option<u64>> {
         let mut lowest: Option<u64> = None;
         for entry in self.read_manifest(source)? {
-            if entry.fence || entry.segment_key.is_none() {
+            if entry.fence
+                || entry.segment_key.is_none()
+                || Self::is_reclaimed_manifest_marker(&entry)
+            {
                 continue;
             }
             if Self::visible_last_seq(&entry) > through_seq {
@@ -2652,7 +2675,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ) -> EngineResult<Option<u64>> {
         let mut best: Option<u64> = None;
         for entry in self.read_manifest(shard)? {
-            if entry.fence || entry.segment_key.is_none() {
+            if entry.fence
+                || entry.segment_key.is_none()
+                || Self::is_reclaimed_manifest_marker(&entry)
+            {
                 continue;
             }
             // A non-positive `committed_at_ms` is NOT a trustworthy seal-time upper bound on the segment's
