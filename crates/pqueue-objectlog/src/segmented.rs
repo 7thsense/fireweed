@@ -1210,7 +1210,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     fn load_shard_buf(&self, shard: &QueueKey) -> EngineResult<ShardBuf> {
-        let (next_seq, next_index, epoch) = self.recover_manifest(shard)?;
+        let (next_seq, next_index, epoch, _) = self.recover_manifest(shard)?;
         let manifest_deletion_watermark = self.read_read_horizon(shard)?;
         Ok(ShardBuf {
             buffered: Vec::new(),

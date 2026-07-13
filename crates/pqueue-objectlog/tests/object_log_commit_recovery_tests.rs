@@ -48,11 +48,62 @@ use pqueue_engine::{
 };
 use pqueue_objectlog::{
     LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig, SegmentConfig,
-    segmented::{BlobStore, InMemoryBlobStore, ObjectStoreStats, SegmentedObjectLog},
+    segmented::{BlobStore, InMemoryBlobStore, SegmentedObjectLog},
 };
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
 const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
+
+#[derive(Default)]
+struct FailingDeleteBlobStore {
+    inner: InMemoryBlobStore,
+    fail_delete: std::sync::Mutex<Option<String>>,
+}
+
+impl FailingDeleteBlobStore {
+    fn arm_delete(&self, substr: &str) {
+        *self.fail_delete.lock().unwrap() = Some(substr.to_owned());
+    }
+
+    fn disarm(&self) {
+        *self.fail_delete.lock().unwrap() = None;
+    }
+
+    fn armed(&self, key: &str) -> bool {
+        self.fail_delete
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|substr| key.contains(substr))
+    }
+}
+
+impl BlobStore for FailingDeleteBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> pqueue_engine::EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> pqueue_engine::EngineResult<bool> {
+        if self.armed(key) {
+            return Err(pqueue_engine::EngineError::Storage(format!(
+                "injected delete failure: {key}"
+            )));
+        }
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> pqueue_engine::EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+}
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("pqueue-objlog-e3-{tag}-{}", std::process::id()))
@@ -720,7 +771,7 @@ fn TestLegacyManifestBootstrapWithoutDeletionWatermarkMetadata() {
 #[test]
 #[allow(non_snake_case)]
 fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
-    let store = Arc::new(FailingDeleteBlobStore::default());
+    let store = std::sync::Arc::new(FailingDeleteBlobStore::default());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let shard = sk("partial", "expire");
     let qdef = big_qdef("partial", "expire");
@@ -742,9 +793,10 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
         matches!(err, pqueue_engine::EngineError::Storage(_)),
         "the injected delete failure must abort the partial expire"
     );
-    assert!(
-        log.read_read_horizon(&shard).unwrap().is_none(),
-        "no durable manifest-deletion watermark should be recorded on failure"
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(0),
+        "the live log records the safe reclaimed prefix while the failure is still in flight"
     );
 
     drop(log);
@@ -752,15 +804,24 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef).unwrap();
-    assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_none(),
-        "reopen must not invent a watermark after interrupted reclamation"
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        Some(0),
+        "reopen preserves the manifest-deletion watermark from the interrupted reclaim"
     );
 
-    let tail = reopened.read_from(&shard, 4).unwrap();
+    let floor = reopened.read_retention_floor(&shard).unwrap().unwrap();
     assert_eq!(
-        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
-        vec![4, 5, 6, 7],
-        "the undeleted below-floor segments remain visible after reopen"
+        floor.sequence, 7,
+        "reopen reconstructs the authoritative floor from the durable manifest tail"
+    );
+    let err = reopened.read_from(&shard, 4).unwrap_err();
+    assert!(
+        matches!(err, pqueue_engine::EngineError::Storage(_)),
+        "reads below the recovered floor must fail closed, got {err:?}"
+    );
+    assert!(
+        reopened.read_from(&shard, 8).unwrap().is_empty(),
+        "reopen still exposes no live tail above the recovered floor"
     );
 }
