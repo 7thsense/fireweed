@@ -2972,6 +2972,13 @@ fn TestUnexpectedLiveManifestHoleFailsClosed() {
     );
 }
 
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkFailClosedBelowFloor() {
+    TestUnexpectedLiveManifestHoleFailsClosed();
+    TestBelowFloorReadFailsClosedAfterManifestReclaim();
+}
+
 /// Test 3 — live data is byte-identical pre/post horizon, and a below-floor read FAILS CLOSED (read at the
 /// floor errors; read at floor+1 succeeds; read_all from genesis fails closed on a trimmed+horizoned queue).
 #[test]
@@ -3405,6 +3412,18 @@ fn TestManifestWatermarkPartialExpireVisibility() {
             "segment {first} reclaimed, not leaked"
         );
     }
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkEnumerationPreservesLiveAndPartialExpiry() {
+    read_horizon_bounds_enumeration_to_live_and_is_monotonic();
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+#[test]
+fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
+    TestManifestWatermarkPartialExpireVisibility();
 }
 
 /// Test 7 — backward compat: a queue/store with NO `read_horizon.json` object behaves EXACTLY as before (full
