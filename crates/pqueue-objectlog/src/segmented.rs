@@ -3731,6 +3731,18 @@ mod manifest_deletion_watermark_tests {
             .collect()
     }
 
+    fn strip_manifest_head_namespace(store: &std::sync::Arc<InMemoryBlobStore>, shard: &QueueKey) {
+        for key in store
+            .list(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_prefix(shard))
+            .unwrap()
+        {
+            assert!(
+                store.delete(&key).unwrap(),
+                "expected to remove manifest head key {key}"
+            );
+        }
+    }
+
     struct PartialExpireFault {
         calls: AtomicUsize,
     }
@@ -3956,5 +3968,129 @@ mod manifest_deletion_watermark_tests {
             store.get(&seg2_legacy_key).unwrap().is_none(),
             "the fully reclaimed below-floor legacy manifest copy is physically deleted after the full pass"
         );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestLegacyManifestBootstrapPreservesFenceCompatibility() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let stale_writer = SegmentedObjectLog::open(store.clone(), cfg);
+        stale_writer.create_queue(&conformance_qdef()).unwrap();
+
+        let writer = SegmentedObjectLog::open(store.clone(), cfg);
+        writer.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            writer
+                .enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+                .unwrap();
+            writer.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+        }
+
+        writer
+            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
+            .unwrap();
+        assert_eq!(writer.expire_segments_through(&shard, 1, 1_000).unwrap(), 1);
+
+        strip_manifest_head_namespace(&store, &shard);
+
+        let head_prefix = SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_prefix(&shard);
+        assert!(
+            store.list(&head_prefix).unwrap().is_empty(),
+            "the fixture must recover without any authoritative head keys"
+        );
+        let legacy_prefix = SegmentedObjectLog::<InMemoryBlobStore>::manifest_prefix(&shard);
+        assert_eq!(
+            store.list(&legacy_prefix).unwrap(),
+            vec![
+                SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 1),
+                SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 2),
+                SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 3),
+            ],
+            "only the legacy manifest namespace remains"
+        );
+
+        let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+        reopened.create_queue(&conformance_qdef()).unwrap();
+        let recovered = reopened.read_manifest(&shard).unwrap();
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "recovery still enumerates legacy manifest entries after reopening"
+        );
+        assert_eq!(
+            reopened.current_epoch(&shard).unwrap(),
+            0,
+            "bootstrap restores the manifest tail epoch from the legacy-only fixture"
+        );
+
+        reopened.enqueue(&shard, &pushes(1), 0, 40).unwrap();
+        let ack = reopened.seal(&shard, 0, 41).unwrap();
+        assert_eq!(ack.len(), 1);
+        assert_eq!(
+            ack[0],
+            CommandPosition::new(shard.clone(), 0, 6),
+            "bootstrap restores the tail state so the reopened writer resumes at the next sequence"
+        );
+        assert!(
+            store
+                .get(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(
+                    &shard, 4
+                ))
+                .unwrap()
+                .is_some(),
+            "the reopened writer commits the next legacy manifest index"
+        );
+
+        stale_writer.enqueue(&shard, &pushes(1), 0, 50).unwrap();
+        let err = stale_writer.seal(&shard, 0, 51).unwrap_err();
+        assert!(
+            matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+            "the stale cached writer is rejected after the reclaimed-index fence is persisted"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestLegacyBootstrapNotRemoved() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let writer = SegmentedObjectLog::open(store.clone(), cfg);
+        writer.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..2u64 {
+            writer
+                .enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+                .unwrap();
+            writer.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+        }
+
+        strip_manifest_head_namespace(&store, &shard);
+
+        let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+        reopened.create_queue(&conformance_qdef()).unwrap();
+        let recovered = reopened.read_manifest(&shard).unwrap();
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "a queue with only legacy manifest keys still recovers its entries"
+        );
+        assert_eq!(
+            recovered.last().map(|entry| entry.last_seq),
+            Some(3),
+            "the tail state comes back from the legacy manifest namespace"
+        );
+        reopened.enqueue(&shard, &pushes(1), 0, 30).unwrap();
+        let ack = reopened.seal(&shard, 0, 31).unwrap();
+        assert_eq!(ack[0], CommandPosition::new(shard.clone(), 0, 4));
     }
 }
