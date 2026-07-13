@@ -626,6 +626,11 @@ struct ManifestEntry {
     /// pre-existing manifest (written before this field existed) defaults every entry to `None`.
     #[serde(default)]
     retention_floor_through: Option<u64>,
+    /// Durable manifest deletion watermark marker. Current manifests can carry it as an append-only,
+    /// read-only marker entry; legacy manifests deserialize it as `None` and continue to bootstrap from
+    /// the compatibility `read_horizon.json` cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compacted_through_index: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -947,6 +952,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         format!("{}{index:020}.json", Self::manifest_head_prefix(shard))
     }
 
+    fn manifest_watermark_head_key(shard: &QueueKey, index: u64) -> String {
+        format!(
+            "{}{index:020}~watermark.json",
+            Self::manifest_head_prefix(shard)
+        )
+    }
+
     fn list_commit_keys_at(&self, prefix: &str, horizon: Option<u64>) -> EngineResult<Vec<String>> {
         match horizon {
             Some(w) => self.store_list_from(prefix, &format!("{prefix}{w:020}.json")),
@@ -982,6 +994,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let _ = self.store_put_if_absent(&legacy_key, &body, false)?;
         }
         Ok(won)
+    }
+
+    fn commit_manifest_watermark_marker(
+        &self,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+    ) -> EngineResult<bool> {
+        let body = to_json(entry)?;
+        let head_key = Self::manifest_watermark_head_key(shard, entry.index);
+        self.store_put_if_absent(&head_key, &body, true)
     }
 
     fn delete_manifest_entry(&self, shard: &QueueKey, index: u64) -> EngineResult<()> {
@@ -1071,7 +1093,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// entry — which names no segment — its `first_seq`, which already records the live next seq). This makes
     /// a seal O(1) manifest reads instead of re-reading + re-parsing the whole O(n) manifest each time
     /// (the previous full scan made a sustained push O(n^2)). `read_all` still does a full scan for recovery.
-    fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64)> {
+    fn recover_manifest(&self, shard: &QueueKey) -> EngineResult<(u64, u64, u64, Option<u64>)> {
         // Range-list from the durable read-horizon so recovery enumerates only LIVE (above-floor) entries
         // (bead pqueue-8928baec). The tail is ALWAYS > floor > W, so it is never below the horizon; deriving
         // the tuple from the MAX ranged key is exact. The +1 GET for the horizon here is off the O(1) seal hot
@@ -1091,7 +1113,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             None => self.list_authoritative_manifest_keys_at(shard, None)?,
         };
         let Some(tail_key) = keys.into_iter().max() else {
-            return Ok((0, 0, 0));
+            return Ok((0, 0, 0, None));
         };
         let Some(bytes) = self.store_get(&tail_key)? else {
             return Err(EngineError::Conflict);
@@ -1106,7 +1128,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         } else {
             Self::visible_last_seq(&tail) + 1
         };
-        Ok((next_seq, next_index, tail.epoch))
+        Ok((
+            next_seq,
+            next_index,
+            tail.epoch,
+            tail.compacted_through_index,
+        ))
     }
 
     /// The LIVE manifest keys for `shard` above a GIVEN `horizon` — indices strictly ABOVE the durable
@@ -1217,7 +1244,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         // Bounded retry against concurrent acquirers (no consensus; the store CAS is the only primitive).
         for _ in 0..16 {
-            let (next_seq, next_index, cur_epoch) = self.recover_manifest(shard)?;
+            let (next_seq, next_index, cur_epoch, _) = self.recover_manifest(shard)?;
             let new_epoch = cur_epoch + 1;
             let entry = ManifestEntry {
                 index: next_index,
@@ -1230,6 +1257,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 checksum: 0,
                 committed_at_ms: now_ms,
                 retention_floor_through: None,
+                compacted_through_index: None,
             };
             if self.commit_manifest_entry(shard, &entry, true)? {
                 // The fence entry just won its CAS: the epoch handoff is now durably committed to the
@@ -1406,6 +1434,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             checksum: seg_checksum,
             committed_at_ms,
             retention_floor_through: None,
+            compacted_through_index: None,
         };
         let won = self.commit_manifest_entry(shard, &entry, true)?;
         if !won {
@@ -1800,7 +1829,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // before copying, then re-read it after the copy and before the final commit marker write. If a newer
         // owner has taken the source in the meantime, the branch commit must fail cleanly (`Conflict`) and
         // roll back the partial branch rather than publishing a branch on a source it no longer owns.
-        let (_, _, source_epoch) = self.recover_manifest(source)?;
+        let (_, _, source_epoch, _) = self.recover_manifest(source)?;
         let metadata = BranchMetadata {
             source: source.clone(),
             branch: branch.clone(),
@@ -1873,6 +1902,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     checksum: 0,
                     committed_at_ms: 0,
                     retention_floor_through: Some(f),
+                    compacted_through_index: None,
                 };
                 self.commit_manifest_entry(&branch, &floor_entry, true)?;
                 next_index += 1;
@@ -1929,7 +1959,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 return Ok(None);
             }
 
-            let (next_seq, next_manifest_index, committed_epoch) =
+            let (next_seq, next_manifest_index, committed_epoch, _) =
                 self.recover_manifest(&branch)?;
             {
                 let mut g = self.inner.lock().expect("segmented log poisoned");
@@ -1941,7 +1971,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
             // Own lease / epoch: the branch gets its own fence entry without mutating the parent queue.
             let epoch = self.acquire_epoch(&branch, now_ms)?;
-            let (_, _, current_source_epoch) = self.recover_manifest(source)?;
+            let (_, _, current_source_epoch, _) = self.recover_manifest(source)?;
             if current_source_epoch != source_epoch {
                 return Err(EngineError::Conflict);
             }
@@ -2297,7 +2327,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         position: CommandPosition,
         expected_epoch: u64,
     ) -> EngineResult<()> {
-        let (cur_seq, cur_index, cur_epoch) = self.recover_manifest(shard)?;
+        let (cur_seq, cur_index, cur_epoch, _) = self.recover_manifest(shard)?;
         if cur_epoch > expected_epoch {
             return Err(EngineError::EpochFenced);
         }
@@ -2323,6 +2353,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             checksum: 0,
             committed_at_ms: 0, // audit-only; floor entries are skipped by every age/segment scanner
             retention_floor_through: Some(position.sequence),
+            compacted_through_index: None,
         };
         let won = self.commit_manifest_entry(shard, &entry, false)?;
         if !won {
@@ -2388,6 +2419,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         };
         let mut new_w: Option<u64> = None;
         for entry in entries {
+            if entry.compacted_through_index.is_some() {
+                continue;
+            }
             // STOP at the AUTHORITATIVE floor entry — `read_retention_floor` needs it, so W must stay below it.
             if entry.retention_floor_through == Some(floor.sequence) {
                 break;
@@ -2420,6 +2454,21 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             // Best-effort monotonic PUT. A candidate is always derived strictly below the durable floor (see
             // SAFETY above), so even a non-atomic read-check-then-put that a racing writer interleaves can only
             // regress W to another below-floor value — never above a live entry.
+            let (cur_seq, cur_index, cur_epoch, _) = self.recover_manifest(shard)?;
+            let marker = ManifestEntry {
+                index: cur_index.saturating_sub(1),
+                epoch: cur_epoch,
+                fence: false,
+                segment_key: None,
+                first_seq: cur_seq.saturating_sub(1),
+                last_seq: cur_seq.saturating_sub(1),
+                visible_last_seq: None,
+                checksum: 0,
+                committed_at_ms: now_ms,
+                retention_floor_through: None,
+                compacted_through_index: Some(w),
+            };
+            let _ = self.commit_manifest_watermark_marker(shard, &marker)?;
             let blob = ReadHorizonBlob { index: w };
             self.store_put(&Self::read_horizon_key(shard), &to_json(&blob)?, false)?;
             let mut g = self.inner.lock().expect("segmented log poisoned");
