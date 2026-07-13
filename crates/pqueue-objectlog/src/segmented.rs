@@ -1752,7 +1752,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.fail_closed_below_floor(shard, 0, horizon)?;
         let mut out = Vec::new();
         for entry in self.read_manifest_at(shard, horizon)? {
-            if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
+            if entry.fence || (horizon.is_some() && Self::is_reclaimed_manifest_marker(&entry)) {
                 continue;
             }
             let Some(seg_key) = entry.segment_key.as_ref() else {
@@ -1817,7 +1817,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.fail_closed_below_floor(shard, from_seq, horizon)?;
         let mut out = Vec::new();
         for entry in self.read_manifest_at(shard, horizon)? {
-            if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
+            if entry.fence || (horizon.is_some() && Self::is_reclaimed_manifest_marker(&entry)) {
                 continue;
             }
             // The bounded-tail saving: a fully-applied segment is skipped without a GET/parse of its object.
@@ -2330,7 +2330,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         through_seq: u64,
         now_ms: i64,
     ) -> EngineResult<u64> {
-        let entries = self.read_manifest(source)?;
+        let horizon_snapshot = self.read_read_horizon(source)?;
+        let entries = self.read_manifest_at(source, horizon_snapshot)?;
         let (_candidates, _) = self.manifest_reclamation_candidates_from_entries(
             source,
             through_seq,
@@ -2376,6 +2377,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 reclaimed_through = Some(Self::visible_last_seq(entry));
             }
         }
+        // The pass-level watermark advance must still be able to inspect the reclaimed prefix that may sit at
+        // or below the current durable watermark. A later pass can only advance across a gap once the prefix
+        // becomes contiguous again, so the advance scan starts one entry before the current watermark when
+        // one exists.
+        let advance_entries = match horizon_snapshot {
+            None => self.read_manifest_at(source, None)?,
+            Some(0) => self.read_manifest_at(source, None)?,
+            Some(w) => self.read_manifest_at(source, Some(w - 1))?,
+        };
         // Advance the durable read-horizon only for the longest contiguous prefix we fully reclaimed. A later
         // delete failure must not let the watermark leap over an undeleted manifest entry; at the same time, a
         // partial failure after some successful reclaim work should still durably record the safe prefix so a
@@ -2387,8 +2397,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // delete-only compaction safely; a cheaper delete-only variant would need the post-head-CAS protocol
         // redesign, not this code path.
         if let Some(reclaimed_through) = reclaimed_through {
-            let _ =
-                self.advance_read_horizon_from_entries(source, reclaimed_through, now_ms, &entries);
+            let _ = self.advance_read_horizon_from_entries(
+                source,
+                reclaimed_through,
+                now_ms,
+                &advance_entries,
+            );
         }
         match error {
             Some(err) => Err(err),

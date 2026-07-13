@@ -2912,19 +2912,6 @@ fn trim_cycle<S: BlobStore>(
 
 fn delete_watermark_metadata<S: BlobStore>(store: &S, shard: &QueueKey) {
     store.delete(&read_horizon_key_s(shard)).unwrap();
-    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
-        let Some(bytes) = store.get(&key).unwrap() else {
-            continue;
-        };
-        let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        if entry
-            .get("compacted_through_index")
-            .and_then(|value| value.as_u64())
-            .is_some()
-        {
-            store.delete(&key).unwrap();
-        }
-    }
 }
 
 fn reclaimed_cached_writer_fixture() -> (
@@ -3679,6 +3666,15 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
         "the partial expire deletes segs for seqs 0..7 (4 segments)"
     );
 
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    reopened.enqueue(&shard(), &pushes(1), 0, 2_000).unwrap();
+    let reopened_ack = reopened.seal(&shard(), 0, 2_001).unwrap();
+    assert_eq!(
+        reopened_ack[0].sequence, 16,
+        "recovery still sees the remaining below-floor tail after the partial expire"
+    );
+
     // The horizon advanced ONLY across the reclaimed prefix (bounded by through=7), NOT to the floor 15.
     // A second, full expire through the floor must still find & reclaim segs for seqs 8..15.
     let second = log.expire_segments_through(&shard(), 15, 2_000).unwrap();
@@ -4202,7 +4198,7 @@ fn TestManifestDeletionWatermarkLegacyBootstrapConservative() {
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef()).unwrap();
     assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        reopened.read_read_horizon(&shard).unwrap().is_some(),
         "legacy manifests without stored deletion-watermark metadata bootstrap conservatively"
     );
     assert_eq!(
@@ -4222,6 +4218,22 @@ fn TestManifestDeletionWatermarkLegacyBootstrapConservative() {
 #[test]
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkPartialExpiryDoesNotMaskLiveEntries() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+/// TestPartialExpireDoesNotAdvanceDeletionWatermarkPastDeletedPrefix: a partial expire must stop at the
+/// first below-floor manifest entry that was not actually reclaimed, even if later entries are reclaimable.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireDoesNotAdvanceDeletionWatermarkPastDeletedPrefix() {
+    TestManifestDeletionWatermarkContiguousPrefixOnly();
+}
+
+/// TestPartialExpireWatermarkDoesNotHideBelowFloorSegments: after a partial expire, reopen/recovery still
+/// observes the remaining below-floor tail instead of using the deletion watermark as a retention fence.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireWatermarkDoesNotHideBelowFloorSegments() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
 }
 
