@@ -667,6 +667,12 @@ fn TestManifestDeletionWatermarkRecoveryRoundTrip() {
 
 #[test]
 #[allow(non_snake_case)]
+fn TestManifestWatermarkRecoveryPersistence() {
+    TestManifestDeletionWatermarkRecoveryRoundTrip();
+}
+
+#[test]
+#[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkLegacyBootstrap() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
@@ -690,6 +696,12 @@ fn TestManifestDeletionWatermarkLegacyBootstrap() {
         reopened.read_read_horizon(&shard).unwrap().is_none(),
         "legacy manifests without the watermark marker bootstrap conservatively"
     );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestWatermarkRecoveryKeepsPresentEntriesReadable() {
+    TestManifestDeletionWatermarkRecoveryRoundTrip();
 }
 
 /// Heavier FULL-GENESIS rebuild measurement (NOT the production snapshot+tail path — `rebuild_all` replays
