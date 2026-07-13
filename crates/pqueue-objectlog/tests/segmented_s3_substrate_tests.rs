@@ -604,8 +604,8 @@ fn branch_pins_parent_segments_against_expiry() {
         "expired parent manifest head stays retained as history"
     );
     assert!(
-        store.get(&parent_manifest_legacy_key).unwrap().is_some(),
-        "expired parent legacy manifest stays retained as history"
+        store.get(&parent_manifest_legacy_key).unwrap().is_none(),
+        "the reclaimed legacy manifest copy is removed"
     );
 }
 
@@ -652,7 +652,7 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
     );
     assert!(store.get(&seg_key).unwrap().is_none());
     assert!(store.get(&manifest_head_key).unwrap().is_some());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
 
     // Branch metadata can still be discarded idempotently after expiry.
     log.discard_branch(&parent_shard, &branch_shard).unwrap();
@@ -767,7 +767,7 @@ fn TestBranchPinReleaseEnablesManifestReclaim() {
 
     assert!(store.get(&seg_key).unwrap().is_none());
     assert!(store.get(&manifest_head_key).unwrap().is_some());
-    assert!(store.get(&manifest_legacy_key).unwrap().is_some());
+    assert!(store.get(&manifest_legacy_key).unwrap().is_none());
     assert_eq!(
         log.read_read_horizon(&source).unwrap(),
         Some(0),
@@ -967,8 +967,8 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "the unpinned manifest head is retained as history"
     );
     assert!(
-        store.get(&seg1_manifest_legacy_key).unwrap().is_some(),
-        "the unpinned legacy manifest is retained as history"
+        store.get(&seg1_manifest_legacy_key).unwrap().is_none(),
+        "the reclaimed legacy manifest copy is removed"
     );
     assert!(
         store.get(&seg2_key).unwrap().is_some(),
@@ -1028,8 +1028,8 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         "seg0 manifest head remains retained once the pin is gone"
     );
     assert!(
-        store.get(&seg0_manifest_legacy_key).unwrap().is_some(),
-        "seg0 legacy manifest remains retained once the pin is gone"
+        store.get(&seg0_manifest_legacy_key).unwrap().is_none(),
+        "seg0 legacy manifest is reclaimed once the pin is gone"
     );
 }
 
@@ -2744,6 +2744,12 @@ fn manifest_key_s(shard: &QueueKey, index: u64) -> String {
     format!("{}{index:020}.json", manifest_prefix_s(shard))
 }
 
+fn delete_prefix<S: BlobStore>(store: &S, prefix: &str) {
+    for key in store.list(prefix).unwrap() {
+        store.delete(&key).unwrap();
+    }
+}
+
 fn segment_key_for<S: BlobStore>(store: &S, shard: &QueueKey, first_seq: u64) -> String {
     for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
         for key in store.list(&prefix).unwrap() {
@@ -2794,18 +2800,12 @@ fn reclaimed_cached_writer_fixture() -> (
 
     let stale_owner = SegmentedObjectLog::open(store.clone(), cfg);
     stale_owner.create_queue(&qdef()).unwrap();
-    for i in 0..3u64 {
-        stale_owner
-            .enqueue(&shard(), &pushes(1), 0, (i as i64 + 1) * 10)
-            .unwrap();
-        stale_owner
-            .seal(&shard(), 0, (i as i64 + 1) * 10 + 1)
-            .unwrap();
-    }
+    stale_owner.enqueue(&shard(), &pushes(1), 0, 10).unwrap();
+    stale_owner.seal(&shard(), 0, 11).unwrap();
 
     let live_owner = SegmentedObjectLog::open(store.clone(), cfg);
     live_owner.create_queue(&qdef()).unwrap();
-    for i in 0..3u64 {
+    for i in 0..4u64 {
         live_owner
             .enqueue(&shard(), &pushes(1), 0, 200 + i as i64 * 10)
             .unwrap();
@@ -2866,8 +2866,8 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
     // enumerates the live tail.
     let total_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap().len();
     assert!(
-        total_manifest_keys >= initial_manifest_keys,
-        "trimmed below-floor manifest entries stay retained in-place"
+        total_manifest_keys < initial_manifest_keys,
+        "reclaiming below-floor entries removes the legacy compatibility copies"
     );
     // Range-listing from the horizon enumerates only the LIVE tail — strictly fewer than the total history.
     let live_keys = store
@@ -2970,16 +2970,22 @@ fn TestUnexpectedLiveManifestHoleFailsClosed() {
         "the floor entry is still present before we simulate the hole"
     );
     assert!(
-        store.delete(&manifest_key_s(&shard(), 1)).unwrap(),
-        "removed the live floor manifest entry"
+        store
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_some(),
+        "the live floor head entry is still present before we simulate the hole"
     );
     assert!(
         store.delete(&manifest_head_key_s(&shard(), 1)).unwrap(),
         "removed the authoritative head copy too"
     );
     assert!(
-        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none(),
-        "the live floor entry is now missing"
+        store
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_none(),
+        "the live floor head entry is now missing"
     );
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
@@ -3088,8 +3094,15 @@ fn TestLiveTailByteIdenticalAfterManifestReclaim() {
 
     // Prove the live tail stayed byte-identical while the below-floor manifest history remained retained.
     assert!(
-        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_some(),
-        "below-floor manifest entries stay retained in-place"
+        store
+            .get(&manifest_head_key_s(&shard(), 0))
+            .unwrap()
+            .is_some(),
+        "the reclaimed manifest head stays retained as the durable fence"
+    );
+    assert!(
+        store.get(&manifest_key_s(&shard(), 0)).unwrap().is_none(),
+        "the legacy compatibility copy is reclaimed"
     );
 
     let after = log.read_from(&shard(), first_readable).unwrap();
@@ -3112,11 +3125,11 @@ fn TestLiveTailByteIdenticalAfterManifestReclaim() {
 }
 
 /// Test 4 — a stale cached writer whose next index points below the durable read-horizon still cannot ack.
-/// The retained manifest slot stays occupied, and the stale seal returns `EpochFenced` or `Conflict` rather
-/// than creating a fresh durable entry at the occupied address.
+/// The reclaimed manifest slot is overwritten with a durable marker, and the stale seal returns
+/// `EpochFenced` or `Conflict` rather than creating a fresh durable entry at the occupied address.
 #[test]
 #[allow(non_snake_case)]
-fn TestPermanentFenceSurvivesManifestReclaim() {
+fn TestPermanentFenceMarkerBlocksReclaimedIndex() {
     let (store, stale_owner, _live_owner) = reclaimed_cached_writer_fixture();
 
     stale_owner.enqueue(&shard(), &pushes(1), 0, 5_000).unwrap();
@@ -3126,13 +3139,25 @@ fn TestPermanentFenceSurvivesManifestReclaim() {
         matches!(err, EngineError::EpochFenced | EngineError::Conflict),
         "a reclaimed cached manifest index must not ack, got {err:?}"
     );
+    let head_bytes = store
+        .get(&manifest_head_key_s(&shard(), 1))
+        .unwrap()
+        .expect("reclaimed manifest-head marker");
+    let head_entry: serde_json::Value = serde_json::from_slice(&head_bytes).unwrap();
+    assert_eq!(
+        head_entry
+            .get("compacted_through_index")
+            .and_then(|v| v.as_u64()),
+        Some(1),
+        "the reclaimed head slot carries a durable marker"
+    );
     assert!(
-        store.get(&manifest_key_s(&shard(), 3)).unwrap().is_some(),
-        "the retained manifest slot stays occupied after the stale seal"
+        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none(),
+        "the reclaimed legacy compatibility copy is removed"
     );
     assert!(
         store
-            .get(&manifest_head_key_s(&shard(), 3))
+            .get(&manifest_head_key_s(&shard(), 1))
             .unwrap()
             .is_some(),
         "the authoritative manifest-head slot stays occupied after the stale seal"
@@ -3141,6 +3166,81 @@ fn TestPermanentFenceSurvivesManifestReclaim() {
         store.inner.object_count(),
         objects_before,
         "the stale seal must not write a fresh manifest or segment object"
+    );
+}
+
+/// Test 4b — legacy manifest bootstrap still reads valid legacy state when the authoritative head copy is
+/// absent.
+#[test]
+#[allow(non_snake_case)]
+fn TestFenceMarkerPreservesLegacyBootstrap() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+
+    let legacy_def = branch_qdef("legacy-bootstrap");
+    let legacy_shard = QueueKey::new(legacy_def.tenant_id.clone(), legacy_def.queue_id.clone());
+    let legacy_log = SegmentedObjectLog::open(store.clone(), cfg);
+    legacy_log.create_queue(&legacy_def).unwrap();
+    for i in 0..4u64 {
+        legacy_log
+            .enqueue(&legacy_shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        legacy_log
+            .seal(&legacy_shard, 0, (i as i64 + 1) * 10 + 1)
+            .unwrap();
+    }
+    trim_cycle(&legacy_log, &legacy_shard, 3, 0, 1_000);
+    let legacy_bytes = store
+        .get(&manifest_key_s(&legacy_shard, 3))
+        .unwrap()
+        .expect("legacy manifest entry");
+    let retained_legacy_manifest: serde_json::Value =
+        serde_json::from_slice(&legacy_bytes).unwrap();
+    assert!(
+        retained_legacy_manifest
+            .get("segment_key")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "the retained legacy manifest entry is still valid before we remove the head copy"
+    );
+    assert!(
+        store
+            .get(&manifest_head_key_s(&legacy_shard, 3))
+            .unwrap()
+            .is_some(),
+        "the authoritative head copy still exists before the bootstrap simulation"
+    );
+
+    delete_prefix(store.as_ref(), &manifest_head_prefix_s(&legacy_shard));
+    assert!(
+        store
+            .list(&manifest_head_prefix_s(&legacy_shard))
+            .unwrap()
+            .is_empty(),
+        "the legacy bootstrap queue has no authoritative head copy"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&legacy_def).unwrap();
+    assert_eq!(
+        reopened
+            .read_retention_floor(&legacy_shard)
+            .unwrap()
+            .unwrap()
+            .sequence,
+        3,
+        "the legacy manifest copy still bootstraps the durable floor"
+    );
+    assert_eq!(
+        reopened.current_epoch(&legacy_shard).unwrap(),
+        0,
+        "the legacy manifest copy still bootstraps the epoch"
+    );
+    let tail = reopened.read_from(&legacy_shard, 4).unwrap();
+    assert_eq!(
+        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the legacy bootstrap still reads the live tail"
     );
 }
 
@@ -3544,8 +3644,8 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
     );
     assert_eq!(
         log.read_read_horizon(&shard()).unwrap(),
-        Some(0),
-        "the watermark advances only through the contiguous successfully deleted prefix"
+        None,
+        "no contiguous prefix is committed when the first reclaimable delete fails"
     );
 
     store.disarm();
@@ -3610,7 +3710,7 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
 
     log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
         .unwrap();
-    store.arm_delete(&manifest_head_key_s(&shard(), 0));
+    store.arm_delete(&manifest_key_s(&shard(), 0));
 
     let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
     assert!(
@@ -3659,10 +3759,12 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
         "no horizon after delete"
     );
 
-    // The retained below-floor entries are still present, so deleting the horizon object now fails closed
-    // rather than pretending the reclaimed prefix is live.
-    assert!(
-        matches!(log.read_all(&shard()), Err(EngineError::Storage(_))),
-        "without the horizon object the trimmed queue fails closed on the retained prefix"
+    // Without the horizon object the queue falls back to the marker-filtered full list and still returns
+    // the live tail above the reclaimed floor.
+    let tail = log.read_all(&shard()).unwrap();
+    assert_eq!(
+        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "without the horizon object the trimmed queue still returns the live tail"
     );
 }

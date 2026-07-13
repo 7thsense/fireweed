@@ -33,6 +33,7 @@
 //!   - The true 10M-item-in-S3 snapshot+tail rebuild within a stated recovery-window budget is the live run
 //!     (pqueue-2f9ebac3); here the local genesis-replay rate is REPORTED only.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pqueue_conformance::{envelope, item};
@@ -48,7 +49,7 @@ use pqueue_engine::{
 };
 use pqueue_objectlog::{
     LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig, SegmentConfig,
-    segmented::{BlobStore, InMemoryBlobStore, ObjectStoreStats, SegmentedObjectLog},
+    segmented::{BlobStore, InMemoryBlobStore, SegmentedObjectLog},
 };
 
 /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
@@ -88,6 +89,49 @@ fn manifest_head_prefix_s(shard: &pqueue_engine::QueueKey) -> String {
 
 fn read_horizon_key_s(shard: &pqueue_engine::QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
+}
+
+#[derive(Default)]
+struct FailingDeleteBlobStore {
+    inner: InMemoryBlobStore,
+    fail_delete: Mutex<Option<String>>,
+}
+
+impl FailingDeleteBlobStore {
+    fn arm_delete(&self, key: &str) {
+        *self.fail_delete.lock().unwrap() = Some(key.to_string());
+    }
+
+    fn disarm(&self) {
+        *self.fail_delete.lock().unwrap() = None;
+    }
+}
+
+impl BlobStore for FailingDeleteBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> pqueue_engine::EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> pqueue_engine::EngineResult<bool> {
+        if self.fail_delete.lock().unwrap().as_deref() == Some(key) {
+            return Err(pqueue_engine::EngineError::Storage(format!(
+                "injected delete failure for {key}"
+            )));
+        }
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> pqueue_engine::EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
 }
 
 fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
@@ -735,16 +779,21 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
 
     log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
         .unwrap();
-    store.arm_delete(&format!("/manifest_head/{:020}.json", 1));
+    store.arm_delete(&format!(
+        "{}manifest/{:020}.json",
+        shard_prefix_s(&shard),
+        1
+    ));
 
     let err = log.expire_segments_through(&shard, 7, 1_000).unwrap_err();
     assert!(
         matches!(err, pqueue_engine::EngineError::Storage(_)),
         "the injected delete failure must abort the partial expire"
     );
-    assert!(
-        log.read_read_horizon(&shard).unwrap().is_none(),
-        "no durable manifest-deletion watermark should be recorded on failure"
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(0),
+        "the contiguous reclaimed prefix should be recorded even when a later delete fails"
     );
 
     drop(log);
@@ -752,15 +801,28 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef).unwrap();
-    assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_none(),
-        "reopen must not invent a watermark after interrupted reclamation"
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        Some(0),
+        "reopen must recover the last durable contiguous watermark after interrupted reclamation"
     );
 
-    let tail = reopened.read_from(&shard, 4).unwrap();
-    assert_eq!(
-        tail.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
-        vec![4, 5, 6, 7],
-        "the undeleted below-floor segments remain visible after reopen"
+    let marker_bytes = store
+        .inner
+        .get(&format!(
+            "{}manifest_head/{:020}.json",
+            shard_prefix_s(&shard),
+            1
+        ))
+        .unwrap()
+        .expect("reclaimed manifest marker");
+    let marker: serde_json::Value = serde_json::from_slice(&marker_bytes).unwrap();
+    let seg_key = marker
+        .get("segment_key")
+        .and_then(|v| v.as_str())
+        .expect("segment key retained in the reclaimed marker");
+    assert!(
+        store.inner.get(seg_key).unwrap().is_some(),
+        "the segment referenced by the reclaimed marker remains present after reopen"
     );
 }
