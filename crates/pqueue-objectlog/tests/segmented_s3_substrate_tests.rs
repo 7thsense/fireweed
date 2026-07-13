@@ -2905,6 +2905,23 @@ fn trim_cycle<S: BlobStore>(
         .unwrap();
 }
 
+fn delete_watermark_metadata<S: BlobStore>(store: &S, shard: &QueueKey) {
+    store.delete(&read_horizon_key_s(shard)).unwrap();
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        let Some(bytes) = store.get(&key).unwrap() else {
+            continue;
+        };
+        let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        if entry
+            .get("compacted_through_index")
+            .and_then(|value| value.as_u64())
+            .is_some()
+        {
+            store.delete(&key).unwrap();
+        }
+    }
+}
+
 fn reclaimed_cached_writer_fixture() -> (
     std::sync::Arc<CountingBlobStore>,
     SegmentedObjectLog<std::sync::Arc<CountingBlobStore>>,
@@ -3883,10 +3900,7 @@ fn backward_compat_no_horizon_object_behaves_as_before() {
     // Trim (writes a horizon), then DELETE the horizon object to simulate a pre-existing / rolled-back queue.
     trim_cycle(&log, &shard(), 3, 0, 1_000);
     assert!(log.read_read_horizon(&shard()).unwrap().is_some());
-    assert!(
-        store.delete(&read_horizon_key_s(&shard())).unwrap(),
-        "removed the horizon object"
-    );
+    delete_watermark_metadata(store.as_ref(), &shard());
     assert!(
         log.read_read_horizon(&shard()).unwrap().is_some(),
         "the durable horizon is reconstructed from the retained marker history"
@@ -3981,6 +3995,107 @@ fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
             .collect::<Vec<_>>(),
         vec![8, 9, 10, 11],
         "the live entries above the floor remain visible after the ignored high candidate"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkPersistsAfterPhysicalDelete() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..3u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+        .unwrap();
+    store.arm_delete(&segment_key_for(store.as_ref(), &shard, 2));
+
+    let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected delete failure must abort the reclaim pass"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(0),
+        "the deletion watermark records only the highest physically reclaimed manifest index from that pass"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard, 0))
+            .unwrap()
+            .is_none(),
+        "the first reclaimed segment object remains deleted"
+    );
+    assert!(
+        store
+            .inner
+            .get(&segment_key_for(store.as_ref(), &shard, 2))
+            .unwrap()
+            .is_some(),
+        "the failed segment object is still present and therefore cannot be counted in the watermark"
+    );
+
+    store.disarm();
+    assert_eq!(
+        log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+        2,
+        "the retry completes the contiguous reclaimed prefix"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(2),
+        "the persisted watermark advances only after the later physical deletes complete"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkLegacyBootstrapConservative() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard, 3, 0, 1_000);
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(1),
+        "the durable watermark exists before the legacy bootstrap metadata is removed"
+    );
+
+    delete_watermark_metadata(store.as_ref(), &shard);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert!(
+        reopened.read_read_horizon(&shard).unwrap().is_none(),
+        "legacy manifests without stored deletion-watermark metadata bootstrap conservatively"
+    );
+    assert_eq!(
+        reopened
+            .read_from(&shard, 4)
+            .unwrap()
+            .iter()
+            .map(|(pos, _)| pos.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the conservative bootstrap still exposes the live tail instead of skipping entries"
     );
 }
 
