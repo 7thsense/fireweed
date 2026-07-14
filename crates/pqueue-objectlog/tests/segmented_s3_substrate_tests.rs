@@ -5031,6 +5031,16 @@ fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
     TestManifestDeletionWatermarkReclaimCyclesMonotonic();
 }
 
+/// TestPartialExpireVisibilityStateDoesNotRegressReadHorizonBounds: enabling the partial-expire
+/// visibility state must not widen the bounded read/recovery enumeration, and the durable watermark
+/// still preserves the live tail ordering.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityStateDoesNotRegressReadHorizonBounds() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+    TestManifestDeletionWatermarkReclaimCyclesMonotonic();
+}
+
 #[test]
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkStorageMonotonic() {
