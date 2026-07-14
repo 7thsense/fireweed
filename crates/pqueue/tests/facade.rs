@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use pqueue::{
-    ClaimRef, CommitEntry, CommitRequest, EngineError, FinalizeKind, GateKeyPolicy, GroupKey,
-    MetadataValue, Nack, NewItem, PayloadUpdate, Pqueue, RequestId, UtcTimestamp,
+    ClaimAt, ClaimRef, CommitEntry, CommitRequest, EngineError, FinalizeKind, GateKeyPolicy,
+    GroupKey, MetadataValue, Nack, NewItem, PayloadUpdate, Pqueue, RequestId, UtcTimestamp,
 };
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
@@ -779,5 +779,88 @@ async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
         follow_up[0].payload.as_deref(),
         Some(lifecycle_json.as_ref()),
         "JSON payload in lifecycle_item survives commit path verbatim"
+    );
+}
+
+/// Scheduled-work selection at a caller-resolved execution epoch: `claim_at` decides due-ness at
+/// `eligibility_time` while the lease keeps running off the handle's clock. The clock is NEVER moved to
+/// fake the epoch — that would be a shared mutation visible to every other caller on this handle (and would
+/// silently re-date pushes and lease expiries) — so the operational time here deliberately sits BEFORE the
+/// epoch being selected for.
+#[tokio::test]
+async fn claim_at_resolves_eligibility_at_an_explicit_epoch_over_memory() {
+    let backend = Arc::new(composed_memory_backend());
+    let clock = Arc::new(ManualClock::at(0)); // operational time: ts(0), and it stays there
+    let pq = Pqueue::new(backend, clock);
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+
+    // Three items scheduled ahead of the operational clock (ascending priority = the claim order).
+    for (priority, not_before) in [(10, 100), (20, 200), (30, 300)] {
+        pq.push(
+            &q,
+            NewItem {
+                not_before: Some(UtcTimestamp::new(not_before, 0).unwrap()),
+                ..at(priority)
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // Nothing is due at the operational clock, so the ordinary claim is empty...
+    assert!(
+        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
+        "no item is due at the operational clock"
+    );
+
+    // ...but a claim resolved AT the ts(200) execution epoch takes the work scheduled by then. The
+    // boundary is inclusive, so the item scheduled exactly at 200 is due; the one at 300 is not.
+    let due = pq
+        .claim_at(
+            &q,
+            ClaimAt::new(10, 60_000).eligibility_time(UtcTimestamp::new(200, 0).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        due.iter().map(|i| i.not_before).collect::<Vec<_>>(),
+        vec![
+            Some(UtcTimestamp::new(100, 0).unwrap()),
+            Some(UtcTimestamp::new(200, 0).unwrap()),
+        ],
+        "due at the eligibility epoch: not_before <= 200, inclusive at the boundary"
+    );
+    for item in &due {
+        assert_eq!(
+            item.lease_expires_at,
+            UtcTimestamp::new(60, 0).unwrap(),
+            "lease is measured from the operational clock (0) + 60s — never from the eligibility epoch"
+        );
+    }
+
+    // The eligibility epoch selected work without disturbing the clock: the remaining item is still not
+    // due at operational time, and a plain claim still sees an empty queue.
+    assert!(
+        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
+        "claim_at left the handle's clock untouched"
+    );
+
+    // lease_time is independently steerable: select the last item at its epoch, but anchor its lease to a
+    // caller-supplied operational instant.
+    let late = pq
+        .claim_at(
+            &q,
+            ClaimAt::new(10, 60_000)
+                .eligibility_time(UtcTimestamp::new(300, 0).unwrap())
+                .lease_time(UtcTimestamp::new(1_000, 0).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(late.len(), 1, "only the item scheduled at 300 was left");
+    assert_eq!(
+        late[0].lease_expires_at,
+        UtcTimestamp::new(1_060, 0).unwrap(),
+        "lease expiry is lease_time + duration"
     );
 }

@@ -36,6 +36,7 @@ async fn claim_fences_superseded_owner_epoch() {
     assert!(e1 >= 1, "acquire advances the durable epoch");
 
     let stale = ClaimRequest {
+        eligibility_time: None,
         expected_epoch: Some(0),
         ..claim_req(10, 500, 100)
     };
@@ -50,6 +51,7 @@ async fn claim_fences_superseded_owner_epoch() {
     );
 
     let ok = ClaimRequest {
+        eligibility_time: None,
         expected_epoch: Some(e1),
         ..claim_req(10, 500, 100)
     };

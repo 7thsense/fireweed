@@ -26,7 +26,7 @@ pub use crate::claimed_item_shape_includes_payload_fields_and_gate_keys_if_suppo
 // traits need not be imported here.
 use crate::{
     Adr011ConformanceBackend, ConformanceBackend, ConformanceCommitTransition, ConformanceCore,
-    claim_req, commit, envelope, item, item_max, qdef, qkey, shard, ts,
+    claim_req, claim_req_at, commit, envelope, item, item_max, qdef, qkey, shard, ts,
 };
 
 fn adr011_qdef_with_entity_schema() -> QueueDefinition {
@@ -1801,6 +1801,95 @@ pub async fn claim_empty_when_nothing_eligible<B: ConformanceCore>(make: impl Fn
     assert!(claimed.items.is_empty());
 }
 
+/// A claim carries TWO times, and a backend must not conflate them: `eligibility_time` decides which
+/// scheduled items are DUE (`not_before <= eligibility_time`), while `now`/`lease_expires_at` measure the
+/// LEASE. A caller selecting work for an execution epoch (a scheduler tick, a backfill, a replay) can then
+/// sit at any operational time and still hand out leases that are valid against the real clock.
+///
+/// Three items scheduled at 100 / 200 / 300, and the operational clock deliberately placed on both sides
+/// of the eligibility epoch, plus the exact `not_before == eligibility_time` boundary.
+pub async fn claim_with_explicit_eligibility_time<B: ConformanceCore>(make: impl Fn() -> B) {
+    async fn scheduled_queue<B: ConformanceCore>(b: &B) {
+        b.create_queue(qdef()).await.unwrap();
+        let mut items = Vec::new();
+        // Equal priority, so the strict claim order is the FIFO created_seq order: 1, 2, 3.
+        for (id, key, not_before) in [("1", "ka", 100), ("2", "kb", 200), ("3", "kc", 300)] {
+            let mut it = item(id, key, 5);
+            it.not_before = Some(ts(not_before));
+            items.push(it);
+        }
+        commit(
+            b,
+            envelope(QueueCommand::Push(PushCommand { items }), vec![]),
+        )
+        .await;
+    }
+    fn ids(claimed: &pqueue_engine::Claimed) -> Vec<String> {
+        claimed
+            .items
+            .iter()
+            .map(|i| i.item_id.to_string())
+            .collect()
+    }
+
+    // 1. Operational clock AFTER the eligibility epoch (the backfill / catch-up direction): select the work
+    //    that was due as of ts(150) even though it is now ts(1_000). Only item 1 (due at 100) qualifies —
+    //    `now` must NOT leak into the selection, or items 2 and 3 would be swept in as well.
+    let b = make();
+    scheduled_queue(&b).await;
+    let claimed = b.claim(claim_req_at(10, 1_060, 1_000, 150)).await.unwrap();
+    assert_eq!(
+        ids(&claimed),
+        ["1"],
+        "selection must resolve due-ness at eligibility_time (150), not at now (1_000)"
+    );
+    // ...and the lease it handed out is anchored to the OPERATIONAL time, not the eligibility epoch: a
+    // lease derived from ts(150) would already be expired at ts(1_000), losing the item to a reclaim sweep.
+    assert_eq!(
+        claimed.items[0].lease_expires_at,
+        ts(1_060),
+        "lease expiry must come from lease_time + duration, untouched by eligibility_time"
+    );
+
+    // 2. Operational clock BEFORE the eligibility epoch (the look-ahead direction): claiming as of ts(300)
+    //    while the clock reads ts(10) selects everything scheduled up to that epoch, in strict order.
+    let b = make();
+    scheduled_queue(&b).await;
+    let claimed = b.claim(claim_req_at(10, 70, 10, 300)).await.unwrap();
+    assert_eq!(
+        ids(&claimed),
+        ["1", "2", "3"],
+        "an eligibility epoch ahead of the clock selects the work due at that epoch"
+    );
+    assert_eq!(
+        claimed.items[0].lease_expires_at,
+        ts(70),
+        "lease still measured from the operational now (10) + duration"
+    );
+
+    // 3. The exact equality boundary: eligibility_time == not_before is DUE (the `<=` half-open convention
+    //    every other eligibility read uses), so ts(200) takes item 2 and stops short of item 3.
+    let b = make();
+    scheduled_queue(&b).await;
+    let claimed = b.claim(claim_req_at(10, 1_060, 1_000, 200)).await.unwrap();
+    assert_eq!(
+        ids(&claimed),
+        ["1", "2"],
+        "an item scheduled exactly AT eligibility_time is eligible (not_before <= eligibility_time)"
+    );
+
+    // 4. Unset eligibility_time is unchanged behaviour: due-ness falls back to `now`, so the pre-existing
+    //    single-clock claim of every other caller keeps selecting exactly what it selected before.
+    let b = make();
+    scheduled_queue(&b).await;
+    let claimed = b.claim(claim_req(10, 260, 200)).await.unwrap();
+    assert_eq!(
+        ids(&claimed),
+        ["1", "2"],
+        "without an explicit eligibility_time, `now` decides due-ness as it always did"
+    );
+}
+
 pub async fn claimed_item_shape_includes_payload_fields_and_gate_keys<B: ConformanceCore>(
     make: impl Fn() -> B,
 ) {
@@ -2106,6 +2195,7 @@ pub async fn claimed_item_shape_whole_cohort_omits_per_item_lease_token<B: Confo
 
     let claimed = b
         .claim(ClaimRequest {
+            eligibility_time: None,
             compatibility: ClaimCompatibility {
                 whole_cohort: true,
                 ..Default::default()

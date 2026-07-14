@@ -83,6 +83,7 @@ fn claim_req_compat(
     compatibility: ClaimCompatibility,
 ) -> ClaimRequest {
     ClaimRequest {
+        eligibility_time: None,
         shard: shard(),
         worker_id: WorkerId::new("w1").unwrap(),
         max_items: max,

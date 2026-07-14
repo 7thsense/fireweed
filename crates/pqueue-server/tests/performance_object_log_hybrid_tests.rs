@@ -617,6 +617,7 @@ where
                 let offset = claimed_total + (op as u64 * claim_batch as u64);
                 let token = LeaseToken::new(format!("lt-{backend_profile}-{offset}")).unwrap();
                 backend.claim(ClaimRequest {
+                    eligibility_time: None,
                     shard: shard.clone(),
                     worker_id: WorkerId::new("w").unwrap(),
                     max_items: claim_batch.min((resident - offset) as usize),
@@ -2244,6 +2245,7 @@ where
                 let t = Instant::now();
                 let claimed = backend
                     .claim(ClaimRequest {
+                        eligibility_time: None,
                         shard: shard.clone(),
                         worker_id: WorkerId::new(format!("w{task}")).expect("worker id"),
                         max_items: claim_batch,
@@ -3364,6 +3366,7 @@ async fn performance_object_log_hybrid_async_apply_exactly_once() {
 
     let claimed = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: test_shard.clone(),
             worker_id: WorkerId::new("w").unwrap(),
             max_items: 4,

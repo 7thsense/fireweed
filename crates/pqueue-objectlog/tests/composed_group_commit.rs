@@ -202,6 +202,7 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
     // The first claim force-seals the buffered pushes so selection observes durable pushed items, but the
     // claim command itself remains unacked until a later object-log group-commit seal.
     let claim1 = backend.claim(ClaimRequest {
+        eligibility_time: None,
         shard: shard.clone(),
         worker_id: WorkerId::new("w1").unwrap(),
         max_items: 2,
@@ -222,6 +223,7 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
     // A second normal claim starts before the first claim is durable. The in-flight claim guard excludes the
     // first claim's candidates, so both claim commands can seal together without double-leasing.
     let claim2 = backend.claim(ClaimRequest {
+        eligibility_time: None,
         shard: shard.clone(),
         worker_id: WorkerId::new("w2").unwrap(),
         max_items: 2,
@@ -300,6 +302,7 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
     // A later claim selects nothing (the candidates were leased then completed — never double-leased).
     let again = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("w3").unwrap(),
             max_items: 10,
@@ -335,6 +338,7 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
     );
 
     let claimed = backend.claim(ClaimRequest {
+        eligibility_time: None,
         shard: shard.clone(),
         worker_id: WorkerId::new("hybrid-claimer").unwrap(),
         max_items: 1,

@@ -805,8 +805,13 @@ impl ClaimPort for SqliteRelationalBackend {
             if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
                 return Err(EngineError::EpochFenced);
             }
+            // Every candidate-selection read below resolves due-ness at the caller-resolved eligibility epoch
+            // (`ClaimRequest::eligibility_at`: the explicit `eligibility_time`, else `now`). The lease and
+            // the `apply_command_sql` stamping further down deliberately stay on the operational `req.now`,
+            // so selecting work for another execution epoch never back-dates a lease.
+            let eligibility_at = req.eligibility_at();
             if matches!(unit, ClaimUnit::WholeGroup | ClaimUnit::SameGroupKey) {
-                refresh_due_group_summaries(&tx, &req.shard, req.now)?;
+                refresh_due_group_summaries(&tx, &req.shard, eligibility_at)?;
             }
             // Candidate selection inside the claim transaction (serialized under the backend Mutex). The
             // item-level path is the strict-claim order; the group/cohort paths consume their projections.
@@ -817,7 +822,7 @@ impl ClaimPort for SqliteRelationalBackend {
                     claim_scan_hints,
                     claim_scan_default_fifo,
                     &req.shard,
-                    req.now,
+                    eligibility_at,
                     req.max_items,
                 )?,
                 ClaimUnit::WholeGroup => {
@@ -827,13 +832,19 @@ impl ClaimPort for SqliteRelationalBackend {
                         .as_ref()
                         .map(|gb| gb.max_groups)
                         .unwrap_or(0);
-                    select_group_batching(&tx, &req.shard, req.now, req.max_items, max_groups)?
+                    select_group_batching(
+                        &tx,
+                        &req.shard,
+                        eligibility_at,
+                        req.max_items,
+                        max_groups,
+                    )?
                 }
                 ClaimUnit::SameGroupKey => {
-                    select_same_group(&tx, &req.shard, req.now, req.max_items)?
+                    select_same_group(&tx, &req.shard, eligibility_at, req.max_items)?
                 }
                 ClaimUnit::WholeCohort => {
-                    match select_whole_cohort(&tx, &req.shard, req.now, req.max_items)? {
+                    match select_whole_cohort(&tx, &req.shard, eligibility_at, req.max_items)? {
                         Some(selected) => {
                             selected_cohort = Some(selected.cohort_id);
                             selected.item_ids

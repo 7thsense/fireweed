@@ -406,6 +406,7 @@ async fn object_log_e3_throughput_recovery_and_ack_latency() {
     while drained < items {
         let claimed = b
             .claim(ClaimRequest {
+                eligibility_time: None,
                 shard: shard.clone(),
                 worker_id: WorkerId::new("w1").unwrap(),
                 max_items: ack_batch,
