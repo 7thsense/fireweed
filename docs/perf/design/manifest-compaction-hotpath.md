@@ -347,7 +347,9 @@ correctly admits a branch's seq-`f` first append. **Do not** implement compactio
   data-plane fence wiring; the permanent head CAS remains the stale-writer fence, and the read-horizon
   watermark is only a read-cost helper, not an ownership fence. If a future design *does* choose to lean
   on the lease bound (D-A), it must first land the §2 config invariant AND a proven substrate `W`, and
-  should be gated on pqueue-c33c367e closing.
+  should be gated on pqueue-c33c367e closing. Evaluating pqueue-c33c367e does **not** widen the
+  delete-safe envelope for this doc: it only changes who stamps `fence_epoch` in the server runtime,
+  not whether a below-floor manifest address may be freed.
 
 ---
 
@@ -371,6 +373,16 @@ codex noted S3 LIST natively supports `StartAfter` — the `BlobStore` trait sim
 - Owner-fence evaluation for `pqueue-c33c367e`: the current index-CAS protocol still must keep below-floor manifest addresses occupied, so it cannot support delete-only compaction safely. That means `pqueue-c33c367e` does **not** change the watermark design: the permanent head stays the stale-writer fence, and the watermark remains a read-cost helper, not the ownership fence. Any cheaper delete-only variant is therefore gated on the post-head-CAS redesign above, not on the current protocol.
 
 **Residual:** object COUNT still grows (addresses are never freed — the price of the write-once fence), but as tiny, never-read, never-listed markers ⇒ a slow, modest storage cost. Fully bounding object COUNT requires the redesigned fencing/commit protocol above (Option 2), a much larger change.
+
+### 6.2 Legacy bootstrap and head-compatible recovery
+
+This subsection keeps the corrected read-cost discussion at `docs/perf/design/manifest-compaction-hotpath.md:359` and the decision trace at `docs/perf/design/manifest-compaction-hotpath.md:374` aligned with legacy repositories that already have `manifest/{index}` entries but do **not** yet have a durable head object.
+
+- On a legacy repository, recovery starts from the manifest tail first, because that append-only tail is the only authoritative history available before the first head exists.
+- If the durable head is absent, recovery derives the first head from the recovered tail, validates that the tail is head-compatible with the current manifest prefix, and then writes the durable head marker that makes that recovered tail authoritative for later opens. This is a bootstrap step, not a new ack boundary.
+- TD-004 ack-after-manifest semantics stay unchanged: acknowledged commands are still only those whose manifest entries were already durable before the ack, and the first head publication does not retroactively change which commands were acknowledged.
+- Branch copy semantics also stay unchanged except for the recovery source of the tail: branch creation/reopen may read or reconstruct the head-compatible tail before seeding `next_seq` / `next_manifest_index`, but it does not change how branches are copied once that tail is known.
+- Once the head exists, recovery prefers the head-compatible tail and uses it as the authoritative cursor for the remainder of the open path, while the legacy max-key tail recovery remains the bootstrap fallback only for repositories that have not been migrated yet.
 
 ### Revised options for the decision
 1. **RANGE-LIST + watermark (+ optional mark-dead) — RECOMMENDED.** Provably safe (fence never weakened), zero seal-path change, **fully bounds per-READ cost to live history** (the bead's primary operational pain: recovery/reads LISTing the whole manifest). Adds `list_from` to BlobStore (3 impls) + a durable watermark + read-path changes. Leaves slow tiny-marker storage-count growth.
