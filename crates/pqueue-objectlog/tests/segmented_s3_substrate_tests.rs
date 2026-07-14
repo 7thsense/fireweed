@@ -3384,6 +3384,124 @@ fn TestBehindImageFailClosedWithDeletedManifests() {
 
 #[test]
 #[allow(non_snake_case)]
+fn TestBranchInheritanceRetainedFloorMetadataAvailable() {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..6u64 {
+        log.enqueue(&source, &pushes(1), 0, 10 + i as i64 * 10)
+            .unwrap();
+        log.seal(&source, 0, 11 + i as i64 * 10).unwrap();
+    }
+
+    trim_cycle(&log, &source, 3, 0, 1_000);
+    delete_prefix(store.as_ref(), &manifest_prefix_s(&source));
+
+    assert_eq!(
+        log.read_retention_floor(&source)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the retained floor metadata survives the physical deletion of the legacy source prefix"
+    );
+    assert!(
+        log.read_read_horizon(&source).unwrap().is_some(),
+        "the retained branch-inheritance watermark remains available after legacy prefix deletion"
+    );
+
+    store.reset_reads();
+    let branch_def = branch_qdef("retained-metadata-available");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        60_000,
+        2_000,
+    )
+    .unwrap();
+
+    assert_eq!(
+        log.read_retention_floor(&branch)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the branch inherits the retained source floor without needing deleted source manifest objects"
+    );
+    assert_eq!(
+        log.read_all(&branch)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5],
+        "branch inheritance stays on the retained live view"
+    );
+
+    let deleted_source_manifest_prefix = manifest_prefix_s(&source);
+    assert!(
+        store
+            .get_keys()
+            .into_iter()
+            .all(|key| !key.starts_with(&deleted_source_manifest_prefix)),
+        "branch creation and recovery do not recover any deleted source manifest objects"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchInheritanceRetainedFloorMetadataFailClosed() {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..6u64 {
+        log.enqueue(&source, &pushes(1), 0, 20 + i as i64 * 10)
+            .unwrap();
+        log.seal(&source, 0, 21 + i as i64 * 10).unwrap();
+    }
+
+    trim_cycle(&log, &source, 3, 0, 2_000);
+    delete_prefix(store.as_ref(), &manifest_prefix_s(&source));
+    strip_manifest_head_namespace(store.as_ref(), &source);
+
+    let branch_def = branch_qdef("retained-metadata-fail-closed");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    let err = log
+        .branch(
+            &source,
+            &branch_def,
+            &CommandPosition::new(source.clone(), 0, 5),
+            60_000,
+            3_000,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Conflict | EngineError::Storage(_)),
+        "branch inheritance must fail closed when the retained floor/head metadata is missing, got {err:?}"
+    );
+    assert!(
+        store
+            .list(&manifest_head_prefix_s(&branch))
+            .unwrap()
+            .is_empty(),
+        "a failed branch attempt must not leave an orphan-visible manifest_head namespace"
+    );
+    assert!(
+        store.list(&manifest_prefix_s(&branch)).unwrap().is_empty(),
+        "a failed branch attempt must not leave an orphan-visible legacy manifest namespace"
+    );
+    assert!(
+        log.read_retention_floor(&branch).unwrap().is_none(),
+        "no branch floor is readable after a fail-closed attempt"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkSurvivesReopenBelowDurableFloor() {
     TestUnexpectedLiveManifestHoleFailsClosed();
 }
