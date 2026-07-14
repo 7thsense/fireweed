@@ -67,6 +67,7 @@ struct CountingBlobStore {
     segment_gets: AtomicU64,
     manifest_gets: AtomicU64,
     list_count: AtomicU64,
+    get_keys: Mutex<Vec<String>>,
 }
 
 impl CountingBlobStore {
@@ -78,6 +79,11 @@ impl CountingBlobStore {
         self.segment_gets.store(0, Ordering::Relaxed);
         self.manifest_gets.store(0, Ordering::Relaxed);
         self.list_count.store(0, Ordering::Relaxed);
+        self.get_keys.lock().unwrap().clear();
+    }
+
+    fn get_keys(&self) -> Vec<String> {
+        self.get_keys.lock().unwrap().clone()
     }
 }
 
@@ -91,6 +97,7 @@ impl BlobStore for CountingBlobStore {
     }
 
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.get_keys.lock().unwrap().push(key.to_owned());
         if key.ends_with(".seg") {
             self.segment_gets.fetch_add(1, Ordering::Relaxed);
         }
@@ -500,16 +507,15 @@ fn branch_shares_segments_and_diverges() {
         store.get(&source_seg_key).unwrap().is_some(),
         "parent segment remains stored"
     );
+    let branch_prefix = format!(
+        "t/{}/q/{}/",
+        hex_lower(branch_shard.tenant_id.as_str().as_bytes()),
+        hex_lower(branch_shard.queue_id.as_str().as_bytes())
+    );
+    let branch_objects = store.list(&branch_prefix).unwrap();
     assert!(
-        store
-            .list(&format!(
-                "t/{}/q/{}/seg/",
-                hex_lower(branch_shard.tenant_id.as_str().as_bytes()),
-                hex_lower(branch_shard.queue_id.as_str().as_bytes())
-            ))
-            .unwrap()
-            .is_empty(),
-        "branch creation does not duplicate parent segment objects"
+        branch_objects.iter().any(|k| k.contains("branch-seg/")),
+        "branch creation materializes branch-owned segment copies"
     );
 
     parent.enqueue(&parent_shard, &pushes(1), 0, 30).unwrap();
@@ -533,6 +539,92 @@ fn branch_shares_segments_and_diverges() {
             .map(|(_, env)| format!("{:?}", env.command))
             .collect::<Vec<_>>(),
         "post-cut writes diverge independently"
+    );
+}
+
+#[test]
+fn branch_reads_survive_source_prefix_deletion_and_stay_on_branch_owned_keys() {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let parent = SegmentedObjectLog::open(store.clone(), cfg);
+    let parent_def = qdef();
+    let parent_shard = shard();
+    parent.create_queue(&parent_def).unwrap();
+
+    for _ in 0..6 {
+        parent.enqueue(&parent_shard, &pushes(1), 0, 10).unwrap();
+        parent.seal(&parent_shard, 0, 11).unwrap();
+    }
+    parent
+        .advance_retention_floor(
+            &parent_shard,
+            CommandPosition::new(parent_shard.clone(), 0, 3),
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        parent
+            .expire_segments_through(&parent_shard, 3, 20)
+            .unwrap(),
+        4
+    );
+
+    let branch_def = branch_qdef("trimmed-source");
+    let branch_shard =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    let branch_epoch = parent
+        .branch(
+            &parent_shard,
+            &branch_def,
+            &CommandPosition::new(parent_shard.clone(), 0, 5),
+            60_000,
+            30,
+        )
+        .unwrap();
+    assert_eq!(branch_epoch, 1);
+
+    let source_shard_prefix = shard_prefix_of(&parent_shard);
+    let source_manifest_prefix = format!("{source_shard_prefix}manifest/");
+    let source_manifest_head_prefix = format!("{source_shard_prefix}manifest_head/");
+    for key in store.inner.list(&source_manifest_prefix).unwrap() {
+        assert!(store.inner.delete(&key).unwrap());
+    }
+    for key in store.inner.list(&source_manifest_head_prefix).unwrap() {
+        assert!(store.inner.delete(&key).unwrap());
+    }
+    for key in store
+        .inner
+        .list(&format!("{source_shard_prefix}seg_attempt/"))
+        .unwrap()
+    {
+        assert!(store.inner.delete(&key).unwrap());
+    }
+    store.reset_reads();
+
+    let branch_view = parent.read_all(&branch_shard).unwrap();
+    assert_eq!(
+        branch_view
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5],
+        "branch reads stay on the inherited live view after the source prefixes are physically deleted"
+    );
+    assert!(
+        store
+            .get_keys()
+            .iter()
+            .all(|key| !key.starts_with(&source_shard_prefix)),
+        "branch reads do not GET deleted source manifest or segment objects"
+    );
+    assert_eq!(
+        parent
+            .read_retention_floor(&branch_shard)
+            .unwrap()
+            .unwrap()
+            .sequence,
+        3,
+        "the branch still inherits the trimmed source floor"
     );
 }
 
