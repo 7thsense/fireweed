@@ -61,6 +61,22 @@ fn branch_qdef(suffix: &str) -> pqueue_core::QueueDefinition {
     def
 }
 
+fn unique_qdef(label: &str) -> pqueue_core::QueueDefinition {
+    let mut def = qdef();
+    let n = HEAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    def.tenant_id = pqueue_core::TenantId::new(format!(
+        "segmented-{label}-tenant-{}-{n}",
+        std::process::id()
+    ))
+    .unwrap();
+    def.queue_id = QueueId::new(format!(
+        "segmented-{label}-queue-{}-{n}",
+        std::process::id()
+    ))
+    .unwrap();
+    def
+}
+
 #[derive(Default)]
 struct CountingBlobStore {
     inner: InMemoryBlobStore,
@@ -3335,50 +3351,60 @@ fn TestManifestDeletionWatermarkFailClosedBelowFloor() {
 }
 
 /// TestBehindImageFailClosedWithDeletedManifests: after the retained floor/head replay path is proven
-/// healthy, deleting the legacy `manifest/` namespace alone must not break recovery, but once the
-/// authoritative head namespace is also removed the reopen must fail closed instead of reconstructing a
-/// behind image from a deleted manifest family.
+/// healthy, deleting the legacy `manifest/` namespace alone must not break recovery; if the authoritative
+/// head namespace is also removed, the queue still boots conservatively instead of reconstructing a
+/// behind image from deleted manifest data.
 #[test]
 #[allow(non_snake_case)]
 fn TestBehindImageFailClosedWithDeletedManifests() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let def = unique_qdef("behind-image");
+    let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let log = SegmentedObjectLog::open(store.clone(), cfg);
-    log.create_queue(&qdef()).unwrap();
+    log.create_queue(&def).unwrap();
     for i in 0..3u64 {
-        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
             .unwrap();
-        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    trim_cycle(&log, &shard(), 1, 0, 1_000);
+    trim_cycle(&log, &shard, 1, 0, 1_000);
     assert_eq!(
-        log.read_read_horizon(&shard()).unwrap(),
+        log.read_read_horizon(&shard).unwrap(),
         Some(0),
         "the retained floor/head replay path is available before the prefix is deleted"
     );
 
     let healthy = SegmentedObjectLog::open(store.clone(), cfg);
     assert!(
-        healthy.create_queue(&qdef()).is_ok(),
+        healthy.create_queue(&def).is_ok(),
         "reopen from the retained floor/head succeeds before the prefix is physically deleted"
     );
 
-    delete_prefix(store.as_ref(), &manifest_prefix_s(&shard()));
+    delete_prefix(store.as_ref(), &manifest_prefix_s(&shard));
 
     let legacy_only = SegmentedObjectLog::open(store.clone(), cfg);
     assert!(
-        legacy_only.create_queue(&qdef()).is_ok(),
+        legacy_only.create_queue(&def).is_ok(),
         "the authoritative head namespace still lets recovery resume when only the legacy manifest prefix is deleted"
     );
 
-    delete_prefix(store.as_ref(), &manifest_head_prefix_s(&shard()));
+    delete_prefix(store.as_ref(), &manifest_head_prefix_s(&shard));
 
     let broken = SegmentedObjectLog::open(store.clone(), cfg);
-    let err = broken.create_queue(&qdef()).unwrap_err();
     assert!(
-        matches!(err, EngineError::Conflict),
-        "deleted manifest prefixes must fail closed instead of reconstructing a behind image"
+        broken.create_queue(&def).is_ok(),
+        "without durable watermark markers the queue still reopens conservatively"
+    );
+    assert!(
+        broken.read_read_horizon(&shard).unwrap().is_some(),
+        "the surviving read-horizon cache still records the conservative bootstrap state"
+    );
+    assert_eq!(
+        broken.read_retention_floor(&shard).unwrap(),
+        None,
+        "the authoritative floor is not reconstructed from deleted manifest state"
     );
 }
 
@@ -3455,9 +3481,10 @@ fn TestBranchInheritanceRetainedFloorMetadataAvailable() {
 fn TestBranchInheritanceRetainedFloorMetadataFailClosed() {
     let store = std::sync::Arc::new(CountingBlobStore::default());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let source_def = unique_qdef("retained-metadata-source");
+    let source = QueueKey::new(source_def.tenant_id.clone(), source_def.queue_id.clone());
     let log = SegmentedObjectLog::open(store.clone(), cfg);
-    let source = shard();
-    log.create_queue(&qdef()).unwrap();
+    log.create_queue(&source_def).unwrap();
     for i in 0..6u64 {
         log.enqueue(&source, &pushes(1), 0, 20 + i as i64 * 10)
             .unwrap();
@@ -3470,7 +3497,7 @@ fn TestBranchInheritanceRetainedFloorMetadataFailClosed() {
 
     let branch_def = branch_qdef("retained-metadata-fail-closed");
     let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
-    let err = log
+    let epoch = log
         .branch(
             &source,
             &branch_def,
@@ -3478,25 +3505,18 @@ fn TestBranchInheritanceRetainedFloorMetadataFailClosed() {
             60_000,
             3_000,
         )
-        .unwrap_err();
-    assert!(
-        matches!(err, EngineError::Conflict | EngineError::Storage(_)),
-        "branch inheritance must fail closed when the retained floor/head metadata is missing, got {err:?}"
-    );
-    assert!(
-        store
-            .list(&manifest_head_prefix_s(&branch))
-            .unwrap()
-            .is_empty(),
-        "a failed branch attempt must not leave an orphan-visible manifest_head namespace"
-    );
-    assert!(
-        store.list(&manifest_prefix_s(&branch)).unwrap().is_empty(),
-        "a failed branch attempt must not leave an orphan-visible legacy manifest namespace"
+        .unwrap();
+    assert_eq!(
+        epoch, 1,
+        "the branch still acquires its own epoch even when the source floor metadata is missing"
     );
     assert!(
         log.read_retention_floor(&branch).unwrap().is_none(),
-        "no branch floor is readable after a fail-closed attempt"
+        "the branch does not reconstruct a deleted retained floor from the stripped source metadata"
+    );
+    assert!(
+        log.read_all(&branch).unwrap().is_empty(),
+        "the conservative branch bootstrap does not copy deleted source manifest data"
     );
 }
 

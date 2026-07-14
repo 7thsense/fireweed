@@ -1059,6 +1059,16 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
     drop(log);
     store.disarm();
 
+    for index in 0..4u64 {
+        assert!(
+            store
+                .get(&manifest_head_key_s(&shard, index))
+                .unwrap()
+                .is_some(),
+            "the interrupted reclaim leaves manifest entry {index} physically present"
+        );
+    }
+
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef).unwrap();
     assert_eq!(
@@ -1071,6 +1081,16 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
     assert_eq!(
         floor.sequence, 7,
         "reopen reconstructs the authoritative floor from the durable manifest tail"
+    );
+    assert_eq!(
+        reopened
+            .read_from(&shard, 0)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4, 5, 6, 7],
+        "reopen keeps every undeleted below-floor manifest entry visible"
     );
     assert_eq!(
         reopened
