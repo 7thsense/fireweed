@@ -5055,6 +5055,12 @@ fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
 
 #[test]
 #[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageNeverExceedsFloor() {
+    TestManifestDeletionWatermarkReclaimNeverExceedsFloor();
+}
+
+#[test]
+#[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkPersistsAfterPhysicalDelete() {
     let store = std::sync::Arc::new(FailingBlobStore::default());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
