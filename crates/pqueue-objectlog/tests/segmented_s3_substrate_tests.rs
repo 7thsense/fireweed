@@ -4101,6 +4101,15 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
         Some(1),
         "reopening observes the durable watermark that lags the physical delete progress"
     );
+    assert_eq!(
+        reopened
+            .read_retention_floor(&source)
+            .unwrap()
+            .unwrap()
+            .sequence,
+        15,
+        "the reopened shard still sees the full durable retention floor, so the remaining below-floor prefix is not hidden"
+    );
     for (first_seq, seg_key) in seg_keys.iter().skip(2) {
         assert!(
             store.get(seg_key).unwrap().is_some(),
@@ -4251,6 +4260,25 @@ fn TestManifestWatermarkPresentEntriesNotHiddenDuringPartialExpiry() {
 #[allow(non_snake_case)]
 fn TestManifestWatermarkReadPathOwnerFenceEvaluationDocumented() {
     TestDeletionWatermarkOwnerFenceIndependence();
+}
+
+/// TestPartialExpireVisibilityDecisionKeepsUndeletedBelowFloorSegments: a partial expire that leaves
+/// below-floor segment objects physically present must still let the reopened manifest/read path enumerate
+/// the first not-yet-deleted entry instead of hiding the whole prefix.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityDecisionKeepsUndeletedBelowFloorSegments() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+/// TestPartialExpireVisibilityDecisionReadRecoveryBootstrapCompatibility: recovery after the same partial
+/// expire fixture still enumerates the first undeleted below-floor entry, and the legacy bootstrap fixture
+/// without partial-expire state keeps bootstrapping from the cached read-horizon behavior.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityDecisionReadRecoveryBootstrapCompatibility() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+    TestManifestDeletionWatermarkStorageLegacyBootstrap();
 }
 
 /// TestObjectlogPqueueC33c367eReleaseNote: the release-note claim about pqueue-c33c367e is backed by the
