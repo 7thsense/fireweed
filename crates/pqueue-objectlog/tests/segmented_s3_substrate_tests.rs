@@ -2604,6 +2604,111 @@ fn branch_inheritance_seed_floor_edge() {
     );
 }
 
+/// **AC-3 — TestBranchInheritanceSourcePinsPreserved** (bead pqueue-151257a3, part 2 of the pqueue-92a2e386
+/// split). Branch creation off the RETAINED floor/head metadata (the same trimmed-source substrate as
+/// [`branch_inheritance_uses_retained_floor_metadata`]) must publish the exact same source pin and orphan-GC
+/// contract an ordinary, untrimmed-source branch gets — the retained-metadata inheritance path is not a
+/// second, weaker contract:
+///
+/// * the source pin (`{source}branches/{branch}.json` registry entry) is durable once creation returns;
+/// * the source's own retention floor is untouched by branch creation;
+/// * [`SegmentedObjectLog::gc_orphaned_branches`] never reclaims the committed branch (orphan GC guarantee);
+/// * the branch's live pin still protects every RETAINED segment it copied (4..7) against
+///   [`SegmentedObjectLog::expire_segments_through`] (retention floor / reclamation guarantee);
+/// * discarding the branch releases the pin and the formerly-pinned retained segments become reclaimable,
+///   exactly as [`branch_pins_parent_segments_against_expiry`] proves for an untrimmed source.
+#[test]
+fn branch_inheritance_source_pins_preserved() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    // Source: 8 single-command segments (seq 0..7), floor advanced to 3, below-floor prefix physically
+    // reclaimed — the same retained-floor-metadata substrate as `branch_inheritance_uses_retained_floor_metadata`.
+    seed_trimmed_source(&log, &store, &source, 8, 3);
+
+    let branch_def = branch_qdef("source-pins-preserved");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 7),
+        60_000,
+        60,
+    )
+    .unwrap();
+
+    // (1) The source pin is durable: branch creation off retained floor/head metadata still registers the
+    // same registry entry an ordinary branch would.
+    let registry_key = branch_registry_key_of(&source, &branch);
+    assert!(
+        store.get(&registry_key).unwrap().is_some(),
+        "branch creation off retained floor/head metadata still publishes the source pin"
+    );
+
+    // (2) The retention floor guarantee is not relaxed: the source's own floor is untouched by branch
+    // creation ...
+    assert_eq!(
+        log.read_retention_floor(&source)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the source retention floor is unchanged by branch creation"
+    );
+    // ... and the orphan GC guarantee is not relaxed: a fully COMMITTED branch is never reclaimed by
+    // gc_orphaned_branches, whether or not its source was trimmed before the branch was created.
+    assert_eq!(
+        log.gc_orphaned_branches(&source).unwrap(),
+        0,
+        "a committed branch created off retained floor metadata is never an orphan"
+    );
+    assert!(
+        store.get(&registry_key).unwrap().is_some(),
+        "the source pin survives a GC pass that correctly finds no orphan"
+    );
+    let branch_prefix = shard_prefix_of(&branch);
+    assert!(
+        store
+            .get(&format!("{branch_prefix}branch.json"))
+            .unwrap()
+            .is_some(),
+        "the branch commit marker survives GC"
+    );
+
+    // (3) The pin still protects the LIVE retained segments (4..7) it inherited: expiring through the
+    // branch's own cut must reclaim NOTHING while the branch is live — the retained-metadata inheritance path
+    // does not weaken the pin an ordinary (untrimmed-source) branch would have installed.
+    assert_eq!(
+        log.expire_segments_through(&source, 7, 61).unwrap(),
+        0,
+        "the live branch pins every retained source segment it reads (4..7) against expiry"
+    );
+    for seq in 4..=7u64 {
+        assert!(
+            store
+                .get(&segment_key_for(store.as_ref(), &source, seq))
+                .unwrap()
+                .is_some(),
+            "pinned retained segment {seq} remains present while the branch is live"
+        );
+    }
+
+    // (4) Discarding the branch releases the pin exactly as it would for an ordinary branch — proving the
+    // guarantee is the SAME contract, not a weaker one substituted for the retained-metadata path.
+    log.discard_branch(&source, &branch).unwrap();
+    assert!(
+        store.get(&registry_key).unwrap().is_none(),
+        "discarding the branch releases the source pin"
+    );
+    assert_eq!(
+        log.expire_segments_through(&source, 7, 62).unwrap(),
+        4,
+        "once the pin is released the formerly-pinned retained segments (4..7) become reclaimable"
+    );
+}
+
 #[test]
 fn counters_surface_emits_a_release_ledger_row() {
     // Drive several group-commit segments, then emit the measured segment/object counts to the release
