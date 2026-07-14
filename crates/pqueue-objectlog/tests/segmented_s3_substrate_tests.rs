@@ -3559,6 +3559,85 @@ fn TestBranchInheritanceRetainedFloorMetadataAvailable() {
     );
 }
 
+/// TestBranchGcPreservesInheritedFloorPins: a committed branch created from a trimmed source keeps its
+/// inherited floor and source pin even if the source's legacy manifest prefix is physically deleted before
+/// branch GC runs. The branch GC path must continue to classify from the source pin registry / branch
+/// metadata, not from deleted legacy source manifest objects.
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchGcPreservesInheritedFloorPins() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..6u64 {
+        log.enqueue(&source, &pushes(1), 0, 10 + i as i64 * 10)
+            .unwrap();
+        log.seal(&source, 0, 11 + i as i64 * 10).unwrap();
+    }
+
+    trim_cycle(&log, &source, 3, 0, 1_000);
+
+    let branch_def = branch_qdef("gc-retained-floor-pins");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 5),
+        60_000,
+        2_000,
+    )
+    .unwrap();
+
+    delete_prefix(store.as_ref(), &manifest_prefix_s(&source));
+    assert!(
+        store.list(&manifest_prefix_s(&source)).unwrap().is_empty(),
+        "the legacy source manifest prefix is physically gone"
+    );
+
+    assert_eq!(
+        log.read_retention_floor(&branch).unwrap().unwrap().sequence,
+        3,
+        "the branch still inherits the trimmed source floor before GC"
+    );
+    assert_eq!(
+        log.read_all(&branch)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5],
+        "the branch still reads the retained live view before GC"
+    );
+
+    assert_eq!(
+        log.gc_orphaned_branches(&source).unwrap(),
+        0,
+        "branch GC ignores the committed branch even after the source manifest prefix is deleted"
+    );
+
+    let source_branch_prefix = format!("{}branches/", shard_prefix_s(&source));
+    assert!(
+        !store.list(&source_branch_prefix).unwrap().is_empty(),
+        "the source pin survives branch GC"
+    );
+    assert_eq!(
+        log.read_retention_floor(&branch).unwrap().unwrap().sequence,
+        3,
+        "the branch floor survives branch GC"
+    );
+    assert_eq!(
+        log.read_all(&branch)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5],
+        "the branch view survives branch GC"
+    );
+}
+
 #[test]
 #[allow(non_snake_case)]
 fn TestBranchInheritanceRetainedFloorMetadataFailClosed() {
