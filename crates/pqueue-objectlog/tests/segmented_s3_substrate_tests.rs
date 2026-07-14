@@ -4618,6 +4618,11 @@ fn TestManifestDeletionWatermarkReclaimCyclesMonotonic() {
 }
 
 #[test]
+fn read_horizon_bounds_enumeration_to_live_and_is_monotonic() {
+    TestManifestDeletionWatermarkReclaimCyclesMonotonic();
+}
+
+#[test]
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkStorageMonotonic() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
