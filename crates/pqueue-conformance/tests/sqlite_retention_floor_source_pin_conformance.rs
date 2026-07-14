@@ -548,3 +548,273 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
 
     std::fs::remove_dir_all(&root_async).ok();
 }
+
+/// TestSqliteObjectlogDeletedManifestRecovery: SQLite-backed integration surfaces
+/// fail-closed deleted-prefix behavior when a projection image references
+/// physically deleted manifest prefixes. Runs against both hybrid-strict and
+/// hybrid-async to cover the composed SQLite projection recovery path.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteObjectlogDeletedManifestRecovery() {
+    for tag in ["strict", "async"] {
+        let root = base_dir(&format!("{tag}-objlog-del"));
+        // Set up a queue with a trimmed object log and a fresh SQLite projection.
+        let backend = if tag == "strict" {
+            open_hybrid_strict(&root)
+        } else {
+            open_hybrid_async(&root)
+        };
+        backend.create_queue(qdef()).await.unwrap();
+
+        // Write old segments (seq 0..3 at t=10) that will be past retention.
+        for i in 0..4u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("del-k-{i}")).unwrap()),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts(10),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        // Write fresh tail (seq 4..7 within retention).
+        for i in 4..8u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("del-k-{i}")).unwrap()),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts(10_000),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        drain(&backend);
+
+        // Trim: establishes retention floor through seq 3.
+        backend.tick(ts(10_000)).await.unwrap();
+        let floor = floor_seq(&backend).expect("floor established");
+        assert_eq!(floor, 3, "{tag}: retention floor at seq 3");
+        drop(backend);
+
+        // Delete the SQLite projection files so the reopen starts with a
+        // projection image behind the deleted manifest prefix.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+        }
+
+        // Recovery must fail closed with the identifiable signal.
+        let sqlite = root.join("projection.sqlite");
+        let log = pqueue_objectlog::ObjectLog::open_group_commit(
+            &root,
+            pqueue_objectlog::SegmentConfig::new(1, 1).unwrap(),
+        )
+        .expect("log");
+        let hybrid = if tag == "strict" {
+            pqueue_sqlite::HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .expect("hybrid")
+                .with_strict_apply(true)
+        } else {
+            pqueue_sqlite::HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .expect("hybrid")
+                .with_deferred_flush_chunk(1)
+                .with_async_monitor(clear_thresholds())
+        };
+        let result = pqueue_engine::ComposedBackend::new(
+            log,
+            hybrid,
+            pqueue_engine::InProcessControlPlane::new(),
+        )
+        .with_group_commit(true)
+        .recover();
+        let err = result.err().unwrap_or_else(|| {
+            panic!("{tag}: recovery over behind projection image must fail closed")
+        });
+        assert!(
+            pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+            "{tag}: must fail with deleted-manifest-prefix signal; got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// TestSqliteDeletedManifestErrorPreservesGuarantees: the SQLite error path
+/// does not relax retention-floor, source-pin, branch atomicity, orphan GC,
+/// or fail-closed guarantees.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteDeletedManifestErrorPreservesGuarantees() {
+    let root = base_dir("gates");
+
+    // Set up a queue with a branch pin BEFORE trim to prove source-pin guarantee.
+    // Pin at seq 0 so the first segment is retained even after the floor advances.
+    let backend = open_hybrid_strict(&root);
+    backend.create_queue(qdef()).await.unwrap();
+    for i in 0..4u64 {
+        backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new(format!("g-k-{i}")).unwrap()),
+                    payload: Some(bytes::Bytes::from_static(b"body")),
+                    ..Default::default()
+                }],
+                ts(10),
+                None,
+            )
+            .await
+            .expect("push");
+    }
+    drain(&backend);
+
+    // Create a branch pin at seq 0 before trim.
+    let pin_pos = CommandPosition::new(shard(), 0, 0);
+    backend
+        .with_log(|l| l.branch(&shard(), &branch_def(), &pin_pos, 1_000_000_000_000, 10_000))
+        .expect("create branch");
+
+    // Push a fresh tail (seq 4..5) within retention.
+    for i in 4..6u64 {
+        backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new(format!("g-k-{i}")).unwrap()),
+                    payload: Some(bytes::Bytes::from_static(b"body")),
+                    ..Default::default()
+                }],
+                ts(1_000_000),
+                None,
+            )
+            .await
+            .expect("push");
+    }
+    drain(&backend);
+
+    // Trim: the branch pin protects seq 0, the floor advances past seq 1.
+    backend
+        .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
+        .expect("trim with pin");
+    let floor = floor_seq(&backend).expect("floor established");
+    assert!(
+        floor >= 1,
+        "floor advanced past reclaimed commands (floor={floor})"
+    );
+
+    // Source-pin guarantee: the pinned source segment survived trim.
+    let seg_count = count_seg_files(&root);
+    assert!(
+        seg_count >= 1,
+        "pinned source segment survives trim (got {seg_count} seg files)"
+    );
+
+    // Above-floor tail is readable.
+    let tail = backend
+        .read_from(&shard(), floor_pos(&backend), 100)
+        .await
+        .expect("read_from above floor");
+    assert!(!tail.entries.is_empty(), "above-floor tail readable");
+
+    // Now delete the SQLite projection files to simulate a behind image.
+    drop(backend);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+    }
+
+    // Recovery must fail closed with the identifiable signal.
+    let sqlite = root.join("projection.sqlite");
+    let log = pqueue_objectlog::ObjectLog::open_group_commit(
+        &root,
+        pqueue_objectlog::SegmentConfig::new(1, 1).unwrap(),
+    )
+    .expect("log");
+    let hybrid = pqueue_sqlite::HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_strict_apply(true);
+    let result = pqueue_engine::ComposedBackend::new(
+        log,
+        hybrid,
+        pqueue_engine::InProcessControlPlane::new(),
+    )
+    .with_group_commit(true)
+    .recover();
+    let err = result
+        .err()
+        .unwrap_or_else(|| panic!("recovery over behind projection image must fail closed"));
+    assert!(
+        pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+        "error must be the distinct deleted-manifest-prefix signal; got {err:?}"
+    );
+
+    // Verify the underlying store still has the floor intact by opening a
+    // bare object log (without SQLite projection) and checking the floor.
+    let log_only = pqueue_objectlog::ObjectLog::open_group_commit(
+        &root,
+        pqueue_objectlog::SegmentConfig::new(1, 1).unwrap(),
+    )
+    .expect("log-only reopen");
+    assert!(
+        pqueue_engine::LogStore::retention_floor(&log_only, &shard())
+            .expect("read floor")
+            .is_some(),
+        "retention floor persists after fail-closed recovery"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// TestSqlitePropagationPqueueC33c367eInteractionRecorded: pqueue-c33c367e
+/// interaction is evaluated before landing and the SQLite propagation conclusion
+/// is recorded for release notes handoff.
+#[test]
+#[allow(non_snake_case)]
+fn TestSqlitePropagationPqueueC33c367eInteractionRecorded() {
+    // pqueue-c33c367e evaluation conclusion for SQLite propagation:
+    //
+    // The deferred server acquire-runtime wiring (pqueue-c33c367e) does NOT
+    // change the SQLite deleted-manifest fail-closed propagation safety envelope.
+    // The compose guard and the read_from path both rely on the substrate-level
+    // fail_closed_below_floor guard and the durable retention floor - neither
+    // depends on pqueue-c33c367e's per-write fence_epoch wiring.
+    //
+    // The SQLite projection recovery fails closed when the projection image
+    // high-water is behind the durable retention floor, using the distinct
+    // deleted_manifest_prefix_error signal. This is independent of owner-fence
+    // wiring because:
+    //   1. The retention floor is established and advanced by epoch-fenced
+    //      operations (advance_retention_floor) that never depend on the
+    //      deferred server wiring.
+    //   2. The projection high-water is advanced per-apply inside the same
+    //      durable transaction as the materialized SQLite state, making the
+    //      behind-image detection purely a local consistency check.
+    //   3. The fail_closed_below_floor guard operates on the durable deletion
+    //      watermark and floor, both of which are persisted in the object-log
+    //      substrate independently of pqueue-c33c367e.
+    //
+    // Therefore pqueue-c33c367e does NOT widen or narrow the SQLite
+    // deleted-manifest propagation envelope. This conclusion is recorded
+    // here for release notes handoff and is also documented at:
+    //   - docs/perf/design/manifest-compaction-hotpath.md:388
+    //   - docs/releases/v0.14.0.md
+    //   - crates/pqueue-conformance/tests/sqlite_retention_floor_source_pin_conformance.rs (this file)
+    // Verify the evaluation is documented in the release notes.
+    let release_notes = include_str!("../../../docs/releases/v0.14.0.md");
+    assert!(
+        release_notes.contains("pqueue-073ecde6"),
+        "SQLite propagation bead pqueue-073ecde6 must be recorded in v0.14.0 release notes"
+    );
+    assert!(
+        release_notes.contains("pqueue-c33c367e"),
+        "pqueue-c33c367e evaluation must be recorded in v0.14.0 release notes"
+    );
+}

@@ -120,8 +120,8 @@ fn TestEngineObjectlogDeletedManifestRecovery() {
         };
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("retention floor") && msg.contains("behind"),
-            "{tag}: deleted manifest prefixes must fail closed, got {msg}"
+            msg.contains("read below retention floor"),
+            "{tag}: deleted manifest prefixes must fail closed with the distinct signal; got {msg}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

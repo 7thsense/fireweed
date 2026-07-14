@@ -1784,16 +1784,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     .as_ref()
                     .is_some_and(|hw| hw.sequence >= fl.sequence);
                 if !covers_floor {
+                    let hw_seq = recorded_high_water.as_ref().map(|hw| hw.sequence);
                     return Err(EngineError::Storage(format!(
-                        "recovery refused: {}/{} has a durable retention floor at seq {} but the projection \
-                         image high-water is {:?} (behind the floor); the below-floor object-log segments are \
-                         reclaimed, so replaying from the floor would silently drop commands — a restored/\
-                         rolled-back/foreign projection image over a trimmed log is an unrecoverable \
-                         inconsistency",
-                        key.tenant_id.as_str(),
-                        key.queue_id.as_str(),
-                        fl.sequence,
-                        recorded_high_water,
+                        "read below retention floor: projection high-water {:?} <= reclaimed floor {} \
+                         (recovery refused: the projection image is behind the durable floor; a restored, \
+                         rolled-back, or foreign projection image over a trimmed log is an unrecoverable \
+                         inconsistency)",
+                        hw_seq, fl.sequence,
                     )));
                 }
             }

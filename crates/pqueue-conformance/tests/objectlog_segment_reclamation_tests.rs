@@ -770,8 +770,8 @@ async fn behind_image_fail_closed_with_deleted_manifests_impl() {
         });
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("retention floor") && msg.contains("behind"),
-            "{mode_name}: the fail-closed error must name the behind-floor inconsistency; got {msg}"
+            msg.contains("read below retention floor"),
+            "{mode_name}: the fail-closed error must be the distinct deleted-manifest-prefix signal; got {msg}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
