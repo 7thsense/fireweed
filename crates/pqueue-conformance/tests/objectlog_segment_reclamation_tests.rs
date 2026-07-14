@@ -673,7 +673,7 @@ async fn test_bug3_projection_behind_floor_fails_closed() {
     );
 }
 
-async fn behind_image_fail_closed_with_deleted_manifests_impl() {
+async fn retained_floor_head_replay_recovery_impl() {
     for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
         let mode_name = match mode {
             ProjectionMode::HybridAsync => "hybrid-async",
@@ -713,7 +713,34 @@ async fn behind_image_fail_closed_with_deleted_manifests_impl() {
             vec![3],
             "{mode_name}: replay resumes at the retained floor/head, not from genesis"
         );
-        drop(reopened);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+async fn behind_image_fail_closed_with_deleted_manifests_impl() {
+    for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
+        let mode_name = match mode {
+            ProjectionMode::HybridAsync => "hybrid-async",
+            ProjectionMode::HybridStrict => "hybrid-strict",
+        };
+        let root = base_dir(mode_name);
+        let backend = open_mode(&root, mode);
+        backend.create_queue(qdef_short_retention()).await.unwrap();
+
+        // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+        for i in 0..3 {
+            push(&backend, &format!("old-{i}"), 10).await;
+        }
+        drain(&backend);
+        push(&backend, "fresh", 10_000).await;
+        drain(&backend);
+        backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+        assert_eq!(
+            floor_seq(&backend),
+            Some(2),
+            "{mode_name}: the old prefix is trimmed; floor at seq 2"
+        );
+        drop(backend);
 
         // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen
         // starts with a behind image (high-water None < floor 2) while the object-log floor blob + trimmed
@@ -754,6 +781,18 @@ async fn behind_image_fail_closed_with_deleted_manifests_impl() {
 #[tokio::test]
 async fn test_behind_image_fail_closed_with_deleted_manifests() {
     behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteEngineBehindImageDeletedManifestFailClosed() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteEngineBehindImageRetainedFloorHeadReplayRecovery() {
+    retained_floor_head_replay_recovery_impl().await;
 }
 
 #[tokio::test]
