@@ -2362,19 +2362,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ) -> EngineResult<u64> {
         let horizon_snapshot = self.visible_manifest_deletion_watermark(source)?;
         let entries = self.read_manifest_at(source, horizon_snapshot)?;
-        let (_candidates, _) = self.manifest_reclamation_candidates_from_entries(
-            source,
-            through_seq,
-            now_ms,
-            &entries,
-        )?;
-        let advance_entries = match horizon_snapshot {
-            // Capture the scan input before this pass rewrites reclaimed entries. The no-horizon case can
-            // reuse the pre-delete snapshot directly; later passes need one entry before the current
-            // watermark so the already-reclaimed prefix remains visible to the fold.
-            None | Some(0) => entries.clone(),
-            Some(w) => self.read_manifest_at(source, Some(w - 1))?,
-        };
         let mut deleted = 0u64;
         let mut reclaimed_through: Option<u64> = None;
         let mut reclaimed_indices = Vec::new();
@@ -2420,7 +2407,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 reclaimed_through = Some(Self::visible_last_seq(entry));
             }
         }
-        // Advance the durable read-horizon only for the longest contiguous prefix we fully reclaimed. A later
+        // Persist the durable read-horizon only for the longest contiguous prefix we fully reclaimed. A later
         // delete failure must not let the watermark leap over an undeleted manifest entry; at the same time, a
         // partial failure after some successful reclaim work should still durably record the safe prefix so a
         // retry can resume from the last committed boundary.
@@ -2431,6 +2418,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // delete-only compaction safely; a cheaper delete-only variant would need the post-head-CAS protocol
         // redesign, not this code path.
         if let Some(reclaimed_through) = reclaimed_through {
+            let advance_entries = match horizon_snapshot {
+                // Capture the scan input before this pass rewrites reclaimed entries. The no-horizon case can
+                // reuse the pre-delete snapshot directly; later passes need one entry before the current
+                // watermark so the already-reclaimed prefix remains visible to the fold.
+                None | Some(0) => entries.clone(),
+                Some(w) => self.read_manifest_at(source, Some(w - 1))?,
+            };
             let mut advance_entry_map = BTreeMap::new();
             for entry in advance_entries {
                 advance_entry_map.insert(entry.index, entry);
@@ -2442,12 +2436,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 advance_entry_map.insert(entry.index, entry.clone());
             }
             let advance_entries: Vec<_> = advance_entry_map.into_values().collect();
-            let _ = self.advance_read_horizon_from_entries(
+            let new_w = self.contiguous_manifest_deletion_watermark_from_entries(
                 source,
                 reclaimed_through,
                 now_ms,
                 &advance_entries,
-            );
+            )?;
+            if let Some(w) = new_w {
+                self.persist_manifest_deletion_watermark_entry(source, w, now_ms)?;
+            }
         }
         match error {
             Some(err) => Err(err),
@@ -2839,30 +2836,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         if let Some(w) = new_w
             && self.read_read_horizon(shard)?.is_none_or(|cur| w > cur)
         {
-            // Best-effort monotonic PUT. A candidate is always derived strictly below the durable floor (see
-            // SAFETY above), and the append-only watermark marker history makes stale blob writes harmless.
-            let (cur_seq, cur_index, cur_epoch, _) = self.recover_manifest(shard)?;
-            let marker = ManifestEntry {
-                index: cur_index.saturating_sub(1),
-                epoch: cur_epoch,
-                fence: false,
-                segment_key: None,
-                first_seq: cur_seq.saturating_sub(1),
-                last_seq: cur_seq.saturating_sub(1),
-                visible_last_seq: None,
-                checksum: 0,
-                committed_at_ms: now_ms,
-                retention_floor_through: None,
-                compacted_through_index: Some(w),
-            };
-            let _ = self.commit_manifest_watermark_marker(shard, &marker)?;
-            let blob = ReadHorizonBlob { index: w };
-            self.store_put(&Self::read_horizon_key(shard), &to_json(&blob)?, false)?;
-            let mut g = self.inner.lock().expect("segmented log poisoned");
-            if let Some(buf) = g.shards.get_mut(shard) {
-                buf.manifest_deletion_watermark =
-                    Some(buf.manifest_deletion_watermark.map_or(w, |cur| cur.max(w)));
-            }
+            self.persist_manifest_deletion_watermark_entry(shard, w, now_ms)?;
         }
         Ok(())
     }
@@ -2898,6 +2872,43 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Ok(()); // ignore a stale candidate that would overrun the authoritative floor
         }
         self.advance_read_horizon(shard, reclaimed_through, now_ms)
+    }
+
+    fn persist_manifest_deletion_watermark_entry(
+        &self,
+        shard: &QueueKey,
+        reclaimed_through: u64,
+        now_ms: i64,
+    ) -> EngineResult<()> {
+        // Best-effort monotonic PUT. A candidate is always derived strictly below the durable floor (see
+        // SAFETY above), and the append-only watermark marker history makes stale blob writes harmless.
+        let (cur_seq, cur_index, cur_epoch, _) = self.recover_manifest(shard)?;
+        let marker = ManifestEntry {
+            index: cur_index.saturating_sub(1),
+            epoch: cur_epoch,
+            fence: false,
+            segment_key: None,
+            first_seq: cur_seq.saturating_sub(1),
+            last_seq: cur_seq.saturating_sub(1),
+            visible_last_seq: None,
+            checksum: 0,
+            committed_at_ms: now_ms,
+            retention_floor_through: None,
+            compacted_through_index: Some(reclaimed_through),
+        };
+        let _ = self.commit_manifest_watermark_marker(shard, &marker)?;
+        let blob = ReadHorizonBlob {
+            index: reclaimed_through,
+        };
+        self.store_put(&Self::read_horizon_key(shard), &to_json(&blob)?, false)?;
+        let mut g = self.inner.lock().expect("segmented log poisoned");
+        if let Some(buf) = g.shards.get_mut(shard) {
+            buf.manifest_deletion_watermark = Some(
+                buf.manifest_deletion_watermark
+                    .map_or(reclaimed_through, |cur| cur.max(reclaimed_through)),
+            );
+        }
+        Ok(())
     }
 
     /// The highest `visible_last_seq` over the CONTIGUOUS PREFIX of DATA manifest segments whose
@@ -3888,6 +3899,54 @@ mod manifest_deletion_watermark_tests {
         fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
             self.inner.stats(prefix)
         }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestDeletionWatermarkAdvancesOnlyAfterManifestDeleteProgress() {
+        let store = std::sync::Arc::new(RecordingDeleteBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+        }
+        let segment_keys: Vec<_> = log
+            .read_manifest(&shard)
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| entry.segment_key)
+            .collect();
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+            .unwrap();
+
+        store.fail_delete_once(&segment_keys[0]);
+        let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+        assert!(
+            matches!(err, EngineError::Conflict),
+            "a failed first eligible delete must abort before any watermark persistence occurs"
+        );
+        assert!(
+            store
+                .get(&SegmentedObjectLog::<InMemoryBlobStore>::read_horizon_key(
+                    &shard
+                ))
+                .unwrap()
+                .is_none(),
+            "no deletion watermark blob is written when the pass makes no manifest-delete progress"
+        );
+        assert!(
+            store
+                .list(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_prefix(&shard))
+                .unwrap()
+                .into_iter()
+                .all(|key| !key.ends_with("~watermark.json")),
+            "no watermark marker is persisted when the first eligible manifest delete fails"
+        );
     }
 
     #[test]
