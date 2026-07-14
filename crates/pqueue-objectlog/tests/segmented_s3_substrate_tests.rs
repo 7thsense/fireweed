@@ -4516,6 +4516,96 @@ fn TestManifestDeletionWatermarkReclaimCyclesMonotonic() {
     );
 }
 
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageMonotonic() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let shard = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard, 3, 0, 1_000);
+    let first = log
+        .read_manifest_deletion_watermark(&shard)
+        .unwrap()
+        .expect("initial durable watermark");
+    log.persist_manifest_deletion_watermark(&shard, first, 2_000)
+        .unwrap();
+    assert_eq!(
+        log.read_manifest_deletion_watermark(&shard).unwrap(),
+        Some(first),
+        "repeating the same candidate leaves the durable watermark unchanged"
+    );
+
+    trim_cycle(&log, &shard, 7, 0, 3_000);
+    let second = log
+        .read_manifest_deletion_watermark(&shard)
+        .unwrap()
+        .expect("advanced durable watermark");
+    assert!(
+        second > first,
+        "later reclaim progress advances the durable watermark: {first} -> {second}"
+    );
+
+    log.persist_manifest_deletion_watermark(&shard, first, 4_000)
+        .unwrap();
+    assert_eq!(
+        log.read_manifest_deletion_watermark(&shard).unwrap(),
+        Some(second),
+        "a stale lower candidate cannot regress the durable manifest deletion watermark"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageNoCorruptOnStale() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let shard = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..4u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+        .unwrap();
+    log.persist_manifest_deletion_watermark(&shard, 3, 1_000)
+        .unwrap();
+    assert_eq!(log.read_read_horizon(&shard).unwrap(), Some(1));
+
+    let stale_blob = serde_json::json!({ "index": 0 });
+    store
+        .put(
+            &read_horizon_key_s(&shard),
+            &serde_json::to_vec(&stale_blob).unwrap(),
+        )
+        .unwrap();
+
+    log.persist_manifest_deletion_watermark(&shard, 1, 2_000)
+        .unwrap();
+    assert_eq!(
+        log.read_manifest_deletion_watermark(&shard).unwrap(),
+        Some(1),
+        "the durable deletion watermark remains readable after stale writes are ignored"
+    );
+    assert_eq!(
+        log.read_read_horizon(&shard).unwrap(),
+        Some(1),
+        "the cached horizon cannot corrupt the durable watermark when it regresses"
+    );
+}
+
 /// TestManifestDeletionWatermarkReclaimNeverExceedsFloor: a too-high deletion candidate is ignored by the
 /// bounded watermark path and does not hide the live manifest tail.
 #[test]
