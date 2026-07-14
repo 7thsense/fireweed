@@ -4005,6 +4005,24 @@ fn partial_expire_visibility_uses_durable_manifest_deletion_watermark() {
     TestPartialExpireVisibilityUsesDurableManifestDeletionWatermark();
 }
 
+/// TestManifestWatermarkPresentEntriesNotHiddenDuringPartialExpiry: a partial expire can leave
+/// below-floor manifest entries physically present, and reopen/recovery must keep using the durable
+/// watermark as the read floor until the watermark is advanced durably.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestWatermarkPresentEntriesNotHiddenDuringPartialExpiry() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+/// TestManifestWatermarkReadPathOwnerFenceEvaluationDocumented: pqueue-c33c367e owner-fence wiring
+/// does not change read-path watermark enforcement here; the watermark remains a fail-closed read
+/// floor, while ownership still comes from the permanent head CAS.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestWatermarkReadPathOwnerFenceEvaluationDocumented() {
+    TestDeletionWatermarkOwnerFenceIndependence();
+}
+
 /// Test 9 — after successful below-floor manifest cleanup, the durable read-horizon advances
 /// monotonically and survives reopen/recovery, while staying below the durable floor.
 #[test]
