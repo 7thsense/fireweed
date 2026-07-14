@@ -228,3 +228,161 @@ fn TestDeletedManifestReleaseNoteArtifacts() {
         "dependency ID pqueue-8928baec must be named in release notes"
     );
 }
+
+/// TestDeletedManifestVerificationEvidence: verification evidence document names
+/// the governing artifacts, dependency ID pqueue-8928baec, pqueue-c33c367e
+/// conclusion, and the SQLite and engine deleted-manifest recovery test symbols
+/// covered by sibling beads.
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletedManifestVerificationEvidence() {
+    let evidence = include_str!(
+        "../../../.ddx/executions/20260714T234920-be4f9d8d/deleted-manifest-recovery-evidence.md"
+    );
+
+    // Governing artifact: docs/perf/design/manifest-compaction-hotpath.md:374
+    assert!(
+        evidence.contains("docs/perf/design/manifest-compaction-hotpath.md:374")
+            || evidence.contains("docs/perf/design/manifest-compaction-hotpath.md"),
+        "governing artifact hotpath.md:374 must be named in evidence"
+    );
+
+    // Governing artifact: docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224
+    assert!(
+        evidence.contains("TP-003-verification-acceptance-criteria.md:224")
+            || evidence.contains("TP-003-verification-acceptance-criteria.md"),
+        "governing artifact TP-003:224 must be named in evidence"
+    );
+
+    // Dependency ID pqueue-8928baec
+    assert!(
+        evidence.contains("pqueue-8928baec"),
+        "dependency ID pqueue-8928baec must be named in evidence"
+    );
+
+    // pqueue-c33c367e conclusion
+    assert!(
+        evidence.contains("pqueue-c33c367e"),
+        "pqueue-c33c367e evaluation conclusion must be named in evidence"
+    );
+
+    // Engine-level sibling test symbols
+    assert!(
+        evidence.contains("TestEngineObjectlogDeletedManifestRecovery"),
+        "engine sibling test symbol TestEngineObjectlogDeletedManifestRecovery must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestEngineObjectlogFloorHeadReplayRecovery"),
+        "engine sibling test symbol TestEngineObjectlogFloorHeadReplayRecovery must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestSqliteEnginePqueueC33c367eReleaseNote"),
+        "engine sibling test symbol TestSqliteEnginePqueueC33c367eReleaseNote must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestDeletedManifestReleaseNoteArtifacts"),
+        "engine sibling test symbol TestDeletedManifestReleaseNoteArtifacts must be named in evidence"
+    );
+
+    // SQLite-level sibling test symbols
+    assert!(
+        evidence.contains("TestSqliteObjectlogDeletedManifestRecovery"),
+        "SQLite sibling test symbol TestSqliteObjectlogDeletedManifestRecovery must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestSqliteDeletedManifestErrorPreservesGuarantees"),
+        "SQLite sibling test symbol TestSqliteDeletedManifestErrorPreservesGuarantees must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestSqlitePropagationPqueueC33c367eInteractionRecorded"),
+        "SQLite sibling test symbol TestSqlitePropagationPqueueC33c367eInteractionRecorded must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestSqliteObjectlogFloorHeadReplayRecovery"),
+        "SQLite sibling test symbol TestSqliteObjectlogFloorHeadReplayRecovery must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestSqliteFloorHeadReplayPreservesFailClosedBoundary"),
+        "SQLite sibling test symbol TestSqliteFloorHeadReplayPreservesFailClosedBoundary must be named in evidence"
+    );
+    assert!(
+        evidence.contains("TestSqlitePqueueC33c367eInteractionRecorded"),
+        "SQLite sibling test symbol TestSqlitePqueueC33c367eInteractionRecorded must be named in evidence"
+    );
+}
+
+/// TestDeletedManifestEvidenceSurfaces: verification evidence explicitly covers
+/// objectlog, SQLite, engine, conformance, formatting, linting, Go, lefthook,
+/// PR gate, and Codex adversarial review requirements, marking missing optional
+/// tools/configs as operator-required gate failures rather than skipped.
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletedManifestEvidenceSurfaces() {
+    let evidence = include_str!(
+        "../../../.ddx/executions/20260714T234920-be4f9d8d/deleted-manifest-recovery-evidence.md"
+    );
+
+    // Objectlog surface
+    assert!(
+        evidence.contains("Objectlog") || evidence.contains("objectlog"),
+        "objectlog surface must be covered in evidence"
+    );
+
+    // SQLite surface
+    assert!(
+        evidence.contains("SQLite") || evidence.contains("sqlite"),
+        "SQLite surface must be covered in evidence"
+    );
+
+    // Engine surface
+    assert!(
+        evidence.contains("Engine") || evidence.contains("engine"),
+        "engine surface must be covered in evidence"
+    );
+
+    // Conformance surface
+    assert!(
+        evidence.contains("Conformance") || evidence.contains("conformance"),
+        "conformance surface must be covered in evidence"
+    );
+
+    // Formatting surface
+    assert!(
+        evidence.contains("fmt")
+            || evidence.contains("Formatting")
+            || evidence.contains("formatting"),
+        "formatting surface must be covered in evidence"
+    );
+
+    // Linting surface
+    assert!(
+        evidence.contains("clippy") || evidence.contains("Clippy") || evidence.contains("linting"),
+        "linting surface must be covered in evidence"
+    );
+
+    // Go surface (mark not-applicable)
+    assert!(
+        evidence.contains("go.mod") || evidence.contains("Go"),
+        "Go surface must be covered in evidence (mark not-applicable if absent)"
+    );
+
+    // Lefthook surface (mark as operator-required gate failure)
+    assert!(
+        evidence.contains("operator-required") || evidence.contains("operator_required"),
+        "lefthook/config must be marked as operator-required gate failure in evidence"
+    );
+
+    // PR gate surface
+    assert!(
+        evidence.contains("PR gate")
+            || evidence.contains("pr-gate")
+            || evidence.contains("pr_gate"),
+        "PR gate surface must be covered in evidence"
+    );
+
+    // Codex adversarial review surface
+    assert!(
+        evidence.contains("Codex") || evidence.contains("adversarial"),
+        "Codex adversarial review surface must be covered in evidence"
+    );
+}
