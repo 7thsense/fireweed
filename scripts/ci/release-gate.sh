@@ -82,7 +82,13 @@ ${CARGO} llvm-cov --package pqueue-core --lcov \
     --output-path "${REPO_ROOT}/target/coverage/pqueue-core.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core.lcov" --crate pqueue-core --min-lines 90
-rustup run nightly cargo llvm-cov --package pqueue-core --branch --lcov \
+# cargo-llvm-cov spawns Cargo/rustc subprocesses of its own. Pin the whole
+# subprocess tree to nightly and put the nightly binaries ahead of Homebrew's
+# standalone stable Cargo/rustc; selecting only the outer Cargo allows the
+# nested `rustc` lookup to reject llvm-cov's nightly-only `-Z` branch flags.
+NIGHTLY_BIN="$(dirname "$(rustup which --toolchain nightly rustc)")"
+PATH="${NIGHTLY_BIN}:${PATH}" RUSTUP_TOOLCHAIN=nightly \
+    rustup run nightly cargo llvm-cov --package pqueue-core --branch --lcov \
     --output-path "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov" \
