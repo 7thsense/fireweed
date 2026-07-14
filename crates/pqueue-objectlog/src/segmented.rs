@@ -3904,6 +3904,92 @@ mod manifest_deletion_watermark_tests {
 
     #[test]
     #[allow(non_snake_case)]
+    fn TestManifestReclamationEligibilityStrictlyBelowFloor() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        let shard = conformance_shard();
+
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+        }
+
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+            .unwrap();
+        let candidates = log.manifest_reclamation_candidates(&shard, 1, 31).unwrap();
+        assert_eq!(
+            candidates.iter().map(|c| c.first_seq).collect::<Vec<_>>(),
+            vec![0],
+            "the candidate set stays strictly below the durable floor and excludes the unreclaimed below-floor and live above-floor segments"
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the authoritative floor entry and the live tail at or above it are not eligible"
+        );
+        assert_eq!(
+            log.expire_segments_through(&shard, 1, 31).unwrap(),
+            1,
+            "only the reclaimed below-floor prefix is deleted on the partial pass"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestReclamationEligibilitySkipsBranchPinnedSegments() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        let shard = conformance_shard();
+
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.enqueue(&shard, &pushes(2), 0, 10).unwrap();
+        log.seal(&shard, 0, 11).unwrap();
+        log.enqueue(&shard, &pushes(2), 0, 20).unwrap();
+        log.seal(&shard, 0, 21).unwrap();
+
+        let mut branch_def = conformance_qdef();
+        branch_def.queue_id =
+            pqueue_core::QueueId::new(format!("manifest-eligibility-{}", std::process::id()))
+                .unwrap();
+        let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+        log.branch(
+            &shard,
+            &branch_def,
+            &CommandPosition::new(shard.clone(), 0, 1),
+            60_000,
+            30,
+        )
+        .unwrap();
+
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
+            .unwrap();
+        assert!(
+            log.manifest_reclamation_candidates(&shard, 1, 31)
+                .unwrap()
+                .is_empty(),
+            "the branch-pinned below-floor segment is excluded while the pin is live"
+        );
+
+        log.discard_branch(&shard, &branch).unwrap();
+        let candidates = log.manifest_reclamation_candidates(&shard, 1, 32).unwrap();
+        assert_eq!(
+            candidates.iter().map(|c| c.first_seq).collect::<Vec<_>>(),
+            vec![0],
+            "once the branch pin is released, the same below-floor segment becomes enumerable again"
+        );
+        assert_eq!(
+            log.expire_segments_through(&shard, 1, 32).unwrap(),
+            1,
+            "the later expiry pass can reclaim the formerly pinned segment"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn TestManifestDeletionWatermarkAdvancesOnlyAfterManifestDeleteProgress() {
         let store = std::sync::Arc::new(RecordingDeleteBlobStore::default());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
