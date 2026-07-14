@@ -1259,3 +1259,101 @@ fn count_seg_files(root: &Path) -> usize {
     }
     n
 }
+
+// ---------------------------------------------------------------------------
+// Hybrid-strict conformance: deleted-manifest behind-image fail-closed (AC1).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestHybridStrictBehindImageDeletedManifestFailClosed() {
+    let root = base_dir("hybrid-strict-behind-fail-closed");
+    let backend = open_hybrid_strict(&root);
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        push(&backend, &format!("old-{i}"), 10).await;
+    }
+    drain(&backend);
+    push(&backend, "fresh", 10_000).await;
+    drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        floor_seq(&backend),
+        Some(2),
+        "hybrid-strict: the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen
+    // starts with a behind image (high-water None < floor 2) while the object-log floor blob + trimmed
+    // segments persist.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+    }
+
+    // Recovery must FAIL CLOSED (does not silently drop the reclaimed commands 0..2).
+    let sqlite = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(&root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_strict_apply(true);
+    let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover();
+    let err = result.err().unwrap_or_else(|| {
+        panic!("hybrid-strict: recovery over a projection image behind the retention floor must fail closed")
+    });
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("retention floor") && msg.contains("behind"),
+        "hybrid-strict: the fail-closed error must name the behind-floor inconsistency; got {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid-strict conformance: retained floor/head replay recovery (AC2).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestHybridStrictBehindImageRetainedFloorHeadReplayRecovery() {
+    let root = base_dir("hybrid-strict-retained-replay");
+    let backend = open_hybrid_strict(&root);
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        push(&backend, &format!("old-{i}"), 10).await;
+    }
+    drain(&backend);
+    push(&backend, "fresh", 10_000).await;
+    drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        floor_seq(&backend),
+        Some(2),
+        "hybrid-strict: the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
+    let reopened = open_hybrid_strict(&root);
+    let floor = floor_pos(&reopened).expect("retained floor after reopen");
+    let page = reopened
+        .read_from(&shard(), Some(floor), 100)
+        .await
+        .unwrap_or_else(|e| panic!("hybrid-strict: read_from retained floor errored: {e:?}"));
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![3],
+        "hybrid-strict: replay resumes at the retained floor/head, not from genesis"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
