@@ -2168,6 +2168,442 @@ fn branch_inherits_source_retention_floor_and_reads_no_missing_segment() {
     );
 }
 
+/// The LEGACY compatibility manifest copy — the object head-based compaction PHYSICALLY DELETES below the
+/// retention floor.
+fn manifest_key_of(shard: &pqueue_engine::QueueKey, index: u64) -> String {
+    format!("{}manifest/{index:020}.json", shard_prefix_of(shard))
+}
+
+/// The AUTHORITATIVE manifest entry (the `manifest_head/` namespace). Its ADDRESS is never freed — compaction
+/// overwrites a below-floor entry with a reclaimed marker instead of deleting it, keeping the create-only
+/// `put_if_absent` collision fence intact — and the range-list skips every index at/below the read-horizon.
+fn manifest_head_key_of(shard: &pqueue_engine::QueueKey, index: u64) -> String {
+    format!("{}manifest_head/{index:020}.json", shard_prefix_of(shard))
+}
+
+/// Drive `commands` single-command segments (seq `0..commands`) onto `source`, advance the durable retention
+/// floor to `floor`, and run the trim that PHYSICALLY reclaims the below-floor prefix — both the segment
+/// objects AND their manifest entries ([`SegmentedObjectLog::expire_segments_through`] deletes the manifest
+/// entry once the segment delete succeeds, then advances the read-horizon watermark).
+///
+/// Returns the manifest keys the trim DELETED (diffed across the trim), i.e. exactly the below-floor manifest
+/// prefix that branch creation can no longer read.
+fn seed_trimmed_source<S: BlobStore, T: BlobStore>(
+    log: &SegmentedObjectLog<S>,
+    store: &T,
+    source: &pqueue_engine::QueueKey,
+    commands: u64,
+    floor: u64,
+) -> Vec<String> {
+    for _ in 0..commands {
+        log.enqueue(source, &pushes(1), 0, 10).unwrap();
+        log.seal(source, 0, 11).unwrap();
+    }
+    log.advance_retention_floor(source, CommandPosition::new(source.clone(), 0, floor), 12)
+        .unwrap();
+
+    let manifest_prefix = format!("{}manifest/", shard_prefix_of(source));
+    let before = store.list(&manifest_prefix).unwrap();
+    let reclaimed = log.expire_segments_through(source, floor, 20).unwrap();
+    assert_eq!(
+        reclaimed,
+        floor + 1,
+        "the trim reclaims every below-floor segment object (seq 0..={floor})"
+    );
+    let after = store.list(&manifest_prefix).unwrap();
+
+    let mut deleted: Vec<String> = before
+        .into_iter()
+        .filter(|key| !after.contains(key))
+        .collect();
+    deleted.sort();
+    deleted
+}
+
+/// **AC-1 — TestBranchInheritanceUsesRetainedFloorMetadata** (bead pqueue-f2b2e9e3).
+///
+/// After head-based compaction runs, the source's below-floor manifest prefix is no longer a substrate branch
+/// creation can fold from genesis:
+///
+/// * the LEGACY `manifest/` copies below the floor are PHYSICALLY DELETED (`delete_manifest_entry`), and
+/// * their AUTHORITATIVE `manifest_head/` entries are overwritten with reclaimed markers (the address is kept
+///   OCCUPIED so the create-only CAS fence stays intact) and hidden below the durable read-horizon, so no
+///   range-list even enumerates them.
+///
+/// Branch creation must therefore inherit from the RETAINED floor metadata: the authoritative retention-floor
+/// entry (kept ABOVE the watermark precisely so `read_retention_floor` still resolves once the prefix is gone)
+/// plus the range-listed live tail that yields the head. This asserts BOTH halves — the inherited floor/head
+/// are correct, and creation GETs NO deleted (or reclaimed) below-floor source manifest object.
+#[test]
+fn branch_inheritance_uses_retained_floor_metadata() {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    // Source: 8 single-command segments (seq 0..7) at manifest indices 0..7, floor advanced to 3 (its
+    // floor-advance entry lands at index 8), below-floor prefix physically reclaimed.
+    let deleted_manifest_keys = seed_trimmed_source(&log, &store, &source, 8, 3);
+
+    // The below-floor manifest PREFIX is physically gone from the store ...
+    assert_eq!(
+        deleted_manifest_keys,
+        (0..=3)
+            .map(|i| manifest_key_of(&source, i))
+            .collect::<Vec<_>>(),
+        "the trim physically DELETES the below-floor manifest entries (indices 0..=3), not just their segments"
+    );
+    for key in &deleted_manifest_keys {
+        assert!(
+            store.inner.get(key).unwrap().is_none(),
+            "{key} must be physically deleted"
+        );
+    }
+    // ... and their authoritative head slots survive ONLY as reclaimed markers (address OCCUPIED so the
+    // create-only CAS fence holds, but carrying no live inheritance state).
+    for index in 0..=3u64 {
+        let head: serde_json::Value = serde_json::from_slice(
+            &store
+                .inner
+                .get(&manifest_head_key_of(&source, index))
+                .unwrap()
+                .expect(
+                    "the below-floor head ADDRESS is never freed (the CAS fence depends on it)",
+                ),
+        )
+        .unwrap();
+        assert_eq!(
+            head["compacted_through_index"], index,
+            "the below-floor head entry is a RECLAIMED MARKER, not live inheritance state"
+        );
+    }
+    // The RETAINED floor metadata survives ABOVE the read-horizon: the authoritative retention-floor entry is
+    // the inheritance substrate branch creation is left with (the watermark stops strictly below it).
+    let floor_entry_key = manifest_head_key_of(&source, 8);
+    let floor_entry: serde_json::Value =
+        serde_json::from_slice(&store.inner.get(&floor_entry_key).unwrap().expect(
+            "the AUTHORITATIVE retention-floor entry is RETAINED (read_retention_floor still needs it)",
+        ))
+        .unwrap();
+    assert_eq!(
+        floor_entry["retention_floor_through"], 3,
+        "the retained floor entry carries the source floor f = 3"
+    );
+    assert_eq!(
+        log.read_read_horizon(&source).unwrap(),
+        Some(3),
+        "the durable read-horizon hides the deleted prefix from every range-list"
+    );
+    assert_eq!(
+        log.read_retention_floor(&source)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the source floor still resolves from the retained metadata alone"
+    );
+
+    // Create the branch over the trimmed source, recording every GET the creation issues.
+    store.reset_reads();
+    let branch_def = branch_qdef("retained-floor-metadata");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    let branch_epoch = log
+        .branch(
+            &source,
+            &branch_def,
+            &CommandPosition::new(source.clone(), 0, 7),
+            60_000,
+            30,
+        )
+        .unwrap();
+    let creation_gets = store.get_keys();
+
+    // (1) The branch inherited the CORRECT source FLOOR ...
+    assert_eq!(
+        log.read_retention_floor(&branch)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the branch inherits the source floor (3) derived from the RETAINED floor entry"
+    );
+    // ... and the CORRECT source HEAD: its view is exactly the retained (floor, cut] range ...
+    assert_eq!(
+        log.read_all(&branch)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the branch view is exactly the retained (floor, cut] range — no reclaimed object is ever GET"
+    );
+    // ... and its own next write continues at `cut + 1` on its own epoch, proving the recovered head (next_seq
+    // / next_manifest_index) came from the live tail rather than a deleted prefix.
+    assert_eq!(branch_epoch, 1, "the branch takes its own lease epoch");
+    log.enqueue(&branch, &pushes(1), branch_epoch, 40).unwrap();
+    let positions = log.seal(&branch, branch_epoch, 41).unwrap();
+    assert_eq!(
+        positions[0].sequence, 8,
+        "the inherited HEAD continues at cut + 1"
+    );
+
+    // (2) ... and it did so WITHOUT recovering any deleted source manifest object: neither a physically
+    // deleted legacy copy ...
+    for key in &deleted_manifest_keys {
+        assert!(
+            !creation_gets.contains(key),
+            "branch creation GET the DELETED source manifest object {key} — inheritance must not fold the \
+             reclaimed prefix"
+        );
+    }
+    // ... nor a below-floor (reclaimed-marker) head slot: the range-list from the read-horizon never
+    // enumerates them, so inheritance never touches the compacted prefix at all.
+    for index in 0..=3u64 {
+        let head_key = manifest_head_key_of(&source, index);
+        assert!(
+            !creation_gets.contains(&head_key),
+            "branch creation GET the reclaimed below-floor head entry {head_key} — inheritance must read only \
+             the RETAINED metadata above the read-horizon"
+        );
+    }
+    // The positive half: the inheritance substrate it DID read is the retained floor entry.
+    assert!(
+        creation_gets.contains(&floor_entry_key),
+        "branch creation DID read the RETAINED floor entry — that is the inheritance substrate"
+    );
+}
+
+/// A store that CRASHES a branch creation at its LAST durable write — the `branch.json` commit marker — after
+/// snapshotting every object durable at that exact instant. The snapshot is the crash image: ALL inherited
+/// branch metadata (source pin, `branch.pending` sentinel, seed floor entry, copied manifest entries + segment
+/// objects, epoch fence) present, commit marker absent.
+#[derive(Default)]
+struct MarkerCrashStore {
+    inner: InMemoryBlobStore,
+    snapshot: Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+impl MarkerCrashStore {
+    fn snapshot_at_marker(&self) -> Vec<(String, Vec<u8>)> {
+        self.snapshot.lock().unwrap().clone()
+    }
+}
+
+impl BlobStore for MarkerCrashStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        if key.ends_with("branch.json") {
+            let mut snapshot = Vec::new();
+            for k in self.inner.list("")? {
+                if let Some(bytes) = self.inner.get(&k)? {
+                    snapshot.push((k, bytes));
+                }
+            }
+            *self.snapshot.lock().unwrap() = snapshot;
+            return Err(EngineError::Storage(
+                "injected: crash before the branch commit marker".into(),
+            ));
+        }
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(prefix)
+    }
+}
+
+/// **AC-2 — TestBranchInheritanceSeedFloorEdge** (bead pqueue-f2b2e9e3). Two halves of the same contract.
+///
+/// **The seed-floor `seq == f` edge.** A branch over a source trimmed to floor `f` seeds its OWN first manifest
+/// entry AT `seq == f` (`first_seq == last_seq == f`, `retention_floor_through = f`, naming NO segment object),
+/// so `f + 1` is its effective genesis: `f` itself is the EXCLUSIVE lower bound, the first legal cut is `f + 1`,
+/// and a cut AT `f` is rejected cleanly. The branch writes NO read-horizon of its own — which is exactly what
+/// keeps its own `seq == f` seed ENUMERABLE (the fail-closed below-floor guard is gated on a horizon EXISTING),
+/// so the seed is never mistaken for a reclaimed tombstone.
+///
+/// **Atomic visibility.** The branch becomes visible ONLY after ALL of that inherited metadata is durable: at
+/// the instant of the commit-marker write every inherited object is already on the store, yet a crash image
+/// taken there recovers the branch as NON-EXISTENT (no view, no resolvable floor). Visibility flips at the
+/// marker, never mid-inheritance.
+#[test]
+fn branch_inheritance_seed_floor_edge() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    seed_trimmed_source(&log, &store, &source, 8, 3); // floor f = 3
+
+    // A cut AT the floor (`seq == f`) is REJECTED cleanly: the floor is an EXCLUSIVE lower bound, so that whole
+    // view is reclaimed. `f + 1` is the FIRST legal cut — that is the edge.
+    let err = log
+        .branch(
+            &source,
+            &branch_qdef("cut-at-floor"),
+            &CommandPosition::new(source.clone(), 0, 3),
+            60_000,
+            30,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Invalid(_)),
+        "a cut AT the source floor f is rejected cleanly (Invalid), got {err:?}"
+    );
+
+    let branch_def = branch_qdef("seed-floor-edge");
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 4), // cut == f + 1, the first legal cut
+        60_000,
+        31,
+    )
+    .unwrap();
+
+    // The branch's FIRST (authoritative) manifest entry is the inherited SEED FLOOR at `seq == f`.
+    let seed: serde_json::Value = serde_json::from_slice(
+        &store
+            .get(&manifest_head_key_of(&branch, 0))
+            .unwrap()
+            .expect("the branch seeds its inherited floor as manifest index 0"),
+    )
+    .unwrap();
+    assert_eq!(
+        seed["first_seq"], 3,
+        "the seed floor entry sits AT seq == f"
+    );
+    assert_eq!(seed["last_seq"], 3, "the seed floor entry sits AT seq == f");
+    assert_eq!(
+        seed["retention_floor_through"], 3,
+        "the seed entry IS a retention-floor-advance entry carrying the inherited floor f"
+    );
+    assert!(
+        seed["segment_key"].is_null(),
+        "the seed floor entry names NO segment object — there is nothing below f left to GET"
+    );
+    assert_eq!(
+        seed["fence"], false,
+        "the seed is a floor entry, not an epoch fence"
+    );
+    assert_eq!(
+        log.read_retention_floor(&branch)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "the branch resolves its own inherited floor at f"
+    );
+    assert_eq!(
+        log.read_read_horizon(&branch).unwrap(),
+        None,
+        "the branch writes NO read-horizon, so the fail-closed guard never suppresses its own seq == f seed"
+    );
+    assert_eq!(
+        log.read_all(&branch)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![4],
+        "the seed is METADATA, not a command: the branch's effective genesis is f + 1, and its view is [f+1, cut]"
+    );
+
+    // ---- Atomic visibility: only after ALL inherited metadata is durable. ----
+    let crash_store = std::sync::Arc::new(MarkerCrashStore::default());
+    let crash_log = SegmentedObjectLog::open(
+        crash_store.clone(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    );
+    let crash_source = shard();
+    crash_log.create_queue(&qdef()).unwrap();
+    seed_trimmed_source(&crash_log, &crash_store, &crash_source, 8, 3);
+
+    let crash_def = branch_qdef("seed-floor-atomicity");
+    let crash_branch =
+        pqueue_engine::QueueKey::new(crash_def.tenant_id.clone(), crash_def.queue_id.clone());
+    let err = crash_log
+        .branch(
+            &crash_source,
+            &crash_def,
+            &CommandPosition::new(crash_source.clone(), 0, 4),
+            60_000,
+            32,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "the injected commit-marker crash surfaces as a store failure, got {err:?}"
+    );
+
+    // The crash image: EVERY piece of inherited metadata is durable, ONLY the commit marker is missing.
+    let image = crash_store.snapshot_at_marker();
+    let crash_branch_prefix = shard_prefix_of(&crash_branch);
+    let seed_key = manifest_head_key_of(&crash_branch, 0);
+    assert!(
+        image.iter().any(|(k, _)| *k == seed_key),
+        "the inherited SEED FLOOR entry was already durable when the marker write was attempted"
+    );
+    assert!(
+        image
+            .iter()
+            .any(|(k, _)| *k == format!("{crash_branch_prefix}branch.pending")),
+        "the branch sentinel was durable"
+    );
+    assert!(
+        image
+            .iter()
+            .any(|(k, _)| *k == branch_registry_key_of(&crash_source, &crash_branch)),
+        "the source pin was durable"
+    );
+    assert!(
+        !image
+            .iter()
+            .any(|(k, _)| *k == format!("{crash_branch_prefix}branch.json")),
+        "the commit marker had NOT landed — it is the LAST durable write"
+    );
+
+    // Recover that image: the branch is NON-EXISTENT despite every inherited object being durable.
+    let recovered_store = std::sync::Arc::new(InMemoryBlobStore::new());
+    for (key, bytes) in &image {
+        recovered_store.put(key, bytes).unwrap();
+    }
+    let recovered = SegmentedObjectLog::open(
+        recovered_store.clone(),
+        SegmentConfig::new(10_000_000, 100).unwrap(),
+    );
+    assert!(
+        recovered.read_all(&crash_branch).unwrap().is_empty(),
+        "an un-marked branch is NOT visible, even with its whole inherited manifest durable"
+    );
+    assert_eq!(
+        recovered.read_retention_floor(&crash_branch).unwrap(),
+        None,
+        "an un-marked branch has NO resolvable inherited floor until its commit marker is durable"
+    );
+    // By contrast the COMMITTED branch above — marker durable AFTER all inherited metadata — is fully visible.
+    assert_eq!(
+        log.read_retention_floor(&branch)
+            .unwrap()
+            .map(|p| p.sequence),
+        Some(3),
+        "visibility flips at the commit marker: the committed branch keeps its inherited floor"
+    );
+}
+
 #[test]
 fn counters_surface_emits_a_release_ledger_row() {
     // Drive several group-commit segments, then emit the measured segment/object counts to the release
