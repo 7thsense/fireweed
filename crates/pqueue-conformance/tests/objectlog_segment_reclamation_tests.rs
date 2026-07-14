@@ -1167,6 +1167,18 @@ async fn TestObjectlogDeletedManifestSourcePinRetentionFloor() {
     behind_image_fail_closed_with_deleted_manifests_impl().await;
 }
 
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestObjectlogBehindImageDeletedManifestFailClosed() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestObjectlogBehindImageRetainedFloorHeadReplayRecovery() {
+    retained_floor_head_replay_recovery_impl().await;
+}
+
 // ---------------------------------------------------------------------------
 // Test 6 — BACKWARD COMPAT: a never-trimmed (pre-floor) log has no retention_floor.json; recovery folds from
 //          genesis, byte-identical to baseline, no missing segments.
