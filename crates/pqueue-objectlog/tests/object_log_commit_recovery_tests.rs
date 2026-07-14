@@ -671,6 +671,83 @@ fn TestManifestWatermarkRecoveryPersistence() {
     TestManifestDeletionWatermarkRecoveryRoundTrip();
 }
 
+fn manifest_watermark_restart_and_fallback_round_trip() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = sk("watermark", "recovery");
+    let def = big_qdef("watermark", "recovery");
+
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&def).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&shard, &seg_pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    seg_trim_cycle(&log, &shard, 3, 0, 1_000);
+    let persisted = log
+        .read_read_horizon(&shard)
+        .unwrap()
+        .expect("watermark persisted after reclaim");
+    assert_eq!(
+        persisted, 1,
+        "the durable deletion watermark records the physically reclaimed prefix"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&def).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        Some(persisted),
+        "restart reloads the durable deletion watermark"
+    );
+    assert_eq!(
+        reopened
+            .read_from(&shard, 4)
+            .unwrap()
+            .iter()
+            .map(|(pos, _)| pos.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the live tail stays readable above the recovered deletion watermark"
+    );
+
+    delete_watermark_marker(store.as_ref(), &shard);
+
+    let conservative = SegmentedObjectLog::open(store.clone(), cfg);
+    conservative.create_queue(&def).unwrap();
+    assert!(
+        conservative.read_read_horizon(&shard).unwrap().is_none(),
+        "without persisted watermark metadata the recovery path falls back conservatively"
+    );
+    assert_eq!(
+        conservative
+            .read_from(&shard, 4)
+            .unwrap()
+            .iter()
+            .map(|(pos, _)| pos.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7],
+        "the conservative fallback still exposes undeleted below-floor manifest objects"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestObjectLogCommitRecoveryManifestWatermark() {
+    manifest_watermark_restart_and_fallback_round_trip();
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestOwnerFenceDeleteOnlyEvaluation() {
+    // pqueue-c33c367e owner-fence wiring does not change the current index-CAS safety envelope, so a
+    // cheaper delete-only compaction variant remains unsupported here. Recovery must stay conservative and
+    // must not infer deletion from the cache alone.
+    manifest_watermark_restart_and_fallback_round_trip();
+}
+
 #[test]
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkLegacyBootstrap() {
