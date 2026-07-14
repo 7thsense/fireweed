@@ -3106,6 +3106,89 @@ fn lagging_partial_expire_fixture() -> (
     (store, cfg, source, seg_keys)
 }
 
+fn assert_partial_expire_visibility_decision_fixture(
+    store: &std::sync::Arc<InMemoryBlobStore>,
+    cfg: SegmentConfig,
+    source: &QueueKey,
+    seg_keys: &[(u64, String)],
+) {
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+
+    assert_eq!(
+        reopened
+            .read_retention_floor(source)
+            .unwrap()
+            .unwrap()
+            .sequence,
+        15,
+        "the durable floor stays above the partial-expire fixture's below-floor entries"
+    );
+    assert_eq!(
+        reopened.read_read_horizon(source).unwrap(),
+        Some(1),
+        "the durable manifest deletion watermark records only the proven reclaimed prefix"
+    );
+
+    assert!(
+        store.get(&seg_keys[0].1).unwrap().is_none(),
+        "the first reclaimed segment object is gone"
+    );
+    assert!(
+        store.get(&seg_keys[1].1).unwrap().is_none(),
+        "the second reclaimed segment object is gone"
+    );
+    assert!(
+        store.get(&seg_keys[2].1).unwrap().is_some(),
+        "the first not-yet-deleted below-floor segment object remains available"
+    );
+
+    assert_eq!(
+        reopened.expire_segments_through(source, 3, 2_000).unwrap(),
+        0,
+        "a rerun at the same horizon does not advance past the unreclaimed below-floor entry"
+    );
+    assert_eq!(
+        reopened.read_read_horizon(source).unwrap(),
+        Some(1),
+        "the hidden prefix does not advance beyond the proven reclaimed range"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    reopened.enqueue(source, &pushes(1), 0, 2_000).unwrap();
+    let reopened_ack = reopened.seal(source, 0, 2_001).unwrap();
+    assert_eq!(
+        reopened_ack[0].sequence, 16,
+        "recovery still sees the remaining below-floor tail after the partial expire"
+    );
+
+    // Finish the lagging cleanup without invoking the main expire path: delete the remaining below-floor
+    // segment objects directly, then advance the durable watermark across the now-complete prefix.
+    for (first_seq, seg_key) in seg_keys.iter().skip(2) {
+        assert!(
+            store.delete(seg_key).unwrap(),
+            "segment {first_seq} is reclaimed once the lagging prefix completes"
+        );
+    }
+    reopened
+        .persist_manifest_deletion_watermark(source, 15, 3_000)
+        .unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(source).unwrap(),
+        Some(7),
+        "the durable watermark only catches up after the remaining below-floor segments are reclaimed"
+    );
+
+    // Nothing leaked: every data segment object at/below the floor is gone.
+    for (first_seq, seg_key) in seg_keys {
+        assert!(
+            store.get(seg_key).unwrap().is_none(),
+            "segment {first_seq} reclaimed, not leaked"
+        );
+    }
+}
+
 fn delete_watermark_metadata<S: BlobStore>(store: &S, shard: &QueueKey) {
     store.delete(&read_horizon_key_s(shard)).unwrap();
     for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
@@ -4093,61 +4176,7 @@ fn ac_txn_3_fresh_log_recovers_identically_after_horizon_advance() {
 #[allow(non_snake_case)]
 fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
     let (store, cfg, source, seg_keys) = lagging_partial_expire_fixture();
-
-    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
-    reopened.create_queue(&qdef()).unwrap();
-    assert_eq!(
-        reopened.read_read_horizon(&source).unwrap(),
-        Some(1),
-        "reopening observes the durable watermark that lags the physical delete progress"
-    );
-    assert_eq!(
-        reopened
-            .read_retention_floor(&source)
-            .unwrap()
-            .unwrap()
-            .sequence,
-        15,
-        "the reopened shard still sees the full durable retention floor, so the remaining below-floor prefix is not hidden"
-    );
-    for (first_seq, seg_key) in seg_keys.iter().skip(2) {
-        assert!(
-            store.get(seg_key).unwrap().is_some(),
-            "segment {first_seq} remains visible while the durable cleanup is still lagging"
-        );
-    }
-
-    reopened.enqueue(&source, &pushes(1), 0, 2_000).unwrap();
-    let reopened_ack = reopened.seal(&source, 0, 2_001).unwrap();
-    assert_eq!(
-        reopened_ack[0].sequence, 16,
-        "recovery still sees the remaining below-floor tail after the partial expire"
-    );
-
-    // Finish the lagging cleanup without invoking the main expire path: delete the remaining below-floor
-    // segment objects directly, then advance the durable watermark across the now-complete prefix.
-    for (first_seq, seg_key) in seg_keys.iter().skip(2) {
-        assert!(
-            store.delete(seg_key).unwrap(),
-            "segment {first_seq} is reclaimed once the lagging prefix completes"
-        );
-    }
-    reopened
-        .persist_manifest_deletion_watermark(&source, 15, 3_000)
-        .unwrap();
-    assert_eq!(
-        reopened.read_read_horizon(&source).unwrap(),
-        Some(7),
-        "the durable watermark only catches up after the remaining below-floor segments are reclaimed"
-    );
-
-    // Nothing leaked: every data segment object at/below the floor is gone.
-    for (first_seq, seg_key) in seg_keys {
-        assert!(
-            store.get(&seg_key).unwrap().is_none(),
-            "segment {first_seq} reclaimed, not leaked"
-        );
-    }
+    assert_partial_expire_visibility_decision_fixture(&store, cfg, &source, &seg_keys);
 }
 
 #[test]
@@ -4237,6 +4266,26 @@ fn TestPartialExpireReadHorizonAloneDoesNotHideBelowFloorEntries() {
 #[allow(non_snake_case)]
 fn TestPartialExpireVisibilityUsesDurableManifestDeletionWatermark() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+/// TestPartialExpireVisibilityDecisionHidesOnlyReclaimedPrefix: expiry-side manifest enumeration skips
+/// only the prefix that was durably reclaimed, while the first undeleted below-floor entry stays visible
+/// to later manifest enumeration.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityDecisionHidesOnlyReclaimedPrefix() {
+    let (store, cfg, source, seg_keys) = lagging_partial_expire_fixture();
+    assert_partial_expire_visibility_decision_fixture(&store, cfg, &source, &seg_keys);
+}
+
+/// TestPartialExpireVisibilityDecisionExpiryStopsAtUndeletedBelowFloor: the first not-yet-deleted
+/// below-floor data entry stops the expiry-side hidden-prefix advance and remains visible on the next
+/// manifest enumeration.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityDecisionExpiryStopsAtUndeletedBelowFloor() {
+    let (store, cfg, source, seg_keys) = lagging_partial_expire_fixture();
+    assert_partial_expire_visibility_decision_fixture(&store, cfg, &source, &seg_keys);
 }
 
 #[test]
