@@ -818,3 +818,261 @@ fn TestSqlitePropagationPqueueC33c367eInteractionRecorded() {
         "pqueue-c33c367e evaluation must be recorded in v0.14.0 release notes"
     );
 }
+
+/// TestSqliteObjectlogFloorHeadReplayRecovery: SQLite-backed recovery succeeds via
+/// retained floor/head replay without relaxing retention-floor or source-pin
+/// guarantees and without data loss. Runs against both hybrid-strict and
+/// hybrid-async.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteObjectlogFloorHeadReplayRecovery() {
+    for tag in ["strict-fhr", "async-fhr"] {
+        let root = base_dir(tag);
+        let backend = if tag.starts_with("strict") {
+            open_hybrid_strict(&root)
+        } else {
+            open_hybrid_async(&root)
+        };
+        backend.create_queue(qdef()).await.unwrap();
+
+        // Push old commands (seq 0..3) at ts=10 that will be past retention.
+        for i in 0..4u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("fhr-old-{i}")).unwrap()),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts(10),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        // Push fresh commands (seq 4..7) at ts=10_000 within retention.
+        for i in 4..8u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(
+                            ClientItemKey::new(format!("fhr-fresh-{i}")).unwrap(),
+                        ),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts(10_000),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        drain(&backend);
+
+        // Trim: advances floor through seq 3.
+        backend.tick(ts(10_000)).await.unwrap();
+        let floor = floor_seq(&backend).expect("floor advanced");
+        assert_eq!(floor, 3, "{tag}: retention floor at seq 3");
+        drop(backend);
+
+        // Reopen and recover from retained floor/head.
+        let reopened = if tag.starts_with("strict") {
+            open_hybrid_strict(&root)
+        } else {
+            open_hybrid_async(&root)
+        };
+        let floor_after = floor_seq(&reopened).expect("floor survived reopen");
+        assert_eq!(
+            floor_after, 3,
+            "{tag}: retention floor persisted after reopen"
+        );
+
+        // Read from floor succeeds with complete tail (seq 4..7).
+        let tail = reopened
+            .read_from(&shard(), floor_pos(&reopened), 100)
+            .await
+            .expect("{tag}: read_from floor after reopen must succeed");
+        let tail_seqs: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
+        assert_eq!(
+            tail_seqs,
+            vec![4, 5, 6, 7],
+            "{tag}: above-floor tail is complete after reopen"
+        );
+
+        // Retention-floor guarantee: reads below the floor still fail closed.
+        let genesis_err = reopened
+            .read_from(&shard(), None, 100)
+            .await
+            .expect_err("{tag}: read_from genesis must fail closed after reopen");
+        assert!(
+            matches!(genesis_err, EngineError::Storage(ref m) if m.contains("read below retention floor")),
+            "{tag}: expected Storage(read below retention floor), got {genesis_err:?}"
+        );
+
+        // Source-pin guarantee not relaxed: the floor is still authoritative.
+        assert!(
+            tail_seqs.iter().all(|s| *s > floor_after),
+            "{tag}: all returned sequences are above the retained floor"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// TestSqliteFloorHeadReplayPreservesFailClosedBoundary: replay succeeds only
+/// from retained floor/head and still fails closed for projection images that
+/// require physically deleted prefixes. Runs against both hybrid-strict and
+/// hybrid-async.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteFloorHeadReplayPreservesFailClosedBoundary() {
+    for tag in ["strict-bnd", "async-bnd"] {
+        let root = base_dir(tag);
+
+        // --- Part 1: healthy reopen succeeds from retained floor/head ---
+        let backend = if tag.starts_with("strict") {
+            open_hybrid_strict(&root)
+        } else {
+            open_hybrid_async(&root)
+        };
+        backend.create_queue(qdef()).await.unwrap();
+
+        for i in 0..4u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("bnd-old-{i}")).unwrap()),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts(10),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        for i in 4..8u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(
+                            ClientItemKey::new(format!("bnd-fresh-{i}")).unwrap(),
+                        ),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts(10_000),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        drain(&backend);
+        backend.tick(ts(10_000)).await.unwrap();
+        let floor = floor_seq(&backend).expect("floor advanced");
+        assert_eq!(floor, 3, "{tag}: retention floor at seq 3");
+        drop(backend);
+
+        // Healthy reopen: recovery succeeds from retained floor/head.
+        let reopened = if tag.starts_with("strict") {
+            open_hybrid_strict(&root)
+        } else {
+            open_hybrid_async(&root)
+        };
+        let floor_after = floor_seq(&reopened).expect("floor survived reopen");
+        assert_eq!(floor_after, 3, "{tag}: floor persisted for healthy reopen");
+        let tail = reopened
+            .read_from(&shard(), floor_pos(&reopened), 100)
+            .await
+            .expect("{tag}: healthy reopen read from floor succeeds");
+        let tail_seqs: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
+        assert_eq!(
+            tail_seqs,
+            vec![4, 5, 6, 7],
+            "{tag}: healthy reopen returns complete tail"
+        );
+        drop(reopened);
+
+        // --- Part 2: behind image must fail closed for physically deleted prefixes ---
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+        }
+
+        let sqlite_path = root.join("projection.sqlite");
+        let log = pqueue_objectlog::ObjectLog::open_group_commit(
+            &root,
+            pqueue_objectlog::SegmentConfig::new(1, 1).unwrap(),
+        )
+        .expect("log");
+        let hybrid = if tag.starts_with("strict") {
+            pqueue_sqlite::HybridProjectionStore::open(sqlite_path.to_str().unwrap())
+                .expect("hybrid")
+                .with_strict_apply(true)
+        } else {
+            pqueue_sqlite::HybridProjectionStore::open(sqlite_path.to_str().unwrap())
+                .expect("hybrid")
+                .with_deferred_flush_chunk(1)
+                .with_async_monitor(clear_thresholds())
+        };
+        let result = pqueue_engine::ComposedBackend::new(
+            log,
+            hybrid,
+            pqueue_engine::InProcessControlPlane::new(),
+        )
+        .with_group_commit(true)
+        .recover();
+        let err = result.err().unwrap_or_else(|| {
+            panic!("{tag}: recovery over behind projection image must fail closed")
+        });
+        assert!(
+            pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+            "{tag}: must fail with deleted-manifest-prefix signal; got {err:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// TestSqlitePqueueC33c367eInteractionRecorded: pqueue-c33c367e interaction is
+/// evaluated before landing and the SQLite-specific conclusion is available in
+/// release notes or the repo's release-note source.
+#[test]
+#[allow(non_snake_case)]
+fn TestSqlitePqueueC33c367eInteractionRecorded() {
+    // pqueue-c33c367e evaluation conclusion for SQLite retained floor/head replay:
+    //
+    // The deferred server acquire-runtime wiring (pqueue-c33c367e) does NOT
+    // change the SQLite floor/head replay safety envelope. The re-opened
+    // composed backend recovery succeeds from the retained floor/head because
+    // the durable retention floor is persisted in the object-log substrate
+    // independently of the deferred server wiring. The floor/head replay
+    // path is:
+    //   1. The durable retention floor is established by epoch-fenced
+    //      operations (advance_retention_floor) that never depend on the
+    //      deferred server wiring.
+    //   2. The projection recovers by replaying from the retained floor/head,
+    //      not by consulting deleted manifest prefixes.
+    //   3. The behind-image fail-closed guard (compose.rs) operates on the
+    //      durable floor and SQLite high-water, both of which are independent
+    //      of pqueue-c33c367e.
+    //
+    // Therefore pqueue-c33c367e does NOT widen or narrow the SQLite retained
+    // floor/head replay envelope. This conclusion is recorded here for release
+    // notes handoff and is also documented at:
+    //   - docs/perf/design/manifest-compaction-hotpath.md:388
+    //   - docs/releases/v0.14.0.md
+    //   - crates/pqueue-conformance/tests/sqlite_retention_floor_source_pin_conformance.rs (this file)
+    let release_notes = include_str!("../../../docs/releases/v0.14.0.md");
+    assert!(
+        release_notes.contains("pqueue-b9f4cd54"),
+        "SQLite floor/head replay bead pqueue-b9f4cd54 must be recorded in v0.14.0 release notes"
+    );
+    assert!(
+        release_notes.contains("pqueue-c33c367e"),
+        "pqueue-c33c367e evaluation must be recorded in v0.14.0 release notes"
+    );
+}
