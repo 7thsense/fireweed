@@ -3867,6 +3867,55 @@ mod manifest_deletion_watermark_tests {
 
     #[test]
     #[allow(non_snake_case)]
+    fn TestManifestWatermarkFailClosedBelowFloor() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let writer = SegmentedObjectLog::open(store.clone(), cfg);
+        writer.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            writer
+                .enqueue(&shard, &pushes(1), 0, 100 + i as i64 * 10)
+                .unwrap();
+            writer.seal(&shard, 0, 101 + i as i64 * 10).unwrap();
+        }
+
+        writer
+            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
+            .unwrap();
+        assert_eq!(writer.expire_segments_through(&shard, 1, 1_000).unwrap(), 2);
+
+        let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+        reopened.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(
+            reopened.read_read_horizon(&shard).unwrap(),
+            Some(1),
+            "reopen reloads the durable manifest-deletion watermark"
+        );
+
+        let err = reopened.read_all(&shard).unwrap_err();
+        assert!(
+            matches!(&err, EngineError::Storage(msg) if msg.contains("read below retention floor")),
+            "reads below the durable floor must fail closed after reopen, got {err:?}"
+        );
+
+        let err = reopened.read_from(&shard, 1).unwrap_err();
+        assert!(
+            matches!(&err, EngineError::Storage(msg) if msg.contains("read below retention floor")),
+            "a reopened reader must also fail closed when the requested start sequence is at the floor, got {err:?}"
+        );
+
+        let live = reopened.read_from(&shard, 2).unwrap();
+        assert_eq!(
+            live.iter().map(|(pos, _)| pos.sequence).collect::<Vec<_>>(),
+            vec![2],
+            "the reopened reader still returns live entries above the durable floor"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn TestManifestDeletionWatermarkRacingWritersNeverRegress() {
         let store = std::sync::Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
