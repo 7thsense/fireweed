@@ -32,7 +32,7 @@
 #   land. This gate never claims release-tier green.
 set -euo pipefail
 
-CARGO="cargo +1.92.0"
+CARGO="rustup run 1.92.0 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -82,7 +82,7 @@ ${CARGO} llvm-cov --package pqueue-core --lcov \
     --output-path "${REPO_ROOT}/target/coverage/pqueue-core.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core.lcov" --crate pqueue-core --min-lines 90
-cargo +nightly llvm-cov --package pqueue-core --branch --lcov \
+rustup run nightly cargo llvm-cov --package pqueue-core --branch --lcov \
     --output-path "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov" \

@@ -465,8 +465,8 @@ free_kind_build_space() {
 prepare_kind_image_context() {
     echo "=== deployment release gate: prepare kind image context ==="
     free_kind_build_space
-    run_cmd cargo +1.92.0 build --release --bin pqueue-verify-ledger
-    run_cmd cargo +1.92.0 build --release --bin pqueue-service
+    run_cmd rustup run 1.92.0 cargo build --release --bin pqueue-verify-ledger
+    run_cmd rustup run 1.92.0 cargo build --release --bin pqueue-service
 
     rm -rf "${KIND_IMAGE_CONTEXT}"
     mkdir -p "${KIND_IMAGE_CONTEXT}"
