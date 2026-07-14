@@ -673,8 +673,7 @@ async fn test_bug3_projection_behind_floor_fails_closed() {
     );
 }
 
-#[tokio::test]
-async fn test_behind_image_fail_closed_with_deleted_manifests() {
+async fn behind_image_fail_closed_with_deleted_manifests_impl() {
     for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
         let mode_name = match mode {
             ProjectionMode::HybridAsync => "hybrid-async",
@@ -750,6 +749,17 @@ async fn test_behind_image_fail_closed_with_deleted_manifests() {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+#[tokio::test]
+async fn test_behind_image_fail_closed_with_deleted_manifests() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestBehindImageFailClosedWithDeletedManifests() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
 }
 
 #[tokio::test]
@@ -1037,8 +1047,7 @@ fn branch_def() -> QueueDefinition {
     d
 }
 
-#[tokio::test]
-async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
+async fn bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl() {
     let root = base_dir("released-pin");
     let backend = open_hybrid(&root, clear_thresholds());
     backend.create_queue(qdef_short_retention()).await.unwrap();
@@ -1105,6 +1114,18 @@ async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
         1,
         "seg0 reclaimed after the pin releases; only the fresh tail remains"
     );
+}
+
+#[tokio::test]
+async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
+    bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestObjectlogDeletedManifestSourcePinRetentionFloor() {
+    bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl().await;
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
 }
 
 // ---------------------------------------------------------------------------

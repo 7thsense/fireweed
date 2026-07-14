@@ -3319,6 +3319,54 @@ fn TestManifestDeletionWatermarkFailClosedBelowFloor() {
     TestBelowFloorReadFailsClosedAfterManifestReclaim();
 }
 
+/// TestBehindImageFailClosedWithDeletedManifests: after the retained floor/head replay path is proven
+/// healthy, deleting the legacy `manifest/` namespace alone must not break recovery, but once the
+/// authoritative head namespace is also removed the reopen must fail closed instead of reconstructing a
+/// behind image from a deleted manifest family.
+#[test]
+#[allow(non_snake_case)]
+fn TestBehindImageFailClosedWithDeletedManifests() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..3u64 {
+        log.enqueue(&shard(), &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    trim_cycle(&log, &shard(), 1, 0, 1_000);
+    assert_eq!(
+        log.read_read_horizon(&shard()).unwrap(),
+        Some(0),
+        "the retained floor/head replay path is available before the prefix is deleted"
+    );
+
+    let healthy = SegmentedObjectLog::open(store.clone(), cfg);
+    assert!(
+        healthy.create_queue(&qdef()).is_ok(),
+        "reopen from the retained floor/head succeeds before the prefix is physically deleted"
+    );
+
+    delete_prefix(store.as_ref(), &manifest_prefix_s(&shard()));
+
+    let legacy_only = SegmentedObjectLog::open(store.clone(), cfg);
+    assert!(
+        legacy_only.create_queue(&qdef()).is_ok(),
+        "the authoritative head namespace still lets recovery resume when only the legacy manifest prefix is deleted"
+    );
+
+    delete_prefix(store.as_ref(), &manifest_head_prefix_s(&shard()));
+
+    let broken = SegmentedObjectLog::open(store.clone(), cfg);
+    let err = broken.create_queue(&qdef()).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Conflict),
+        "deleted manifest prefixes must fail closed instead of reconstructing a behind image"
+    );
+}
+
 #[test]
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkSurvivesReopenBelowDurableFloor() {
@@ -4039,6 +4087,14 @@ fn TestManifestWatermarkPresentEntriesNotHiddenDuringPartialExpiry() {
 #[allow(non_snake_case)]
 fn TestManifestWatermarkReadPathOwnerFenceEvaluationDocumented() {
     TestDeletionWatermarkOwnerFenceIndependence();
+}
+
+/// TestObjectlogPqueueC33c367eReleaseNote: the release-note claim about pqueue-c33c367e is backed by the
+/// documented owner-fence evaluation test.
+#[test]
+#[allow(non_snake_case)]
+fn TestObjectlogPqueueC33c367eReleaseNote() {
+    TestManifestWatermarkReadPathOwnerFenceEvaluationDocumented();
 }
 
 /// Test 9 — after successful below-floor manifest cleanup, the durable read-horizon advances
