@@ -2333,6 +2333,18 @@ fn shard_prefix_of(k: &pqueue_engine::QueueKey) -> String {
     )
 }
 
+fn branch_registry_key_of(
+    source: &pqueue_engine::QueueKey,
+    branch: &pqueue_engine::QueueKey,
+) -> String {
+    format!(
+        "{}branches/{}/{}.json",
+        shard_prefix_of(source),
+        hex_lower(branch.tenant_id.as_str().as_bytes()),
+        hex_lower(branch.queue_id.as_str().as_bytes())
+    )
+}
+
 /// A store that injects a FAILED branch creation whose OWN rollback cleanup also fails, leaving a durable
 /// orphan (leftover `branch.pending` sentinel + partial branch manifest + a still-registered source pin). While
 /// armed it (a) fails the `branch.json` commit-marker put — the LAST write of a branch creation — so the branch
@@ -2342,6 +2354,7 @@ struct OrphanBranchFaultStore {
     inner: InMemoryBlobStore,
     fail_marker_put: AtomicBool,
     fail_deletes: AtomicBool,
+    missing_get: Mutex<Option<String>>,
 }
 
 impl OrphanBranchFaultStore {
@@ -2350,6 +2363,7 @@ impl OrphanBranchFaultStore {
             inner: InMemoryBlobStore::new(),
             fail_marker_put: AtomicBool::new(false),
             fail_deletes: AtomicBool::new(false),
+            missing_get: Mutex::new(None),
         }
     }
 
@@ -2361,6 +2375,11 @@ impl OrphanBranchFaultStore {
     fn disarm(&self) {
         self.fail_marker_put.store(false, Ordering::SeqCst);
         self.fail_deletes.store(false, Ordering::SeqCst);
+        *self.missing_get.lock().unwrap() = None;
+    }
+
+    fn arm_missing_get(&self, key: &str) {
+        *self.missing_get.lock().unwrap() = Some(key.to_owned());
     }
 }
 
@@ -2379,6 +2398,15 @@ impl BlobStore for OrphanBranchFaultStore {
     }
 
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        if self
+            .missing_get
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|missing| missing == key)
+        {
+            return Ok(None);
+        }
         self.inner.get(key)
     }
 
@@ -3635,6 +3663,90 @@ fn TestBranchGcPreservesInheritedFloorPins() {
             .collect::<Vec<_>>(),
         vec![4, 5],
         "the branch view survives branch GC"
+    );
+}
+
+/// TestBranchGcFailClosedOnMissingInheritanceMetadata: branch GC refuses to touch an orphan when the
+/// persisted source-pin metadata becomes missing before the classify+delete pass can trust it.
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchGcFailClosedOnMissingInheritanceMetadata() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-missing-inheritance", 1_000);
+
+    let registry_key = branch_registry_key_of(&source, &branch);
+    store.arm_missing_get(&registry_key);
+
+    let err = log.gc_orphaned_branches(&source).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("missing branch registry entry")),
+        "branch GC must fail closed when the inherited source-pin metadata disappears: {err:?}"
+    );
+    assert!(
+        store
+            .get(&format!("{}branch.pending", shard_prefix_of(&branch)))
+            .unwrap()
+            .is_some(),
+        "the orphan stays intact after the fail-closed read path aborts"
+    );
+    assert!(
+        !store
+            .list(&format!("{}branches/", shard_prefix_of(&source)))
+            .unwrap()
+            .is_empty(),
+        "the source pin remains registered after the aborted GC pass"
+    );
+    assert!(
+        !store
+            .list(&format!("{}manifest/", shard_prefix_of(&branch)))
+            .unwrap()
+            .is_empty(),
+        "the branch-local manifest objects are left untouched when GC refuses to proceed"
+    );
+}
+
+/// TestBranchGcFailClosedOnCorruptInheritanceMetadata: branch GC refuses to touch an orphan when the
+/// persisted source-pin metadata is present but corrupt before the classify+delete pass can trust it.
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchGcFailClosedOnCorruptInheritanceMetadata() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-corrupt-inheritance", 1_000);
+
+    let registry_key = branch_registry_key_of(&source, &branch);
+    store.inner.put(&registry_key, b"{not-valid-json").unwrap();
+
+    let err = log.gc_orphaned_branches(&source).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(_)),
+        "corrupt source-pin metadata must surface as a storage error so GC cannot guess: {err:?}"
+    );
+    assert!(
+        store
+            .get(&format!("{}branch.pending", shard_prefix_of(&branch)))
+            .unwrap()
+            .is_some(),
+        "the orphan stays intact after the corrupt metadata aborts GC"
+    );
+    assert!(
+        !store
+            .list(&format!("{}branches/", shard_prefix_of(&source)))
+            .unwrap()
+            .is_empty(),
+        "the source pin remains registered after the aborted GC pass"
+    );
+    assert!(
+        !store
+            .list(&format!("{}manifest/", shard_prefix_of(&branch)))
+            .unwrap()
+            .is_empty(),
+        "the branch-local manifest objects are left untouched when GC refuses to proceed"
     );
 }
 

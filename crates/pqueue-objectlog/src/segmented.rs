@@ -785,6 +785,13 @@ fn branch_metadata_key(branch: &QueueKey) -> String {
     format!("{}branch.json", shard_prefix(branch))
 }
 
+fn branch_registry_branch_key(key: &str) -> Option<String> {
+    let branch = key.split_once("/branches/")?.1;
+    let (tenant_hex, queue_json) = branch.split_once('/')?;
+    let queue_hex = queue_json.strip_suffix(".json")?;
+    Some(format!("t/{tenant_hex}/q/{queue_hex}/branch.json"))
+}
+
 fn branch_segment_key(branch: &QueueKey, index: u64, first_seq: u64) -> String {
     format!(
         "{}branch-seg/e{index:020}/s{first_seq:020}.seg",
@@ -1887,9 +1894,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let prefix = format!("{}branches/", shard_prefix(source));
         let mut out = Vec::new();
         for key in self.store_list(&prefix)? {
-            if let Some(bytes) = self.store_get(&key)? {
-                out.push(serde_json::from_slice(&bytes).map_err(store_err)?);
-            }
+            let Some(bytes) = self.store_get(&key)? else {
+                continue;
+            };
+            out.push(serde_json::from_slice(&bytes).map_err(store_err)?);
         }
         Ok(out)
     }
@@ -2329,12 +2337,24 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut reclaimed = 0u64;
-        for meta in self.read_branch_registry(source)? {
-            let branch = &meta.branch;
+        let prefix = format!("{}branches/", shard_prefix(source));
+        for key in self.store_list(&prefix)? {
+            let Some(branch_metadata_key) = branch_registry_branch_key(&key) else {
+                return Err(EngineError::Storage(format!(
+                    "invalid branch registry key {key}"
+                )));
+            };
             // COMMITTED (marker present) => a live, readable branch protected by its own TTL/pin. NEVER GC.
-            if self.store_get(&branch_metadata_key(branch))?.is_some() {
+            if self.store_get(&branch_metadata_key)?.is_some() {
                 continue;
             }
+            let Some(bytes) = self.store_get(&key)? else {
+                return Err(EngineError::Storage(format!(
+                    "missing branch registry entry {key}"
+                )));
+            };
+            let meta: BranchMetadata = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let branch = &meta.branch;
             // Test seam (never armed in production): strike the classify→delete window a concurrent creation's
             // marker write could race, so the create/GC exclusion can be proven deterministically.
             self.fault(FaultCutPoint::GcAfterOrphanClassified)?;
