@@ -4451,6 +4451,198 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFailClosed() {
     );
 }
 
+/// TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinal (bead pqueue-29a6c98c): with TWO committed, live
+/// branches pinning a trimmed source, below-floor source manifest and segment objects stay retained while
+/// EITHER remains readable. Once the final readable branch (`branch_b`, the wider-cut one) is ALSO discarded —
+/// the "last readable branch advances" condition — `expire_segments_through` does not merely report a
+/// non-zero count: it physically removes the below-floor segment objects from the store.
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinal() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&source, &pushes(1), 0, 10 + i as i64 * 10)
+            .unwrap();
+        log.seal(&source, 0, 11 + i as i64 * 10).unwrap();
+    }
+    let seg_keys: Vec<String> = (0..4u64)
+        .map(|seq| segment_key_for(store.as_ref(), &source, seq))
+        .collect();
+    let manifest_keys: Vec<String> = (0..4u64).map(|idx| manifest_key_s(&source, idx)).collect();
+
+    let branch_a_def = branch_qdef("gc-final-a");
+    let branch_a = QueueKey::new(
+        branch_a_def.tenant_id.clone(),
+        branch_a_def.queue_id.clone(),
+    );
+    log.branch(
+        &source,
+        &branch_a_def,
+        &CommandPosition::new(source.clone(), 0, 0),
+        60_000,
+        50,
+    )
+    .unwrap();
+
+    let branch_b_def = branch_qdef("gc-final-b");
+    let branch_b = QueueKey::new(
+        branch_b_def.tenant_id.clone(),
+        branch_b_def.queue_id.clone(),
+    );
+    log.branch(
+        &source,
+        &branch_b_def,
+        &CommandPosition::new(source.clone(), 0, 3),
+        60_000,
+        50,
+    )
+    .unwrap();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
+        .unwrap();
+
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 100).unwrap(),
+        0,
+        "below-floor segments stay retained while both branches remain readable"
+    );
+    for key in &seg_keys {
+        assert!(
+            store.get(key).unwrap().is_some(),
+            "segment {key} must still exist while a branch can read it"
+        );
+    }
+    for key in &manifest_keys {
+        assert!(
+            store.get(key).unwrap().is_some(),
+            "manifest entry {key} must still exist while a branch can read it"
+        );
+    }
+
+    // branch_a advances out of the picture, leaving branch_b as the LAST readable branch: still retained.
+    log.discard_branch(&source, &branch_a).unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 150).unwrap(),
+        0,
+        "the last remaining readable branch alone keeps below-floor segments retained"
+    );
+
+    // The final readable branch itself now advances (is discarded): no branch can read the below-floor range.
+    log.discard_branch(&source, &branch_b).unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 200).unwrap(),
+        4,
+        "with the final readable branch gone, every below-floor segment becomes physically deletable"
+    );
+    for key in &seg_keys {
+        assert!(
+            store.get(key).unwrap().is_none(),
+            "segment {key} must be physically removed once no branch can read it"
+        );
+    }
+    for key in &manifest_keys {
+        assert!(
+            store.get(key).unwrap().is_none(),
+            "manifest entry {key} must be physically removed once no branch can read it"
+        );
+    }
+}
+
+/// TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinalConservative (bead pqueue-29a6c98c): the LAST
+/// remaining readable branch's inherited floor/source-pin proof becomes AMBIGUOUS (its registry entry is
+/// listed by the store but cannot be fetched) rather than the branch being genuinely discarded/advanced.
+/// Branch GC must NOT treat that ambiguity as proof the final branch has advanced past the below-floor range:
+/// it fails closed and leaves every below-floor source manifest and segment object physically intact. Once the
+/// ambiguity clears and the branch is genuinely discarded, the true final-branch-advances case (proven above)
+/// takes over and deletion proceeds.
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinalConservative() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..4u64 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+    let seg_keys: Vec<String> = (0..4u64)
+        .map(|seq| segment_key_for(store.as_ref(), &source, seq))
+        .collect();
+    let manifest_keys: Vec<String> = (0..4u64).map(|idx| manifest_key_s(&source, idx)).collect();
+
+    let branch_def = branch_qdef("gc-final-conservative");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 3),
+        1_000_000_000,
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(
+        log.read_all(&branch).unwrap().len(),
+        4,
+        "the branch is committed and fully readable before the fault is injected"
+    );
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
+        .unwrap();
+
+    // This IS the last readable branch — it is not discarded, but its source-pin proof becomes unfetchable,
+    // simulating an inconsistency between `list` and `get` rather than a genuine release.
+    let registry_key = branch_registry_key_of(&source, &branch);
+    store.arm_missing_get(&registry_key);
+
+    let err = log.expire_segments_through(&source, 3, 2_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("missing branch registry entry")),
+        "branch GC must fail closed rather than guess the final branch has advanced: {err:?}"
+    );
+    for key in &seg_keys {
+        assert!(
+            store.get(key).unwrap().is_some(),
+            "segment {key} must NOT be physically deleted while the final branch's readability is unproven"
+        );
+    }
+    for key in &manifest_keys {
+        assert!(
+            store.get(key).unwrap().is_some(),
+            "manifest entry {key} must NOT be physically deleted while the final branch's readability is unproven"
+        );
+    }
+
+    // Once the ambiguity clears and the branch is genuinely discarded (the true final-branch-advances
+    // condition), deletion proceeds exactly like the non-conservative case.
+    store.disarm();
+    log.discard_branch(&source, &branch).unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 3_000).unwrap(),
+        4,
+        "once ambiguity clears and the final branch is genuinely discarded, below-floor segments become deletable"
+    );
+    for key in &seg_keys {
+        assert!(
+            store.get(key).unwrap().is_none(),
+            "segment {key} is physically removed once the final branch's advance is genuinely proven"
+        );
+    }
+    for key in &manifest_keys {
+        assert!(
+            store.get(key).unwrap().is_none(),
+            "manifest entry {key} is physically removed once the final branch's advance is genuinely proven"
+        );
+    }
+}
+
 #[test]
 #[allow(non_snake_case)]
 fn TestBranchInheritanceRetainedFloorMetadataFailClosed() {
