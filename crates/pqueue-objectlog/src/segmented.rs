@@ -1890,12 +1890,21 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(out)
     }
 
+    /// Read every registered source pin (bead pqueue-635500fb). This is the ONLY input
+    /// [`Self::branch_pins_segment`] uses to decide whether a below-floor source object may be deleted, so a
+    /// listed-but-unfetchable entry MUST fail closed the same way [`Self::gc_orphaned_branches`] already does
+    /// for its own registry read — silently skipping it here would let `expire_segments_through` and
+    /// [`Self::contiguous_manifest_deletion_watermark_from_entries`] treat a still-registered (and possibly
+    /// still-readable) branch as unpinned and reclaim an object it may need, on nothing more than a transient
+    /// store inconsistency between `list` and `get`.
     fn read_branch_registry(&self, source: &QueueKey) -> EngineResult<Vec<BranchMetadata>> {
         let prefix = format!("{}branches/", shard_prefix(source));
         let mut out = Vec::new();
         for key in self.store_list(&prefix)? {
             let Some(bytes) = self.store_get(&key)? else {
-                continue;
+                return Err(EngineError::Storage(format!(
+                    "missing branch registry entry {key}"
+                )));
             };
             out.push(serde_json::from_slice(&bytes).map_err(store_err)?);
         }

@@ -4291,6 +4291,166 @@ fn TestBranchGcFailClosedOnCorruptInheritanceMetadata() {
     );
 }
 
+/// TestBranchGcDeletesBelowFloorAfterLastReadableBranch (bead pqueue-635500fb): with TWO committed, live
+/// branches pinning overlapping-but-different ranges of a trimmed source, below-floor source objects stay
+/// retained as long as AT LEAST ONE of them can still read them — not just while every branch needs them.
+/// `branch_a` is cut at seq 0 (pins only the first segment); `branch_b` is cut at seq 3 (pins all four). Once
+/// `branch_a` is discarded, `branch_b` ALONE keeps every below-floor segment retained; only once `branch_b` is
+/// also discarded (no readable branch remains) do the segments become reclaimable.
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchGcDeletesBelowFloorAfterLastReadableBranch() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+
+    log.create_queue(&qdef()).unwrap();
+    for i in 0..4u64 {
+        log.enqueue(&source, &pushes(1), 0, 10 + i as i64 * 10)
+            .unwrap();
+        log.seal(&source, 0, 11 + i as i64 * 10).unwrap();
+    }
+
+    let branch_a_def = branch_qdef("gc-multi-readable-a");
+    let branch_a = QueueKey::new(
+        branch_a_def.tenant_id.clone(),
+        branch_a_def.queue_id.clone(),
+    );
+    log.branch(
+        &source,
+        &branch_a_def,
+        &CommandPosition::new(source.clone(), 0, 0),
+        60_000,
+        50,
+    )
+    .unwrap();
+
+    let branch_b_def = branch_qdef("gc-multi-readable-b");
+    let branch_b = QueueKey::new(
+        branch_b_def.tenant_id.clone(),
+        branch_b_def.queue_id.clone(),
+    );
+    log.branch(
+        &source,
+        &branch_b_def,
+        &CommandPosition::new(source.clone(), 0, 3),
+        60_000,
+        50,
+    )
+    .unwrap();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
+        .unwrap();
+
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 100).unwrap(),
+        0,
+        "every below-floor segment stays pinned while both branches remain readable"
+    );
+
+    // The LAST-readable-branch case: branch_a (which never needed seq 1..3) is discarded, leaving branch_b as
+    // the ONLY remaining readable branch. Every below-floor segment — including the ones branch_a never
+    // pinned — must still be retained purely because branch_b can still read them.
+    log.discard_branch(&source, &branch_a).unwrap();
+    assert!(
+        log.manifest_reclamation_candidates(&source, 3, 100)
+            .unwrap()
+            .is_empty(),
+        "with branch_a gone, branch_b alone still keeps every below-floor segment retained"
+    );
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 150).unwrap(),
+        0,
+        "GC deletes nothing while branch_b remains the last readable branch"
+    );
+    assert_eq!(
+        log.read_all(&branch_b)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+        "branch_b reads its full retained view after the GC pass"
+    );
+
+    // Once branch_b (the last readable branch) is also discarded, the below-floor segments finally become
+    // reclaimable via the existing trim path.
+    log.discard_branch(&source, &branch_b).unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 3, 200).unwrap(),
+        4,
+        "with no readable branch left, the below-floor segments become reclaimable"
+    );
+}
+
+/// TestBranchGcDeletesBelowFloorAfterLastReadableBranchFailClosed (bead pqueue-635500fb): a committed, live
+/// (still readable) branch's source-pin proof becomes unfetchable — `store.list` still returns its registry
+/// key, but `store.get` unexpectedly returns `None` for it, a storage inconsistency rather than a legitimate
+/// `discard_branch`. Below-floor source objects the branch can still read MUST stay retained: the trim path
+/// must fail closed (surface an error, delete nothing) rather than silently treat the branch as unpinned.
+#[test]
+#[allow(non_snake_case)]
+fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFailClosed() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+
+    log.create_queue(&qdef()).unwrap();
+    for _ in 0..4u64 {
+        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
+        log.seal(&source, 0, 10).unwrap();
+    }
+
+    let branch_def = branch_qdef("gc-fail-closed-readable");
+    let branch = QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 3),
+        1_000_000_000,
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(
+        log.read_all(&branch).unwrap().len(),
+        4,
+        "the branch is committed and fully readable before the fault is injected"
+    );
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
+        .unwrap();
+
+    let seg_key = segment_key_for(store.as_ref(), &source, 2);
+    let registry_key = branch_registry_key_of(&source, &branch);
+    // The branch is NOT discarded — its commit marker, manifest, and TTL are all still live. Only the
+    // source's pin proof becomes unfetchable, simulating a `list`/`get` inconsistency rather than a real
+    // release.
+    store.arm_missing_get(&registry_key);
+
+    let err = log.expire_segments_through(&source, 3, 2_000).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("missing branch registry entry")),
+        "the trim path must fail closed when a still-registered source pin cannot be fetched: {err:?}"
+    );
+    assert!(
+        store.get(&seg_key).unwrap().is_some(),
+        "the below-floor segment a readable branch may still need stays retained despite the fault"
+    );
+
+    store.disarm();
+    assert_eq!(
+        log.read_all(&branch)
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+        "the branch remains fully readable once the fault clears, proving nothing was lost"
+    );
+}
+
 #[test]
 #[allow(non_snake_case)]
 fn TestBranchInheritanceRetainedFloorMetadataFailClosed() {
