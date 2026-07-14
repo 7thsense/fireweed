@@ -3125,6 +3125,12 @@ fn write_read_horizon_cache_only<S: BlobStore>(store: &S, shard: &QueueKey, inde
         .unwrap();
 }
 
+fn strip_manifest_head_namespace<S: BlobStore>(store: &S, shard: &QueueKey) {
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        store.delete(&key).unwrap();
+    }
+}
+
 fn reclaimed_cached_writer_fixture() -> (
     std::sync::Arc<CountingBlobStore>,
     SegmentedObjectLog<std::sync::Arc<CountingBlobStore>>,
@@ -4662,6 +4668,54 @@ fn TestLegacyManifestBootstrapPreservesPermanentFenceProtocol() {
         err,
         EngineError::EpochFenced,
         "the stale writer is still fenced by the permanent head CAS"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestLegacyBootstrapNotRemoved() {
+    let (store, stale_owner, live_owner) = reclaimed_cached_writer_fixture();
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let expected_watermark = live_owner.read_read_horizon(&shard).unwrap();
+
+    strip_manifest_head_namespace(&store, &shard);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
+        None,
+        "removing the manifest-head namespace removes durable watermark markers"
+    );
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        expected_watermark,
+        "legacy bootstrap still restores the reclaimed-index fence from the compatibility cache"
+    );
+    let floor = reopened.read_retention_floor(&shard).unwrap().unwrap();
+    assert_eq!(
+        reopened
+            .read_from(&shard, floor.sequence + 1)
+            .unwrap()
+            .iter()
+            .map(|(position, _)| position.sequence)
+            .collect::<Vec<_>>(),
+        vec![4],
+        "legacy manifest fallback still recovers the live tail after the head namespace is stripped"
+    );
+
+    stale_owner.enqueue(&shard, &pushes(1), 0, 5_000).unwrap();
+    let objects_before = store.inner.object_count();
+    let err = stale_owner.seal(&shard, 0, 5_001).unwrap_err();
+    assert!(
+        matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+        "a stale cached writer targeting the reclaimed index must be rejected, got {err:?}"
+    );
+    assert_eq!(
+        store.inner.object_count(),
+        objects_before,
+        "the rejected stale writer must not publish a fresh segment or manifest object"
     );
 }
 
