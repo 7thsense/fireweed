@@ -740,6 +740,21 @@ fn store_err<E: std::fmt::Display>(e: E) -> EngineError {
     EngineError::Storage(e.to_string())
 }
 
+/// Construct the distinct fail-closed deleted-prefix error. Downstream callers (SQLite projection,
+/// engine compose recovery) can use this to build or identify the same deleted-manifest-prefix signal.
+pub fn deleted_manifest_prefix_error(from_seq: u64, floor_seq: u64) -> EngineError {
+    EngineError::Storage(format!(
+        "read below retention floor: from_seq {from_seq} <= reclaimed floor {floor_seq} \
+         (segments reclaimed; recovery resumes at floor+1)"
+    ))
+}
+
+/// Returns `true` when `err` is the distinct deleted-manifest-prefix fail-closed signal
+/// (as produced by [`fail_closed_below_floor`] / [`deleted_manifest_prefix_error`]).
+pub fn is_deleted_manifest_prefix_error(err: &EngineError) -> bool {
+    matches!(err, EngineError::Storage(msg) if msg.starts_with("read below retention floor"))
+}
+
 fn to_json<T: serde::Serialize>(v: &T) -> EngineResult<Vec<u8>> {
     serde_json::to_vec(v).map_err(store_err)
 }
@@ -1744,7 +1759,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// the horizon corresponds to a floor `<= floor_now`, so every below-horizon (hidden) entry is `<= floor`
     /// here — a concurrent trim that advances the watermark after the snapshot can therefore never hide a
     /// tombstone this guard would have let slip (it would have raised the floor this guard reads too).
-    fn fail_closed_below_floor(
+    /// The distinct fail-closed deleted-prefix signal: returned when a read's `from_seq` dips to or below
+    /// the reclaimed retention floor after the manifest deletion watermark has advanced. Callers can
+    /// distinguish this from generic storage errors via [`is_deleted_manifest_prefix_error`] or by
+    /// constructing/reporting it through [`deleted_manifest_prefix_error`].
+    pub fn fail_closed_below_floor(
         &self,
         shard: &QueueKey,
         from_seq: u64,
@@ -1754,11 +1773,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             && let Some(floor) = self.read_retention_floor(shard)?
             && from_seq <= floor.sequence
         {
-            return Err(EngineError::Storage(format!(
-                "read below retention floor: from_seq {from_seq} <= reclaimed floor {} \
-                 (segments reclaimed; recovery resumes at floor+1)",
-                floor.sequence
-            )));
+            return Err(deleted_manifest_prefix_error(from_seq, floor.sequence));
         }
         Ok(())
     }

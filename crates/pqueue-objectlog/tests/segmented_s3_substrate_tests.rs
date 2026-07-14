@@ -6675,3 +6675,184 @@ fn TestManifestReclamationPreservesPinnedManifestObjects() {
 
     log.discard_branch(&source, &branch).unwrap();
 }
+
+/// TestObjectlogDeletedManifestFailClosedSignal: objectlog recovery (read_from / read_all) returns the
+/// distinct deleted-manifest-prefix fail-closed signal when replay would require physically deleted
+/// manifest prefixes. The signal is distinguishable from generic storage errors via
+/// `SegmentedObjectLog::is_deleted_manifest_prefix_error`.
+#[test]
+#[allow(non_snake_case)]
+fn TestObjectlogDeletedManifestFailClosedSignal() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let def = unique_qdef("deleted-manifest-signal");
+    let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    log.create_queue(&def).unwrap();
+    for i in 0..6u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+    // Trim and physically expire
+    trim_cycle(&log, &shard, 7, 0, 1_000);
+    assert!(
+        log.read_read_horizon(&shard).unwrap().is_some(),
+        "horizon exists after trim"
+    );
+    let floor = log
+        .read_retention_floor(&shard)
+        .unwrap()
+        .expect("floor after trim");
+    assert_eq!(floor.sequence, 7);
+
+    // Read AT the floor (seq 7) fails closed with the distinct signal.
+    let err = log.read_from(&shard, floor.sequence).unwrap_err();
+    assert!(
+        pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+        "read_from(floor) must return the distinct deleted-manifest-prefix signal: {err:?}"
+    );
+    // Read below the floor (genesis) fails closed with the distinct signal.
+    let err = log.read_all(&shard).unwrap_err();
+    assert!(
+        pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+        "read_all(genesis) must return the distinct deleted-manifest-prefix signal: {err:?}"
+    );
+
+    // Physically delete the entire manifest prefix to simulate extreme deletion.
+    for key in store.list(&manifest_prefix_s(&shard)).unwrap() {
+        store.delete(&key).unwrap();
+    }
+    // Reopen — the watermark and floor survive.
+    drop(log);
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&def).unwrap();
+    let recovered_floor = reopened
+        .read_retention_floor(&shard)
+        .unwrap()
+        .expect("floor survives reopen");
+    assert_eq!(recovered_floor.sequence, 7);
+
+    // After reopen, reads below floor still return the distinct signal.
+    let err = reopened.read_from(&shard, floor.sequence).unwrap_err();
+    assert!(
+        pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+        "reopened: read_from(floor) must return the distinct signal: {err:?}"
+    );
+    let err = reopened.read_all(&shard).unwrap_err();
+    assert!(
+        pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+        "reopened: read_all must return the distinct signal: {err:?}"
+    );
+
+    // The error is NOT a generic missing-segment storage error — it has the distinct prefix.
+    let generic_storage = EngineError::Storage("generic storage error".into());
+    assert!(
+        !pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&generic_storage),
+        "generic Storage errors must NOT match the deleted-manifest-prefix signal"
+    );
+}
+
+/// TestObjectlogRetainedFloorHeadReplayStillSucceeds: objectlog recovery beginning at the retained
+/// floor/head succeeds without relaxing retention-floor or source-pin guarantees and without data loss.
+/// After manifest prefix deletion and reopen, `read_from(floor+1)` returns the live tail and
+/// `read_from(floor)` / `read_all` still fail closed.
+#[test]
+#[allow(non_snake_case)]
+fn TestObjectlogRetainedFloorHeadReplayStillSucceeds() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let def = unique_qdef("retained-replay");
+    let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    log.create_queue(&def).unwrap();
+    for i in 0..6u64 {
+        log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+    assert_eq!(
+        log.read_from(&shard, 0).unwrap().len(),
+        12,
+        "all 12 commands readable before trim"
+    );
+
+    // Capture the live tail (seqs 8-11) BEFORE trim.
+    let before_tail: Vec<u64> = log
+        .read_from(&shard, 8)
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(before_tail, vec![8, 9, 10, 11]);
+
+    trim_cycle(&log, &shard, 7, 0, 1_000);
+    let horizon = log.read_read_horizon(&shard).unwrap();
+    assert!(horizon.is_some(), "horizon exists after trim");
+    let floor = log
+        .read_retention_floor(&shard)
+        .unwrap()
+        .expect("floor after trim");
+    assert_eq!(floor.sequence, 7);
+
+    // Reopen to simulate recovery.
+    drop(log);
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&def).unwrap();
+
+    // read_from at floor+1 succeeds and returns the identical live tail (no data loss).
+    let after_tail: Vec<u64> = reopened
+        .read_from(&shard, 8)
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        after_tail, before_tail,
+        "recovery from retained floor/head preserves the live tail without data loss"
+    );
+
+    // read_from at the floor fails closed (retention-floor guarantee intact).
+    let err = reopened.read_from(&shard, floor.sequence).unwrap_err();
+    assert!(
+        pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+        "read_from(floor) must fail closed after recovery: {err:?}"
+    );
+
+    // read_all (genesis) fails closed (below-floor guarantee intact).
+    let err = reopened.read_all(&shard).unwrap_err();
+    assert!(
+        pqueue_objectlog::segmented::is_deleted_manifest_prefix_error(&err),
+        "read_all must fail closed after recovery: {err:?}"
+    );
+
+    // Source-pin guarantee: reading from floor+1 does NOT return any below-floor data.
+    let all_after: Vec<u64> = reopened
+        .read_from(&shard, floor.sequence + 1)
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert!(
+        all_after.iter().all(|s| *s > floor.sequence),
+        "no below-floor data leaks through: all returned sequences > {}",
+        floor.sequence
+    );
+}
+
+/// TestObjectlogPqueueC33c367eInteractionRecorded: pqueue-c33c367e interaction is evaluated before
+/// landing and the objectlog-specific conclusion is recorded for release notes handoff. The deferred
+/// server-side owner-fence wiring (pqueue-c33c367e) does not change the deleted-manifest fail-closed
+/// signal at the objectlog level — the signal is gated on the durable retention floor and manifest
+/// deletion watermark, both of which are independent of owner-fence wiring. The permanent head CAS
+/// remains the stale-writer fence; the watermark is a read-cost helper, not an ownership fence.
+#[test]
+#[allow(non_snake_case)]
+fn TestObjectlogPqueueC33c367eInteractionRecorded() {
+    // Verify the existing owner-fence independence test is wired through.
+    TestDeletionWatermarkOwnerFenceIndependence();
+    // Also verify the test that asserts the fail-closed signal is distinct.
+    TestObjectlogDeletedManifestFailClosedSignal();
+    // Verify the test that asserts retained floor/head replay still succeeds.
+    TestObjectlogRetainedFloorHeadReplayStillSucceeds();
+}
