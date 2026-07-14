@@ -5041,6 +5041,57 @@ fn TestPartialExpireVisibilityStateDoesNotRegressReadHorizonBounds() {
     TestManifestDeletionWatermarkReclaimCyclesMonotonic();
 }
 
+/// TestPartialExpireVisibilityStatePreservesFailClosedBelowFloorReads: a partial-expire visibility
+/// state must not reopen reclaimed below-floor reads when a durable watermark is present; the
+/// fail-closed guard still rejects `from_seq <= floor`, while `floor + 1` continues to read the live tail.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityStatePreservesFailClosedBelowFloorReads() {
+    let (store, cfg, source, seg_keys) = lagging_partial_expire_fixture();
+    assert_partial_expire_visibility_decision_fixture(&store, cfg, &source, &seg_keys);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    assert_eq!(
+        reopened
+            .read_retention_floor(&source)
+            .unwrap()
+            .unwrap()
+            .sequence,
+        15,
+        "the partial-expire fixture leaves a durable reclaimed floor in place"
+    );
+    assert!(
+        reopened.read_read_horizon(&source).unwrap().is_some(),
+        "the durable watermark remains present for the reopened queue"
+    );
+
+    let below_floor_err = reopened.read_all(&source).unwrap_err();
+    assert!(
+        matches!(
+            &below_floor_err,
+            EngineError::Storage(msg) if msg.contains("read below retention floor")
+        ),
+        "reads below the reclaimed floor must fail closed, got {below_floor_err:?}"
+    );
+
+    let floor_err = reopened.read_from(&source, 15).unwrap_err();
+    assert!(
+        matches!(
+            &floor_err,
+            EngineError::Storage(msg) if msg.contains("read below retention floor")
+        ),
+        "reads at the reclaimed floor must fail closed, got {floor_err:?}"
+    );
+
+    let live = reopened.read_from(&source, 16).unwrap();
+    assert_eq!(
+        live.iter().map(|(pos, _)| pos.sequence).collect::<Vec<_>>(),
+        vec![16],
+        "reads at floor + 1 continue to return the live tail"
+    );
+}
+
 #[test]
 #[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkStorageMonotonic() {
