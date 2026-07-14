@@ -4090,6 +4090,70 @@ mod manifest_deletion_watermark_tests {
 
     #[test]
     #[allow(non_snake_case)]
+    fn TestManifestDeletionWatermarkStorageBelowFloorAccepted() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 300 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 301 + i as i64 * 10).unwrap();
+        }
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+            .unwrap();
+
+        log.persist_manifest_deletion_watermark(&shard, 4, 1_000)
+            .unwrap();
+        assert_eq!(
+            log.read_read_horizon(&shard).unwrap(),
+            Some(1),
+            "a below-floor candidate advances the durable deletion watermark for the reclaimed prefix"
+        );
+        assert!(
+            store
+                .list(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_prefix(&shard))
+                .unwrap()
+                .into_iter()
+                .any(|key| key.ends_with("~watermark.json")),
+            "the durable deletion watermark is recorded in the manifest-head marker history"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestDeletionWatermarkStorageMonotonicNoRegression() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 400 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 401 + i as i64 * 10).unwrap();
+        }
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+            .unwrap();
+
+        log.persist_manifest_deletion_watermark(&shard, 4, 1_000)
+            .unwrap();
+        assert_eq!(log.read_read_horizon(&shard).unwrap(), Some(1));
+
+        log.persist_manifest_deletion_watermark(&shard, 1, 2_000)
+            .unwrap();
+        assert_eq!(
+            log.read_read_horizon(&shard).unwrap(),
+            Some(1),
+            "a stale or lower candidate cannot regress the durable deletion watermark"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn TestManifestDeletionWatermarkOwnerFenceIndependenceDocumented() {
         let store = std::sync::Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
