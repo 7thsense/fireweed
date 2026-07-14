@@ -4040,7 +4040,7 @@ mod manifest_deletion_watermark_tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn TestManifestDeletionWatermarkRacingWritersNeverRegress() {
+    fn TestManifestDeletionWatermarkMonotonic() {
         let store = std::sync::Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
         let shard = conformance_shard();
