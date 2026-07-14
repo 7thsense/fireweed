@@ -1065,15 +1065,17 @@ async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
         .expect("create branch pin");
 
     // Trim: floor advances to seq 1 (both old expired, checkpoint covers them). expire SKIPS the pinned seg0
-    // and deletes seg1. Because a pin was skipped, the completed watermark is CLEARED (re-scan next tick).
+    // and deletes seg1. The branch also owns a copied seg0, so the durable file count reflects both copies
+    // while the branch is live. Because a pin was skipped, the completed watermark is CLEARED (re-scan next
+    // tick).
     backend
         .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
         .expect("trim with a live pin");
     assert_eq!(floor_seq(&backend), Some(1), "floor advanced to seq 1");
     assert_eq!(
         count_seg_files(&root),
-        2,
-        "the pinned seg0 survives (skipped) + the fresh tail; only seg1 was reclaimed"
+        3,
+        "the pinned source seg0 survives, the branch owns its copied seg0, and the fresh tail remains"
     );
 
     // Idle re-tick while the pin is still live reclaims nothing new (seg0 stays pinned).
@@ -1082,8 +1084,8 @@ async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
         .expect("idle re-tick while pinned");
     assert_eq!(
         count_seg_files(&root),
-        2,
-        "the pinned seg0 is still retained while the branch is live"
+        3,
+        "the pinned source seg0 and the branch-owned copy both remain while the branch is live"
     );
 
     // Release the pin; the NEXT trim tick re-scans and reclaims the previously-pinned seg0.

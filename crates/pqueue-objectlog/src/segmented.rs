@@ -785,6 +785,13 @@ fn branch_metadata_key(branch: &QueueKey) -> String {
     format!("{}branch.json", shard_prefix(branch))
 }
 
+fn branch_segment_key(branch: &QueueKey, index: u64, first_seq: u64) -> String {
+    format!(
+        "{}branch-seg/e{index:020}/s{first_seq:020}.seg",
+        shard_prefix(branch)
+    )
+}
+
 /// The "branch creation in progress" sentinel (bead pqueue-b5cc2bc7): written EARLY (right after the source
 /// pin) and dropped when the `branch.json` commit marker lands. Its presence WITHOUT the commit marker means a
 /// PARTIAL/uncommitted branch — treated as non-existent by every segment-reading path, so a failed/partial
@@ -2130,7 +2137,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
                 // Skip a data segment entirely at/below the source floor — its object is RECLAIMED, so copying
                 // the tombstone would make the branch's read GET a deleted object. A straddling segment
-                // (visible_last_seq > floor) is retained and IS copied.
+                // (visible_last_seq > floor) is retained, but the branch gets its OWN copy of the segment
+                // bytes so later source-prefix deletion cannot strand the branch on a deleted source object.
                 if let Some(f) = source_floor
                     && Self::visible_last_seq(&entry) <= f
                 {
@@ -2145,6 +2153,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 copied.index = next_index;
                 if entry.last_seq > position.sequence {
                     copied.visible_last_seq = Some(position.sequence);
+                }
+                if let Some(seg_key) = entry.segment_key.as_ref() {
+                    let branch_seg_key =
+                        branch_segment_key(&branch, copied.index, copied.first_seq);
+                    let bytes = self
+                        .store_get(seg_key)?
+                        .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
+                    self.store_put_segment(&branch_seg_key, &bytes)?;
+                    copied.segment_key = Some(branch_seg_key);
                 }
                 self.commit_manifest_entry(&branch, &copied, true)?;
                 next_index += 1;
@@ -2298,10 +2315,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Reclamation reuses [`Self::cleanup_uncommitted_branch`] (objects first, source pin LAST), so it also
     /// RELEASES the orphaned source pin and the source becomes fully reclaimable again. Store-failure-tolerant +
     /// idempotent: a delete that fails surfaces its error and leaves the rest for the NEXT pass (never corrupts,
-    /// and a re-run over an already-cleaned orphan is a clean no-op). Branches copy no segment OBJECTS of their
-    /// own (their manifest entries reference the SOURCE's shared segments via the pin), so no source segment is
-    /// ever deleted here — only branch-local manifest/sentinel/queue objects and the source pin. Returns the
-    /// number of orphans reclaimed.
+    /// and a re-run over an already-cleaned orphan is a clean no-op). Branches own their copied segment OBJECTS,
+    /// so cleanup deletes only branch-local manifest/sentinel/queue/segment objects and the source pin — never
+    /// the source's segment prefix. Returns the number of orphans reclaimed.
     pub fn gc_orphaned_branches(&self, source: &QueueKey) -> EngineResult<u64> {
         // Exclude concurrent branch creation for the WHOLE classify+delete (see the doc comment + the guard's
         // definition). Outermost lock: taken before any `inner` acquisition, so no lock-order inversion.
