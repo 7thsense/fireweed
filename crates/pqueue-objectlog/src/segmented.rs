@@ -2412,6 +2412,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     error = Some(err);
                     break;
                 }
+                if let Err(err) = self.delete_manifest_entry(source, entry.index) {
+                    error = Some(err);
+                    break;
+                }
                 reclaimed_indices.push(entry.index);
                 reclaimed_through = Some(Self::visible_last_seq(entry));
             }
@@ -2444,13 +2448,6 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 now_ms,
                 &advance_entries,
             );
-        }
-        for index in reclaimed_indices {
-            if let Err(err) = self.delete_manifest_entry(source, index)
-                && error.is_none()
-            {
-                error = Some(err);
-            }
         }
         match error {
             Some(err) => Err(err),
@@ -3734,8 +3731,10 @@ mod manifest_deletion_watermark_tests {
         envelope, item, qdef as conformance_qdef, shard as conformance_shard,
     };
     use pqueue_engine::PushCommand;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering, Ordering};
+    use std::sync::atomic::{
+        AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering, Ordering,
+    };
+    use std::sync::{Arc, Mutex};
 
     fn pushes(n: u64) -> Vec<CommandEnvelope> {
         (0..n)
@@ -3784,6 +3783,67 @@ mod manifest_deletion_watermark_tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingDeleteBlobStore {
+        inner: InMemoryBlobStore,
+        delete_events: Mutex<Vec<String>>,
+        fail_delete_key: Mutex<Option<String>>,
+        failed_once: AtomicBool,
+    }
+
+    impl RecordingDeleteBlobStore {
+        fn delete_events(&self) -> Vec<String> {
+            self.delete_events.lock().unwrap().clone()
+        }
+
+        fn fail_delete_once(&self, key: &str) {
+            *self.fail_delete_key.lock().unwrap() = Some(key.to_owned());
+            self.failed_once.store(false, Ordering::Relaxed);
+        }
+
+        fn clear_delete_failure(&self) {
+            *self.fail_delete_key.lock().unwrap() = None;
+            self.failed_once.store(false, Ordering::Relaxed);
+        }
+    }
+
+    impl BlobStore for RecordingDeleteBlobStore {
+        fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+            self.inner.put(key, body)
+        }
+
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+            self.inner.put_if_absent(key, body)
+        }
+
+        fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> EngineResult<bool> {
+            self.delete_events.lock().unwrap().push(key.to_owned());
+            let should_fail = self
+                .fail_delete_key
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|fail_key| fail_key == key)
+                && !self.failed_once.swap(true, Ordering::Relaxed);
+            if should_fail {
+                return Err(EngineError::Conflict);
+            }
+            self.inner.delete(key)
+        }
+
+        fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+            self.inner.list(prefix)
+        }
+
+        fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+            self.inner.stats(prefix)
         }
     }
 
@@ -4186,6 +4246,162 @@ mod manifest_deletion_watermark_tests {
         assert!(
             store.get(&seg2_legacy_key).unwrap().is_none(),
             "the fully reclaimed below-floor legacy manifest copy is physically deleted after the full pass"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestExpireDeletesEligibleLegacyManifestObjectsAfterSegmentReclaim() {
+        let store = std::sync::Arc::new(RecordingDeleteBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+        }
+        let segment_keys: Vec<_> = log
+            .read_manifest(&shard)
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| entry.segment_key)
+            .collect();
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+            .unwrap();
+
+        assert_eq!(log.expire_segments_through(&shard, 5, 1_000).unwrap(), 3);
+
+        let events = store.delete_events();
+        for (index, segment_key) in segment_keys.iter().enumerate() {
+            let segment_pos = events
+                .iter()
+                .position(|key| key == segment_key)
+                .unwrap_or_else(|| panic!("segment delete should be recorded: {events:?}"));
+            let legacy_pos = events
+                .iter()
+                .position(|key| {
+                    key == &SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(
+                        &shard,
+                        index as u64,
+                    )
+                })
+                .unwrap_or_else(|| panic!("legacy manifest delete should be recorded: {events:?}"));
+            assert!(
+                segment_pos < legacy_pos,
+                "legacy manifest delete must follow its segment delete: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestHeadFenceRemainsOccupiedAfterReclaim() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let stale_writer = SegmentedObjectLog::open(store.clone(), cfg);
+        stale_writer.create_queue(&conformance_qdef()).unwrap();
+
+        let writer = SegmentedObjectLog::open(store.clone(), cfg);
+        writer.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..2u64 {
+            writer
+                .enqueue(&shard, &pushes(2), 0, 100 + i as i64 * 10)
+                .unwrap();
+            writer.seal(&shard, 0, 101 + i as i64 * 10).unwrap();
+        }
+        writer
+            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+            .unwrap();
+        assert_eq!(writer.expire_segments_through(&shard, 3, 1_000).unwrap(), 2);
+
+        let head_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_key(&shard, 1);
+        let head_bytes = store
+            .get(&head_key)
+            .unwrap()
+            .expect("authoritative manifest_head entry should remain occupied");
+        let head: ManifestEntry = serde_json::from_slice(&head_bytes).unwrap();
+        assert_eq!(
+            head.compacted_through_index,
+            Some(1),
+            "the occupied head entry is rewritten as a reclaimed marker"
+        );
+        assert!(
+            store
+                .get(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(
+                    &shard, 1
+                ))
+                .unwrap()
+                .is_none(),
+            "the trim removes only the legacy compatibility copy, not the authoritative head"
+        );
+
+        stale_writer.enqueue(&shard, &pushes(1), 0, 2_000).unwrap();
+        let err = stale_writer.seal(&shard, 0, 2_001).unwrap_err();
+        assert!(
+            matches!(err, EngineError::EpochFenced | EngineError::Conflict),
+            "the stale writer still collides with the occupied manifest_head address"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestManifestDeleteFailureDoesNotSkipUndeletedPrefix() {
+        let store = std::sync::Arc::new(RecordingDeleteBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 200 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 201 + i as i64 * 10).unwrap();
+        }
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+            .unwrap();
+
+        let failing_legacy = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 1);
+        store.fail_delete_once(&failing_legacy);
+        let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+        assert!(
+            matches!(err, EngineError::Conflict),
+            "a legacy manifest delete failure should surface so the pass can be retried"
+        );
+        assert_eq!(
+            log.read_read_horizon(&shard).unwrap(),
+            Some(0),
+            "the durable read horizon must stop before the undeleted legacy manifest gap"
+        );
+        assert!(
+            store
+                .get(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(
+                    &shard, 1
+                ))
+                .unwrap()
+                .is_some(),
+            "the undeleted legacy manifest entry must remain available for retry"
+        );
+
+        store.clear_delete_failure();
+        assert_eq!(
+            log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+            1,
+            "the retry resumes from the undeleted prefix and finishes reclaiming the remaining segment"
+        );
+        assert_eq!(log.read_read_horizon(&shard).unwrap(), Some(2));
+        assert!(
+            store
+                .get(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(
+                    &shard, 1
+                ))
+                .unwrap()
+                .is_none(),
+            "the retry physically removes the legacy manifest gap"
         );
     }
 
