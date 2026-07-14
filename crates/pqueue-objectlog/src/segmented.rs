@@ -4481,6 +4481,50 @@ mod manifest_deletion_watermark_tests {
 
     #[test]
     #[allow(non_snake_case)]
+    fn TestPartialExpireDoesNotHideUndeletedManifestEntries() {
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..3u64 {
+            log.enqueue(&shard, &pushes(2), 0, 10 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
+        }
+        let seg2_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 2);
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
+            .unwrap();
+
+        assert_eq!(
+            log.expire_segments_through(&shard, 4, 1_000).unwrap(),
+            2,
+            "a partial below-floor pass only reclaims the entries at or below the requested through_seq"
+        );
+        assert_eq!(
+            log.read_read_horizon(&shard).unwrap(),
+            Some(1),
+            "the recovered watermark stays below the undeleted below-floor manifest entry"
+        );
+        assert!(
+            store.get(&seg2_legacy_key).unwrap().is_some(),
+            "the below-floor manifest entry whose segment object was not deleted stays visible"
+        );
+
+        assert_eq!(
+            log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+            1,
+            "a later full pass still finds and reclaims the undeleted below-floor entry"
+        );
+        assert!(
+            store.get(&seg2_legacy_key).unwrap().is_none(),
+            "the final full pass physically deletes the previously undeleted below-floor manifest copy"
+        );
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn TestExpireDeletesEligibleLegacyManifestObjectsAfterSegmentReclaim() {
         let store = std::sync::Arc::new(RecordingDeleteBlobStore::default());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
