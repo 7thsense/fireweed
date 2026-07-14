@@ -5397,11 +5397,71 @@ fn TestManifestWatermarkReadPathOwnerFenceEvaluationDocumented() {
 
 /// TestPartialExpireVisibilityDecisionKeepsUndeletedBelowFloorSegments: a partial expire that leaves
 /// below-floor segment objects physically present must still let the reopened manifest/read path enumerate
-/// the first not-yet-deleted entry instead of hiding the whole prefix.
+/// the first not-yet-deleted entry instead of hiding the whole prefix. Also verifies the helper-level
+/// decision function directly.
 #[test]
 #[allow(non_snake_case)]
 fn TestPartialExpireVisibilityDecisionKeepsUndeletedBelowFloorSegments() {
+    existing_partial_expire_visibility_decision_keeps_undeleted();
+    helper_level_partial_expire_visibility_decision_keeps_undeleted();
+}
+
+fn existing_partial_expire_visibility_decision_keeps_undeleted() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+fn helper_level_partial_expire_visibility_decision_keeps_undeleted() {
+    // Construct a shard fixture with a durable retention floor above multiple segment entries,
+    // a durable manifest deletion watermark below at least one below-floor data entry, and an
+    // active partial reclaimed-through boundary below that entry.
+    let (store, cfg, source, _seg_keys) = lagging_partial_expire_fixture();
+
+    let floor = SegmentedObjectLog::open(store.clone(), cfg);
+    floor.create_queue(&qdef()).unwrap();
+    let floor_seq = floor
+        .read_retention_floor(&source)
+        .unwrap()
+        .map(|f| f.sequence);
+    let durable_watermark = floor.read_read_horizon(&source).unwrap();
+
+    assert_eq!(floor_seq, Some(15), "floor at seq 15");
+    assert_eq!(durable_watermark, Some(1), "watermark at index 1");
+
+    // Entry at index 2: below-floor data entry with visible_last_seq=5.
+    // With reclaimed_through=3 (< visible_last_seq=5): data check says NOT reclaimed → visible.
+    assert!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            2,     // entry_index
+            4,     // first_seq
+            5,     // visible_last_seq
+            false, // fence
+            None,  // retention_floor_through
+            None,  // compacted_through_index
+            durable_watermark,
+            3, // reclaimed_through (below visible_last_seq)
+            floor_seq,
+        ),
+        "below-floor undeleted data entry at index 2 must be visible when reclaimed_through \
+         is below its visible_last_seq"
+    );
+
+    // Same entry with reclaimed_through=7 (> visible_last_seq=5): data check says reclaimed
+    // BUT index 2 > watermark 1 → still visible due to watermark defense.
+    assert!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            2,
+            4,
+            5,
+            false,
+            None,
+            None,
+            durable_watermark,
+            7,
+            floor_seq,
+        ),
+        "below-floor undeleted data entry at index 2 must stay visible when above the durable \
+         watermark even if reclaimed_through advanced past visible_last_seq"
+    );
 }
 
 /// TestPartialExpireVisibilityDecisionReadRecoveryBootstrapCompatibility: recovery after the same partial

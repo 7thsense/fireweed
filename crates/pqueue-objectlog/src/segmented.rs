@@ -1227,6 +1227,54 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         entry.compacted_through_index.is_some()
     }
 
+    /// Decide whether a manifest entry is visible during a partial-expire enumeration pass.
+    ///
+    /// Accepts the durable manifest deletion watermark (`durable_watermark` index W), the caller's
+    /// active `reclaimed_through` sequence boundary, and the current `floor_seq`.
+    ///
+    /// Returns `true` when the entry must remain visible. Below-floor entries whose index is above
+    /// `W` remain visible even when the caller's `reclaimed_through` has advanced past their
+    /// `visible_last_seq` — the durable watermark is the definitive record of what has been proven
+    /// reclaimed, and a partial expire must not hide not-yet-deleted below-floor entries.
+    ///
+    /// Internal helper for partial-expiry enumeration; exported for fixture-level testing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn partial_expire_entry_visible(
+        entry_index: u64,
+        entry_first_seq: u64,
+        entry_visible_last_seq: u64,
+        entry_fence: bool,
+        entry_retention_floor_through: Option<u64>,
+        entry_compacted_through_index: Option<u64>,
+        durable_watermark: Option<u64>,
+        reclaimed_through: u64,
+        floor_seq: Option<u64>,
+    ) -> bool {
+        if entry_compacted_through_index.is_some() {
+            return false;
+        }
+        let Some(floor_seq) = floor_seq else {
+            return true;
+        };
+        if entry_retention_floor_through == Some(floor_seq) {
+            return true;
+        }
+        let reclaimed = match entry_retention_floor_through {
+            Some(v) => v < floor_seq,
+            None if entry_fence => entry_first_seq <= floor_seq,
+            None => entry_visible_last_seq <= reclaimed_through,
+        };
+        if !reclaimed {
+            return true;
+        }
+        if let Some(w) = durable_watermark
+            && entry_index > w
+        {
+            return true;
+        }
+        false
+    }
+
     fn contiguous_manifest_deletion_watermark_from_entries(
         &self,
         shard: &QueueKey,
@@ -4825,5 +4873,209 @@ mod manifest_deletion_watermark_tests {
         reopened.enqueue(&shard, &pushes(1), 0, 30).unwrap();
         let ack = reopened.seal(&shard, 0, 31).unwrap();
         assert_eq!(ack[0], CommandPosition::new(shard.clone(), 0, 4));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn TestPartialExpireVisibilityHelperKeepsUndeletedBelowFloorEntry() {
+        // Build the lagging-partial-expire fixture (8 data segments, 2 commands each = seqs 0..15,
+        // floor advanced to seq 15, first 2 segments physically deleted, durable watermark at index 1).
+        let store = std::sync::Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        let shard = conformance_shard();
+
+        log.create_queue(&conformance_qdef()).unwrap();
+        for i in 0..8u64 {
+            log.enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+                .unwrap();
+            log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+        }
+
+        // Advance floor to seq 15, then delete the first 2 segment objects and persist watermark.
+        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 15), 0)
+            .unwrap();
+        let entries = log.read_manifest(&shard).unwrap();
+        let seg_keys: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e.segment_key.clone())
+            .collect();
+        for seg_key in seg_keys.iter().take(2) {
+            assert!(store.delete(seg_key).unwrap());
+        }
+        log.persist_manifest_deletion_watermark(&shard, 3, 1_000)
+            .unwrap();
+        assert_eq!(
+            log.read_read_horizon(&shard).unwrap(),
+            Some(1),
+            "durable watermark at index 1 (only entries 0,1 reclaimed)"
+        );
+
+        // Entry at index 0: data, visible_last_seq=1, index 0 <= watermark 1 → NOT visible when
+        // reclaimed_through >= visible_last_seq.  With reclaimed_through=3 (> 1) the data check
+        // says reclaimed AND index <= watermark → not visible.
+        assert!(
+            !SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                0,        // entry_index
+                0,        // first_seq
+                1,        // visible_last_seq
+                false,    // fence
+                None,     // retention_floor_through
+                None,     // compacted_through_index
+                Some(1),  // durable_watermark
+                3,        // reclaimed_through
+                Some(15), // floor_seq
+            ),
+            "entry at reclaimed index 0 must be NOT visible when reclaimed_through covers it"
+        );
+
+        // Entry at index 1: data, visible_last_seq=3, index 1 <= watermark 1 → NOT visible
+        assert!(
+            !SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                1,
+                2,
+                3,
+                false,
+                None,
+                None,
+                Some(1),
+                3,
+                Some(15),
+            ),
+            "entry at reclaimed index 1 must be NOT visible when reclaimed_through covers it"
+        );
+
+        // Entry at index 2: data, visible_last_seq=5, index 2 > watermark 1.
+        // With reclaimed_through=3 (< visible_last_seq=5): data check says NOT reclaimed → visible.
+        assert!(
+            SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                2,
+                4,
+                5,
+                false,
+                None,
+                None,
+                Some(1),
+                3,
+                Some(15),
+            ),
+            "below-floor data entry at index 2 must be visible when reclaimed_through is below visible_last_seq"
+        );
+
+        // Entry at index 2 with reclaimed_through=7 (> visible_last_seq=5): data check says
+        // reclaimed BUT index 2 > watermark 1 → still visible (watermark defense).
+        assert!(
+            SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                2,
+                4,
+                5,
+                false,
+                None,
+                None,
+                Some(1),
+                7,
+                Some(15),
+            ),
+            "below-floor data entry at index 2 must stay visible when above the durable watermark even \
+             if reclaimed_through advanced past visible_last_seq"
+        );
+
+        // Entry at index 6 (above the floor, live data): always visible.
+        assert!(
+            SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                6,
+                12,
+                13,
+                false,
+                None,
+                None,
+                Some(1),
+                3,
+                Some(15),
+            ),
+            "above-floor live entry must always be visible"
+        );
+
+        // Floor-advance entry (superseded, below authoritative floor) at index 2 > watermark 1:
+        // reclaimed by data check but index above watermark → stays visible.
+        assert!(
+            SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                2,
+                0,
+                0,
+                false,
+                Some(3),
+                None,
+                Some(1),
+                3,
+                Some(15),
+            ),
+            "superseded floor-advance entry above the durable watermark must remain visible"
+        );
+
+        // Same entry at index 0 <= watermark 1: reclaimed by data check AND index below
+        // watermark → not visible.
+        assert!(
+            !SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                0,
+                0,
+                0,
+                false,
+                Some(3),
+                None,
+                Some(1),
+                3,
+                Some(15),
+            ),
+            "superseded floor-advance entry at or below the durable watermark must be not visible"
+        );
+
+        // Authoritative floor entry (retention_floor_through == floor_seq): always visible.
+        assert!(
+            SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                3,
+                0,
+                0,
+                false,
+                Some(15),
+                None,
+                Some(1),
+                3,
+                Some(15),
+            ),
+            "authoritative floor entry must always be visible"
+        );
+
+        // Reclaimed manifest marker (compacted_through_index is Some): never visible.
+        assert!(
+            !SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                0,
+                0,
+                0,
+                false,
+                None,
+                Some(0),
+                Some(1),
+                3,
+                Some(15),
+            ),
+            "reclaimed manifest marker must never be visible"
+        );
+
+        // No floor (None): every entry is visible.
+        assert!(
+            SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+                0,
+                0,
+                1,
+                false,
+                None,
+                None,
+                Some(1),
+                3,
+                None,
+            ),
+            "every entry must be visible when there is no durable floor"
+        );
     }
 }
