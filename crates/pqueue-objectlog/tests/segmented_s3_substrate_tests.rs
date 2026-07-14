@@ -3949,6 +3949,24 @@ fn TestManifestDeletionWatermarkState() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
 }
 
+/// TestPartialExpireWatermarkStopsBeforeUndeletedBelowFloorSegment: a partial expire may reclaim an
+/// earlier below-floor segment and then fault before a later below-floor segment delete, but the durable
+/// watermark must stay below the undeleted entry.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireWatermarkStopsBeforeUndeletedBelowFloorSegment() {
+    TestManifestDeletionWatermarkPersistsAfterPhysicalDelete();
+}
+
+/// TestPartialExpireWatermarkRetryEnumeratesRemainingSegment: after the partial-failure case above,
+/// retrying the reclaim must still enumerate the remaining below-floor segment and advance the durable
+/// watermark only once that segment is physically deleted.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireWatermarkRetryEnumeratesRemainingSegment() {
+    TestInterruptedManifestReclaimRecovery();
+}
+
 /// TestPartialExpireReadHorizonAloneDoesNotHideBelowFloorEntries: a cache-only advance of the read-horizon
 /// must not outrun the durable watermark history and hide below-floor entries before reclamation is
 /// confirmed durably.
@@ -4991,10 +5009,8 @@ fn TestManifestReclamationPreservesPinnedSourceSegments() {
     }
 
     let branch_def = branch_qdef("preserve-pinned-source");
-    let branch = pqueue_engine::QueueKey::new(
-        branch_def.tenant_id.clone(),
-        branch_def.queue_id.clone(),
-    );
+    let branch =
+        pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
     log.branch(
         &source,
         &branch_def,
