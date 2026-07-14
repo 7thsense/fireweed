@@ -3134,6 +3134,12 @@ fn write_read_horizon_cache_only<S: BlobStore>(store: &S, shard: &QueueKey, inde
         .unwrap();
 }
 
+fn strip_manifest_head_namespace<S: BlobStore>(store: &S, shard: &QueueKey) {
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        store.delete(&key).unwrap();
+    }
+}
+
 fn reclaimed_cached_writer_fixture() -> (
     std::sync::Arc<CountingBlobStore>,
     SegmentedObjectLog<std::sync::Arc<CountingBlobStore>>,
