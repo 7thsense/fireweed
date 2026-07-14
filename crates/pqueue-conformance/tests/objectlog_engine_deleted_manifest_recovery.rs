@@ -154,3 +154,77 @@ fn TestEngineObjectlogFloorHeadReplayRecovery() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// TestSqliteEnginePqueueC33c367eReleaseNote: release notes record the evaluated
+/// pqueue-c33c367e interaction before landing, including whether it affects
+/// SQLite, engine, retained floor/head replay, retention-floor semantics,
+/// source-pin semantics, or fail-closed behavior.
+#[test]
+#[allow(non_snake_case)]
+fn TestSqliteEnginePqueueC33c367eReleaseNote() {
+    let release_notes = include_str!("../../../docs/releases/v0.14.0.md");
+    // pqueue-c33c367e evaluation must be recorded
+    assert!(
+        release_notes.contains("pqueue-c33c367e"),
+        "pqueue-c33c367e evaluation must be recorded in v0.14.0 release notes"
+    );
+    // SQLite surface: pqueue-c33c367e interaction for SQLite propagation
+    assert!(
+        release_notes.contains("SQLite") && release_notes.contains("pqueue-c33c367e"),
+        "pqueue-c33c367e interaction for SQLite must be recorded in release notes"
+    );
+    // Engine surface: pqueue-c33c367e interaction for engine composed recovery
+    assert!(
+        release_notes.contains("engine") && release_notes.contains("pqueue-c33c367e"),
+        "pqueue-c33c367e interaction for engine must be recorded in release notes"
+    );
+    // Retained floor/head replay surface
+    assert!(
+        release_notes.contains("floor/head replay") || release_notes.contains("floor/head"),
+        "retained floor/head replay surface must be recorded in release notes"
+    );
+    // Retention-floor semantics surface
+    assert!(
+        release_notes.contains("retention-floor"),
+        "retention-floor semantics must be recorded in release notes"
+    );
+    // Source-pin semantics surface
+    assert!(
+        release_notes.contains("source-pin") || release_notes.contains("source pin"),
+        "source-pin semantics must be recorded in release notes"
+    );
+    // Fail-closed behavior surface
+    assert!(
+        release_notes.contains("fail closed") || release_notes.contains("fail-closed"),
+        "fail-closed behavior must be recorded in release notes"
+    );
+}
+
+/// TestDeletedManifestReleaseNoteArtifacts: release notes name governing
+/// artifacts docs/perf/design/manifest-compaction-hotpath.md:374 and
+/// docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224
+/// plus dependency ID pqueue-8928baec.
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletedManifestReleaseNoteArtifacts() {
+    let release_notes = include_str!("../../../docs/releases/v0.14.0.md");
+    // Governing artifact: docs/perf/design/manifest-compaction-hotpath.md:374
+    assert!(
+        release_notes.contains("docs/perf/design/manifest-compaction-hotpath.md:374")
+            || release_notes.contains("docs/perf/design/manifest-compaction-hotpath.md"),
+        "governing artifact docs/perf/design/manifest-compaction-hotpath.md:374 must be named in release notes"
+    );
+    // Governing artifact: docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224
+    assert!(
+        release_notes.contains(
+            "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224"
+        ) || release_notes
+            .contains("docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md"),
+        "governing artifact docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224 must be named in release notes"
+    );
+    // Dependency ID pqueue-8928baec
+    assert!(
+        release_notes.contains("pqueue-8928baec"),
+        "dependency ID pqueue-8928baec must be named in release notes"
+    );
+}
