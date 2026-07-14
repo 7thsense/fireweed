@@ -4972,3 +4972,67 @@ fn TestManifestDeletionWatermarkContiguousPrefixOnly() {
         "once the gap clears, the watermark only advances to the first newly reclaimed entry"
     );
 }
+
+/// TestManifestReclamationPreservesPinnedSourceSegments: a live branch pin keeps the referenced source
+/// segment physically readable while the reclaim pass deletes the eligible unpinned below-floor segments.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestReclamationPreservesPinnedSourceSegments() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+
+    for i in 0..3u64 {
+        log.enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    let branch_def = branch_qdef("preserve-pinned-source");
+    let branch = pqueue_engine::QueueKey::new(
+        branch_def.tenant_id.clone(),
+        branch_def.queue_id.clone(),
+    );
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 1),
+        60_000,
+        30,
+    )
+    .unwrap();
+
+    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 5, 31).unwrap(),
+        2,
+        "the reclaim pass deletes only the unpinned below-floor segments"
+    );
+
+    assert!(
+        store
+            .get(&segment_key_for(store.as_ref(), &source, 0))
+            .unwrap()
+            .is_some(),
+        "the branch-pinned source segment stays physically readable"
+    );
+    assert!(
+        store
+            .get(&segment_key_for(store.as_ref(), &source, 2))
+            .unwrap()
+            .is_none(),
+        "the eligible unpinned below-floor segment is reclaimed"
+    );
+    assert!(
+        store
+            .get(&segment_key_for(store.as_ref(), &source, 4))
+            .unwrap()
+            .is_none(),
+        "the later eligible unpinned below-floor segment is also reclaimed"
+    );
+
+    log.discard_branch(&source, &branch).unwrap();
+}
