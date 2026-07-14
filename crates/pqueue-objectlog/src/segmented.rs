@@ -1059,7 +1059,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         horizon: Option<u64>,
     ) -> EngineResult<Vec<String>> {
         let head_prefix = Self::manifest_head_prefix(shard);
-        let head_keys = self.list_commit_keys_at(&head_prefix, horizon)?;
+        let head_keys = self
+            .list_commit_keys_at(&head_prefix, horizon)?
+            .into_iter()
+            .filter(|key| !key.ends_with("~watermark.json"))
+            .collect::<Vec<_>>();
         if head_keys.is_empty() {
             self.list_commit_keys_at(&Self::manifest_prefix(shard), horizon)
         } else {

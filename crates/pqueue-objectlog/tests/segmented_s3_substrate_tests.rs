@@ -3116,6 +3116,15 @@ fn delete_watermark_markers_only<S: BlobStore>(store: &S, shard: &QueueKey) {
     }
 }
 
+fn delete_manifest_head_data_only<S: BlobStore>(store: &S, shard: &QueueKey) {
+    for key in store.list(&manifest_head_prefix_s(shard)).unwrap() {
+        if !key.ends_with("~watermark.json") {
+            store.delete(&key).unwrap();
+        }
+    }
+    store.delete(&read_horizon_key_s(shard)).unwrap();
+}
+
 fn write_read_horizon_cache_only<S: BlobStore>(store: &S, shard: &QueueKey, index: u64) {
     store
         .put(
@@ -4662,6 +4671,82 @@ fn TestLegacyManifestBootstrapPreservesPermanentFenceProtocol() {
         err,
         EngineError::EpochFenced,
         "the stale writer is still fenced by the permanent head CAS"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestLegacyManifestBootstrapPreservesFenceCompatibility() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let qdef = qdef();
+
+    let owner_a = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_a.create_queue(&qdef).unwrap();
+    for i in 0..4u64 {
+        owner_a
+            .enqueue(&shard, &pushes(2), 0, (i as i64 + 1) * 10)
+            .unwrap();
+        owner_a.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
+    }
+
+    let owner_b = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_b.create_queue(&qdef).unwrap();
+    assert_eq!(owner_b.acquire_epoch(&shard, 100).unwrap(), 1);
+    owner_b.enqueue(&shard, &pushes(2), 1, 110).unwrap();
+    owner_b.seal(&shard, 1, 111).unwrap();
+
+    trim_cycle(&owner_b, &shard, 3, 1, 1_000);
+    let expected_tail = owner_b
+        .read_from(&shard, 4)
+        .unwrap()
+        .into_iter()
+        .map(|(position, envelope)| {
+            (
+                position.sequence,
+                position.backend_epoch,
+                serde_json::to_vec(&envelope).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_epoch = owner_b.current_epoch(&shard).unwrap();
+    let expected_horizon = owner_b.read_read_horizon(&shard).unwrap();
+
+    delete_manifest_head_data_only(store.as_ref(), &shard);
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef).unwrap();
+    assert_eq!(
+        reopened.read_read_horizon(&shard).unwrap(),
+        expected_horizon,
+        "the durable reclaimed-index fence is reconstructed from marker history"
+    );
+    assert_eq!(
+        reopened
+            .read_from(&shard, 4)
+            .unwrap()
+            .into_iter()
+            .map(|(position, envelope)| {
+                (
+                    position.sequence,
+                    position.backend_epoch,
+                    serde_json::to_vec(&envelope).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        expected_tail,
+        "legacy bootstrap recovers the same live tail after the head namespace is removed"
+    );
+    assert_eq!(
+        reopened.current_epoch(&shard).unwrap(),
+        expected_epoch,
+        "legacy-only bootstrap preserves the recovered epoch"
+    );
+    assert_eq!(
+        reopened.acquire_epoch(&shard, 5_000).unwrap(),
+        expected_epoch + 1,
+        "a fresh owner can continue from the legacy-bootstrapped recovered epoch"
     );
 }
 
