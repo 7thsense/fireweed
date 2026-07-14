@@ -212,6 +212,24 @@ fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::Queue
     let _ = store.delete(&read_horizon_key_s(shard));
 }
 
+fn delete_watermark_markers_only<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
+    for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
+        for key in store.list(&prefix).unwrap() {
+            let Some(bytes) = store.get(&key).unwrap() else {
+                continue;
+            };
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if parsed
+                .get("compacted_through_index")
+                .and_then(|v| v.as_u64())
+                .is_some()
+            {
+                store.delete(&key).unwrap();
+            }
+        }
+    }
+}
+
 fn seg_pushes(n: u64) -> Vec<pqueue_engine::CommandEnvelope> {
     (0..n)
         .map(|i| {
@@ -870,7 +888,7 @@ fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
 
 #[test]
 #[allow(non_snake_case)]
-fn TestLegacyManifestBootstrapWithoutDeletionWatermarkMetadata() {
+fn TestLegacyManifestBootstrapStillWorks() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let shard = sk("legacy", "bootstrap");
@@ -881,16 +899,29 @@ fn TestLegacyManifestBootstrapWithoutDeletionWatermarkMetadata() {
     log.enqueue(&shard, &segmented_pushes(2), 0, 10).unwrap();
     log.seal(&shard, 0, 11).unwrap();
 
+    store
+        .put(
+            &read_horizon_key_s(&shard),
+            &serde_json::to_vec(&serde_json::json!({ "index": 0u64 })).unwrap(),
+        )
+        .unwrap();
+    delete_watermark_markers_only(store.as_ref(), &shard);
+
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef).unwrap();
     assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_none(),
-        "legacy manifests without a deletion watermark bootstrap as pre-reclamation state"
+        reopened.read_read_horizon(&shard).unwrap().is_some(),
+        "legacy metadata still carries the cached watermark value"
     );
     assert_eq!(
-        reopened.read_all(&shard).unwrap().len(),
-        2,
-        "legacy bootstrap still reads the committed manifest tail"
+        reopened
+            .read_from(&shard, 0)
+            .unwrap()
+            .iter()
+            .map(|(pos, _)| pos.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "legacy bootstrap keeps the physically present below-floor manifest entries visible when marker history is missing"
     );
     assert_eq!(
         reopened.current_epoch(&shard).unwrap(),

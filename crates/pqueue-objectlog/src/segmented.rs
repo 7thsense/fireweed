@@ -1426,15 +1426,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     /// The manifest-deletion watermark used by read/recovery visibility. If durable watermark markers
-    /// exist, they alone define the visible horizon; the cached `read_horizon.json` blob only bootstraps
-    /// legacy queues that have no marker history yet.
+    /// exist, they alone define the visible horizon. The cached `read_horizon.json` blob is intentionally
+    /// ignored here: legacy shards can still have physically present below-floor manifests, so cache-only
+    /// state must not hide them during recovery or manifest enumeration.
     fn visible_manifest_deletion_watermark(&self, shard: &QueueKey) -> EngineResult<Option<u64>> {
-        let durable = self.read_manifest_deletion_watermark(shard)?;
-        if durable.is_some() {
-            Ok(durable)
-        } else {
-            self.read_horizon_cache(shard)
-        }
+        self.read_manifest_deletion_watermark(shard)
     }
 
     /// Acquire the queue at a NEW, strictly-greater epoch by publishing a **fence entry** to the manifest
