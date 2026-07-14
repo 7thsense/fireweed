@@ -363,12 +363,27 @@ An adversarial codex pass against the code corrected three load-bearing claims:
 
 codex noted S3 LIST natively supports `StartAfter` — the `BlobStore` trait simply doesn't expose it. Adding `list_from(prefix, start_after_key)` (S3-native; trivial filter for InMemory/LocalFs) unlocks a design that **fully bounds per-read cost with ZERO hot-path change and provable safety**:
 
+### 6.1 Permanent head contract for delete-safe compaction
+
+The delete-safe version of this design uses a **permanent head object family** under `manifest_head/{version:020}.json`. The durable head payload is `ManifestHeadBlob { current_epoch, next_seq, next_manifest_index, retention_floor_through }`:
+
+- `current_epoch` is the owner epoch recovered for the next write attempt.
+- `next_seq` is the next command sequence that seal/recovery must resume from.
+- `next_manifest_index` is the authoritative tail index to target next.
+- `retention_floor_through` is the durable floor watermark that bounds reclamation.
+
+The head update primitive is `update_manifest_head_if_version(prefix, expected_version, value)`: read the current versioned head, require the caller's `expected_version` to match, then create the next version key with `put_if_absent`. If the version has moved or the create-only write loses, the caller sees a retryable conflict and must re-read the head. That is the linearizable conditional-update/head contract this design needs.
+
+`put_if_absent` on the append-only `manifest/{index:020}.json` namespace is not enough if old manifest indexes can be removed. Once an index address is freed, a stale writer can still win create-only CAS at that address and false-ack a phantom entry below the live epoch tail. The permanent head object avoids that failure mode by moving linearizability to a separate, never-reused head key; the manifest index namespace itself remains the durable append log, not the fence.
+
 - Keep every below-floor manifest index **OCCUPIED** (never freed) ⇒ the `put_if_absent` index-collision fence is intact byte-for-byte ⇒ the O(1) seal (no list-before-seal, 1144-1145) is untouched ⇒ **no stale-writer false-ack is even possible** (correctness never depends on the lease/TTL or the deferred pqueue-c33c367e wiring).
 - Maintain a durable monotonic **`compacted_through_index` watermark**, advanced by compaction only up to the highest index fully below the **epoch-fenced retention floor** (so W < lowest LIVE index always; a stale/low W only costs a few extra enumerated keys, never skips live data; W can never exceed the floor so it can never hide a live entry).
 - Treat `read_horizon.json` as a cache and the append-only `manifest_head/*~watermark.json` marker history as the durable source of truth, so restart/reload reconstructs the highest contiguous reclaimed index even if a stale writer races a lower blob write.
 - `recover_manifest` and `read_manifest` call `list_from(manifest/, {W})` ⇒ enumerate **only indices > W** ⇒ **O(live) LIST + O(live) GET**. Recovery tail is still `max` of the ranged list (the tail is always > floor > W, so it is never skipped).
 - Optional **mark-dead** overwrite of below-W entries shrinks per-entry storage BYTES (not count).
 - Owner-fence evaluation for `pqueue-c33c367e`: the current index-CAS protocol still must keep below-floor manifest addresses occupied, so it cannot support delete-only compaction safely. That means `pqueue-c33c367e` does **not** change the watermark design: the permanent head stays the stale-writer fence, and the watermark remains a read-cost helper, not the ownership fence. Any cheaper delete-only variant is therefore gated on the post-head-CAS redesign above, not on the current protocol.
+
+This preserves TD-004 ack-after-manifest semantics: a command is still acked only after its segment object and the corresponding manifest/head commit are durable, and the redesign does not relax AC-TXN-3 replay, behind-image fail-closed, branch inheritance, retention floor, or epoch fencing.
 
 **Residual:** object COUNT still grows (addresses are never freed — the price of the write-once fence), but as tiny, never-read, never-listed markers ⇒ a slow, modest storage cost. Fully bounding object COUNT requires the redesigned fencing/commit protocol above (Option 2), a much larger change.
 
