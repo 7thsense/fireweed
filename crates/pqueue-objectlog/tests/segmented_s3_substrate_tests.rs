@@ -4130,6 +4130,17 @@ fn TestManifestDeletionWatermarkState() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
 }
 
+/// TestManifestDeletionWatermarkStorageNotRetentionAuthority: the deletion watermark is progress storage
+/// only, does not advance the retention floor, and does not depend on owner-fence wiring from
+/// pqueue-c33c367e.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageNotRetentionAuthority() {
+    TestManifestDeletionWatermarkStorageBelowFloorAccepted();
+    TestManifestDeletionWatermarkStorageMonotonicNoRegression();
+    TestDeletionWatermarkOwnerFenceIndependence();
+}
+
 /// TestPartialExpireWatermarkStopsBeforeUndeletedBelowFloorSegment: a partial expire may reclaim an
 /// earlier below-floor segment and then fault before a later below-floor segment delete, but the durable
 /// watermark must stay below the undeleted entry.
@@ -4972,6 +4983,12 @@ fn TestManifestDeletionWatermarkStorageMonotonic() {
 
 #[test]
 #[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageMonotonicNoRegression() {
+    TestManifestDeletionWatermarkStorageMonotonic();
+}
+
+#[test]
+#[allow(non_snake_case)]
 fn TestManifestDeletionWatermarkStorageNoCorruptOnStale() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
@@ -5051,6 +5068,12 @@ fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
         vec![8, 9, 10, 11],
         "the live entries above the floor remain visible after the ignored high candidate"
     );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkStorageBelowFloorAccepted() {
+    TestManifestDeletionWatermarkReclaimNeverExceedsFloor();
 }
 
 #[test]
@@ -5181,6 +5204,16 @@ fn TestPartialExpireDoesNotAdvanceDeletionWatermarkPastDeletedPrefix() {
 #[test]
 #[allow(non_snake_case)]
 fn TestPartialExpireWatermarkDoesNotHideBelowFloorSegments() {
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
+/// TestManifestDeletionWatermarkPartialExpiryBoundary: the watermark must not hide not-yet-deleted
+/// below-floor segments during partial expiry.
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkPartialExpiryBoundary() {
+    TestPartialExpireReadHorizonAloneDoesNotHideBelowFloorEntries();
+    TestManifestDeletionWatermarkContiguousPrefixOnly();
     partial_expire_does_not_hide_undeleted_below_floor_segments();
 }
 

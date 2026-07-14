@@ -2857,12 +2857,13 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Persist the manifest-deletion watermark after a caller has already confirmed deletion progress.
     ///
-    /// This is the bounded state-transition surface future reclamation code should use: the caller must
-    /// perform the manifest-object deletion work first, then call this helper to durably record the
-    /// reclaimed prefix. If no below-floor manifest deletion made progress, the monotonic update is a no-op.
-    /// Correctness here does not depend on the deferred pqueue-c33c367e owner-fence wiring; the permanent
-    /// head CAS remains the stale-writer fence, and this helper only records already-reclaimed manifest
-    /// history.
+    /// This is progress storage only: the caller must delete the manifest objects first, then call this
+    /// helper to durably record the reclaimed prefix. It does not advance `read_retention_floor`, does not
+    /// act as retention authority, and must not be used to hide still-present below-floor entries during a
+    /// partial-expiry pass. If no below-floor manifest deletion made progress, the monotonic update is a
+    /// no-op. Correctness here does not depend on the deferred pqueue-c33c367e owner-fence wiring; the
+    /// permanent head CAS remains the stale-writer fence, and this helper only records already-reclaimed
+    /// manifest history.
     pub fn persist_manifest_deletion_watermark(
         &self,
         shard: &QueueKey,
