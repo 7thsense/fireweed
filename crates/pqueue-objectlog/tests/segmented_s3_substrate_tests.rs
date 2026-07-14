@@ -3940,6 +3940,15 @@ fn partial_expire_does_not_hide_undeleted_below_floor_segments() {
     }
 }
 
+#[test]
+#[allow(non_snake_case)]
+fn TestManifestDeletionWatermarkState() {
+    TestManifestDeletionWatermarkContiguousPrefixOnly();
+    TestManifestDeletionWatermarkPersistsAfterPhysicalDelete();
+    TestDeletionWatermarkOwnerFenceIndependence();
+    partial_expire_does_not_hide_undeleted_below_floor_segments();
+}
+
 /// TestPartialExpireReadHorizonAloneDoesNotHideBelowFloorEntries: a cache-only advance of the read-horizon
 /// must not outrun the durable watermark history and hide below-floor entries before reclamation is
 /// confirmed durably.
