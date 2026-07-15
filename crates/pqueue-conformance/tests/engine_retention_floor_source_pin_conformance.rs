@@ -292,6 +292,243 @@ async fn source_pin_blocks_reclamation_impl(root: &Path, mode: ProjectionMode) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Bead pqueue-d7134740: engine live source pin survives reopen + pinned data
+// readable + release fail-closed (governing:
+//  docs/perf/design/manifest-compaction-hotpath.md:374,
+//  docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224).
+// ---------------------------------------------------------------------------
+
+async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMode) {
+    let tag = match mode {
+        ProjectionMode::HybridStrict => "strict",
+        ProjectionMode::HybridAsync => "async",
+    };
+
+    // --- Phase 1: setup + trim with live pin ---
+    let backend = make_mode(root, mode).recover().expect("recover");
+    backend.create_queue(qdef()).await.unwrap();
+
+    // Push 4 old commands (seq 0..3) at early timestamps so they expire.
+    push_commands(&backend, "elpr-old", 4, 10).await;
+    drain(&backend);
+
+    // Create a branch pin at seq 0 protecting the first segment.
+    let pin_pos = pqueue_engine::CommandPosition::new(qkey(), 0, 0);
+    backend
+        .with_log(|l| l.branch(&qkey(), &branch_def(), &pin_pos, 1_000_000_000_000, 10_000))
+        .expect("create branch");
+
+    // Push 2 fresh commands (seq 4..5) within retention for a readable tail.
+    push_commands(&backend, "elpr-fresh", 2, 1_000_000).await;
+    drain(&backend);
+
+    // Trim: pin protects seq 0, unpinned seq 1..3 reclaimed, floor advances.
+    backend
+        .trim_reclaimable_segments(&qkey(), 1_000, ts(1_000_000))
+        .expect("trim with live pin");
+
+    // EXACT PINNED BOUNDARY: lowest_branch_pinned_below identifies seq 0.
+    let pinned_before = backend
+        .with_log(|l| l.lowest_branch_pinned_below(&qkey(), 3, 10_000))
+        .expect("lowest_branch_pinned_below before reopen");
+    assert_eq!(
+        pinned_before,
+        Some(0),
+        "{tag}: exact pinned seq before reopen is 0"
+    );
+
+    // Floor advanced through reclaimed unpinned segments (1..3).
+    let floor_before = floor_seq(&backend).expect("floor before reopen");
+    assert_eq!(
+        floor_before, 3,
+        "{tag}: floor at last reclaimed seq 3 before reopen"
+    );
+
+    // Verify pinned data is accessible via the branch queue before reopen.
+    let branch_before = backend
+        .read_from(&branch_qkey(), None, 100)
+        .await
+        .expect("{tag}: branch queue readable before reopen");
+    let branch_seqs_before: Vec<u64> = branch_before
+        .entries
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert!(
+        branch_seqs_before.contains(&0),
+        "{tag}: pinned seq 0 readable via branch before reopen, got seqs {branch_seqs_before:?}"
+    );
+
+    // Tail readable after trim.
+    let tail_before = backend
+        .read_from(&qkey(), floor_pos(&backend), 100)
+        .await
+        .expect("{tag}: tail readable before reopen");
+    let tail_seqs_before: Vec<u64> = tail_before
+        .entries
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        tail_seqs_before,
+        vec![4, 5],
+        "{tag}: tail seq 4..5 before reopen"
+    );
+
+    drop(backend);
+
+    // --- Phase 2: REOPEN with live pin ---
+    let reopened = make_mode(root, mode).recover().expect("recover");
+
+    // AC1: exact pinned boundary survives reopen.
+    let pinned_after = reopened
+        .with_log(|l| l.lowest_branch_pinned_below(&qkey(), 3, 10_000))
+        .expect("lowest_branch_pinned_below after reopen");
+    assert_eq!(
+        pinned_after,
+        Some(0),
+        "{tag}: pinned seq 0 survives reopen (AC1)"
+    );
+
+    // AC1: persisted floor survives reopen.
+    let floor_after = floor_seq(&reopened).expect("floor after reopen");
+    assert_eq!(floor_after, 3, "{tag}: floor persisted after reopen (AC1)");
+
+    // AC1: retained tail is readable after reopen.
+    let tail_after = reopened
+        .read_from(&qkey(), floor_pos(&reopened), 100)
+        .await
+        .expect("{tag}: tail readable after reopen (AC1)");
+    let tail_seqs_after: Vec<u64> = tail_after.entries.iter().map(|(p, _)| p.sequence).collect();
+    assert_eq!(
+        tail_seqs_after,
+        vec![4, 5],
+        "{tag}: retained tail seq 4..5 readable after reopen (AC1)"
+    );
+
+    // AC2: below-floor pinned source data remains readable via the branch queue.
+    // The branch holds a durable copy of the pinned source segment (seq 0).
+    let branch_after = reopened
+        .read_from(&branch_qkey(), None, 100)
+        .await
+        .expect("{tag}: branch queue readable after reopen (AC2)");
+    let branch_seqs_after: Vec<u64> = branch_after
+        .entries
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert!(
+        branch_seqs_after.contains(&0),
+        "{tag}: pinned seq 0 readable via branch after reopen (AC2), got seqs {branch_seqs_after:?}"
+    );
+
+    // --- Phase 3: RELEASE pin + reclaim ---
+    reopened
+        .with_log(|l| l.discard_branch(&qkey(), &branch_qkey()))
+        .expect("discard branch");
+
+    reopened
+        .trim_reclaimable_segments(&qkey(), 1_000, ts(1_000_000))
+        .expect("trim after pin release");
+
+    // AC3: no branch pin remains after release.
+    let pinned_after_release = reopened
+        .with_log(|l| l.lowest_branch_pinned_below(&qkey(), 3, 10_000))
+        .expect("lowest_branch_pinned_below after release");
+    assert_eq!(
+        pinned_after_release, None,
+        "{tag}: no branch pin after release (AC3)"
+    );
+
+    // AC3: floor at seq 3 after pin release.
+    let floor_after_release = floor_seq(&reopened).expect("floor after release");
+    assert_eq!(
+        floor_after_release, 3,
+        "{tag}: floor at seq 3 after pin release (AC3)"
+    );
+
+    // AC3: retained tail data remains complete after release.
+    let tail_after_release = reopened
+        .read_from(&qkey(), floor_pos(&reopened), 100)
+        .await
+        .expect("{tag}: tail readable after pin release (AC3)");
+    let tail_seqs: Vec<u64> = tail_after_release
+        .entries
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        tail_seqs,
+        vec![4, 5],
+        "{tag}: retained tail seq 4..5 after release (AC3)"
+    );
+
+    // AC3: below-floor reads fail closed after pin release.
+    let err = reopened
+        .read_from(&qkey(), None, 100)
+        .await
+        .expect_err("{tag}: genesis read must fail closed after pin release (AC3)");
+    assert!(
+        matches!(err, EngineError::Storage(ref m) if m.contains("read below retention floor")),
+        "{tag}: expected Storage(read below retention floor) after pin release, got {err:?} (AC3)"
+    );
+
+    drop(reopened);
+}
+
+/// TestConformanceEngineLiveSourcePinSurvivesReopen (AC1):
+/// engine integration reopens hybrid-strict and hybrid-async backends with a live
+/// source pin and proves the pin remains active (lowest_branch_pinned_below, floor,
+/// and above-floor tail all survive reopen).
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestConformanceEngineLiveSourcePinSurvivesReopen() {
+    for mode in [ProjectionMode::HybridStrict, ProjectionMode::HybridAsync] {
+        let tag = match mode {
+            ProjectionMode::HybridStrict => "eng-ac1-strict",
+            ProjectionMode::HybridAsync => "eng-ac1-async",
+        };
+        let root = base_dir(tag);
+        engine_live_pin_reopen_and_release_impl(&root, mode).await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// TestConformanceEnginePinnedBelowFloorDataReadable (AC2):
+/// after reopen and before release, the exact below-floor pinned source data
+/// remains readable via the branch queue — not merely the above-floor tail.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestConformanceEnginePinnedBelowFloorDataReadable() {
+    for mode in [ProjectionMode::HybridStrict, ProjectionMode::HybridAsync] {
+        let tag = match mode {
+            ProjectionMode::HybridStrict => "eng-ac2-strict",
+            ProjectionMode::HybridAsync => "eng-ac2-async",
+        };
+        let root = base_dir(tag);
+        engine_live_pin_reopen_and_release_impl(&root, mode).await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// TestConformanceEnginePinReleaseFailClosed (AC3):
+/// releasing the pin and reclaiming makes below-floor reads fail closed while
+/// the retained tail remains complete.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestConformanceEnginePinReleaseFailClosed() {
+    for mode in [ProjectionMode::HybridStrict, ProjectionMode::HybridAsync] {
+        let tag = match mode {
+            ProjectionMode::HybridStrict => "eng-ac3-strict",
+            ProjectionMode::HybridAsync => "eng-ac3-async",
+        };
+        let root = base_dir(tag);
+        engine_live_pin_reopen_and_release_impl(&root, mode).await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
 /// Test the retention-floor and source-pin invariants on both hybrid-strict and
 /// hybrid-async backends through the full engine ComposedBackend integration,
 /// covering deleted-prefix fail-closed, retained floor/head replay recovery,
