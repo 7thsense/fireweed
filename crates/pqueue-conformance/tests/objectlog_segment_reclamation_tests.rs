@@ -1413,3 +1413,49 @@ async fn TestHybridAsyncBehindImageDeletedManifestFailClosed() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------
+// Hybrid-async conformance: retained floor/head replay recovery (AC2,
+// bead pqueue-fbb4296b). Verifies successful replay recovery from retained
+// floor/head for hybrid-async after deleted manifest prefixes.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestHybridAsyncBehindImageRetainedFloorHeadReplayRecovery() {
+    let root = base_dir("hybrid-async-retained-replay");
+    let backend = open_hybrid(&root, clear_thresholds());
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        push(&backend, &format!("old-{i}"), 10).await;
+    }
+    drain(&backend);
+    push(&backend, "fresh", 10_000).await;
+    drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        floor_seq(&backend),
+        Some(2),
+        "hybrid-async: the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
+    let reopened = open_hybrid(&root, clear_thresholds());
+    let floor = floor_pos(&reopened).expect("retained floor after reopen");
+    let page = reopened
+        .read_from(&shard(), Some(floor), 100)
+        .await
+        .unwrap_or_else(|e| panic!("hybrid-async: read_from retained floor errored: {e:?}"));
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![3],
+        "hybrid-async: replay resumes at the retained floor/head, not from genesis"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
