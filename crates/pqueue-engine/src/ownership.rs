@@ -8,23 +8,33 @@
 //!    before serving. On backends whose control-plane acquire transaction already advanced the storage
 //!    fence, this reuses that value; otherwise it advances the storage epoch after a successful
 //!    `acquire_queue_lease`. It returns the [`OwnedSession`] whose `fence_epoch` is the value the owner is
-//!    meant to stamp on `LogWriter::append(..., expected_epoch)`.
+//!    meant to stamp on every data-plane write.
 //!
-//!    SCOPE / WHAT IS AND IS NOT FENCED (do not overstate this): the storage `LogWriter::append` SEAM does
-//!    reject a stale `expected_epoch` (BQ-20), and the end-to-end test drives exactly that seam. But the
-//!    REAL data-plane ports — `ClaimPort`/`PushPort`/`FinalizePort` and the backends' `commit_command` /
-//!    `append_durable` / projection `commit` fast paths — currently read the queue's CURRENT epoch
-//!    internally and pass it as `expected_epoch` (always-current, NEVER self-fences; see
-//!    `pqueue-projection::commit`, `pqueue-sqlite::commit_command`). They do NOT yet take an owner's cached
-//!    `fence_epoch`. So a SUPERSEDED owner's actual CLAIM is NOT fenced today — only a write made through the
-//!    raw append seam is. Threading `fence_epoch` through the real ports (the work that genuinely closes the
-//!    BQ-20/21/22 deferral) is the server-wiring follow-up (pqueue-c33c367e); the `port.rs::acquire_epoch`
-//!    note that "the two epochs are separate" remains accurate until then.
+//!    FENCE SCOPE (pqueue-7bac12ce closes the BQ-20/21/22 deferral): Every data-plane port
+//!    (`ClaimPort`/`PushPort`/`FinalizePort`/`RenewLeasePort`/`ReassignLeasePort`/`PurgePort`/`UpsertPort`
+//!    /`CommitTransitionPort`/`ReclaimPort`) accepts `expected_epoch: Option<u64>` from the caller. Both
+//!    the library facade (`Pqueue::push`/`claim`/`ack`/etc.) and the RESP server wiring
+//!    (`OwnershipRuntime::expected_epoch_for_write`) supply the owner's cached `fence_epoch` from the
+//!    [`OwnedSession`] — so a SUPERSEDED owner's claim/push/finalize is `EpochFenced` at commit time, not
+//!    just the raw `LogWriter::append` seam. Backend implementations (compose.rs, sqlite/relational/apply.rs,
+//!    segmented writer, etc.) check `expected_epoch.is_some_and(|e| e != current_epoch)` inside the atomic
+//!    unit of work before applying anything. `None` is the degenerate sole-owner path (never self-fence).
+//!    Tests `claim_fences_superseded_owner_epoch`, `push_fences_superseded_owner_epoch`, and
+//!    `finalize_fences_superseded_owner_epoch` (pqueue-memory::tests, pqueue-sqlite::conformance) prove this.
 //!
-//!    KNOWN HAZARD (two-counter non-atomicity): for backends whose control-plane acquire does not bind the
-//!    storage fence in the same transaction, this helper still performs two mutations (control-plane lease
-//!    epoch, then storage fence epoch). A crash BETWEEN them can delay fencing or drift counters. The
-//!    postgres_native control plane avoids that by advancing the storage fence in the acquire transaction.
+//!    TWO-COUNTER NON-ATOMICITY (proven benign for every current deployment): for backends whose
+//!    control-plane acquire does not bind the storage fence in the same transaction, `acquire_and_fence`
+//!    still performs two mutations (control-plane lease epoch, then storage fence epoch). A crash BETWEEN
+//!    them can delay fencing or drift counters. This is BENIGN for every current deployment:
+//!    - In-memory control planes (`InMemoryControlPlane`): a process crash resets all state to genesis, so
+//!      the gap is irrelevant — the next acquire starts fresh at epoch 0.
+//!    - Postgres-native control plane (`PostgresControlPlane`): advances the storage fence inside the same
+//!      acquire transaction — no gap exists.
+//!    - SQLite compositions use `InProcessControlPlane` (in-memory), which loses lease state on restart;
+//!      the queue is unowned after crash and re-acquired at the current (or genesis) epoch.
+//!
+//!    Any future durable control plane that does NOT bind the storage fence in the acquire transaction
+//!    MUST address this gap.
 //!
 //! 2. [`owner_liveness_violation`] — the PREDICATE KERNEL of the TD-003 owner-liveness / stalled-queue guard
 //!    (FR-41): a queue with eligible work aged at/past `progress_bound_ms` while it has no live SERVING
@@ -33,9 +43,9 @@
 //!    the pure decision only.
 //!
 //! SCOPE (honest): BQ-23's bead area is `pqueue-server`, but the full server runtime (the per-node
-//! acquire/renew/heartbeat loop, the per-connection serve-gate, stamping `fence_epoch` on the data plane,
-//! drain's "stop serving BatchClaim", and the observable stalled-queue surface) is deferred to
-//! pqueue-c33c367e. This module + its tests deliver the reusable, unit-testable core those build on.
+//! acquire/renew/heartbeat loop, the per-connection serve-gate, drain's "stop serving BatchClaim", and the
+//! observable stalled-queue surface) is a follow-up. This module + its tests deliver the reusable,
+//! unit-testable core those build on.
 
 use pqueue_core::{OwnerId, UtcTimestamp};
 
@@ -53,11 +63,11 @@ pub struct OwnedSession {
     pub queue: QueueKey,
     /// The control-plane lease epoch — the renew/release credential (lease liveness authority).
     pub lease_epoch: u64,
-    /// The durable STORAGE fence epoch the owner is meant to stamp as `expected_epoch` on
-    /// `LogWriter::append`. At the raw append SEAM a stale value is rejected `EpochFenced` (BQ-20); the real
-    /// claim/push ports do NOT yet consume this (they self-stamp the current epoch — see the module-doc
-    /// SCOPE; threading it in is pqueue-c33c367e). The owner MUST re-`acquire_and_fence` rather than write
-    /// at a stale epoch.
+    /// The durable STORAGE fence epoch the owner stamps as `expected_epoch` on every data-plane write
+    /// (claim/push/finalize/renew/reassign/purge/upsert/commit). Every port backend checks this against the
+    /// current durable epoch inside the atomic unit of work — a stale value is rejected `EpochFenced`
+    /// (BQ-20, threaded through the real ports by bead pqueue-7bac12ce). The owner MUST
+    /// re-`acquire_and_fence` rather than write at a stale epoch.
     pub fence_epoch: u64,
 }
 

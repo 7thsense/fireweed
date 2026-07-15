@@ -596,8 +596,9 @@ impl PushPort for SqliteRelationalBackend {
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
-        // Fence threading for this backend family is deferred (B1b continuation); accepted for the port
-        // contract so the owner fence is uniform once the relational/object write paths thread it.
+        // Bead pqueue-7bac12ce: fence_epoch is now threaded through every data-plane port. The
+        // relational backend checks `expected_epoch` against the durable cursor epoch inside
+        // `commit_command` — a stale value is `EpochFenced`.
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let result = (|| {

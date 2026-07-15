@@ -84,11 +84,10 @@ impl Inner {
     /// Assign the next command sequence for `shard`, apply `command` to `pqueue_items`, and advance the
     /// cursor — all in one transaction (the atomic append+apply UoW the async ports rely on).
     ///
-    /// BQ-20 NOTE: this is the data-plane fast path (every claim/push/finalize port routes here). It is the
-    /// in-process owner, so it is NOT epoch-fenced — the TD-003 `assignment_epoch` fence lives at the
-    /// [`RelLogWriter::append`] seam (`LogWriter::append`). Fencing a STALE owner's claim end-to-end needs
-    /// the owner to cache + pass its `expected_epoch` on every write, which arrives with the ownership/lease
-    /// identity layer (BQ-21); until then no second owner exists in-process, so the gap is theoretical.
+    /// BQ-20/BQ-21/BQ-22 (bead pqueue-7bac12ce): the owner's cached `fence_epoch` is now threaded through
+    /// every data-plane port as `expected_epoch`, and this function checks it against the durable cursor
+    /// epoch — a stale value is `EpochFenced` (see the `expected_epoch.is_some_and` check below). This
+    /// closes the end-to-end fencing gap for the data-plane fast path.
     pub(crate) fn commit_command(
         &mut self,
         shard: &QueueKey,

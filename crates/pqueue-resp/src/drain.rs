@@ -22,7 +22,7 @@
 //!   bool cannot route a mixed batch correctly — the dispatch MUST apply the drain split PER ENTRY (serve the
 //!   renews, refuse the reassigns with `unavailable`). [`DrainClass::RuntimeConsumerDependent`] +
 //!   [`is_new_claim_on_drain`]'s default (`cross_consumer = false` → in-flight) is the SAFE coarse fallback
-//!   that never refuses a renew; the faithful per-entry split is a `pqueue-c33c367e` wiring requirement.
+//!   that never refuses a renew; the faithful per-entry split is a separate wiring requirement.
 
 /// The drain-split class of a queue-addressed command (TD-006 §1A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
