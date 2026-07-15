@@ -6,12 +6,12 @@ ddx:
     - adr-auth-tenancy-and-storage-isolation
     - adr-log-single-source-of-truth
   review:
-    self_hash: 65104fc200ca12bac3cdc1d116c14da6e4c56839651102227134f7b530330185
+    self_hash: 278c336d35ab55c302a1cc321c74a11afca0001545201875fe322a9dd31ebdae
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-kafka-producer-wire-adapter: b49b122239af43127faabd91747efc79cc3853555ffa9bfe4febb9d04f8bde32
-      adr-log-single-source-of-truth: 59aa04e425cda6e2ba888b4fc58108be7727fa9fd168fa9e951909346427c601
-    reviewed_at: "2026-07-08T18:01:17Z"
+      adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
+    reviewed_at: "2026-07-11T00:58:04Z"
 ---
 
 # Architecture Decision Record
@@ -36,10 +36,12 @@ log.** Forcing operators to deploy an external Kafka queue is not acceptable as 
 and an object-log-only pqueue with no Kafka component leaves no way for another system to consume
 the change log at all. The consumer surface must exist in every pqueue deployment, out of the box.
 
-Honest dependency state: pqueue currently has **no** Kafka-protocol dependency. `heimq-wire` left
-the workspace when the `pqueue-kafka` producer adapter was deleted (ADR-005, superseded by ADR-007);
-no workspace `Cargo.toml` references heimq or fjord today. Whatever provider is chosen is a new
-dependency, not an existing anchor.
+Honest dependency state (as of the 2026-07-06 decision): pqueue had **no** Kafka-protocol dependency.
+`heimq-wire` left the workspace when the `pqueue-kafka` producer adapter was deleted (ADR-005,
+superseded by ADR-007); no workspace `Cargo.toml` referenced heimq or fjord at decision time. The
+provider chosen here was a new dependency, not an existing anchor. (It has since landed:
+`crates/pqueue-server/Cargo.toml` pins `fjord-broker` plus `heimq`/`heimq-broker`/`heimq-protocol`
+by git tag.)
 
 ## Decision
 
@@ -56,8 +58,10 @@ deployment is required for another system to consume the change log.
   `pqueue_server::start()`; its shared `Arc<dyn LogBackend>` is handed BOTH to the `FjordChangeRecordSink`
   (the write path) AND to the embedded `HeimqServer` (the external-consumer surface), so in-process
   appends are immediately visible to broker fetches. Change records are encoded as Kafka v2 record
-  batches with the pure-Rust `kafka-protocol` codec — the exact bytes the broker's `RecordBatchView`
-  decodes. **librdkafka (the C Kafka client) is removed entirely**: there is no network client and no
+  batches with the pure-Rust `heimq-protocol` codec — heimq's vendored fork of `kafka-protocol` 0.15.1
+  that bounds Array/CompactArray decode allocation (fixing the OOM-DoS exposure); the upstream
+  `kafka-protocol` crate is fully removed from the workspace. These are the exact bytes the embedded
+  broker's `RecordBatchView` decodes (same pinned heimq version on both sides of the seam). **librdkafka (the C Kafka client) is removed entirely**: there is no network client and no
   loopback TCP socket on the change-log write path (the former design produced over a loopback Kafka
   socket to the in-process broker, which needed libcurl/cmake to build and was a network round-trip to
   talk to an in-process Rust broker).
@@ -179,7 +183,10 @@ provides that machinery behind a boundary instead.
 ## Consequences
 
 - fjord becomes an embedded dependency of `pqueue-server` — git-pinned like `axon-esf` (ADR-011's
-  no-path-deps rule applies; no path dependencies into sibling repos).
+  no-path-deps rule applies; no path dependencies into sibling repos). Since 2026-07, fjord is the
+  **public** repository `github.com/7thsense/fjord` (moved from the private `telepathdata/fjord`),
+  pinned by release tag in `crates/pqueue-server/Cargo.toml` (`fjord-broker`, tag `v0.1.3` at the time
+  of writing), so building pqueue — including CI — requires no private-repo git credentials.
 - The Kafka-binding implementation bead is re-scoped to: embed fjord behind the delivery seam, feed
   it from the emission task, enforce the boundary invariants, pin the record contract above, and
   prove CL-1..CL-8 on the embedded surface with a stock Kafka client.

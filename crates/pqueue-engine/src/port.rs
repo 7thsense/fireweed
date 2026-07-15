@@ -309,7 +309,21 @@ pub struct ClaimRequest {
     pub max_items: usize,
     pub lease_token: LeaseToken,
     pub lease_expires_at: UtcTimestamp,
+    /// Operational claim time: what the lease/command stamping is measured against (`lease_expires_at`
+    /// is `now + lease duration` for the ordinary caller), NOT necessarily what decides due-ness — see
+    /// [`eligibility_time`](Self::eligibility_time).
     pub now: UtcTimestamp,
+    /// Caller-resolved eligibility epoch — the "as of" time that decides which items are DUE
+    /// (`not_before <= eligibility_time`, half-open, so an item is due AT its `not_before`). `None` ⇒
+    /// fall back to `now`, which is the single-clock behaviour every pre-existing caller had.
+    ///
+    /// Set this when selecting *scheduled* work for an execution epoch that is not the operational
+    /// clock: the eligibility scan runs at this epoch while `now` / `lease_expires_at` stay on
+    /// operational time, so the resulting leases remain valid against the real clock. It is purely a
+    /// SELECTION input — backends MUST NOT stamp commands, leases, or lease expiry with it.
+    ///
+    /// Read it through [`eligibility_at`](Self::eligibility_at) rather than matching on the `Option`.
+    pub eligibility_time: Option<UtcTimestamp>,
     /// API-001 Batch Claim compatibility options (group_key / same_group_key / metadata_equals /
     /// group_batching / whole_cohort). `ClaimCompatibility::default()` is an item-level claim
     /// ([`ClaimUnit::Item`](crate::ClaimUnit)) — backends resolve the unit via
@@ -323,6 +337,17 @@ pub struct ClaimRequest {
     /// (behaviour-preserving). The epoch MUST be the value cached at `acquire_queue_lease`, never re-read
     /// from `current_epoch` (re-reading defeats the fence).
     pub expected_epoch: Option<u64>,
+}
+
+impl ClaimRequest {
+    /// The epoch a backend MUST resolve due-ness against (`not_before <= t`): the explicit
+    /// [`eligibility_time`](Self::eligibility_time) when the caller supplied one, else the operational
+    /// [`now`](Self::now). Every candidate-selection call in a claim goes through this; `now` stays the
+    /// stamping/lease clock. Keeping the fallback in one place is what makes an unset `eligibility_time`
+    /// byte-identical to the pre-existing single-clock claim.
+    pub fn eligibility_at(&self) -> UtcTimestamp {
+        self.eligibility_time.unwrap_or(self.now)
+    }
 }
 
 /// A claimed item in the API-001 claimed-item shape (lease fields included).
@@ -511,6 +536,32 @@ pub trait RequestIdReplayProbe: Send + Sync {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> EngineResult<(CommandEnvelope, BodyHash)>;
+
+    /// The MIXED-commit generalization of [`Self::build_request_id_commit_envelope`] (bead pqueue-db60657d).
+    /// Build (but do not commit) the FULL durable envelope sequence a `commit_transition` of a FINALIZE-ONLY
+    /// body (each entry finalizes one claimed input; no side records / lifecycle items / instance fence) would
+    /// append: the committed entries' `Finalize` envelopes AND, when the result is MIXED (at least one
+    /// committed AND at least one rejected), the terminal
+    /// [`RequestOutcome::CommitTransition`](crate::command::RequestOutcome) marker
+    /// carrying the whole per-entry outcome vec (committed AND rejected, each rejection's structured error
+    /// projected durably). Every envelope is stamped with the SAME whole-body fingerprint `commit_transition`
+    /// computes, so a post-reopen retry of the same body Replays (not Conflicts). Each `claim_ref` is validated
+    /// exactly like the real commit path (a rejection here matches it), against the CURRENT projection with no
+    /// intervening apply — correct for INDEPENDENT entries (the conformance mixed case). Appends/applies/records
+    /// NOTHING: the caller drives the returned envelopes through [`crate::Backend::write`] with an
+    /// `AfterAppendBeforeApply` fault to strike the durable-but-unapplied window for a mixed commit, then
+    /// reopens so recovery replays the durable tail AND rebuilds `commit_idempotency` from the durable marker.
+    /// Returns the envelopes plus the whole-body fingerprint. Default: [`EngineError::Unavailable`].
+    fn build_request_id_commit_envelopes(
+        &self,
+        _shard: &QueueKey,
+        _request_id: RequestId,
+        _entries: Vec<CommitTransitionEntry>,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> EngineResult<(Vec<CommandEnvelope>, BodyHash)> {
+        Err(EngineError::Unavailable)
+    }
 }
 
 /// Operator gate-state mutation. Gate support is backend-capability-specific: relational backends

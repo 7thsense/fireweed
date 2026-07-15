@@ -1,7 +1,8 @@
 //! Per-command routing decision (TD-006 §1A: owner-of-record redirect, serve-only-under-lease,
 //! authz-before-redirect). This is the engine-pure DECISION a server owner-runtime applies to every
 //! queue-addressed command; the live wiring (per-connection, holding this node's `OwnedSession`, calling
-//! `resolve_queue_owner`, and emitting the RESP reply) is the server-runtime follow-up (pqueue-c33c367e).
+//! `resolve_queue_owner`, and emitting the RESP reply) is the server-runtime follow-up (pqueue-7bac12ce
+//! threaded the data-plane fence epoch; the full routing runtime is a separate follow-up).
 //!
 //! The TD-006 ordering this enforces, exactly:
 //! 1. **AUTHZ FIRST** — an unauthorized principal gets `-NOPERM` and NEVER a `-MOVED`/`Serve`/`Unavailable`,
@@ -9,7 +10,7 @@
 //!    takes the `resolution` as a parameter, so the caller has already CONSULTED ownership
 //!    (`resolve_queue_owner`) — `route` only guarantees nothing is RETURNED to an unauthorized principal. To
 //!    also avoid an unauthorized principal driving a control-plane resolve (a timing/load side-channel), the
-//!    server wiring (pqueue-c33c367e) MUST call `authorize_tenant` BEFORE `resolve_queue_owner`.
+//!    server wiring MUST call `authorize_tenant` BEFORE `resolve_queue_owner`.
 //! 2. **Serve only under a live current-epoch lease** — a node serves only while it is the recorded
 //!    `active_owner` with a live lease (state `assigned`, or `draining` for in-flight commands).
 //! 3. **`-MOVED` on miss** — a node that does not own the queue redirects to the recorded `active_owner`
@@ -70,7 +71,7 @@ pub fn route(
     // 2/3/4. PRECONDITION: `resolution` must be FRESH. `route` keys off `active_owner == this_owner` + state,
     // NOT `assignment_epoch`; it is sound only because `OwnerResolution` downgrades an EXPIRED lease to
     // unassigned/None, so in a fresh resolution `active_owner == this_owner` ⟹ live current-epoch owner. A
-    // STALE cached resolution would let a deposed node wrongly Serve — the server (pqueue-c33c367e) MUST pass
+    // STALE cached resolution would let a deposed node wrongly Serve — the server MUST pass
     // a fresh `resolve_queue_owner` per write command (writes are also backstopped by the BQ-20 epoch fence;
     // reads are bounded-stale by design, TD-006 §Staleness).
     match (resolution.state, resolution.active_owner.as_ref()) {

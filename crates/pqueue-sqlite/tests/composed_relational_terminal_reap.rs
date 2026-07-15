@@ -12,6 +12,7 @@ fn ts(s: i64) -> UtcTimestamp {
 
 fn claim_req() -> ClaimRequest {
     ClaimRequest {
+        eligibility_time: None,
         shard: shard(),
         worker_id: WorkerId::new("worker-1").unwrap(),
         max_items: 1,

@@ -654,6 +654,7 @@ async fn xreadgroup<B: RespBackend, H: RespHooks>(
         Err(e) => return err_reply(&e),
     };
     let req = ClaimRequest {
+        eligibility_time: None,
         shard,
         worker_id: WorkerId::new("resp").expect("w"),
         max_items: count,

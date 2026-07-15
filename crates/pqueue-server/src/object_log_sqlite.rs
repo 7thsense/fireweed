@@ -479,7 +479,7 @@ impl ClaimPort for ObjectLogSqliteBackend {
             }
             let candidates = self
                 .projection
-                .select_eligible(&req.shard, req.now, req.max_items)
+                .select_eligible(&req.shard, req.eligibility_at(), req.max_items)
                 .await?;
             if candidates.is_empty() {
                 return Ok(Claimed::default());
@@ -1376,7 +1376,7 @@ impl ClaimPort for SegmentedObjectLogSqliteBackend {
             }
             let candidates = self
                 .projection
-                .select_eligible(&req.shard, req.now, req.max_items)
+                .select_eligible(&req.shard, req.eligibility_at(), req.max_items)
                 .await?;
             if candidates.is_empty() {
                 return Ok(Claimed::default());
@@ -2128,7 +2128,7 @@ impl ClaimPort for SegmentedObjectLogInMemoryBackend {
             let candidates = {
                 let proj = self.projection_for(&req.shard)?;
                 let p = proj.lock().expect("segmented inmemory projection poisoned");
-                p.select_eligible(req.now, req.max_items)
+                p.select_eligible(req.eligibility_at(), req.max_items)
             };
             if candidates.is_empty() {
                 return Ok(Claimed::default());

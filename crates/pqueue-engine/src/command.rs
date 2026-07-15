@@ -1015,7 +1015,37 @@ pub struct CommandEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RequestOutcome {
-    Push { item_ids: Vec<ItemId> },
+    Push {
+        item_ids: Vec<ItemId>,
+    },
+    /// The full per-entry outcome of a `commit_transition` (committed AND rejected entries), recorded on a
+    /// terminal marker envelope so recovery can rebuild the whole `Vec<EntryRecovery>` — not just the
+    /// committed, `Finalize`-delimited subset — for a mixed committed+rejected commit (bead pqueue-db60657d).
+    /// A rejected entry mutates and appends nothing itself, so without this record its outcome is lost across
+    /// a restart. Additive: logs written before this variant existed simply lack it, and recovery falls back
+    /// to the committed-only reconstruction + length-guard (see `rebuild_commit_idempotency_from_log`).
+    CommitTransition {
+        entries: Vec<CommitOutcomeEntry>,
+    },
+}
+
+/// Durable, serializable mirror of one commit entry's [`EntryRecovery`](crate::port::EntryRecovery) (which
+/// carries non-`Serialize` types — an [`EngineError`](crate::error::EngineError) in its rejected arm). Carried
+/// in [`RequestOutcome::CommitTransition`] so a mixed commit's per-entry outcome — committed AND rejected,
+/// with the rejection's structured error — round-trips byte-identically across a restart (bead
+/// pqueue-db60657d). `rejection == None` means the entry committed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CommitOutcomeEntry {
+    pub consumed_input_id: ItemId,
+    #[serde(default)]
+    pub instance: Option<(Vec<u8>, u64)>,
+    #[serde(default)]
+    pub side_record_keys: Vec<Vec<u8>>,
+    #[serde(default)]
+    pub lifecycle_item_ids: Vec<ItemId>,
+    /// `None` = committed; `Some` = rejected, carrying the structured rejection.
+    #[serde(default)]
+    pub rejection: Option<crate::error::CommitRejection>,
 }
 
 /// Fail closed when a hybrid/object-log request-id command is missing the metadata required to replay a

@@ -18,7 +18,7 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
   review:
-    self_hash: b485d8c2cb0e34424404c839913f764dffe86be59112c3d135d731aaf40378a3
+    self_hash: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -34,8 +34,8 @@ ddx:
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-      tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
-    reviewed_at: "2026-07-07T06:16:24Z"
+      tp-scale-substantiation: 39792548c579ce686ad8f57017bfcd49f56fe584443ffedd29baf149ba641cb0
+    reviewed_at: "2026-07-11T01:02:40Z"
 ---
 
 # Test Plan: TP-001 Governing Test Traceability
@@ -197,7 +197,11 @@ Scale, density, and object-log performance suites (`performance_single_deploymen
 `performance_cross_queue_scale_out_tests`, `queue_density_single_node_tests`,
 `object_log_latency_cost_matrix_tests`, `object_log_commit_recovery_tests`,
 `external_transaction_contract_matrix_tests`, `recurrence_scale_both_profiles_tests`)
-are owned by TP-002 (`tp-scale-substantiation`); see that plan for their pass bars.
+are owned by TP-002 (`tp-scale-substantiation`); see that plan for their pass bars —
+except `external_transaction_contract_matrix_tests`, whose acceptance bars are the
+AC-TXN rows in TP-003 §3.10 (implemented and evidenced as of v0.11.0, with the
+segment-object-reclamation residual tracked as bead `pqueue-b5cc2bc7`; evidence in
+`docs/perf/evidence/tp003-ac-txn-matrix*.jsonl`).
 
 ## Performance Evidence
 

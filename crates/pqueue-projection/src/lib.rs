@@ -3313,6 +3313,7 @@ mod tests {
         let item_id = pushed[0];
 
         let mut claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer").unwrap(),
             max_items: 1,

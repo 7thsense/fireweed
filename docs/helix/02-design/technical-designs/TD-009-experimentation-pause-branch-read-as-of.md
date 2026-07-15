@@ -8,14 +8,14 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - td-queue-history-change-records
   review:
-    self_hash: 64af1d72d4246cb1cbe23c851fcf7f7ffbc7ccbc210ea6b5ab494cc46d5ea61a
+    self_hash: 68800e79b6e8e458ebfe383e2a34855c9fd408df9ab328225d8946f3e1585655
     deps:
-      adr-log-single-source-of-truth: 59aa04e425cda6e2ba888b4fc58108be7727fa9fd168fa9e951909346427c601
-      adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
-      td-queue-history-change-records: 02808f93dee17f6f31facc9719b7c3b534ba871d430255eceafa37b0aea67ddf
+      adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
+      adr-orthogonal-log-projection-composition: 46327f801156492ee0a1ad0038b730dea7fcef4ebe00641e8f7d9d5f86f8b3f2
+      td-queue-history-change-records: 1a69a5ebd1be38b7f17c3be7a1f1319dc6111581fc905fec2c7a894bb3b77bf0
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-07T06:16:24Z"
+    reviewed_at: "2026-07-11T00:59:47Z"
 ---
 
 # TD-009: Experimentation surface — pause, branch-at-position, read-as-of-position
@@ -53,9 +53,13 @@ per ADR-008; the name survives from the engine's internal vocabulary.) New read 
 - `read_as_of(shard, position, query)` — hydrate from the nearest snapshot ≤ P
   (`latest_snapshot`/`read_snapshot`), replay `read_from` up to P into an ephemeral projection, answer
   the bounded query, discard. This is the log-as-truth "materialize up to P" read.
-- **Relational family**: returns a structured `capability-unavailable` until the ADR-013 migration
-  makes it rebuildable-from-log ("nothing to replay" today,
-  `crates/pqueue-postgres/src/relational.rs:983-987`).
+- **Relational family**: returns a structured `capability-unavailable` (`EngineError::Unavailable`).
+  The ADR-013 rebuild-from-log migration is now complete (the relational stores persist the log,
+  implement `recovery_high_water`, and replay the tail on recovery), but as-of reads additionally
+  require reconstructing an ephemeral historical projection from snapshot + replay, which the
+  relational projection stores decline (`supports_as_of() = false`,
+  `crates/pqueue-engine/src/port.rs:1220-1231`) — so the relational family still serves only "now"
+  until that reconstruct path is built.
 
 ## 3. Branch-at-position
 
@@ -72,8 +76,9 @@ immutable (`crates/pqueue-objectlog/src/segmented.rs:539-549`), namespaced per `
    (`control_plane.rs:14`) is preserved because the branch is a distinct queue, never a second owner
    of Q. Q keeps running, or stays paused for a clean comparison baseline.
 
-**Relational family**: branch = create Q′ and replay Q's log ≤ P into fresh projection tables —
-available only after the ADR-013 migration; until then a structured `capability-unavailable`.
+**Relational family**: branch = create Q′ and replay Q's log ≤ P into fresh projection tables. The
+ADR-013 rebuild-from-log prerequisite is now in place, but the replay-into-fresh-tables branch path
+itself is not built; until it is, the relational family returns a structured `capability-unavailable`.
 
 **Reconstructed state includes in-flight leases.** A branch materialized at P contains Leased items
 whose lease tokens reference workers that will never renew against Q′; they expire on the normal clock

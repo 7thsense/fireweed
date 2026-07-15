@@ -394,6 +394,7 @@ async fn claim_fences_superseded_owner_epoch() {
 
     // A claim carrying the STALE cached epoch (0) is fenced at commit and leases nothing.
     let stale = ClaimRequest {
+        eligibility_time: None,
         expected_epoch: Some(0),
         ..claim_req(10, 500, 100)
     };
@@ -409,6 +410,7 @@ async fn claim_fences_superseded_owner_epoch() {
 
     // The current-epoch owner claims normally.
     let ok = ClaimRequest {
+        eligibility_time: None,
         expected_epoch: Some(e1),
         ..claim_req(10, 500, 100)
     };
@@ -566,6 +568,7 @@ async fn finalize_fences_superseded_owner_epoch() {
     // Lease the item under the degenerate (sole-owner) path.
     let claimed = b
         .claim(ClaimRequest {
+            eligibility_time: None,
             expected_epoch: None,
             ..claim_req(10, 500, 10)
         })

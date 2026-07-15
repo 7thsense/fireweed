@@ -18,7 +18,7 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
+    self_hash: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -33,9 +33,9 @@ ddx:
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-      tp-governing-test-traceability: b485d8c2cb0e34424404c839913f764dffe86be59112c3d135d731aaf40378a3
-      tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
-    reviewed_at: "2026-07-07T06:16:24Z"
+      tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
+      tp-scale-substantiation: 39792548c579ce686ad8f57017bfcd49f56fe584443ffedd29baf149ba641cb0
+    reviewed_at: "2026-07-11T01:06:38Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -200,6 +200,21 @@ memory/dev where present, SQLite, `postgres_native`, `object_log_inmemory_projec
 `object_log_hybrid_projection_async`, and segmented object-log variants. A
 profile that does not pass this section is not selectable outside the explicitly
 documented test/dev scope.
+
+> **Status (2026-07, v0.11.0): the AC-TXN matrix is implemented and evidenced, with one documented
+> residual.** AC-TXN-1..7 all have recorded evidence from
+> `external_transaction_contract_matrix_tests`
+> (`crates/pqueue-conformance/tests/external_transaction_contract_matrix_tests.rs`) in
+> `docs/perf/evidence/tp003-ac-txn-matrix.jsonl` (plus `tp003-ac-txn-matrix-postgres.jsonl` for the
+> postgres-profile rows). Every row passes except: two principled `n/a` rows (AC-TXN-1 on the
+> non-durable in-memory dev profile, where kill/restart durability does not apply; AC-TXN-3's
+> after-append-before-apply cut point on the unified `sqlite_relational` store, where log-append and
+> projection-apply share one transaction so the cut point has no window) and one `partial` —
+> AC-TXN-5A passes all of its success-barrier / ordered-batching / poison / debt-backpressure /
+> high-water-withholding / terminal-item-retention-advancement assertions, but object-log
+> **segment-object reclamation is deferred**: recovery folds the object log from genesis to rebuild
+> the request-id idempotency maps, so segment trimming first needs a bounded-recovery durable
+> retention floor (tracked as bead `pqueue-b5cc2bc7`).
 
 | AC | Setup | Assertion | Pass bar |
 |----|-------|-----------|----------|
