@@ -22,19 +22,27 @@
 //!    Tests `claim_fences_superseded_owner_epoch`, `push_fences_superseded_owner_epoch`, and
 //!    `finalize_fences_superseded_owner_epoch` (pqueue-memory::tests, pqueue-sqlite::conformance) prove this.
 //!
-//!    TWO-COUNTER NON-ATOMICITY (proven benign for every current deployment): for backends whose
-//!    control-plane acquire does not bind the storage fence in the same transaction, `acquire_and_fence`
-//!    still performs two mutations (control-plane lease epoch, then storage fence epoch). A crash BETWEEN
-//!    them can delay fencing or drift counters. This is BENIGN for every current deployment:
-//!    - In-memory control planes (`InMemoryControlPlane`): a process crash resets all state to genesis, so
-//!      the gap is irrelevant — the next acquire starts fresh at epoch 0.
-//!    - Postgres-native control plane (`PostgresControlPlane`): advances the storage fence inside the same
-//!      acquire transaction — no gap exists.
-//!    - SQLite compositions use `InProcessControlPlane` (in-memory), which loses lease state on restart;
-//!      the queue is unowned after crash and re-acquired at the current (or genesis) epoch.
+//!    TWO-COUNTER RECONCILIATION (bead pqueue-b29435b2): for backends whose control-plane acquire does
+//!    NOT bind the storage fence in the same transaction, `acquire_and_fence` may observe
+//!    `current_epoch > lease.assignment_epoch` after the acquire succeeds. This happens when an ephemeral
+//!    control plane (e.g., `InMemoryControlPlane`) is reset on process restart while the durable backend
+//!    retains a higher storage epoch. This gap is reconciled here by distinguishing the restart scenario
+//!    from a genuine inconsistency:
 //!
-//!    Any future durable control plane that does NOT bind the storage fence in the acquire transaction
-//!    MUST address this gap.
+//!    - **Ephemeral reset, cold start**: the CP's prior `active_owner_id` is `None` (the queue was
+//!      genuinely unassigned after restart). `acquire_and_fence` advances the storage epoch to fence stale
+//!      pre-restart writers and sets `fence_epoch` to the new higher value.
+//!    - **Ephemeral reset, same-owner re-affirm**: the CP's prior `active_owner_id` is `Some(owner)` and
+//!      the epoch was preserved (no ownership change). The storage was already advanced by a prior
+//!      restart-reconciliation; re-advancing would self-fence the owner's in-flight writes. `acquire_and_fence`
+//!      reuses `current_epoch` as `fence_epoch` without advancing.
+//!    - **Durable CP**: `current_epoch > lease.assignment_epoch` is a genuine inconsistency that still
+//!      fails closed `EpochFenced`. See [`QueueControlPlane::is_ephemeral`].
+//!
+//!    Tests `ephemeral_restart_reacquire_advances_storage_and_serves` (engine-level, crates/pqueue-engine)
+//!    and `ownership_restart_reacquire_serves_push_claim` (crates/pqueue-sqlite/tests/conformance.rs) prove
+//!    the restart-reconciliation invariant. Stale-epoch writes from the pre-restart epoch are still
+//!    `EpochFenced` (proven by the `*_fences_superseded_owner_epoch` suite against the post-restart fence).
 //!
 //! 2. [`owner_liveness_violation`] — the PREDICATE KERNEL of the TD-003 owner-liveness / stalled-queue guard
 //!    (FR-41): a queue with eligible work aged at/past `progress_bound_ms` while it has no live SERVING
@@ -83,6 +91,12 @@ pub enum OwnershipOutcome {
 /// order matters: the control-plane acquire (single-active-lease + liveness) happens FIRST; only on success
 /// do we observe or advance the durable storage fence, so a rejected acquire never touches the fence. See
 /// the module-doc SCOPE for what this does and does NOT fence.
+///
+/// RESET-RESTART RECONCILIATION (bead pqueue-b29435b2): for ephemeral control planes (`is_ephemeral()`)
+/// whose state resets on process restart, the acquire succeeds but the durable backend's `current_epoch`
+/// may be greater than `lease.assignment_epoch`. This function reads the CP's prior `active_owner_id`
+/// before the acquire to distinguish a cold restart (advance storage) from a same-owner re-affirm (reuse
+/// current storage epoch), avoiding both permanent `EpochFenced` and self-fencing on re-acquire.
 pub async fn acquire_and_fence<CP, S>(
     control_plane: &CP,
     storage: &S,
@@ -94,6 +108,16 @@ where
     CP: QueueControlPlane + ?Sized,
     S: ControlPlaneStore + ?Sized,
 {
+    // Read prior active owner before acquire so we can distinguish cold restart from same-owner re-affirm.
+    let prior_owner = if control_plane.is_ephemeral() {
+        control_plane
+            .lease(queue)
+            .ok()
+            .and_then(|l| l.active_owner_id)
+    } else {
+        None
+    };
+
     match control_plane.acquire_queue_lease(queue, owner, now)? {
         AcquireOutcome::Rejected(held) => Ok(OwnershipOutcome::Rejected(held)),
         AcquireOutcome::Acquired(lease) => {
@@ -106,7 +130,18 @@ where
             } else if current_epoch < lease.assignment_epoch {
                 storage.acquire_epoch(queue).await?
             } else {
-                return Err(crate::error::EngineError::EpochFenced);
+                // current_epoch > lease.assignment_epoch
+                if prior_owner.as_ref() == Some(owner) {
+                    // Same-owner re-affirm after a prior restart-reconciliation advanced the storage.
+                    // CP preserved the epoch; re-advancing would self-fence in-flight writes.
+                    current_epoch
+                } else if control_plane.is_ephemeral() {
+                    // Ephemeral CP was reset on restart: storage epoch is ahead of the fresh CP.
+                    // Advance storage to fence stale pre-restart writers.
+                    storage.acquire_epoch(queue).await?
+                } else {
+                    return Err(crate::error::EngineError::EpochFenced);
+                }
             };
             Ok(OwnershipOutcome::Owned(OwnedSession {
                 owner: owner.clone(),
@@ -171,8 +206,6 @@ mod tests {
 
     #[test]
     fn an_assigned_owner_serving_is_not_an_ownership_violation() {
-        // Even far past the bound, an assigned (serving) owner is the claim planner's concern, not the
-        // owner-liveness guard.
         assert!(!owner_liveness_violation(
             &resolution(LeaseState::Assigned),
             Some(10_000),
@@ -182,13 +215,11 @@ mod tests {
 
     #[test]
     fn unowned_or_draining_past_the_bound_is_a_violation() {
-        // Unowned with aged eligible work past the bound → violation.
         assert!(owner_liveness_violation(
             &resolution(LeaseState::Unassigned),
             Some(1_000),
             1_000
         ));
-        // Draining (not accepting new claims) past the bound → violation.
         assert!(owner_liveness_violation(
             &resolution(LeaseState::Draining),
             Some(1_500),
@@ -198,11 +229,231 @@ mod tests {
 
     #[test]
     fn unowned_within_the_bound_is_not_yet_a_violation() {
-        // Eligible work exists and the queue is unowned, but the oldest item is still within budget.
         assert!(!owner_liveness_violation(
             &resolution(LeaseState::Unassigned),
             Some(999),
             1_000
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Restart-reconciliation test (bead pqueue-b29435b2)
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use crate::control_plane::{ControlPlaneConfig, InMemoryControlPlane};
+    use crate::error::EngineError;
+    use crate::port::{ControlPlaneStore, CreateQueueOutcome};
+    use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
+
+    /// A minimal in-memory `ControlPlaneStore` for the restart-reconciliation test. Tracks a single
+    /// per-queue epoch counter (the durable storage fence). Supports pre-advancing the epoch to simulate
+    /// a durable backend that retained a high epoch across restart.
+    struct EpochStore {
+        epochs: Mutex<HashMap<QueueKey, u64>>,
+    }
+
+    impl EpochStore {
+        fn new() -> Self {
+            EpochStore {
+                epochs: Mutex::new(HashMap::new()),
+            }
+        }
+        fn set_epoch(&self, queue: &QueueKey, epoch: u64) {
+            self.epochs
+                .lock()
+                .expect("poisoned")
+                .insert(queue.clone(), epoch);
+        }
+    }
+
+    impl ControlPlaneStore for EpochStore {
+        fn create_queue(
+            &self,
+            _definition: QueueDefinition,
+        ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
+            std::future::ready(Ok(CreateQueueOutcome {
+                created: true,
+                definition: _definition,
+            }))
+        }
+        fn queue_definition(
+            &self,
+            _key: &QueueKey,
+        ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
+            std::future::ready(Err(EngineError::NotFound))
+        }
+        fn list_queues(
+            &self,
+            _tenant: &TenantId,
+        ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
+            std::future::ready(Ok(vec![]))
+        }
+        fn current_epoch(
+            &self,
+            shard: &QueueKey,
+        ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+            let epoch = self
+                .epochs
+                .lock()
+                .expect("poisoned")
+                .get(shard)
+                .copied()
+                .unwrap_or(0);
+            std::future::ready(Ok(epoch))
+        }
+        fn acquire_epoch(
+            &self,
+            shard: &QueueKey,
+        ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+            let mut g = self.epochs.lock().expect("poisoned");
+            let next = g.get(shard).copied().unwrap_or(0) + 1;
+            g.insert(shard.clone(), next);
+            std::future::ready(Ok(next))
+        }
+    }
+
+    fn ts(s: i64) -> UtcTimestamp {
+        UtcTimestamp::new(s, 0).unwrap()
+    }
+
+    fn qk() -> QueueKey {
+        QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap())
+    }
+
+    /// After an ephemeral CP reset + durable backend with a higher epoch, `acquire_and_fence` reconciles
+    /// the gap: it advances the storage epoch and returns a session whose `fence_epoch >= current_epoch`.
+    #[test]
+    fn ephemeral_restart_reacquire_advances_storage_and_serves() {
+        use futures::executor::block_on;
+
+        let storage = EpochStore::new();
+        let cp = InMemoryControlPlane::new(ControlPlaneConfig::default());
+        let owner = OwnerId::new("node-a").unwrap();
+        let q = qk();
+
+        // Simulate pre-restart: storage has epoch 3 from prior operations.
+        storage.set_epoch(&q, 3);
+        // Fresh CP after restart (no state).
+        cp.register_owner(&owner, ts(0)).unwrap();
+
+        // Re-acquire: should succeed, advancing storage from 3 to 4.
+        let OwnershipOutcome::Owned(session) =
+            block_on(acquire_and_fence(&cp, &storage, &q, &owner, ts(0))).unwrap()
+        else {
+            panic!("expected Owned after restart reconciliation");
+        };
+        assert!(
+            session.fence_epoch > 3,
+            "fence_epoch must exceed pre-restart storage epoch"
+        );
+        assert_eq!(session.fence_epoch, 4, "storage advanced exactly once");
+        assert_eq!(
+            session.lease_epoch, 1,
+            "lease epoch is the fresh CP assignment (1)"
+        );
+        assert_eq!(
+            block_on(storage.current_epoch(&q)).unwrap(),
+            4,
+            "durable storage epoch is the new fence"
+        );
+
+        // Same-owner re-affirm (lease lapse + re-acquire) preserves storage epoch.
+        cp.register_owner(&owner, ts(100)).unwrap();
+        let OwnershipOutcome::Owned(session2) =
+            block_on(acquire_and_fence(&cp, &storage, &q, &owner, ts(100))).unwrap()
+        else {
+            panic!("expected Owned on same-owner re-affirm");
+        };
+        assert_eq!(
+            session2.fence_epoch, 4,
+            "same-owner re-affirm must NOT re-advance storage"
+        );
+        assert_eq!(
+            session2.lease_epoch, 1,
+            "same-owner re-affirm preserves CP epoch"
+        );
+    }
+
+    /// A durable CP (non-ephemeral) with `current_epoch > lease.assignment_epoch` still fails closed.
+    #[test]
+    fn durable_cp_mismatch_still_fails_closed() {
+        use futures::executor::block_on;
+
+        // Use InMemoryControlPlane but wrap it to report is_ephemeral=false.
+        struct DurableCp(InMemoryControlPlane);
+        impl QueueControlPlane for DurableCp {
+            fn is_ephemeral(&self) -> bool {
+                false
+            }
+            fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+                self.0.register_owner(owner, now)
+            }
+            fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+                self.0.heartbeat(owner, now)
+            }
+            fn resolve_queue_owner(
+                &self,
+                queue: &QueueKey,
+                now: UtcTimestamp,
+            ) -> EngineResult<OwnerResolution> {
+                self.0.resolve_queue_owner(queue, now)
+            }
+            fn acquire_queue_lease(
+                &self,
+                queue: &QueueKey,
+                owner: &OwnerId,
+                now: UtcTimestamp,
+            ) -> EngineResult<AcquireOutcome> {
+                self.0.acquire_queue_lease(queue, owner, now)
+            }
+            fn renew_queue_lease(
+                &self,
+                queue: &QueueKey,
+                owner: &OwnerId,
+                expected_epoch: u64,
+                now: UtcTimestamp,
+            ) -> EngineResult<QueueLease> {
+                self.0.renew_queue_lease(queue, owner, expected_epoch, now)
+            }
+            fn begin_drain(
+                &self,
+                queue: &QueueKey,
+                expected_epoch: u64,
+                target_owner: &OwnerId,
+                now: UtcTimestamp,
+            ) -> EngineResult<QueueLease> {
+                self.0.begin_drain(queue, expected_epoch, target_owner, now)
+            }
+            fn release_queue_lease(
+                &self,
+                queue: &QueueKey,
+                owner: &OwnerId,
+                expected_epoch: u64,
+                now: UtcTimestamp,
+            ) -> EngineResult<()> {
+                self.0
+                    .release_queue_lease(queue, owner, expected_epoch, now)
+            }
+            fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
+                self.0.lease(queue)
+            }
+        }
+
+        let storage = EpochStore::new();
+        let cp = DurableCp(InMemoryControlPlane::new(ControlPlaneConfig::default()));
+        let owner = OwnerId::new("node-a").unwrap();
+        let q = qk();
+
+        storage.set_epoch(&q, 5);
+        cp.register_owner(&owner, ts(0)).unwrap();
+
+        let result = block_on(acquire_and_fence(&cp, &storage, &q, &owner, ts(0)));
+        assert!(
+            matches!(result, Err(EngineError::EpochFenced)),
+            "durable CP with storage > CP epoch must fail closed"
+        );
     }
 }
