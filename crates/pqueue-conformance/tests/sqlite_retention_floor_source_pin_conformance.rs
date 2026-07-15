@@ -1,6 +1,8 @@
 //! SQLite-backed retention-floor and source-pin conformance: deleted-prefix fail-closed,
-//! retained floor/head replay recovery, and branch pin invariants
-//! (governing: docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224).
+//! retained floor/head replay recovery, branch pin invariants, and live source pin
+//! survives reopen with exact boundary reclamation.
+//! (governing: docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224,
+//!  bead pqueue-879c9d05).
 //!
 //! This is the SQLite-backed analogue of the objectlog-level
 //! `TestConformanceRetentionFloorSourcePinObjectlogInvariant` in
@@ -14,6 +16,13 @@
 //! guarantees are independent of the deferred server wiring (documented at
 //! docs/perf/design/manifest-compaction-hotpath.md:388 and
 //! docs/releases/v0.14.0.md).
+//!
+//! Bead pqueue-879c9d05 (adversarial follow-up): adds
+//! `TestConformanceSqliteLiveSourcePinSurvivesReopen`,
+//! `TestConformanceSqlitePinReleaseReclaimsExactBoundary`, and
+//! `TestConformanceSqlitePinAssertionStrength` — each with hybrid-strict and
+//! hybrid-async variants — replacing weak `seg_count >= 1` evidence with exact
+//! key/boundary assertions using `lowest_branch_pinned_below` and `retention_floor`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -120,22 +129,6 @@ fn floor_pos(backend: &HybridBackend) -> Option<CommandPosition> {
     backend
         .with_log(|l| LogStore::retention_floor(l, &shard()))
         .expect("retention_floor")
-}
-
-fn count_seg_files(root: &Path) -> usize {
-    let mut n = 0;
-    let Ok(rd) = std::fs::read_dir(root) else {
-        return 0;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            n += count_seg_files(&path);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("seg") {
-            n += 1;
-        }
-    }
-    n
 }
 
 /// Assert deleted-prefix fail-closed and retained floor/head replay recovery
@@ -250,9 +243,13 @@ async fn retained_floor_head_replay_impl(root: &Path) {
     );
 }
 
-/// Assert source-pin guarantees: a live branch prevents reclamation of its pinned
-/// source segment, and the pin survives reopen until released.
-/// Source-pin test uses its own root (separate from the fail-closed/recovery tests).
+/// Assert source-pin guarantees with EXACT boundary assertions (bead pqueue-879c9d05,
+/// replaces previous weak `seg_count >= 1` and `floor >= 1` checks).
+///
+/// - lowest_branch_pinned_below identifies the exact pinned seq (0).
+/// - retention_floor advances to the exact last reclaimed unpinned seq (3).
+/// - After pin release and re-trim, the pinned segment is reclaimed and
+///   below-floor reads fail closed.
 async fn source_pin_blocks_reclamation_impl(root: &Path) {
     let backend = open_hybrid_strict(root);
     backend.create_queue(qdef()).await.unwrap();
@@ -306,47 +303,33 @@ async fn source_pin_blocks_reclamation_impl(root: &Path) {
         .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
         .expect("trim with live pin");
 
-    // Check branch pin state: the pin should protect the first segment.
+    // EXACT PINNED BOUNDARY (AC3): lowest_branch_pinned_below identifies seq 0.
     let pinned = backend
         .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
         .expect("lowest_branch_pinned_below");
-    assert!(
-        pinned.is_some(),
-        "a branch pin should be registered after branch creation"
+    assert_eq!(
+        pinned,
+        Some(0),
+        "exact pinned source segment is seq 0, not a weak seg_count check"
     );
 
-    // The pin kept the first segment: source seg file + branch copy = 2.
-    // With SegmentConfig(1,1), each command is its own segment. Pin at seq 0
-    // protects seg first_seq=0. The branch copies it, so 2 seg files remain
-    // for the pinned segment (source + branch).
-    let seg_count = count_seg_files(root);
-    assert!(
-        seg_count >= 1,
-        "pinned source segment survives trim (got {seg_count} seg files)"
-    );
-
-    // The floor advanced past the oldest non-pinned reclaimed command.
+    // EXACT FLOOR: floor advanced through the reclaimed unpinned segments (1..3).
     let floor = floor_seq(&backend).expect("floor advanced");
-    // With time-based expiry, seq 0 is pinned, seq 1 may be reclaimed.
-    // The floor is the last reclaimed seq: time_expired >= 1 means floor >= 1.
-    assert!(
-        floor >= 1,
-        "floor advanced past reclaimed commands (floor={floor})"
+    assert_eq!(
+        floor, 3,
+        "floor advanced past reclaimed unpinned commands, stopped before pinned seq 0 (floor={floor})"
     );
 
-    // Reads above floor still succeed — the fresh commands (seq 4,5) survive.
+    // EXACT TAIL: above-floor tail is exactly the fresh commands (seq 4..5).
     let tail = backend
         .read_from(&shard(), floor_pos(&backend), 100)
         .await
         .expect("read_from above floor succeeds with pin");
-    assert!(
-        !tail.entries.is_empty(),
-        "above-floor tail readable with pin"
-    );
     let tail_seqs: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
-    assert!(
-        tail_seqs.iter().all(|s| *s > floor),
-        "above-floor tail contains only commands above the floor"
+    assert_eq!(
+        tail_seqs,
+        vec![4, 5],
+        "above-floor tail contains only the fresh tail commands"
     );
 
     // Release the pin and re-trim: the previously-pinned segment is reclaimed.
@@ -367,6 +350,201 @@ async fn source_pin_blocks_reclamation_impl(root: &Path) {
         "after pin release: expected Storage, got {err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bead pqueue-879c9d05: AC1 + AC2 — live source pin survives reopen, then
+// release + exact boundary reclamation
+// ---------------------------------------------------------------------------
+
+/// Combined flow for AC1 (reopen with live pin) and AC2 (release + exact reclaim):
+///
+/// 1. Create data + branch pin at seq 0, trim, assert exact pinned boundary.
+/// 2. Reopen, assert pin survived and pinned segment is retained+readable (AC1).
+/// 3. Release pin, re-trim, assert exact reclaimed boundary, tail readable,
+///    and below-floor reads fail closed (AC2).
+async fn live_pin_reopen_and_release_impl(root: &Path, mode: &str) {
+    // --- Phase 1: setup + trim with live pin ---
+    let backend = if mode == "strict" {
+        open_hybrid_strict(root)
+    } else {
+        open_hybrid_async(root)
+    };
+    backend.create_queue(qdef()).await.unwrap();
+
+    // Push 4 old commands (seq 0..3) at early timestamps so they expire.
+    for i in 0..4u64 {
+        backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new(format!("lpr-k-{i}")).unwrap()),
+                    payload: Some(bytes::Bytes::from_static(b"body")),
+                    ..Default::default()
+                }],
+                ts((i as i64 + 1) * 10),
+                None,
+            )
+            .await
+            .expect("push");
+    }
+    drain(&backend);
+
+    // Create a branch pin at seq 0 protecting the first segment.
+    let pin_pos = CommandPosition::new(shard(), 0, 0);
+    backend
+        .with_log(|l| l.branch(&shard(), &branch_def(), &pin_pos, 1_000_000_000_000, 10_000))
+        .expect("create branch");
+
+    // Push 2 fresh commands (seq 4..5) within retention for a readable tail.
+    for i in 4..6u64 {
+        backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new(format!("lpr-k-{i}")).unwrap()),
+                    payload: Some(bytes::Bytes::from_static(b"body")),
+                    ..Default::default()
+                }],
+                ts(1_000_000),
+                None,
+            )
+            .await
+            .expect("push");
+    }
+    drain(&backend);
+
+    // Trim: pin protects seq 0, unpinned seq 1..3 reclaimed, floor advances.
+    backend
+        .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
+        .expect("trim with live pin");
+
+    // EXACT PINNED BOUNDARY: lowest_branch_pinned_below identifies seq 0.
+    let pinned_before = backend
+        .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
+        .expect("lowest_branch_pinned_below before reopen");
+    assert_eq!(
+        pinned_before,
+        Some(0),
+        "{mode}: exact pinned seq before reopen is 0"
+    );
+
+    // Floor advanced through reclaimed unpinned segments (1..3).
+    let floor_before = floor_seq(&backend).expect("floor before reopen");
+    assert_eq!(
+        floor_before, 3,
+        "{mode}: floor at last reclaimed seq 3 before reopen"
+    );
+
+    // Tail readable after trim.
+    let tail_before = backend
+        .read_from(&shard(), floor_pos(&backend), 100)
+        .await
+        .expect("{mode}: tail readable before reopen");
+    let tail_seqs_before: Vec<u64> = tail_before
+        .entries
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        tail_seqs_before,
+        vec![4, 5],
+        "{mode}: tail seq 4..5 readable before reopen"
+    );
+
+    drop(backend);
+
+    // --- Phase 2: AC1 — REOPEN with live pin ---
+    let reopened = if mode == "strict" {
+        open_hybrid_strict(root)
+    } else {
+        open_hybrid_async(root)
+    };
+
+    // AC1: exact pinned boundary survives reopen.
+    let pinned_after = reopened
+        .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
+        .expect("lowest_branch_pinned_below after reopen");
+    assert_eq!(
+        pinned_after,
+        Some(0),
+        "{mode}: pinned seq 0 survives reopen (AC1)"
+    );
+
+    // AC1: persisted floor survives reopen.
+    let floor_after = floor_seq(&reopened).expect("floor after reopen");
+    assert_eq!(floor_after, 3, "{mode}: floor persisted after reopen (AC1)");
+
+    // AC1: retained tail is readable after reopen.
+    let tail_after = reopened
+        .read_from(&shard(), floor_pos(&reopened), 100)
+        .await
+        .expect("{mode}: tail readable after reopen (AC1)");
+    let tail_seqs_after: Vec<u64> = tail_after.entries.iter().map(|(p, _)| p.sequence).collect();
+    assert_eq!(
+        tail_seqs_after,
+        vec![4, 5],
+        "{mode}: retained tail seq 4..5 readable after reopen (AC1)"
+    );
+
+    // --- Phase 3: AC2 — RELEASE pin + reclaim exact boundary ---
+    reopened
+        .with_log(|l| l.discard_branch(&shard(), &branch_shard()))
+        .expect("discard branch");
+
+    // Trim again: now the previously-pinned segment (seq 0) is eligible.
+    reopened
+        .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
+        .expect("trim after pin release");
+
+    // AC2: no branch pin remains.
+    let pinned_after_release = reopened
+        .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
+        .expect("lowest_branch_pinned_below after release");
+    assert_eq!(
+        pinned_after_release, None,
+        "{mode}: no branch pin after release (AC2)"
+    );
+
+    // AC2: floor advanced to seq 3 (last reclaimed, now including the
+    // previously-pinned seq 0 segment).
+    let floor_after_release = floor_seq(&reopened).expect("floor after release");
+    assert_eq!(
+        floor_after_release, 3,
+        "{mode}: floor at seq 3 after pin release (AC2)"
+    );
+
+    // AC2: retained tail data remains readable above the floor.
+    let tail_after_release = reopened
+        .read_from(&shard(), floor_pos(&reopened), 100)
+        .await
+        .expect("{mode}: tail readable after pin release (AC2)");
+    let tail_seqs: Vec<u64> = tail_after_release
+        .entries
+        .iter()
+        .map(|(p, _)| p.sequence)
+        .collect();
+    assert_eq!(
+        tail_seqs,
+        vec![4, 5],
+        "{mode}: retained tail seq 4..5 after release (AC2)"
+    );
+
+    // AC2: below-floor reads fail closed.
+    let err = reopened
+        .read_from(&shard(), None, 100)
+        .await
+        .expect_err("{mode}: genesis read must fail closed after pin release (AC2)");
+    assert!(
+        matches!(err, EngineError::Storage(ref m) if m.contains("read below retention floor")),
+        "{mode}: expected Storage(read below retention floor) after pin release, got {err:?} (AC2)"
+    );
+
+    drop(reopened);
+}
+
+// ---------------------------------------------------------------------------
+// Existing tests (retention-floor, deleted-manifest, floor/head replay, etc.)
+// ---------------------------------------------------------------------------
 
 /// Test the invariant on both the hybrid-strict backend (closest to direct SQLite
 /// projection apply) and the hybrid-async backend (deferred SQLite apply).
@@ -515,22 +693,31 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
         // Tick should reclaim unpinned old commands (seq 1..3) but keep seq 0.
         backend.tick(ts(1_000_000)).await.unwrap();
         let async_floor = floor_seq(&backend).expect("floor advanced (async)");
-        assert!(async_floor >= 1, "floor at least seq 1 (async)");
-
-        let seg_count = count_seg_files(&root_async_pin);
-        assert!(
-            seg_count >= 1,
-            "pinned source segment survives trim (async, got {seg_count} seg files)"
+        assert_eq!(
+            async_floor, 3,
+            "floor advanced through reclaimed seq 1..3 (async)"
         );
 
-        // Above-floor tail readable.
+        // EXACT PINNED BOUNDARY (AC3): lowest_branch_pinned_below identifies seq 0.
+        let pinned_async = backend
+            .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
+            .expect("lowest_branch_pinned_below (async)");
+        assert_eq!(
+            pinned_async,
+            Some(0),
+            "exact pinned source segment is seq 0 (async)"
+        );
+
+        // Above-floor tail readable: floor at seq 3, tail is seq 4..5.
         let tail = backend
             .read_from(&shard(), floor_pos(&backend), 100)
             .await
             .expect("read_from above floor (async)");
-        assert!(
-            !tail.entries.is_empty(),
-            "above-floor tail readable with pin (async)"
+        let tail_seqs_async: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
+        assert_eq!(
+            tail_seqs_async,
+            vec![4, 5],
+            "above-floor tail is exactly seq 4,5 (async)"
         );
 
         // Release pin and re-tick — pinned segment reclaimed.
@@ -548,6 +735,186 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
 
     std::fs::remove_dir_all(&root_async).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Bead pqueue-879c9d05 top-level test functions (AC1, AC2, AC3)
+// ---------------------------------------------------------------------------
+
+/// TestConformanceSqliteLiveSourcePinSurvivesReopen (AC1):
+/// hybrid-strict and hybrid-async SQLite-backed conformance reopens with a live
+/// pin and proves the exact pinned source segment remains retained and readable.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestConformanceSqliteLiveSourcePinSurvivesReopen() {
+    for mode in ["strict", "async"] {
+        let root = base_dir(&format!("ac1-{mode}"));
+        live_pin_reopen_and_release_impl(&root, mode).await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// TestConformanceSqlitePinReleaseReclaimsExactBoundary (AC2):
+/// after reopen, releasing the pin reclaims the exact now-eligible segment while
+/// retained tail data remains readable and below-floor reads fail closed.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestConformanceSqlitePinReleaseReclaimsExactBoundary() {
+    for mode in ["strict", "async"] {
+        let root = base_dir(&format!("ac2-{mode}"));
+        live_pin_reopen_and_release_impl(&root, mode).await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// TestConformanceSqlitePinAssertionStrength (AC3):
+/// replace weak seg_count >= 1 evidence with exact key/boundary or equivalent
+/// deterministic assertions. The `source_pin_blocks_reclamation_impl` and the
+/// async pin section in `TestConformanceRetentionFloorSourcePinSqliteInvariant`
+/// already exercise exact `lowest_branch_pinned_below` and `retention_floor`
+/// assertions. This test provides an additional standalone verification of
+/// exact boundary assertion strength on a clean backend.
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestConformanceSqlitePinAssertionStrength() {
+    for mode in ["strict", "async"] {
+        let root = base_dir(&format!("ac3-{mode}"));
+        let backend = if mode == "strict" {
+            open_hybrid_strict(&root)
+        } else {
+            open_hybrid_async(&root)
+        };
+        backend.create_queue(qdef()).await.unwrap();
+
+        // Push 4 old commands (seq 0..3).
+        for i in 0..4u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("ac3-k-{i}")).unwrap()),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts((i as i64 + 1) * 10),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        drain(&backend);
+
+        // Create branch pin at seq 0.
+        backend
+            .with_log(|l| {
+                l.branch(
+                    &shard(),
+                    &branch_def(),
+                    &CommandPosition::new(shard(), 0, 0),
+                    1_000_000_000_000,
+                    10_000,
+                )
+            })
+            .expect("create branch");
+
+        // Push 2 fresh commands (seq 4..5).
+        for i in 4..6u64 {
+            backend
+                .push(
+                    &shard(),
+                    vec![PushSpec {
+                        client_item_key: Some(ClientItemKey::new(format!("ac3-k-{i}")).unwrap()),
+                        payload: Some(bytes::Bytes::from_static(b"body")),
+                        ..Default::default()
+                    }],
+                    ts(1_000_000),
+                    None,
+                )
+                .await
+                .expect("push");
+        }
+        drain(&backend);
+
+        // Trim with live pin.
+        backend
+            .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
+            .expect("trim with live pin");
+
+        // EXACT BOUNDARY (AC3): lowest_branch_pinned_below gives deterministic seq, not >= 1.
+        let pinned = backend
+            .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
+            .expect("lowest_branch_pinned_below");
+        assert_eq!(
+            pinned,
+            Some(0),
+            "{mode}: deterministic pinned boundary is seq 0, not weak seg_count"
+        );
+
+        // EXACT FLOOR: floor is the last reclaimed sequence, not ">= 1".
+        let floor = floor_seq(&backend).expect("floor");
+        assert_eq!(
+            floor, 3,
+            "{mode}: deterministic floor at seq 3, not weak floor >= 1"
+        );
+
+        // EXACT TAIL: above-floor tail is deterministic seq 4..5, not "non-empty".
+        let tail = backend
+            .read_from(&shard(), floor_pos(&backend), 100)
+            .await
+            .expect("{mode}: read_from above floor");
+        let tail_seqs: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
+        assert_eq!(
+            tail_seqs,
+            vec![4, 5],
+            "{mode}: deterministic tail seq 4..5, not weak non-empty"
+        );
+
+        // Release pin + re-trim.
+        backend
+            .with_log(|l| l.discard_branch(&shard(), &branch_shard()))
+            .expect("discard branch");
+        backend
+            .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
+            .expect("trim after pin release");
+
+        // No pinned segments remain.
+        let pinned_after = backend
+            .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
+            .expect("lowest_branch_pinned_below after release");
+        assert_eq!(
+            pinned_after, None,
+            "{mode}: no branch pin after release (deterministic)"
+        );
+
+        // Fail-closed below floor.
+        let err = backend
+            .read_from(&shard(), None, 100)
+            .await
+            .expect_err("{mode}: genesis read fails closed after release");
+        assert!(
+            matches!(err, EngineError::Storage(ref m) if m.contains("read below retention floor")),
+            "{mode}: expected Storage, got {err:?}"
+        );
+
+        // Retained tail still readable.
+        let tail_after = backend
+            .read_from(&shard(), floor_pos(&backend), 100)
+            .await
+            .expect("{mode}: tail after release");
+        let tail_seqs_after: Vec<u64> =
+            tail_after.entries.iter().map(|(p, _)| p.sequence).collect();
+        assert_eq!(
+            tail_seqs_after,
+            vec![4, 5],
+            "{mode}: retained tail still seq 4..5"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Existing tests (unchanged below)
+// ---------------------------------------------------------------------------
 
 /// TestSqliteObjectlogDeletedManifestRecovery: SQLite-backed integration surfaces
 /// fail-closed deleted-prefix behavior when a projection image references
@@ -706,24 +1073,24 @@ async fn TestSqliteDeletedManifestErrorPreservesGuarantees() {
         .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
         .expect("trim with pin");
     let floor = floor_seq(&backend).expect("floor established");
-    assert!(
-        floor >= 1,
+    assert_eq!(
+        floor, 3,
         "floor advanced past reclaimed commands (floor={floor})"
     );
 
-    // Source-pin guarantee: the pinned source segment survived trim.
-    let seg_count = count_seg_files(&root);
-    assert!(
-        seg_count >= 1,
-        "pinned source segment survives trim (got {seg_count} seg files)"
-    );
+    // Source-pin guarantee: exact boundary assertion using lowest_branch_pinned_below.
+    let pinned = backend
+        .with_log(|l| l.lowest_branch_pinned_below(&shard(), 3, 10_000))
+        .expect("lowest_branch_pinned_below");
+    assert_eq!(pinned, Some(0), "exact pinned source segment is seq 0");
 
     // Above-floor tail is readable.
     let tail = backend
         .read_from(&shard(), floor_pos(&backend), 100)
         .await
         .expect("read_from above floor");
-    assert!(!tail.entries.is_empty(), "above-floor tail readable");
+    let tail_seqs: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
+    assert_eq!(tail_seqs, vec![4, 5], "above-floor tail is exactly seq 4,5");
 
     // Now delete the SQLite projection files to simulate a behind image.
     drop(backend);
