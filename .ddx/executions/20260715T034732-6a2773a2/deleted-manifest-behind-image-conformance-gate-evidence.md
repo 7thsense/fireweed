@@ -1,3 +1,10 @@
+> HISTORICAL FAILED ATTEMPT NOTICE
+>
+> This report is the preserved evidence bundle from failed bead attempt `pqueue-0269a773`.
+> It was superseded on 2026-07-15 by the authoritative correction bundle
+> `.ddx/executions/20260715T043214-936c36b0/release-evidence-correction.md`.
+> Do not cite this file as the current release-closing authority.
+
 # Deleted-Manifest Behind-Image Conformance Gate — Release Evidence
 
 - Bead: `pqueue-0269a773`

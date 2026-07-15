@@ -2,8 +2,9 @@
 
 ## Supersession / correction (2026-07-15)
 
-This report is preserved as historical evidence from failed bead attempt `pqueue-0269a773`, but it is **not**
-current release authority. The authoritative corrected evidence for release closure now lives in
+This report is preserved as historical evidence for bead `pqueue-819b38ed`, but it is **not**
+current release authority. A separate failed attempt from `pqueue-0269a773` was later preserved and superseded in
+its own bundle. The authoritative corrected evidence for release closure now lives in
 `.ddx/executions/20260715T043214-936c36b0/release-evidence-correction.md` with the matching enforcing gate log at
 `.ddx/executions/20260715T043214-936c36b0/pr-gate-enforcing.log`.
 

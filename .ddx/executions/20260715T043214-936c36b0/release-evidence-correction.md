@@ -10,11 +10,16 @@ Scope: documentation and in-repo execution evidence only
 This bundle is the authoritative release-closing evidence for the final deleted-manifest release-note
 corrections. Earlier reports remain preserved as historical evidence only:
 
-- `.ddx/executions/20260714T235844-72ceadbe/deleted-manifest-recovery-gate-evidence.md`
-- `.ddx/executions/20260714T234920-be4f9d8d/deleted-manifest-recovery-evidence.md`
+- `.ddx/executions/20260715T034732-6a2773a2/deleted-manifest-behind-image-conformance-gate-evidence.md`:
+  exact failed attempt bundle for bead `pqueue-0269a773`, now superseded in place by this correction report.
+- `.ddx/executions/20260714T235844-72ceadbe/deleted-manifest-recovery-gate-evidence.md`:
+  older tracked historical gate report for bead `pqueue-819b38ed`, preserved for chronology and prior findings.
+- `.ddx/executions/20260714T234920-be4f9d8d/deleted-manifest-recovery-evidence.md`:
+  earlier sibling evidence bundle retained as supporting history.
 
-The surviving failed `pqueue-0269a773` report is now explicitly superseded in place and must not be cited as the
-current release authority.
+The exact failed `pqueue-0269a773` report is now explicitly superseded in place, while the older
+`pqueue-819b38ed` report remains preserved under its own identity. Neither historical artifact may be cited as
+the current release authority.
 
 ## Corrected factual claims
 
