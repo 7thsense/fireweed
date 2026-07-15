@@ -188,6 +188,78 @@ fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
     .expect("valid ts")
 }
 
+/// A claim whose two times are decided by the caller instead of both being read off this handle's
+/// [`Clock`] ([`Pqueue::claim_at`] / [`Pqueue::claim_response_at`]).
+///
+/// [`Pqueue::claim`] takes ONE `Clock::now` reading and uses it for both jobs a claim needs a time for,
+/// which is exactly right for a worker draining a queue in real time. Scheduled work is the case it
+/// cannot express: selecting the items due at some execution epoch (a backfill, a replay, a scheduler
+/// tick resolved slightly in the past or the future) while the leases it hands out must still be valid
+/// against the *operational* clock. The two times are therefore separate here:
+///
+/// * `eligibility_time` — the epoch due-ness is resolved at: an item is selected when its
+///   `not_before` (its scheduled time) is `<= eligibility_time`, so the boundary is inclusive and an
+///   item scheduled exactly AT this instant is claimed. It is a selection input only: nothing is
+///   stamped with it. `None` ⇒ the operational time below.
+/// * `lease_time` — the epoch the lease is measured from: the claimed items expire at
+///   `lease_time + lease_ms`, and the claim's command is stamped with it. `None` ⇒ this handle's
+///   `Clock::now()`, which is what a caller wants even when `eligibility_time` is far from it.
+///
+/// Leaving both `None` is precisely [`Pqueue::claim_with`], so an unset field never changes behaviour.
+///
+/// ```no_run
+/// # use pqueue::{ClaimAt, Pqueue, QueueKey, UtcTimestamp, LibBackend, EngineResult};
+/// # async fn f<B: LibBackend>(pq: &Pqueue<B>, queue: &QueueKey, tick: UtcTimestamp) -> EngineResult<()> {
+/// // Work scheduled for `tick`, leased for 60s against the real clock.
+/// let due = pq.claim_at(queue, ClaimAt::new(100, 60_000).eligibility_time(tick)).await?;
+/// # let _ = due;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ClaimAt {
+    /// Maximum items to lease (the `max` of [`Pqueue::claim`]).
+    pub max: usize,
+    /// Lease duration in milliseconds, measured from `lease_time`.
+    pub lease_ms: u64,
+    /// The epoch to resolve due-ness at (`not_before <= eligibility_time`). `None` ⇒ `lease_time`.
+    pub eligibility_time: Option<UtcTimestamp>,
+    /// The epoch the lease is measured from. `None` ⇒ this handle's `Clock::now()`.
+    pub lease_time: Option<UtcTimestamp>,
+    /// API-001 compatibility options, as for [`Pqueue::claim_with`].
+    pub compatibility: ClaimCompatibility,
+}
+
+impl ClaimAt {
+    /// A claim of up to `max` items leased for `lease_ms`, with both times defaulted (identical to
+    /// [`Pqueue::claim`] until an explicit time is set).
+    pub fn new(max: usize, lease_ms: u64) -> Self {
+        Self {
+            max,
+            lease_ms,
+            ..Self::default()
+        }
+    }
+
+    /// Resolve due-ness at `at` instead of the operational clock. See [`ClaimAt::eligibility_time`].
+    pub fn eligibility_time(mut self, at: UtcTimestamp) -> Self {
+        self.eligibility_time = Some(at);
+        self
+    }
+
+    /// Measure the lease from `at` instead of this handle's `Clock::now()`. See [`ClaimAt::lease_time`].
+    pub fn lease_time(mut self, at: UtcTimestamp) -> Self {
+        self.lease_time = Some(at);
+        self
+    }
+
+    /// Attach API-001 compatibility options (group batching / whole cohort / …).
+    pub fn compatibility(mut self, compatibility: ClaimCompatibility) -> Self {
+        self.compatibility = compatibility;
+        self
+    }
+}
+
 /// How a `nack` returns an in-flight item: back to the queue for another attempt (`Retry`) or released
 /// to a fresh delivery without charging the failure differently (`Release`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -680,22 +752,55 @@ impl<B: LibBackend> Pqueue<B> {
         lease_ms: u64,
         compatibility: ClaimCompatibility,
     ) -> EngineResult<Claimed> {
+        self.claim_response_at(
+            queue,
+            ClaimAt::new(max, lease_ms).compatibility(compatibility),
+        )
+        .await
+    }
+
+    /// Claim at caller-resolved times: select the work due at [`ClaimAt::eligibility_time`] while the
+    /// lease runs from [`ClaimAt::lease_time`] (defaulting to this handle's clock). This is the claim to
+    /// use for SCHEDULED work — a scheduler tick / backfill / replay resolves the execution epoch it is
+    /// selecting for, and the leases it takes out stay valid against the operational clock. With neither
+    /// time set it is exactly [`claim_with`](Self::claim_with).
+    pub async fn claim_at(
+        &self,
+        queue: &QueueKey,
+        request: ClaimAt,
+    ) -> EngineResult<Vec<ClaimedItem>> {
+        Ok(self.claim_response_at(queue, request).await?.items)
+    }
+
+    /// [`claim_at`](Self::claim_at) returning the full response envelope (`cohort_lease_token` and friends),
+    /// as [`claim_response_with`](Self::claim_response_with) is to [`claim_with`](Self::claim_with).
+    pub async fn claim_response_at(
+        &self,
+        queue: &QueueKey,
+        request: ClaimAt,
+    ) -> EngineResult<Claimed> {
         // Drain split (TD-003 §Graceful Drain): a draining owner refuses a NEW claim with a retryable
         // `Unavailable` so in-flight leases finalize before handoff; pushes/finalizes/renews continue.
         if self.is_draining(queue) {
             return Err(EngineError::Unavailable);
         }
         let expected_epoch = self.session_epoch(queue).await?;
-        let now = self.clock.now();
+        // The two times a claim needs, resolved independently. `lease_time` is operational: it stamps the
+        // command and anchors the lease expiry, so it defaults to this handle's clock (never to the
+        // eligibility epoch — a claim selecting last hour's due work must not hand out an already-expired
+        // lease). `eligibility_time` only selects; unset, it collapses to the operational time, which is the
+        // single-clock behaviour of `claim`/`claim_with`.
+        let lease_time = request.lease_time.unwrap_or_else(|| self.clock.now());
         let n = self.next();
         let req = ClaimRequest {
             shard: queue.clone(),
             worker_id: WorkerId::new("lib").expect("w"),
-            max_items: max,
+            max_items: request.max,
             lease_token: LeaseToken::new(format!("libL{n}")).expect("lease"),
-            lease_expires_at: add_millis(now, lease_ms),
-            now,
-            compatibility,
+            lease_expires_at: add_millis(lease_time, request.lease_ms),
+            now: lease_time,
+            eligibility_time: request.eligibility_time,
+            compatibility: request.compatibility,
             // Sole-owner: None (never fences). Coordinated owner: the cached acquire-time fence epoch.
             expected_epoch,
         };

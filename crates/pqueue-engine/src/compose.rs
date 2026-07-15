@@ -1784,16 +1784,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     .as_ref()
                     .is_some_and(|hw| hw.sequence >= fl.sequence);
                 if !covers_floor {
+                    let hw_seq = recorded_high_water.as_ref().map(|hw| hw.sequence);
                     return Err(EngineError::Storage(format!(
-                        "recovery refused: {}/{} has a durable retention floor at seq {} but the projection \
-                         image high-water is {:?} (behind the floor); the below-floor object-log segments are \
-                         reclaimed, so replaying from the floor would silently drop commands — a restored/\
-                         rolled-back/foreign projection image over a trimmed log is an unrecoverable \
-                         inconsistency",
-                        key.tenant_id.as_str(),
-                        key.queue_id.as_str(),
-                        fl.sequence,
-                        recorded_high_water,
+                        "read below retention floor: projection high-water {:?} <= reclaimed floor {} \
+                         (recovery refused: the projection image is behind the durable floor; a restored, \
+                         rolled-back, or foreign projection image over a trimmed log is an unrecoverable \
+                         inconsistency)",
+                        hw_seq, fl.sequence,
                     )));
                 }
             }
@@ -2166,11 +2163,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// selection with `Unavailable`, so the log-replay family rejects non-item units unchanged.
     fn claim_rich(&self, req: &ClaimRequest, unit: ClaimUnit) -> EngineResult<Claimed> {
         let mut g = self.inner.lock().expect("poisoned");
+        // Due-ness at the caller-resolved eligibility epoch (see `ClaimRequest::eligibility_at`); the lease
+        // and the committed command below are still stamped with the operational `req.now`.
         let selection = g.projection.select_rich_claim(
             &req.shard,
             unit,
             &req.compatibility,
-            req.now,
+            req.eligibility_at(),
             req.max_items,
         )?;
         if selection.item_ids.is_empty() {
@@ -2980,13 +2979,21 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                     Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
                 }
             }
+            // Selection runs at the caller-resolved eligibility epoch (`eligibility_time`, defaulting to
+            // `now`); the lease/command stamping below stays on `req.now`, so a claim can select work due at
+            // one epoch while leasing it against the operational clock.
+            let eligibility_at = req.eligibility_at();
             let candidates: Vec<ItemId> = if gc && strict_candidate_cursor {
                 let after = g
                     .coords
                     .get(&req.shard)
                     .and_then(|coord| coord.in_flight_claim_tail);
-                g.projection
-                    .eligible_candidates_after(&req.shard, req.now, after, req.max_items)?
+                g.projection.eligible_candidates_after(
+                    &req.shard,
+                    eligibility_at,
+                    after,
+                    req.max_items,
+                )?
             } else {
                 let in_flight_claims = g
                     .coords
@@ -2995,7 +3002,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                     .unwrap_or_default();
                 let candidate_limit = req.max_items.saturating_add(in_flight_claims.len()).max(1);
                 g.projection
-                    .eligible_candidates(&req.shard, req.now, candidate_limit)?
+                    .eligible_candidates(&req.shard, eligibility_at, candidate_limit)?
                     .into_iter()
                     .filter(|id| !in_flight_claims.contains(id))
                     .take(req.max_items)
@@ -5321,6 +5328,7 @@ mod ordered_tests {
         );
 
         let mut first_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-1").unwrap(),
             max_items: 1,
@@ -5341,6 +5349,7 @@ mod ordered_tests {
         };
 
         let mut second_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-2").unwrap(),
             max_items: 1,
@@ -5421,6 +5430,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
 
         let mut paused_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer").unwrap(),
             max_items: 1,
@@ -5463,6 +5473,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
 
         let mut resumed_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-2").unwrap(),
             max_items: 2,
@@ -5501,6 +5512,7 @@ mod ordered_tests {
         drop(landed_push);
 
         let mut plain_claim = plain_backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: plain_shard.clone(),
             worker_id: WorkerId::new("claimer-3").unwrap(),
             max_items: 2,
@@ -5534,6 +5546,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
 
         let mut resumed_plain_claim = plain_backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: plain_shard,
             worker_id: WorkerId::new("claimer-4").unwrap(),
             max_items: 1,
@@ -5569,6 +5582,7 @@ mod ordered_tests {
         drop(push_one);
 
         let mut initial_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-lease").unwrap(),
             max_items: 1,
@@ -5596,6 +5610,7 @@ mod ordered_tests {
         drop(reclaim);
 
         let mut paused_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-paused").unwrap(),
             max_items: 1,
@@ -5629,6 +5644,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
 
         let mut resumed_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-resumed").unwrap(),
             max_items: 1,

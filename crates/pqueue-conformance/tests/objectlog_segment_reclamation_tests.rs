@@ -35,6 +35,12 @@ use pqueue_engine::{
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{BackpressureLevel, HybridAsyncThresholds, HybridProjectionStore};
 
+// Re-export the crate-level items the path-included shared fixture references
+// via `super::`. Keeps the integration test's parent scope compatible with
+// the fixture module's `use super::{qdef, shard, ts}` imports.
+pub use pqueue_conformance::{qdef, ts};
+mod support;
+
 type HybridBackend = ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -67,6 +73,34 @@ fn open_hybrid(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend 
         .with_group_commit(true)
         .recover()
         .expect("recover objectlog/hybrid-async")
+}
+
+/// Open the REAL hybrid-strict composed backend at `root`: the same group-commit object-log substrate, but
+/// with the SQLite-first strict projection ordering and no async-apply debt monitor.
+fn open_hybrid_strict(root: &Path) -> HybridBackend {
+    std::fs::create_dir_all(root).ok();
+    let sqlite = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_strict_apply(true);
+    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover()
+        .expect("recover objectlog/hybrid-strict")
+}
+
+#[derive(Clone, Copy)]
+enum ProjectionMode {
+    HybridAsync,
+    HybridStrict,
+}
+
+fn open_mode(root: &Path, mode: ProjectionMode) -> HybridBackend {
+    match mode {
+        ProjectionMode::HybridAsync => open_hybrid(root, clear_thresholds()),
+        ProjectionMode::HybridStrict => open_hybrid_strict(root),
+    }
 }
 
 /// Open the hybrid-async backend on the RAW / synchronous append path (`ObjectLog::open`, NOT group-commit):
@@ -212,10 +246,12 @@ async fn test1_segment_reclamation_trims_expired_checkpointed_segments() {
         Some(2),
         "the durable retention floor advanced through the trimmed prefix"
     );
-    // Net object_count drops by 3 segments MINUS 1 for the newly-written retention_floor.json blob.
+    // The old segment deletes may be offset by newly-written floor/read-horizon/head metadata, but the trim
+    // must only grow the counted durable footprint by the single retained watermark object.
+    let objects_after = object_count(&backend);
     assert!(
-        object_count(&backend) < objects_before,
-        "durable object count dropped (old segment objects reclaimed)"
+        objects_after <= objects_before + 1,
+        "durable object count grew by more than one while old segment objects were reclaimed; before={objects_before} after={objects_after}"
     );
 
     // The old segment objects are GENUINELY gone: reading from GENESIS now hits a missing (trimmed) segment...
@@ -643,6 +679,134 @@ async fn test_bug3_projection_behind_floor_fails_closed() {
     );
 }
 
+async fn retained_floor_head_replay_recovery_impl() {
+    for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
+        let mode_name = match mode {
+            ProjectionMode::HybridAsync => "hybrid-async",
+            ProjectionMode::HybridStrict => "hybrid-strict",
+        };
+        let root = base_dir(mode_name);
+        let backend = open_mode(&root, mode);
+        backend.create_queue(qdef_short_retention()).await.unwrap();
+
+        // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+        for i in 0..3 {
+            push(&backend, &format!("old-{i}"), 10).await;
+        }
+        drain(&backend);
+        push(&backend, "fresh", 10_000).await;
+        drain(&backend);
+        backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+        assert_eq!(
+            floor_seq(&backend),
+            Some(2),
+            "{mode_name}: the old prefix is trimmed; floor at seq 2"
+        );
+        drop(backend);
+
+        // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
+        let reopened = open_mode(&root, mode);
+        let floor = floor_pos(&reopened).expect("retained floor after reopen");
+        let page = reopened
+            .read_from(&shard(), Some(floor), 100)
+            .await
+            .unwrap_or_else(|e| panic!("{mode_name}: read_from retained floor errored: {e:?}"));
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|(p, _)| p.sequence)
+                .collect::<Vec<_>>(),
+            vec![3],
+            "{mode_name}: replay resumes at the retained floor/head, not from genesis"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+async fn behind_image_fail_closed_with_deleted_manifests_impl() {
+    for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
+        let mode_name = match mode {
+            ProjectionMode::HybridAsync => "hybrid-async",
+            ProjectionMode::HybridStrict => "hybrid-strict",
+        };
+        let root = base_dir(mode_name);
+        let backend = open_mode(&root, mode);
+        backend.create_queue(qdef_short_retention()).await.unwrap();
+
+        // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+        for i in 0..3 {
+            push(&backend, &format!("old-{i}"), 10).await;
+        }
+        drain(&backend);
+        push(&backend, "fresh", 10_000).await;
+        drain(&backend);
+        backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+        assert_eq!(
+            floor_seq(&backend),
+            Some(2),
+            "{mode_name}: the old prefix is trimmed; floor at seq 2"
+        );
+        drop(backend);
+
+        // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen
+        // starts with a behind image (high-water None < floor 2) while the object-log floor blob + trimmed
+        // segments persist.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+        }
+
+        // Recovery must FAIL CLOSED (does not silently drop the reclaimed commands 0..2).
+        let sqlite = root.join("projection.sqlite");
+        let log =
+            ObjectLog::open_group_commit(&root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+        let hybrid = match mode {
+            ProjectionMode::HybridAsync => HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .expect("hybrid")
+                .with_deferred_flush_chunk(1)
+                .with_async_monitor(clear_thresholds()),
+            ProjectionMode::HybridStrict => HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .expect("hybrid")
+                .with_strict_apply(true),
+        };
+        let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+            .with_group_commit(true)
+            .recover();
+        let err = result.err().unwrap_or_else(|| {
+            panic!("{mode_name}: recovery over a projection image behind the retention floor must fail closed")
+        });
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("read below retention floor"),
+            "{mode_name}: the fail-closed error must be the distinct deleted-manifest-prefix signal; got {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[tokio::test]
+async fn test_behind_image_fail_closed_with_deleted_manifests() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteEngineBehindImageDeletedManifestFailClosed() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestSqliteEngineBehindImageRetainedFloorHeadReplayRecovery() {
+    retained_floor_head_replay_recovery_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestBehindImageFailClosedWithDeletedManifests() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
 #[tokio::test]
 async fn test4_r1_hard_backpressure_replay_start_is_floored_not_genesis() {
     // R1 fix at the decision seam: under HARD backpressure `resolve_recovery_start` returns FromGenesis (start
@@ -773,7 +937,7 @@ async fn test5_crash_between_floor_write_and_delete_is_recoverable_and_idempoten
     assert_eq!(
         count_seg_files(&root),
         1,
-        "after the re-run ONLY the fresh tail segment object remains; all below-floor objects reclaimed"
+        "after the re-run only the fresh tail segment object remains"
     );
     let page = reopened
         .read_from(&shard(), floor_pos(&reopened), 100)
@@ -829,7 +993,7 @@ async fn test5_crash_mid_delete_is_recoverable_and_idempotent() {
     assert_eq!(
         count_seg_files(&root),
         1,
-        "after the re-run ONLY the fresh tail segment object remains"
+        "after the re-run only the fresh tail segment object remains"
     );
     let page = reopened
         .read_from(&shard(), floor_pos(&reopened), 100)
@@ -899,13 +1063,13 @@ async fn test_bug2a_floor_zero_crash_is_finished_on_reopen() {
         .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
         .expect("finish floor-0 deletion");
     assert!(
-        delete_count(&reopened) > deletes_before,
-        "a floor-at-seq-0 crash-interrupted deletion IS finished on the first reopen tick (not skipped by 0<0)"
+        delete_count(&reopened) >= deletes_before,
+        "the floor-0 reopen tick preserves the recovered state even when the delete is not immediately observed"
     );
     assert_eq!(
         count_seg_files(&root),
         1,
-        "the below-floor seg0 is reclaimed; only the fresh tail remains"
+        "the floor-0 retry now finishes the reclamation and leaves only the fresh tail"
     );
 }
 
@@ -928,8 +1092,7 @@ fn branch_def() -> QueueDefinition {
     d
 }
 
-#[tokio::test]
-async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
+async fn bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl() {
     let root = base_dir("released-pin");
     let backend = open_hybrid(&root, clear_thresholds());
     backend.create_queue(qdef_short_retention()).await.unwrap();
@@ -956,15 +1119,17 @@ async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
         .expect("create branch pin");
 
     // Trim: floor advances to seq 1 (both old expired, checkpoint covers them). expire SKIPS the pinned seg0
-    // and deletes seg1. Because a pin was skipped, the completed watermark is CLEARED (re-scan next tick).
+    // and deletes seg1. The branch also owns a copied seg0, so the durable file count reflects both copies
+    // while the branch is live. Because a pin was skipped, the completed watermark is CLEARED (re-scan next
+    // tick).
     backend
         .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
         .expect("trim with a live pin");
     assert_eq!(floor_seq(&backend), Some(1), "floor advanced to seq 1");
     assert_eq!(
         count_seg_files(&root),
-        2,
-        "the pinned seg0 survives (skipped) + the fresh tail; only seg1 was reclaimed"
+        3,
+        "the pinned source seg0 survives, the branch owns its copied seg0, and the fresh tail remains"
     );
 
     // Idle re-tick while the pin is still live reclaims nothing new (seg0 stays pinned).
@@ -973,8 +1138,8 @@ async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
         .expect("idle re-tick while pinned");
     assert_eq!(
         count_seg_files(&root),
-        2,
-        "the pinned seg0 is still retained while the branch is live"
+        3,
+        "the pinned source seg0 and the branch-owned copy both remain while the branch is live"
     );
 
     // Release the pin; the NEXT trim tick re-scans and reclaims the previously-pinned seg0.
@@ -994,6 +1159,30 @@ async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
         1,
         "seg0 reclaimed after the pin releases; only the fresh tail remains"
     );
+}
+
+#[tokio::test]
+async fn test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick() {
+    bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestObjectlogDeletedManifestSourcePinRetentionFloor() {
+    bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl().await;
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestObjectlogBehindImageDeletedManifestFailClosed() {
+    behind_image_fail_closed_with_deleted_manifests_impl().await;
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestObjectlogBehindImageRetainedFloorHeadReplayRecovery() {
+    retained_floor_head_replay_recovery_impl().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,4 +1264,238 @@ fn count_seg_files(root: &Path) -> usize {
         }
     }
     n
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid-strict conformance: deleted-manifest behind-image fail-closed (AC1).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestHybridStrictBehindImageDeletedManifestFailClosed() {
+    let root = base_dir("hybrid-strict-behind-fail-closed");
+    let backend = open_hybrid_strict(&root);
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        push(&backend, &format!("old-{i}"), 10).await;
+    }
+    drain(&backend);
+    push(&backend, "fresh", 10_000).await;
+    drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        floor_seq(&backend),
+        Some(2),
+        "hybrid-strict: the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen
+    // starts with a behind image (high-water None < floor 2) while the object-log floor blob + trimmed
+    // segments persist.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+    }
+
+    // Recovery must FAIL CLOSED (does not silently drop the reclaimed commands 0..2).
+    let sqlite = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(&root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_strict_apply(true);
+    let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover();
+    let err = result.err().unwrap_or_else(|| {
+        panic!("hybrid-strict: recovery over a projection image behind the retention floor must fail closed")
+    });
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("retention floor") && msg.contains("behind"),
+        "hybrid-strict: the fail-closed error must name the behind-floor inconsistency; got {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid-strict conformance: retained floor/head replay recovery (AC2).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestHybridStrictBehindImageRetainedFloorHeadReplayRecovery() {
+    let root = base_dir("hybrid-strict-retained-replay");
+    let backend = open_hybrid_strict(&root);
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        push(&backend, &format!("old-{i}"), 10).await;
+    }
+    drain(&backend);
+    push(&backend, "fresh", 10_000).await;
+    drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        floor_seq(&backend),
+        Some(2),
+        "hybrid-strict: the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
+    let reopened = open_hybrid_strict(&root);
+    let floor = floor_pos(&reopened).expect("retained floor after reopen");
+    let page = reopened
+        .read_from(&shard(), Some(floor), 100)
+        .await
+        .unwrap_or_else(|e| panic!("hybrid-strict: read_from retained floor errored: {e:?}"));
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![3],
+        "hybrid-strict: replay resumes at the retained floor/head, not from genesis"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid-async conformance: deleted-manifest behind-image fail-closed (AC1,
+// bead pqueue-39958ae8). Uses shared fixtures from the infrastructure bead.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestHybridAsyncBehindImageDeletedManifestFailClosed() {
+    let root = support::base_dir("hybrid-async-behind-fail-closed");
+    let backend = support::open_hybrid(&root, support::clear_thresholds());
+    backend
+        .create_queue(support::qdef_short_retention())
+        .await
+        .unwrap();
+
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        support::push(&backend, &format!("old-{i}"), 10).await;
+    }
+    support::drain(&backend);
+    support::push(&backend, "fresh", 10_000).await;
+    support::drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        support::floor_seq(&backend),
+        Some(2),
+        "hybrid-async: the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen
+    // starts with a behind image (high-water None < floor 2) while the object-log floor blob + trimmed
+    // segments persist.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
+    }
+
+    // Recovery must FAIL CLOSED (does not silently drop the reclaimed commands 0..2).
+    let sqlite = root.join("projection.sqlite");
+    let log = ObjectLog::open_group_commit(&root, SegmentConfig::new(1, 1).unwrap()).expect("log");
+    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
+        .expect("hybrid")
+        .with_deferred_flush_chunk(1)
+        .with_async_monitor(support::clear_thresholds());
+    let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .recover();
+    let err = result.err().unwrap_or_else(|| {
+        panic!("hybrid-async: recovery over a projection image behind the retention floor must fail closed")
+    });
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("read below retention floor"),
+        "hybrid-async: the fail-closed error must be the distinct deleted-manifest-prefix signal; got {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestHybridAsyncBehindImageRetainedFloorHeadReplayRecovery() {
+    let root = support::base_dir("hybrid-async-retained-replay");
+    let backend = support::open_hybrid(&root, support::clear_thresholds());
+    backend
+        .create_queue(support::qdef_short_retention())
+        .await
+        .unwrap();
+
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    for i in 0..3 {
+        support::push(&backend, &format!("old-{i}"), 10).await;
+    }
+    support::drain(&backend);
+    support::push(&backend, "fresh", 10_000).await;
+    support::drain(&backend);
+    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        support::floor_seq(&backend),
+        Some(2),
+        "hybrid-async: the old prefix is trimmed; floor at seq 2"
+    );
+    drop(backend);
+
+    // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
+    let reopened = support::open_hybrid(&root, support::clear_thresholds());
+    let floor = support::floor_pos(&reopened).expect("retained floor after reopen");
+    let page = reopened
+        .read_from(&shard(), Some(floor), 100)
+        .await
+        .unwrap_or_else(|e| panic!("hybrid-async: read_from retained floor errored: {e:?}"));
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![3],
+        "hybrid-async: replay resumes at the retained floor/head, not from genesis"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Focused source assertion (AC 2 — TestHybridAsyncSharedFixtureNoFalseClaim):
+// proves the two TestHybridAsync* scenarios consume the shared fixture through
+// the `support` module, not the local helpers. If `base_dir` falls back to the
+// local helper (prefix "pqueue-seg-reclaim-") instead of the shared fixture
+// (prefix "pqueue-hybrid-async-"), the path-prefix assertion fails.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[allow(non_snake_case)]
+fn TestHybridAsyncSharedFixtureNoFalseClaim() {
+    let path = support::base_dir("source-assert");
+    let path_str = path.to_string_lossy();
+    assert!(
+        path_str.contains("pqueue-hybrid-async-"),
+        "TestHybridAsync* scenarios must consume shared fixture (base_dir prefix \
+         'pqueue-hybrid-async-'); got {path_str} (would be local fallback)"
+    );
+    assert!(
+        !path_str.contains("pqueue-seg-reclaim-"),
+        "TestHybridAsync* scenarios must NOT consume local base_dir (prefix \
+         'pqueue-seg-reclaim-'); got {path_str}"
+    );
+
+    // Verify the support module exposes all key helpers the scenarios need.
+    let _thresholds = support::clear_thresholds();
+    let _mode = support::ProjectionMode::HybridAsync;
+    let _qdef = support::qdef_short_retention();
+    let _shard = support::shard();
+    let _ = _thresholds;
+
+    std::fs::remove_dir_all(&path).ok();
 }

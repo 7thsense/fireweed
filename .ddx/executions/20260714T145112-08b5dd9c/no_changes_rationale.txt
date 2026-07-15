@@ -1,0 +1,12 @@
+status: proposed
+reason: operator_required: lefthook config files are missing in this worktree, so the pre-commit gate cannot be executed as requested.
+
+go_test:
+- command: go test ./...
+- result: not_applicable
+- evidence: no go.mod or Go packages exist in this repository; the command failed with "pattern ./...: directory prefix . does not contain main module or its selected dependencies".
+
+lefthook_gate:
+- command: lefthook run pre-commit
+- result: operator_required_failure
+- evidence: lefthook reported that no config files named "lefthook", ".lefthook", or ".config/lefthook" were found in this worktree.

@@ -1,0 +1,2 @@
+exit_status=0
+log=.ddx/executions/20260714T151050-3bc9d74b/pr-gate-probe.log

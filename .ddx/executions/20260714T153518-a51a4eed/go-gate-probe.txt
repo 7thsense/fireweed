@@ -1,0 +1,10 @@
+command=go test ./...
+exit_status=1
+status=not-applicable
+reason=no go.mod or .go source files found in repository
+
+--- output ---
+# ./...
+pattern ./...: directory prefix . does not contain main module or its selected dependencies
+FAIL	./... [setup failed]
+FAIL

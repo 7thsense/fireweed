@@ -309,7 +309,21 @@ pub struct ClaimRequest {
     pub max_items: usize,
     pub lease_token: LeaseToken,
     pub lease_expires_at: UtcTimestamp,
+    /// Operational claim time: what the lease/command stamping is measured against (`lease_expires_at`
+    /// is `now + lease duration` for the ordinary caller), NOT necessarily what decides due-ness — see
+    /// [`eligibility_time`](Self::eligibility_time).
     pub now: UtcTimestamp,
+    /// Caller-resolved eligibility epoch — the "as of" time that decides which items are DUE
+    /// (`not_before <= eligibility_time`, half-open, so an item is due AT its `not_before`). `None` ⇒
+    /// fall back to `now`, which is the single-clock behaviour every pre-existing caller had.
+    ///
+    /// Set this when selecting *scheduled* work for an execution epoch that is not the operational
+    /// clock: the eligibility scan runs at this epoch while `now` / `lease_expires_at` stay on
+    /// operational time, so the resulting leases remain valid against the real clock. It is purely a
+    /// SELECTION input — backends MUST NOT stamp commands, leases, or lease expiry with it.
+    ///
+    /// Read it through [`eligibility_at`](Self::eligibility_at) rather than matching on the `Option`.
+    pub eligibility_time: Option<UtcTimestamp>,
     /// API-001 Batch Claim compatibility options (group_key / same_group_key / metadata_equals /
     /// group_batching / whole_cohort). `ClaimCompatibility::default()` is an item-level claim
     /// ([`ClaimUnit::Item`](crate::ClaimUnit)) — backends resolve the unit via
@@ -323,6 +337,17 @@ pub struct ClaimRequest {
     /// (behaviour-preserving). The epoch MUST be the value cached at `acquire_queue_lease`, never re-read
     /// from `current_epoch` (re-reading defeats the fence).
     pub expected_epoch: Option<u64>,
+}
+
+impl ClaimRequest {
+    /// The epoch a backend MUST resolve due-ness against (`not_before <= t`): the explicit
+    /// [`eligibility_time`](Self::eligibility_time) when the caller supplied one, else the operational
+    /// [`now`](Self::now). Every candidate-selection call in a claim goes through this; `now` stays the
+    /// stamping/lease clock. Keeping the fallback in one place is what makes an unset `eligibility_time`
+    /// byte-identical to the pre-existing single-clock claim.
+    pub fn eligibility_at(&self) -> UtcTimestamp {
+        self.eligibility_time.unwrap_or(self.now)
+    }
 }
 
 /// A claimed item in the API-001 claimed-item shape (lease fields included).

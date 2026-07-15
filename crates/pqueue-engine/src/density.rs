@@ -2,7 +2,8 @@
 //! cheaply). The engine-level, unit-testable CORE; this delivers the LRU-bounding + the renewal sweep. The
 //! pieces the bead also names — the per-node assignment POLL and the shared SWEEPER TASK, plus the server
 //! loop that drives all of this on a cadence — are NOT built here; they are the server-runtime follow-up
-//! (pqueue-c33c367e). Two primitives:
+//! (pqueue-7bac12ce threaded the data-plane fence epoch; the sweeper/runtime loop is a separate follow-up).
+//! Two primitives:
 //!
 //! 1. [`ResidentQueues`] — an LRU-BOUNDED set of the queues a node keeps HOT (a resident per-queue handle:
 //!    the in-memory projection for the log-replay family, or the lease/session for the relational family).

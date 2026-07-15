@@ -37,10 +37,10 @@ echo "=== pr-gate [mode=${MODE}] ==="
 
 if [[ "$MODE" == "enforcing" ]]; then
     echo "--- fmt ---"
-    cargo +1.92.0 fmt --all --check
+    rustup run 1.92.0 cargo fmt --all --check
 
     echo "--- ledger validator tests ---"
-    cargo +1.92.0 test -p pqueue-release -- --nocapture
+    rustup run 1.92.0 cargo test -p pqueue-release -- --nocapture
 
     echo "--- coverage threshold parser fixtures ---"
     bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate pqueue-core --min-lines 90 --min-branches 85
@@ -59,13 +59,13 @@ if [[ "$MODE" == "enforcing" ]]; then
 fi
 
 echo "--- fmt ---"
-cargo +1.92.0 fmt --all --check
+rustup run 1.92.0 cargo fmt --all --check
 
 echo "--- clippy ---"
-cargo +1.92.0 clippy --workspace --all-targets -- -D warnings
+rustup run 1.92.0 cargo clippy --workspace --all-targets -- -D warnings
 
 echo "--- test ---"
-cargo +1.92.0 test --workspace
+rustup run 1.92.0 cargo test --workspace
 
 echo "--- cargo deny ---"
 cargo deny check
