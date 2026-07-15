@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: f1b390e64cb29c96f4ec785185dccc3c623add90e17dd671feaf579f847beb41
+    self_hash: 1bb105a302b1e725553539d275aee8f7f4e860a6fa043796387b6b4cab99113f
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: 39792548c579ce686ad8f57017bfcd49f56fe584443ffedd29baf149ba641cb0
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-15T19:40:50Z"
+    reviewed_at: "2026-07-15T19:56:58Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -200,9 +200,10 @@ Postgres-wire compatible. Connection setup belongs to
 - A credentialed live acceptance run against a real managed endpoint is required
   before any release claims provider-specific managed-Postgres certification.
 
-Until a credentialed managed-endpoint run exists, releases may claim only
-generic TLS-capable Postgres support, not provider-specific Lakebase
-certification.
+The stock release supports plaintext Postgres only. TLS-capable Postgres is
+available to source or custom builds that enable the `tls` feature. Until a
+credentialed managed-endpoint run exists, neither build may claim
+provider-specific Lakebase certification.
 
 ## Postgres Commit-Transition Parity Scope
 

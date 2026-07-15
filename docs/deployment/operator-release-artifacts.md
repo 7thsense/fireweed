@@ -135,7 +135,9 @@ kind storage matrix only and is not CI matrix proof.
 The chart exposes separate storage axes:
 
 - log backend: `objectlog` or `postgres`
-- projection backend: `inmemory`, `sqlite`, or `postgres`
+- projection backend: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or
+  `postgres`; `hybrid-strict` remains an explicit pending product decision
 
-The v0.9.0 server smoke path wires `objectlog` plus `inmemory`; other rendered
-axis combinations fail explicitly until their composition roots are implemented.
+The current live-kind matrix covers `objectlog` plus `inmemory`, and `postgres`
+plus `inmemory`, `sqlite`, or `postgres`. Other rendered combinations remain
+outside the live deployment claim until their matrix entries and evidence land.

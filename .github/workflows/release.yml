@@ -62,11 +62,6 @@ jobs:
 
       - run: bash scripts/ci/release-gate.sh
 
-      - name: Deployment release gate
-        env:
-          KIND_NODE_IMAGE: kindest/node:v1.31.0
-        run: bash scripts/ci/deployment-release-gate.sh
-
       - name: Resolve release tag
         id: release
         shell: bash
@@ -80,6 +75,12 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+      - name: Deployment release gate
+        env:
+          KIND_NODE_IMAGE: kindest/node:v1.31.0
+          PQUEUE_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: bash scripts/ci/deployment-release-gate.sh
+
       - name: Package binaries
         run: bash scripts/release/package-binaries.sh "${{ steps.release.outputs.version }}"
 
@@ -89,15 +90,6 @@ jobs:
             --version "${{ steps.release.outputs.version }}" \
             --tag "${{ steps.release.outputs.tag }}" \
             --destination target/release-dist
-
-      - name: Stage deployment proof
-        run: |
-          install -m 0644 \
-            target/deployment-release-gate/deployment-proof.json \
-            target/release-dist/deployment-proof.json
-          install -m 0644 \
-            target/deployment-release-gate/deployment-proof.md \
-            target/release-dist/deployment-proof.md
 
       - name: Stage container image context
         run: |
@@ -157,10 +149,26 @@ jobs:
             --output target/release-dist/pqueue-service-image.txt
           bash scripts/release/write-checksums.sh target/release-dist
 
+      - name: Finalize deployment proof
+        env:
+          PQUEUE_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          PQUEUE_RELEASE_DIST: target/release-dist
+          PQUEUE_IMAGE_EVIDENCE_FILE: target/release-dist/pqueue-service-image.txt
+        run: |
+          bash scripts/ci/deployment-release-gate.sh --finalize-proof
+          install -m 0644 \
+            target/deployment-release-gate/deployment-proof.json \
+            target/release-dist/deployment-proof.json
+          install -m 0644 \
+            target/deployment-release-gate/deployment-proof.md \
+            target/release-dist/deployment-proof.md
+          bash scripts/release/write-checksums.sh target/release-dist
+
       - name: Verify release artifact set
         run: |
           bash scripts/release/verify-release-artifacts.sh \
             --version "${{ steps.release.outputs.version }}" \
+            --commit "$GITHUB_SHA" \
             --dist target/release-dist
 
       - name: Publish release assets

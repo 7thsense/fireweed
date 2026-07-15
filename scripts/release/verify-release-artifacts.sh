@@ -2,11 +2,13 @@
 set -euo pipefail
 
 VERSION=""
+COMMIT=""
 DIST_DIR="target/release-dist"
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --version) VERSION="${2:-}"; shift 2 ;;
+        --commit) COMMIT="${2:-}"; shift 2 ;;
         --dist|--dist-dir) DIST_DIR="${2:-}"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -56,6 +58,72 @@ require_file "${DIST_DIR}/SHA256SUMS"
 
 grep -Eq '^digest=sha256:[0-9a-fA-F]{64}$' "${DIST_DIR}/pqueue-service-image.txt" \
     || fail "image evidence must contain a sha256 digest"
+
+python3 - "${DIST_DIR}/deployment-proof.json" "${DIST_DIR}/deployment-proof.md" \
+    "${DIST_DIR}/pqueue-service-image.txt" "${VERSION}" "${COMMIT}" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+proof_path, markdown_path, image_path = map(pathlib.Path, sys.argv[1:4])
+version, expected_commit = sys.argv[4:6]
+
+try:
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"invalid deployment proof JSON: {exc}")
+
+image = {}
+for line in image_path.read_text(encoding="utf-8").splitlines():
+    if "=" in line:
+        key, value = line.split("=", 1)
+        image[key] = value
+
+errors = []
+if proof.get("schema") != "pqueue.deployment_proof.v1":
+    errors.append("unexpected deployment proof schema")
+if proof.get("status") != "passed" or proof.get("exit_status") != 0:
+    errors.append("deployment proof status must be passed with exit_status 0")
+if proof.get("chart", {}).get("version") != version:
+    errors.append(f"deployment proof chart version must equal {version}")
+package = pathlib.Path(proof.get("chart", {}).get("package", "unavailable")).name
+if package != f"pqueue-{version}.tgz" or not proof.get("chart", {}).get("package_exists"):
+    errors.append("deployment proof chart package is missing or mismatched")
+digest = image.get("digest", "")
+if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+    errors.append("image evidence digest is malformed")
+if proof.get("image", {}).get("digest") != digest:
+    errors.append("deployment proof image digest does not match image evidence")
+if proof.get("image", {}).get("tag") != image.get("version_coordinate"):
+    errors.append("deployment proof image tag does not match image evidence")
+if proof.get("image", {}).get("coordinate") != image.get("digest_coordinate"):
+    errors.append("deployment proof image coordinate does not match image evidence")
+if image.get("version") != version:
+    errors.append("container image evidence version does not match release version")
+if image.get("source_commit") != proof.get("commit_sha"):
+    errors.append("container image evidence commit does not match deployment proof")
+if "unavailable" in {
+    proof.get("image", {}).get("tag"),
+    proof.get("image", {}).get("digest"),
+    proof.get("image", {}).get("coordinate"),
+}:
+    errors.append("deployment proof image identity is unavailable")
+if expected_commit and proof.get("commit_sha") != expected_commit:
+    errors.append("deployment proof commit does not match expected release commit")
+
+markdown = markdown_path.read_text(encoding="utf-8")
+for value, label in [
+    (proof.get("commit_sha", ""), "commit"),
+    (version, "chart version"),
+    (digest, "image digest"),
+]:
+    if not value or value not in markdown:
+        errors.append(f"deployment proof Markdown omits {label}")
+
+if errors:
+    raise SystemExit("invalid deployment proof: " + "; ".join(errors))
+PY
 
 for artifact in "${DIST_DIR}"/*; do
     [[ -f "$artifact" ]] || continue

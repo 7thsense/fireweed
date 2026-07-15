@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CHART_DIR="${REPO_ROOT}/charts/pqueue"
 PROOF_DIR="${PQUEUE_DEPLOYMENT_PROOF_DIR:-${REPO_ROOT}/target/deployment-release-gate}"
-PACKAGE_DIR="${PROOF_DIR}/release-dist"
+PACKAGE_DIR="${PQUEUE_RELEASE_DIST:-${PROOF_DIR}/release-dist}"
 PROOF_JSON="${PROOF_DIR}/deployment-proof.json"
 PROOF_MD="${PROOF_DIR}/deployment-proof.md"
 COMMAND_LOG="${PROOF_DIR}/commands.tsv"
@@ -113,6 +113,10 @@ run_step() {
 }
 
 chart_version() {
+    if [[ -n "${PQUEUE_RELEASE_VERSION:-}" ]]; then
+        printf '%s\n' "${PQUEUE_RELEASE_VERSION}"
+        return
+    fi
     awk -F': *' '$1 == "version" { print $2; exit }' "${CHART_DIR}/Chart.yaml"
 }
 
@@ -542,6 +546,26 @@ run_kind_matrix() {
 
 main() {
     cd "${REPO_ROOT}"
+    if [[ "${1:-}" == "--finalize-proof" ]]; then
+        if (($# != 1)); then
+            err "--finalize-proof does not accept additional arguments"
+            return 64
+        fi
+        local required_log
+        for required_log in "${COMMAND_LOG}" "${STORAGE_LOG}" "${SKIP_LOG}" "${SUPPORT_LOG}"; do
+            if [[ ! -f "${required_log}" ]]; then
+                err "cannot finalize proof; missing gate log: ${required_log}"
+                return 1
+            fi
+        done
+        write_deployment_proof 0
+        echo "deployment proof finalized: ${PROOF_JSON}"
+        return
+    fi
+    if (($# > 0)); then
+        err "unexpected argument(s): $*"
+        return 64
+    fi
     init_proof_logs
     trap 'status=$?; write_deployment_proof "${status}" || true; exit "${status}"' EXIT
     run_non_cluster_gates
