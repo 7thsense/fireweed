@@ -19,7 +19,7 @@
 //!     - Behind-image: deleted SQLite projection causes recovery to fail closed.
 //!     - Both hybrid-strict and hybrid-async projection modes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_conformance::{qdef, qkey, ts};
@@ -299,6 +299,33 @@ async fn source_pin_blocks_reclamation_impl(root: &Path, mode: ProjectionMode) {
 //  docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md:224).
 // ---------------------------------------------------------------------------
 
+/// Find the on-disk path of the source seq-0 segment file under `root`.
+/// The seq-0 segment filename contains `s00000000000000000000-` (the pid/attempt
+/// suffix distinguishes it from branch-owned copies). Returns `None` if no such
+/// file exists.
+fn find_source_seq0_seg_file(root: &Path) -> Option<PathBuf> {
+    walk_find_seg(root, "s00000000000000000000-")
+}
+
+/// Recursively walk `dir` looking for a `.seg` file whose name contains `needle`.
+fn walk_find_seg(dir: &Path, needle: &str) -> Option<PathBuf> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = walk_find_seg(&path, needle) {
+                return Some(found);
+            }
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.contains(needle)
+            && name.ends_with(".seg")
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMode) {
     let tag = match mode {
         ProjectionMode::HybridStrict => "strict",
@@ -327,6 +354,11 @@ async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMo
     backend
         .trim_reclaimable_segments(&qkey(), 1_000, ts(1_000_000))
         .expect("trim with live pin");
+
+    // Capture the exact source seq-0 segment path on disk for filesystem-level
+    // assertions across reopen and reclamation.
+    let seq0_seg = find_source_seq0_seg_file(root)
+        .unwrap_or_else(|| panic!("{tag}: source seq-0 segment must exist after trim with pin"));
 
     // EXACT PINNED BOUNDARY: lowest_branch_pinned_below identifies seq 0.
     let pinned_before = backend
@@ -407,6 +439,12 @@ async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMo
         "{tag}: retained tail seq 4..5 readable after reopen (AC1)"
     );
 
+    // AC1: exact source segment file persists on disk after reopen.
+    assert!(
+        seq0_seg.exists(),
+        "{tag}: source seq-0 segment must exist on disk after reopen (AC1)"
+    );
+
     // AC2: below-floor pinned source data remains readable via the branch queue.
     // The branch holds a durable copy of the pinned source segment (seq 0).
     let branch_after = reopened
@@ -431,6 +469,12 @@ async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMo
     reopened
         .trim_reclaimable_segments(&qkey(), 1_000, ts(1_000_000))
         .expect("trim after pin release");
+
+    // AC3: exact source segment file is reclaimed after pin release + trim.
+    assert!(
+        !seq0_seg.exists(),
+        "{tag}: source seq-0 segment must be absent after discard_branch and re-trim (AC3)"
+    );
 
     // AC3: no branch pin remains after release.
     let pinned_after_release = reopened

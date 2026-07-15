@@ -24,7 +24,7 @@
 //! hybrid-async variants — replacing weak `seg_count >= 1` evidence with exact
 //! key/boundary assertions using `lowest_branch_pinned_below` and `retention_floor`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_conformance::ts;
@@ -356,6 +356,33 @@ async fn source_pin_blocks_reclamation_impl(root: &Path) {
 // release + exact boundary reclamation
 // ---------------------------------------------------------------------------
 
+/// Find the on-disk path of the source seq-0 segment file under `root`.
+/// The seq-0 segment filename contains `s00000000000000000000-` (the pid/attempt
+/// suffix distinguishes it from branch-owned copies). Returns `None` if no such
+/// file exists.
+fn find_source_seq0_seg_file(root: &Path) -> Option<PathBuf> {
+    walk_find_seg(root, "s00000000000000000000-")
+}
+
+/// Recursively walk `dir` looking for a `.seg` file whose name contains `needle`.
+fn walk_find_seg(dir: &Path, needle: &str) -> Option<PathBuf> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = walk_find_seg(&path, needle) {
+                return Some(found);
+            }
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.contains(needle)
+            && name.ends_with(".seg")
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Combined flow for AC1 (reopen with live pin) and AC2 (release + exact reclaim):
 ///
 /// 1. Create data + branch pin at seq 0, trim, assert exact pinned boundary.
@@ -417,6 +444,11 @@ async fn live_pin_reopen_and_release_impl(root: &Path, mode: &str) {
     backend
         .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
         .expect("trim with live pin");
+
+    // Capture the exact source seq-0 segment path on disk for filesystem-level
+    // assertions across reopen and reclamation.
+    let seq0_seg = find_source_seq0_seg_file(root)
+        .unwrap_or_else(|| panic!("{mode}: source seq-0 segment must exist after trim with pin"));
 
     // EXACT PINNED BOUNDARY: lowest_branch_pinned_below identifies seq 0.
     let pinned_before = backend
@@ -486,6 +518,12 @@ async fn live_pin_reopen_and_release_impl(root: &Path, mode: &str) {
         "{mode}: retained tail seq 4..5 readable after reopen (AC1)"
     );
 
+    // AC1: exact source segment file persists on disk after reopen.
+    assert!(
+        seq0_seg.exists(),
+        "{mode}: source seq-0 segment must exist on disk after reopen (AC1)"
+    );
+
     // --- Phase 3: AC2 — RELEASE pin + reclaim exact boundary ---
     reopened
         .with_log(|l| l.discard_branch(&shard(), &branch_shard()))
@@ -495,6 +533,12 @@ async fn live_pin_reopen_and_release_impl(root: &Path, mode: &str) {
     reopened
         .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
         .expect("trim after pin release");
+
+    // AC2: exact source segment file is reclaimed after pin release + trim.
+    assert!(
+        !seq0_seg.exists(),
+        "{mode}: source seq-0 segment must be absent after discard_branch and re-trim (AC2)"
+    );
 
     // AC2: no branch pin remains.
     let pinned_after_release = reopened
